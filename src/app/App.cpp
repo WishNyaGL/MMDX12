@@ -1531,6 +1531,7 @@ void App::UnloadScene() {
     ctx_.WaitForGpu();
     haveLastLiveCamera_ = false;
     scene_.reset();
+    playAutoFocus_.Reset();
     audio_.Unload();
     playing_ = false;
 }
@@ -1643,16 +1644,50 @@ void App::BuildFrameView(float frame, FrameView& view) {
     if (settings_.motionLighting && screen_ != Screen::BenchRun)
         ApplyLightShadowTracks(scene_->lightTrack, scene_->shadowTrack, frame, view);
 
-    // DoF focus plane: the character's head (center bone + 8 without one), as view-space z.
+    // DoF focus plane: the studio's automatic focus over every performer (the one the shot is about: on-screen size,
+    // visible share, head near the frame centre; hysteresis and a short rack between subjects), else the center
+    // performer's head. The render benchmark keeps the fixed head focus (deterministic workload).
     if (scene_->character) {
-        const int head = scene_->character->Model().FindBone("\xE9\xA0\xAD");
-        DirectX::XMFLOAT3 target = focus;
-        if (head >= 0)
-            target = scene_->character->BoneWorldPosition(head);
-        else
-            target.y += 8.0f;
+        const auto bonePos = [](const ModelInstance& m, std::initializer_list<const char*> names, DirectX::XMFLOAT3 fallback) {
+            for (const char* n : names) {
+                const int b = m.Model().FindBone(n);
+                if (b >= 0) return m.BoneWorldPosition(b);
+            }
+            return fallback;
+        };
+        static const char* const kHead = "\xE9\xA0\xAD";                                    // 頭
+        static const char* const kUpper2 = "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB\x32";  // 上半身2
+        static const char* const kUpper = "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB";       // 上半身
+        static const char* const kCenterBone = "\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xBC";  // センター
+        const auto subjectOf = [&](const ModelInstance& m, uint32_t uid) {
+            const DirectX::XMFLOAT3 c = bonePos(m, {kCenterBone}, DirectX::XMFLOAT3{0, 10, 0});
+            studio::FocusSubject fs;
+            fs.uid = uid;
+            fs.center = c;
+            fs.upperBody = bonePos(m, {kUpper2, kUpper}, DirectX::XMFLOAT3{c.x, c.y + 4.0f, c.z});
+            fs.head = bonePos(m, {kHead}, DirectX::XMFLOAT3{c.x, c.y + 8.0f, c.z});
+            return fs;
+        };
         const DirectX::XMMATRIX viewMat = DirectX::XMLoadFloat4x4(&view.camera.view);
-        const float z = DirectX::XMVectorGetZ(DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&target), viewMat));
+        const auto viewZ = [&](const DirectX::XMFLOAT3& pos) {
+            return DirectX::XMVectorGetZ(DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&pos), viewMat));
+        };
+        float z = 0.0f;
+        if (screen_ != Screen::BenchRun && screen_ != Screen::BenchRender) {
+            std::vector<studio::FocusSubject> subjects;
+            subjects.push_back(subjectOf(*scene_->character, 1));
+            for (size_t i = 0; i < scene_->extras.size(); ++i)
+                if (scene_->extras[i].instance) subjects.push_back(subjectOf(*scene_->extras[i].instance, (uint32_t)(2 + i)));
+            studio::FocusView fv;
+            fv.view = view.camera.view;
+            fv.eye = view.camera.eye;
+            fv.tanHalfFovY = std::tan(view.camera.fovYRadians * 0.5f);
+            const ImVec2 ds = ImGui::GetIO().DisplaySize;
+            fv.aspect = ds.y > 0.0f ? ds.x / ds.y : 16.0f / 9.0f;
+            fv.nearZ = view.camera.nearZ;
+            z = playAutoFocus_.Update(frame / kMmdFps, subjects, fv);
+        }
+        if (z <= view.camera.nearZ) z = viewZ(subjectOf(*scene_->character, 1).head);
         view.focusDistance = z > view.camera.nearZ ? z : 0.0f;
     }
 

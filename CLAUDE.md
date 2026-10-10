@@ -146,7 +146,8 @@ progress.md is the session log. Read its latest entry first.
     "focus" array (targets as 1 + model index), never in VMD. No keys = `AutoFocus`: visible characters scored by on-screen
     height^1.5 x visible share x head centrality, 0.7 hysteresis, 0.35 s rack, snaps on camera cuts / time jumps (stateful:
     the viewport and renders share `studioAutoFocus_`). `StudioComputeFocus` writes `FrameView::focusDistance` and
-    `apertureScale` (DofPass and the GI lens multiply it in). Play mode keeps the single character's head.
+    `apertureScale` (DofPass and the GI lens multiply it in). Play mode runs its own `AutoFocus` (`playAutoFocus_`, reset
+    per scene) over every performer, falling back to the center performer's head; the benchmarks keep the fixed head focus.
   - Projects (`studio/StudioProject.*`, `app/UiStudioProject.cpp`): `.mmdxproj` is UTF-8 JSON (format version, relative
     paths) next to standard VMDs (`<stem> - <model>.vmd`, `<stem> - camera.vmd`); every file is written tmp + rename.
     Dirty = `history.Version()` or `projectVersion` (add/remove/rename/visibility/audio) changed since the save. Autosave

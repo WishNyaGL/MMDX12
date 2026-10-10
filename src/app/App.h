@@ -385,6 +385,7 @@ private:
     bool DrawStudioFocusKeyFields(float w, int frame);  // inspector fields of a selected focus key
     std::string StudioModelLabel(uint32_t uid) const;   // outliner name of a model uid ("" when gone)
     studio::AutoFocus studioAutoFocus_;
+    studio::AutoFocus playAutoFocus_;   // play mode: picks the performer the shot is about (reset per scene)
     float studioFocusShown_ = 0.0f;                  // the last frame's focus distance / aperture scale / auto subject
     float studioFocusAperture_ = 1.0f;
     uint32_t studioFocusSubject_ = 0;                // the model the focus follows now (0: a distance / nothing)
