@@ -648,12 +648,7 @@ void App::StudioPushTrackEdit(const char* name, const std::vector<TrackState>& b
 void App::StudioTakeFreeCamera() {
     StudioDoc& d = *studio_;
     if (!d.useMotionCamera || !d.cameraEval) return;
-    const CameraPose pose = d.cameraEval->Evaluate((float)(d.time * kMmdFps));
-    freeCam_.target = pose.target;
-    freeCam_.yaw = pose.rotation.y;
-    freeCam_.pitch = std::clamp(-pose.rotation.x, -1.45f, 1.45f);
-    freeCam_.distance = std::clamp(std::fabs(pose.distance), 2.0f, 600.0f);
-    freeCam_.fovDeg = pose.fovDeg;
+    freeCam_ = FreeFromPose(d.cameraEval->Evaluate((float)(d.time * kMmdFps)));
     d.useMotionCamera = false;
 }
 
@@ -2443,7 +2438,10 @@ void App::StudioViewportNavigate(bool hovered, bool active) {
     }
     if (hovered && io.MouseWheel != 0.0f) {
         if (rmb) studioFlyMul_ = std::clamp(studioFlyMul_ * std::pow(1.2f, io.MouseWheel), 0.1f, 20.0f);  // fly speed
-        else if (possessed) {  // dolly the camera itself: eye and target move together, the lens distance stays
+        else if (!io.KeyCtrl) {  // the lens: field of view (a possessed camera keys it like any other camera edit)
+            cam.fovDeg = std::clamp(cam.fovDeg * std::pow(0.92f, io.MouseWheel), possessed ? 1.0f : 5.0f, possessed ? 125.0f : 120.0f);
+            if (!possessed) cam.fovDeg = std::round(cam.fovDeg * 10.0f) * 0.1f;
+        } else if (possessed) {  // dolly the camera itself: eye and target move together, the lens distance stays
             const float sy = std::sin(cam.yaw), cy = std::cos(cam.yaw), sp = std::sin(cam.pitch), cp = std::cos(cam.pitch);
             const float step = reach * 0.12f * io.MouseWheel;
             cam.target.x += -sy * cp * step;

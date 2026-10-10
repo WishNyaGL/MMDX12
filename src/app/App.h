@@ -332,6 +332,7 @@ private:
     struct FreeCamera;                               // orbit camera (defined below)
     void StudioViewportNavigate(bool hovered, bool active);  // viewport mouse / fly navigation (free or possessed camera)
     static FreeCamera FreeFromKey(const studio::CameraKf& k);  // orbit form of a camera key
+    static FreeCamera FreeFromPose(const CameraPose& pose);    // orbit camera with the pose's eye and view axis (roll dropped)
     FreeCamera StudioViewedFree(int frame) const;    // the camera as shown now, in orbit form (target, yaw, pitch, distance)
     // possession: store `cam` as the camera key at the playhead. base: the key to start from when none exists there
     void StudioWriteCamera(const FreeCamera& cam, const studio::CameraKf* base = nullptr, bool takeView = true);
@@ -504,6 +505,7 @@ private:
 
     // --- free camera helpers (UiPlay.cpp)
     void UpdateFreeCamera();
+    void SetPlayMotionCamera(bool on);   // C / the play bar: leaving the motion camera keeps its current view
 
     // --- offline GI render: stills and videos (UiOffline.cpp)
     enum class OfflineMode { None, Still, Video, Probe };
@@ -650,6 +652,7 @@ private:
     bool overlayVisible_ = true;
     double lastMouseMoveTime_ = 0;
     struct FreeCamera { DirectX::XMFLOAT3 target{0, 10, 0}; float yaw = 0, pitch = 0.1f, distance = 45; float fovDeg = 30; } freeCam_;
+    int freeCamDrag_ = 0;                            // mouse buttons (bit per ImGuiMouseButton) whose drag began over the scene
     studio::CameraKf studioCamKeyBase_;              // ... and its key (interpolation curves)
     FreeCamera studioCamBase_;                       // the camera when a handle drag started
     POINT lastMouse_{};

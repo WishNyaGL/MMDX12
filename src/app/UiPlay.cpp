@@ -1,6 +1,8 @@
 #include "app/App.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include "app/Icons.h"
 #include "app/Lighting.h"
@@ -41,7 +43,7 @@ void App::UpdatePlay(double dt) {
             return;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_F1)) overlayVisible_ ^= 1;
-        if (s->camera && ImGui::IsKeyPressed(ImGuiKey_C)) useMotionCamera_ ^= 1;
+        if (s->camera && ImGui::IsKeyPressed(ImGuiKey_C)) SetPlayMotionCamera(!useMotionCamera_);
         if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) seekTo(playTime_ - 5.0);
         if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) seekTo(playTime_ + 5.0);
         if (ImGui::IsKeyPressed(ImGuiKey_Home)) seekTo(0.0);
@@ -89,19 +91,52 @@ void App::SetPlaying(bool play) {
 // Free camera
 // ---------------------------------------------------------------------------
 
+App::FreeCamera App::FreeFromPose(const CameraPose& pose) {
+    DirectX::XMFLOAT4X4 view;
+    DirectX::XMFLOAT3 eye;
+    CameraMotion::ToView(pose, &view, &eye);
+    // the same eye and forward axis; distance-0 cameras (target = eye) orbit a point just ahead
+    FreeCamera c;
+    const float dist = std::clamp(std::fabs(pose.distance), 2.0f, 600.0f);
+    const DirectX::XMFLOAT3 fwd{view._13, view._23, view._33};
+    c.target = {eye.x + fwd.x * dist, eye.y + fwd.y * dist, eye.z + fwd.z * dist};
+    c.distance = dist;
+    c.pitch = std::clamp(std::asin(std::clamp(-fwd.y, -1.0f, 1.0f)), -1.45f, 1.45f);
+    c.yaw = std::atan2(-fwd.x, fwd.z);
+    c.fovDeg = pose.fovDeg;
+    return c;
+}
+
+void App::SetPlayMotionCamera(bool on) {
+    const SceneRuntime* s = scene_.get();
+    if (on == useMotionCamera_) return;
+    if (!on && s && s->camera) {  // continue from the shot on screen instead of jumping to the last free view
+        freeCam_ = FreeFromPose(s->camera->Evaluate((float)(playTime_ * kMmdFps)));
+    }
+    useMotionCamera_ = on;
+}
+
 void App::UpdateFreeCamera() {
     ImGuiIO& io = ImGui::GetIO();
-    if (io.WantCaptureMouse) return;
+    // The play overlay is a full-screen ImGui window, so io.WantCaptureMouse is always set over the scene: only
+    // its widgets and the other windows (popups, panels) count as UI. A drag belongs to the camera when it started
+    // over the scene, so dragging a slider across the view does not turn it.
+    ImGuiContext& g = *ImGui::GetCurrentContext();
+    const ImGuiWindow* hovered = g.HoveredWindow ? g.HoveredWindow->RootWindow : nullptr;
+    const bool overUi = (hovered && std::strcmp(hovered->Name, "##playoverlay") != 0) || ImGui::IsAnyItemHovered() ||
+                        ImGui::IsAnyItemActive() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+    for (int b = 0; b < 3; ++b) {
+        if (ImGui::IsMouseClicked(b) && !overUi) freeCamDrag_ |= 1 << b;
+        if (!ImGui::IsMouseDown(b)) freeCamDrag_ &= ~(1 << b);
+    }
 
     FreeCamera& cam = freeCam_;
-
-    if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-        const ImVec2 delta = io.MouseDelta;
+    const ImVec2 delta = io.MouseDelta;
+    if (freeCamDrag_ & (1 << ImGuiMouseButton_Left)) {   // orbit
         cam.yaw += delta.x * 0.006f;
         cam.pitch = std::clamp(cam.pitch + delta.y * 0.006f, -1.45f, 1.45f);
     }
-    if (ImGui::IsMouseDragging(ImGuiMouseButton_Right) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
-        const ImVec2 delta = io.MouseDelta;
+    if (freeCamDrag_ & ((1 << ImGuiMouseButton_Right) | (1 << ImGuiMouseButton_Middle))) {   // pan
         // right = (cos(yaw), 0, sin(yaw)), up = (0, 1, 0); pan = (-dx*right + dy*up) * distance * 0.0015
         const float rx = std::cos(cam.yaw), rz = std::sin(cam.yaw);
         const float scale = cam.distance * 0.0015f;
@@ -109,9 +144,15 @@ void App::UpdateFreeCamera() {
         cam.target.y += (delta.y) * scale;
         cam.target.z += (-delta.x * rz) * scale;
     }
-    const float wheel = io.MouseWheel;
-    if (wheel != 0.0f) {
-        cam.distance = std::clamp(cam.distance * std::pow(0.88f, wheel), 2.0f, 600.0f);
+    if (io.MouseWheel != 0.0f && !overUi)
+        cam.distance = std::clamp(cam.distance * std::pow(0.88f, io.MouseWheel), 2.0f, 600.0f);
+    // F: frame the performer again (center bone)
+    if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F, false) && scene_ && scene_->character) {
+        const int center = scene_->character->Model().FindBone("ã»ã³ã¿ã¼");
+        if (center >= 0) {
+            cam.target = scene_->character->BoneWorldPosition(center);
+            cam.target.y += 2.0f;
+        }
     }
 }
 
@@ -361,7 +402,7 @@ void App::DrawPlayOverlay() {
     ImGui::BeginDisabled(!s->camera);
     if (IconButton("##cam", icon::VideoCamera, useMotionCamera_ ? Tr("모션 카메라 켜짐 (C)") : Tr("자유 카메라 (C)"),
                    useMotionCamera_ && s->camera, 40.0f))
-        useMotionCamera_ = !useMotionCamera_;
+        SetPlayMotionCamera(!useMotionCamera_);
     ImGui::EndDisabled();
     x += Dp(44.0f);
     {
