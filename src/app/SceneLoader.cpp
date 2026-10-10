@@ -37,6 +37,15 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
 
     std::atomic<int> done{0};
     const int total = (int)referenced.size();
+    // Imported textures of opaque materials (PmxModel::opaqueTextures): alpha is not coverage.
+    auto forceOpaque = [&](int32_t index) {
+        if ((size_t)index >= m.pmx->opaqueTextures.size() || !m.pmx->opaqueTextures[index]) return;
+        ImageRGBA8& img = m.textures[index];
+        if (!img.hasAlpha) return;
+        for (ImageRGBA8::Level& level : img.mips)
+            for (size_t i = 3; i < level.pixels.size(); i += 4) level.pixels[i] = 255;
+        img.hasAlpha = false;
+    };
     std::for_each(std::execution::par, referenced.begin(), referenced.end(),
                   [&](int32_t index) {
                       if ((size_t)index < m.pmx->embeddedTextures.size() && !m.pmx->embeddedTextures[index].empty()) {
@@ -44,6 +53,7 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
                           std::string err;
                           if (!LoadImageRGBA8FromMemory(bytes.data(), bytes.size(), m.textures[index], &err))
                               LOG_WARN("embedded texture decode failed: %s (%s): %s", m.pmx->textures[index].c_str(), label, err.c_str());
+                          forceOpaque(index);
                           int d = ++done;
                           if (progress && total > 0)
                               progress->fraction.store(fracBegin + (fracEnd - fracBegin) * (float)d / (float)total,
@@ -57,6 +67,7 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
                           std::string err;
                           if (!LoadImageRGBA8(p, m.textures[index], &err))
                               LOG_WARN("texture decode failed: %s: %s", PathToUtf8(p).c_str(), err.c_str());
+                          forceOpaque(index);
                       }
                       int d = ++done;
                       if (progress && total > 0)

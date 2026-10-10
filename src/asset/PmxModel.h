@@ -166,6 +166,9 @@ struct PmxModel {
     // Encoded image bytes for textures that live inside the source file (glTF/GLB/VRM/FBX
     // imports). Empty, or parallel to `textures` with empty entries for file textures.
     std::vector<std::vector<uint8_t>> embeddedTextures;
+    // Imports: 1 = only declared-opaque materials use the texture (glTF alphaMode OPAQUE), so its alpha
+    // holds other data (game masks) and the decoder forces it to 255. Empty, or parallel to `textures`.
+    std::vector<char> opaqueTextures;
     std::vector<PmxMaterial> materials;
     std::vector<PmxBone> bones;
     std::vector<PmxMorph> morphs;

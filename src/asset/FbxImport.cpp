@@ -5,6 +5,7 @@
 #include "asset/ImportScene.h"
 #include "core/TextUtil.h"
 
+#include <climits>
 #include <cstring>
 #include <unordered_map>
 
@@ -57,7 +58,33 @@ std::filesystem::path FindTextureFile(const ufbx_texture* tex, const std::filesy
         std::error_code ec;
         if (!c.empty() && std::filesystem::is_regular_file(c, ec)) return c;
     }
-    return {};
+    // Converted game rips: "Texture\x_ALBD.dds" shipped as "Textures/x_ALBDout.png". Same stem (or with a
+    // converter's "out" / "_out" suffix) in any image format, in the model folder or a direct subfolder.
+    if (base.empty()) return {};
+    const std::string stem = ToLowerAscii(PathToUtf8(base.stem()));
+    static const char* kExts[] = {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".webp", ".gif", ".dds"};
+    std::filesystem::path best;
+    int bestRank = INT_MAX;
+    auto consider = [&](const std::filesystem::path& folder) {
+        std::error_code ec;
+        for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            const std::string s = ToLowerAscii(PathToUtf8(it->path().stem()));
+            int nameRank = s == stem ? 0 : (s == stem + "out" || s == stem + "_out") ? 1 : -1;
+            if (nameRank < 0) continue;
+            const std::string ext = ToLowerAscii(PathToUtf8(it->path().extension()));
+            for (int e = 0; e < (int)std::size(kExts); ++e)
+                if (ext == kExts[e] && nameRank * 100 + e < bestRank) {
+                    bestRank = nameRank * 100 + e;
+                    best = it->path();
+                }
+        }
+    };
+    consider(dir);
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_directory(ec)) consider(it->path());
+    return best;
 }
 
 } // namespace

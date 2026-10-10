@@ -110,6 +110,7 @@ std::string FingerSlot(const std::string& core) {
         if (core.rfind(prefix, 0) != 0) continue;
         std::string rest = core.substr(len);
         if (!rest.empty() && rest[0] == '0') rest = rest.substr(1);
+        if (rest.size() == 2 && rest[0] == 'f') rest = rest.substr(1);  // RE Engine: "IndexF_1"
         if (rest.size() != 1 || rest[0] < '1' || rest[0] > '3') return {};
         static const char* kThumb[] = {"Metacarpal", "Proximal", "Distal"};
         static const char* kOther[] = {"Proximal", "Intermediate", "Distal"};
@@ -155,13 +156,64 @@ const std::map<std::string, std::string>& MmdNames() {
 XMMATRIX Load(const XMFLOAT4X4& m) { return XMLoadFloat4x4(&m); }
 XMFLOAT3 Translation(const XMFLOAT4X4& m) { return {m._41, m._42, m._43}; }
 
-// Nodes that skins reference, plus mesh nodes' ancestors are looked up separately.
-std::vector<char> JointSet(const ImpScene& s) {
+// Nodes that skins reference, plus mesh nodes' ancestors are looked up separately. `withAncestors`
+// adds the joints' unweighted ancestors below the scene roots: rigs that weight only helper bones
+// (RE Engine: the twist bones carry the arm / leg weights, L_Arm_Upper itself has none).
+std::vector<char> JointSet(const ImpScene& s, bool withAncestors = false) {
     std::vector<char> isJoint(s.nodes.size(), 0);
     for (const ImpSkin& sk : s.skins)
         for (int j : sk.joints)
             if (j >= 0 && (size_t)j < isJoint.size()) isJoint[j] = 1;
+    if (withAncestors) {
+        std::vector<char> joints = isJoint;
+        for (size_t i = 0; i < s.nodes.size(); ++i) {
+            if (!joints[i]) continue;
+            for (int p = s.nodes[i].parent; p >= 0 && s.nodes[p].parent >= 0 && !isJoint[p]; p = s.nodes[p].parent) isJoint[p] = 1;
+        }
+    }
     return isJoint;
+}
+
+// Files that give every mesh part its own copy of the skeleton (one armature per part) would map one
+// copy to the MMD bones and leave the other parts undriven. Same-named skeleton nodes with the same
+// world matrix are one bone: a later copy's children move under the first copy and skins reference it.
+void MergeDuplicateSkeletons(ImpScene& s) {
+    auto same = [](const XMFLOAT4X4& a, const XMFLOAT4X4& b) {
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                if (std::fabs(a.m[r][c] - b.m[r][c]) > 1e-4f * std::max(1.0f, std::fabs(a.m[r][c]))) return false;
+        return true;
+    };
+    const std::vector<char> isBone = JointSet(s, true);
+    std::unordered_map<std::string, std::vector<int>> byName;
+    std::vector<int> canon(s.nodes.size());
+    std::vector<char> rehung(s.nodes.size(), 0);
+    int merged = 0;
+    for (size_t i = 0; i < s.nodes.size(); ++i) {  // parents come before children
+        canon[i] = (int)i;
+        ImpNode& n = s.nodes[i];
+        if (n.parent >= 0 && canon[n.parent] != n.parent) {
+            n.parent = canon[n.parent];
+            rehung[i] = 1;
+        }
+        if (!isBone[i] || n.name.empty()) continue;
+        std::vector<int>& copies = byName[n.name];
+        for (int k : copies)
+            if (same(s.nodes[k].world, n.world)) {
+                canon[i] = k;
+                ++merged;
+                break;
+            }
+        if (canon[i] == (int)i) copies.push_back((int)i);
+    }
+    if (!merged) return;
+    for (ImpSkin& sk : s.skins)
+        for (int& j : sk.joints)
+            if (j >= 0 && (size_t)j < canon.size()) j = canon[j];
+    for (size_t i = 0; i < s.nodes.size(); ++i)  // worlds are unchanged; re-hung locals follow them
+        if (rehung[i])
+            XMStoreFloat4x4(&s.nodes[i].local, Load(s.nodes[i].world) * XMMatrixInverse(nullptr, Load(s.nodes[s.nodes[i].parent].world)));
+    LOG_INFO("import: merged %d duplicated skeleton nodes", merged);
 }
 
 // Rest-pose (current node transforms) skinning matrix of one vertex, or the node matrix.
@@ -204,15 +256,17 @@ struct Humanoid {
     bool ok = false;
     std::string note;
     float facing = 1;                  // +1: model faces +Z (glTF convention), -1: faces -Z
+    std::vector<char> bones;           // nodes that become bones (JointSet, with ancestors when needed)
     int Node(const std::string& slot) const {
         auto it = slots.find(slot);
         return it == slots.end() ? -1 : it->second;
     }
 };
 
-Humanoid MapHumanoid(const ImpScene& s) {
+Humanoid MapHumanoidWith(const ImpScene& s, bool withAncestors) {
     Humanoid h;
-    const std::vector<char> isJoint = JointSet(s);
+    h.bones = JointSet(s, withAncestors);
+    const std::vector<char>& isJoint = h.bones;
     if (!s.humanBones.empty()) {
         for (auto& [slot, node] : s.humanBones)
             if (node >= 0 && (size_t)node < s.nodes.size()) h.slots[slot] = node;
@@ -229,14 +283,22 @@ Humanoid MapHumanoid(const ImpScene& s) {
         std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return depth[a] < depth[b]; });
         for (int n : order) {
             const Canonical c = Canon(s.nodes[n].name);
+            // Also without a limb prefix or a "_0" suffix (RE Engine: L_Arm_Hand, L_Leg_Ankle, Head_0).
+            std::vector<std::string> forms = {c.core};
+            for (const std::string limb : {"arm", "leg"})
+                if (c.core.size() > limb.size() && c.core.rfind(limb, 0) == 0) forms.push_back(c.core.substr(limb.size()));
+            if (c.core.size() > 1 && c.core.back() == '0') forms.push_back(c.core.substr(0, c.core.size() - 1));
             std::string slot;
-            for (const SlotName& sn : SlotNames()) {
-                if (sn.sided != (c.side != 0)) continue;
-                for (const char* core : sn.cores)
-                    if (c.core == core) {
-                        slot = sn.sided ? std::string(c.side == 'L' ? "left" : "right") + sn.slot : sn.slot;
-                        break;
-                    }
+            for (const std::string& form : forms) {
+                for (const SlotName& sn : SlotNames()) {
+                    if (sn.sided != (c.side != 0)) continue;
+                    for (const char* core : sn.cores)
+                        if (form == core) {
+                            slot = sn.sided ? std::string(c.side == 'L' ? "left" : "right") + sn.slot : sn.slot;
+                            break;
+                        }
+                    if (!slot.empty()) break;
+                }
                 if (!slot.empty()) break;
             }
             if (slot.empty() && c.side) {
@@ -284,6 +346,16 @@ Humanoid MapHumanoid(const ImpScene& s) {
     }
     h.facing = side > 0 ? 1.0f : -1.0f;  // facing +Z puts the model's left hand at +X
     h.ok = true;
+    return h;
+}
+
+// Skin joints first; their unweighted ancestors only when the joints alone are no humanoid.
+Humanoid MapHumanoid(const ImpScene& s) {
+    Humanoid h = MapHumanoidWith(s, false);
+    if (!h.ok && s.humanBones.empty()) {
+        Humanoid wide = MapHumanoidWith(s, true);
+        if (wide.ok) return wide;
+    }
     return h;
 }
 
@@ -341,6 +413,17 @@ void BuildTextures(const ImpScene& s, PmxModel& out) {
     for (const ImpTexture& t : s.textures) {
         out.textures.push_back(!t.file.empty() ? PathToUtf8(t.file) : t.label);
         if (anyEmbedded) out.embeddedTextures.push_back(t.bytes);
+    }
+    // glTF: an OPAQUE material ignores its texture's alpha; MMD shading would read it as coverage.
+    std::vector<int> users(s.textures.size(), 0), opaqueUsers(s.textures.size(), 0);
+    for (const ImpMaterial& m : s.materials)
+        if (m.texture >= 0 && (size_t)m.texture < s.textures.size()) {
+            ++users[m.texture];
+            opaqueUsers[m.texture] += m.opaque ? 1 : 0;
+        }
+    if (std::any_of(opaqueUsers.begin(), opaqueUsers.end(), [](int n) { return n > 0; })) {
+        out.opaqueTextures.assign(s.textures.size(), 0);
+        for (size_t i = 0; i < s.textures.size(); ++i) out.opaqueTextures[i] = users[i] > 0 && users[i] == opaqueUsers[i];
     }
 }
 
@@ -617,6 +700,7 @@ bool ConvertStage(const ImpScene& s, PmxModel& out, bool place) {
 }
 
 bool ConvertCharacter(ImpScene& s, PmxModel& out, std::string* error) {
+    MergeDuplicateSkeletons(s);
     Humanoid h = MapHumanoid(s);
     if (!h.ok) {
         if (error) *error = "not a humanoid rig: " + h.note;
@@ -640,8 +724,8 @@ bool ConvertCharacter(ImpScene& s, PmxModel& out, std::string* error) {
         b.scale = kUnitsPerMeter;
     }
 
-    // Skeleton: every skin joint, parented to its nearest joint ancestor.
-    const std::vector<char> isJoint = JointSet(s);
+    // Skeleton: every skin joint (+ ancestors, see MapHumanoid), parented to its nearest joint ancestor.
+    const std::vector<char>& isJoint = h.bones;
     std::map<int, std::string> nameOfNode;
     for (auto& [slot, node] : h.slots) {
         auto it = MmdNames().find(slot);
@@ -885,6 +969,7 @@ bool ProbeModelFile(const std::filesystem::path& path, ModelProbe& out, std::str
         out.heightMeters = hi.y - lo.y;
         out.extentMeters = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
         if (out.skinned) {
+            MergeDuplicateSkeletons(scene);
             const Humanoid h = MapHumanoid(scene);
             out.humanoid = h.ok;
             out.humanoidNote = h.note;

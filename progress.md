@@ -1292,3 +1292,24 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   below the fold even at 1080p (the guide scrolls the inspector). Worth a layout pass.
 - Headless Edge can't go below ~500 px wide, so 390 px phones were not seen.
 - `capture.py` needs one app instance at a time (it waits for the shared pipe name to free) and clears `recovery/`.
+
+## 2026-10-11 — FBX/VRM import fixes (Leon Kennedy FBX, Von Lycaon VRM)
+- Leon (RE Engine FBX rip) was skipped as "no head bone": `Head_0`, `L_Arm_Hand`, `L_Leg_Ankle`, `IndexF_1` names
+  did not match, the main limb bones (`L_Arm_Upper`, `L_Leg_Lower`, ...) carry no weights (twist bones do) so they
+  were not skin joints, and the file has 9 armatures (one per mesh part).
+  - Name matcher also tries the core without an `arm`/`leg` prefix or a trailing `0`; fingers accept `F<n>`.
+  - `MapHumanoid` retries with the joints' unweighted ancestors (`JointSet(s, true)`) when joints alone fail;
+    `Humanoid::bones` carries the set into the skeleton build.
+  - `MergeDuplicateSkeletons`: same-named skeleton nodes with equal world matrices become one bone (children re-hung,
+    skins re-pointed). Leon: 283 merged, 1078 bones, every part follows the dance.
+  - Side effect: Biped `Bip001 L Toe0` now maps to つま先 (Zootopia FBXes gain つま先ＩＫ).
+  - FBX textures: fallback search by stem in the model folder + direct subfolders, any image format, also with a
+    converter's `out`/`_out` suffix (`Texture\x.dds` -> `Textures/xout.png`). Leon 0/24 -> 24/24.
+  - `kProbeCacheVersion` 3 (the cache keys on size + mtime only, so old "skipped" verdicts stuck).
+- Lycaon VRM (ZZZ rip): knees/shins see-through. Materials are glTF OPAQUE but the textures hold masks in alpha and the
+  import never used `ImpMaterial::blend`. Now `PmxModel::opaqueTextures` marks textures used only by opaque glTF
+  materials and `DecodeModelTextures` forces their alpha to 255 (FBX keeps texture alpha: no reliable flag there).
+### Not fixed / notes
+- Leon: hair materials reference no texture in the FBX (white hair; `Hair_ALBSout.png` exists but is unreferenced);
+  orange trims on the jacket (not from the albedo; material/texture assignment not investigated).
+- One asset_probe run reported "skipped X.glb: " with an empty error from a stale probes.json entry (not reproducible).

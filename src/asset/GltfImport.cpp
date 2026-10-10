@@ -270,6 +270,7 @@ bool ImportGltf(const std::filesystem::path& path, ImpScene& scene, std::string*
         out.emissive = {m.emissive_factor[0], m.emissive_factor[1], m.emissive_factor[2]};
         out.doubleSided = m.double_sided;
         out.blend = m.alpha_mode != cgltf_alpha_mode_opaque;
+        out.opaque = !out.blend;
         scene.materials.push_back(std::move(out));
     }
 

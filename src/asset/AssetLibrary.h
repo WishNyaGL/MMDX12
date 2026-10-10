@@ -87,7 +87,7 @@ bool CreateLibrarySkeleton(const std::filesystem::path& root, const std::filesys
 
 // Persistent library scan result and probe cache (Requirements B.5, B.6, B.7)
 inline constexpr uint32_t kLibraryScanResultVersion = 3;
-inline constexpr uint32_t kProbeCacheVersion = 2;
+inline constexpr uint32_t kProbeCacheVersion = 3;
 
 bool SaveLibraryScanResult(const LibraryScanResult& result);
 bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult& out);

@@ -32,6 +32,7 @@ struct ImpMaterial {
     int texture = -1;             // into ImpScene::textures
     bool doubleSided = false;
     bool blend = false;           // alpha blend or mask: keep texture alpha
+    bool opaque = false;          // declared opaque (glTF alphaMode OPAQUE): texture alpha is not coverage
 };
 
 struct ImpMorphTarget {
