@@ -76,4 +76,12 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& root, ScanProgress* p
 // Returns true when it created something.
 bool CreateLibrarySkeleton(const std::filesystem::path& root, const std::filesystem::path& templateDir);
 
+// Persistent library scan result and probe cache (Requirements B.5, B.6, B.7)
+inline constexpr uint32_t kLibraryScanResultVersion = 1;
+inline constexpr uint32_t kProbeCacheVersion = 1;
+
+bool SaveLibraryScanResult(const LibraryScanResult& result);
+bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult& out);
+bool LibraryScanResultsEqual(const LibraryScanResult& a, const LibraryScanResult& b);
+
 } // namespace mmdx

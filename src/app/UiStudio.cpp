@@ -166,6 +166,8 @@ bool App::FinishStudioLoad() {
             k.target = di >= 0 ? doc->models[(size_t)di]->uid : 0;
         }
         doc->useShadowTrack = e.useShadowTrack;
+        doc->aspectW = e.aspectW;
+        doc->aspectH = e.aspectH;
         doc->showCameraPath = e.showCameraPath;
         doc->loop = e.loop;
         doc->physics = e.physics && !options_.noPhysics;

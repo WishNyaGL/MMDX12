@@ -218,6 +218,10 @@ private:
     void ClearHiddenOverrides();
     void AssetContextMenu(const std::vector<std::filesystem::path>& files, bool character);
     void PollScan();
+    void StartRevalidation();
+    void ApplyRevalidatedLibrary(LibraryScanResult fresh);
+    void RestoreSelectionsFromSettings();
+    void ApplyStartScreen();
     void ApplyCommandLinePreselection();
     void ApplyRenderSettings();
     // Theme: settings_.theme (or --theme) resolved to light / dark, applied to the UI kit palette, the ImGui style and
@@ -625,6 +629,10 @@ private:
     LibraryScanResult library_;
     std::future<LibraryScanResult> scanFuture_;
     ScanProgress scanProgress_;
+    bool revalidating_ = false;
+    std::future<LibraryScanResult> revalidateFuture_;
+    ScanProgress revalidateProgress_;
+    std::unique_ptr<LibraryScanResult> pendingLibraryResult_;
     int selCharacter_ = -1, selStage_ = -1, selSong_ = -1;  // indices into library_ vectors; stage -1 = none
     char filterCharacter_[128] = {}, filterStage_[128] = {}, filterSong_[128] = {};
     char libraryPathEdit_[512] = {};
@@ -658,6 +666,7 @@ private:
     POINT lastMouse_{};
     double timeSeconds_ = 0;      // wall clock since start (QPC)
     std::atomic<bool> loading_{false};  // startup renderer init in flight: splash paint, resize deferred
+    RenderInitProgress* renderInitProgress_ = nullptr;
     int framesInScene_ = 0;       // frames rendered in Play/BenchRun (for --frames)
     double gpuMsSum_ = 0.0;       // --frames: GPU time of the second half, logged at quit
     int gpuMsCount_ = 0;

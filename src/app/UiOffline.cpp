@@ -25,7 +25,7 @@ namespace mmdx {
 namespace {
 
 OfflineJobDesc MakeJobDesc(const AppOptions& o, const AppSettings& st, const VideoRenderConfig& v, bool video,
-                           bool prepass) {
+                           bool prepass, float studioAspect = 0.0f) {
     OfflineJobDesc j;
     // Effects: a video takes the render dialog's; a still takes the ones chosen when entering the scene.
     j.bloom = video ? v.bloom : st.bloom;
@@ -37,15 +37,21 @@ OfflineJobDesc MakeJobDesc(const AppOptions& o, const AppSettings& st, const Vid
     // Shader packs: the same effect stack as the real-time frame (a video's real-time renderers get it from VideoRealtimeSettings)
     j.effects = st.effectStack;
     if (video) {
-        const VideoResolution& r = kVideoResolutions[v.resolution];
         const VideoQualityPreset& q = kVideoQualities[v.quality];
-        j.width = r.width;
-        j.height = r.height;
+        if (studioAspect > 0.0f) {
+            StudioVideoResolution(v.resolution, studioAspect, j.width, j.height);
+        } else {
+            const VideoResolution& r = kVideoResolutions[v.resolution];
+            j.width = r.width;
+            j.height = r.height;
+        }
         j.minSamples = q.minSamples;
         j.maxSamples = q.maxSamples;
         j.errorThreshold = q.errorThreshold;
         j.prepassRays = q.prepassRays;
         j.maxBounces = q.maxBounces;
+    } else if (studioAspect > 0.0f) {
+        ComputeStudioRenderSize(1080, studioAspect, j.width, j.height);
     }
     if (o.offlineSize[0] > 0 && o.offlineSize[1] > 0) {
         j.width = (uint32_t)(o.offlineSize[0] & ~1);
@@ -226,7 +232,8 @@ void App::StartOfflineVideo(double startSeconds, double endSeconds, bool fromLob
         probe ? (offline_.realtime ? 3 : 1)
               : std::max(1, (int)std::floor((endSeconds - startSeconds) * offline_.video.fps + 1e-6));
     if (probe) offline_.probeKey = CurrentVideoProbeKey();
-    const OfflineJobDesc jd = MakeJobDesc(options_, settings_, offline_.video, true, false);
+    const OfflineJobDesc jd = MakeJobDesc(options_, settings_, offline_.video, true, false,
+                                           studio ? studio_->AspectRatio() : 0.0f);
     VideoEncoder::Desc d;
     d.width = jd.width;
     d.height = jd.height;
@@ -484,7 +491,8 @@ void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
         SaveOfflinePose();
         offline_.prevCamera = view.camera;
     }
-    OfflineJobDesc jd = MakeJobDesc(options_, settings_, offline_.video, video, true);
+    OfflineJobDesc jd = MakeJobDesc(options_, settings_, offline_.video, video, true,
+                                    (offline_.studio && studio_) ? studio_->AspectRatio() : 0.0f);
     if (video) {
         jd.effectReset = (offline_.frame == 0) || jumpCut || view.cameraCut;
     }
@@ -796,8 +804,17 @@ RenderSettings App::VideoRealtimeSettings(const VideoRenderConfig& cfg) const {
     const VideoRealtimeQuality& q = kVideoRealtimeQualities[std::clamp(cfg.quality, 0, kVideoQualityCount - 1)];
     RenderSettings rs = renderer_.Settings();
     rs.fixedResolution = true;
-    rs.fixedWidth = res.width;
-    rs.fixedHeight = res.height;
+    const bool studio = (screen_ == Screen::Studio || offline_.studio) && studio_ != nullptr;
+    if (studio) {
+        StudioVideoResolution(cfg.resolution, studio_->AspectRatio(), rs.fixedWidth, rs.fixedHeight);
+    } else {
+        rs.fixedWidth = res.width;
+        rs.fixedHeight = res.height;
+    }
+    if (options_.offlineSize[0] > 0 && options_.offlineSize[1] > 0) {
+        rs.fixedWidth = (uint32_t)(options_.offlineSize[0] & ~1);
+        rs.fixedHeight = (uint32_t)(options_.offlineSize[1] & ~1);
+    }
     rs.vsync = false;                    // frames are rendered as fast as they complete
     rs.upscaler = UpscalerKind::None;
     rs.renderScale = 1.0f;
@@ -1010,7 +1027,7 @@ App::VideoEstimate App::EstimateVideoRender() const {
     e.frames = std::max(1, (int)std::floor(duration * cfg.fps + 1e-6));
     const VideoProbe* probe = studio ? nullptr : settings_.FindVideoProbe(CurrentVideoProbeKey());
     e.measured = probe != nullptr;
-    e.secondsPerFrame = probe ? probe->secondsPerFrame : EstimatedSecondsPerFrame(cfg);
+    e.secondsPerFrame = probe ? probe->secondsPerFrame : EstimatedSecondsPerFrame(cfg, studio ? studio_->AspectRatio() : 0.0f);
     e.totalSeconds = e.frames * e.secondsPerFrame;
     e.fileGigabytes = (double)cfg.bitrateMbps * duration / 8.0 / 1000.0;
     return e;

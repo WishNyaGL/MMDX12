@@ -144,6 +144,13 @@ ComPtr<ID3DBlob> CompileShaderDxc(const std::filesystem::path& file, const char*
 // files change on disk (shader pack reload).
 void ResetShaderSourceHashes();
 
+// Shader compilation progress tracking
+uint32_t GetCompiledShaderCount();
+uint32_t GetColdShaderCount();
+uint32_t GetExpectedShaderCount();
+void SaveExpectedShaderCount(uint32_t count);
+void ResetShaderCompileCounters();
+
 // Compiles an HLSL entry point with D3DCompileFromFile (D3DCOMPILE_ENABLE_STRICTNESS,
 // plus DEBUG|SKIP_OPTIMIZATION in debug builds, OPTIMIZATION_LEVEL3 otherwise).
 // `target` e.g. "vs_5_1". Logs compiler errors via LOG_ERROR and returns null on failure. `errors` (optional)

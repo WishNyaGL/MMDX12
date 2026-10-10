@@ -8,14 +8,25 @@
 #include "render/RenderTypes.h"
 #include "render/ShaderInterop.h"
 #include "render/Upscaler.h"
+#include <atomic>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <vector>
 
 namespace mmdx {
 
 struct PmxModel;
 struct ImageRGBA8;
+
+struct RenderInitProgress {
+    std::atomic<float> fraction{0.0f};  // 0..1
+    std::mutex mutex;
+    std::string status;                 // guarded by mutex, UTF-8
+    void SetStatus(const std::string& s) { std::lock_guard<std::mutex> l(mutex); status = s; }
+    std::string Status() { std::lock_guard<std::mutex> l(mutex); return status; }
+};
 
 // Frame orchestration: see Passes.h for the pass list. Without models (menus) the renderer
 // only clears the back buffer, so the UI can draw on a clean surface.
@@ -26,7 +37,7 @@ public:
     Renderer() = default;
     ~Renderer();
 
-    bool Initialize(Dx12Context& ctx, const std::filesystem::path& shaderDir);
+    bool Initialize(Dx12Context& ctx, const std::filesystem::path& shaderDir, RenderInitProgress* progress = nullptr);
     void Shutdown();  // waits for GPU
 
     std::unique_ptr<GpuModel> CreateModel(UploadBatch& batch, const PmxModel& pmx,

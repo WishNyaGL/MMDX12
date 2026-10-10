@@ -282,15 +282,33 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     // The renderer init (shader compile, upscaler SDKs) takes seconds: run it on a worker thread and keep pumping
     // window messages here, so the window paints the splash instead of going white / "not responding".
     loading_ = true;
-    auto rendererInit = std::async(std::launch::async, [&] { return renderer_.Initialize(ctx_, shaderDir); });
-    while (rendererInit.wait_for(std::chrono::milliseconds(8)) != std::future_status::ready) {
+    RenderInitProgress initProgress;
+    renderInitProgress_ = &initProgress;
+    auto rendererInit = std::async(std::launch::async, [&] { return renderer_.Initialize(ctx_, shaderDir, &initProgress); });
+    while (rendererInit.wait_for(std::chrono::milliseconds(16)) != std::future_status::ready) {
         MSG m;
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&m);
             DispatchMessageW(&m);
         }
+        if (renderInitProgress_) {
+            uint32_t compiled = GetCompiledShaderCount();
+            uint32_t expected = GetExpectedShaderCount();
+            if (expected > 0) {
+                float sFrac = std::clamp((float)compiled / (float)expected, 0.0f, 1.0f);
+                float f = 0.15f + 0.75f * sFrac;
+                if (f > renderInitProgress_->fraction.load()) {
+                    renderInitProgress_->fraction.store(f);
+                }
+            }
+            if (GetColdShaderCount() > 0) {
+                renderInitProgress_->SetStatus(Tr("셰이더 컴파일 중 (첫 실행은 시간이 걸립니다)"));
+            }
+        }
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
     const bool rendererOk = rendererInit.get();
+    renderInitProgress_ = nullptr;
     loading_ = false;
     if (!hwnd_) return 0;  // closed while loading
     if (!rendererOk) {
@@ -333,10 +351,26 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     startupPhase("updater");
     InitMcp();
     startupPhase("mcp");
-    StartScan();
-    startupPhase("scan start");
+    LibraryScanResult cachedResult;
+    if (LoadLibraryScanResult(libPath, cachedResult)) {
+        LOG_INFO("library: loaded cached library scan result (%d characters, %d stages, %d songs)",
+                 static_cast<int>(cachedResult.characters.size()),
+                 static_cast<int>(cachedResult.stages.size()),
+                 static_cast<int>(cachedResult.songs.size()));
+        library_ = std::move(cachedResult);
+        RestoreSelectionsFromSettings();
+        ApplyCommandLinePreselection();
+        ApplyStartScreen();
+        StartRevalidation();
+        startupPhase("scan start");
+    } else {
+        StartScan();
+        startupPhase("scan start");
+    }
     MainLoop();
     scanProgress_.cancel = true;   // a library scan still running (quit while scanning) stops instead of finishing
+    revalidateProgress_.cancel = true;
+    if (revalidateFuture_.valid()) revalidateFuture_.wait();
 
     // Studio work is never lost by closing the window: unsaved edits go to the recovery file, offered at the next
     // start (automated runs skip this, they would leave prompts behind for the next test).
@@ -389,6 +423,93 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
 // Window
 // ---------------------------------------------------------------------------
 
+namespace {
+// The GDI splash shown while the renderer initialises: the same layout, font and palette as the library scan
+// screen (App::DrawScanning) that follows it, so the hand-over does not jump. Painted off-screen (no flicker).
+void PaintSplash(HDC hdc, const RECT& r, float dpi, float fraction, const std::string& status, const std::string& count) {
+    const int width = r.right - r.left, height = r.bottom - r.top;
+    if (width <= 0 || height <= 0) return;
+    static const bool fontsAdded = [] {   // Pretendard for this process only (ImGui loads its own copy later)
+        for (const wchar_t* f : {L"Pretendard-Bold.otf", L"Pretendard-SemiBold.otf", L"Pretendard-Regular.otf"})
+            AddFontResourceExW((ExecutableDir() / L"assets" / L"fonts" / f).c_str(), FR_PRIVATE, nullptr);
+        return true;
+    }();
+    (void)fontsAdded;
+    const ui::Palette& p = ui::P();
+    const auto rgb = [](ImU32 c) { return (COLORREF)(c & 0xFFFFFF); };   // ImU32 is 0xAABBGGRR, COLORREF 0x00BBGGRR
+    const auto dp = [dpi](float v) { return (int)std::lround(v * dpi); };
+    HDC dc = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, width, height);
+    HGDIOBJ oldBmp = SelectObject(dc, bmp);
+    HBRUSH bg = CreateSolidBrush(rgb(p.bg));
+    FillRect(dc, &r, bg);
+    DeleteObject(bg);
+    SetBkMode(dc, TRANSPARENT);
+    const auto font = [&](float px, int weight) {
+        return CreateFontW(-dp(px), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0,
+                           L"Pretendard");
+    };
+    const auto centred = [&](const std::string& text, HFONT f, COLORREF col, int y) {
+        const std::wstring w = Utf8ToWide(text);
+        HGDIOBJ old = SelectObject(dc, f);
+        SIZE sz{};
+        GetTextExtentPoint32W(dc, w.c_str(), (int)w.size(), &sz);
+        SetTextColor(dc, col);
+        TextOutW(dc, (width - sz.cx) / 2, y, w.c_str(), (int)w.size());
+        SelectObject(dc, old);
+        return sz;
+    };
+    const int cx = width / 2, cy = height / 2;
+    const int y = cy - dp(70.0f);
+    HFONT logo = font(34.0f, FW_BOLD);
+    HGDIOBJ old = SelectObject(dc, logo);
+    SIZE a{}, b{};
+    GetTextExtentPoint32W(dc, L"MMDX", 4, &a);
+    GetTextExtentPoint32W(dc, L"12", 2, &b);
+    const int lx = cx - (a.cx + b.cx) / 2;
+    SetTextColor(dc, rgb(p.ink));
+    TextOutW(dc, lx, y, L"MMDX", 4);
+    SetTextColor(dc, rgb(p.accentInk));
+    TextOutW(dc, lx + a.cx, y, L"12", 2);
+    SelectObject(dc, old);
+    DeleteObject(logo);
+    const int logoH = a.cy;
+    HFONT body = font(ui::size::Body, FW_SEMIBOLD);
+    centred(status.empty() ? std::string(Tr("렌더러 준비 중")) : status, body, rgb(p.ink2), y + logoH + dp(22.0f));
+    DeleteObject(body);
+    // the bar: ui::ProgressBar's shape (sunken track, accent fill, fully rounded)
+    const int bw = dp(360.0f), bh = dp(6.0f), by = y + logoH + dp(54.0f), bx = cx - bw / 2;
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    HBRUSH track = CreateSolidBrush(rgb(p.sunken));
+    HGDIOBJ oldBrush = SelectObject(dc, track);
+    RoundRect(dc, bx, by, bx + bw + 1, by + bh + 1, bh, bh);
+    fraction = std::clamp(fraction, 0.0f, 1.0f);
+    HBRUSH fill = CreateSolidBrush(rgb(p.accent));
+    if (fraction > 0.0f) {
+        SelectObject(dc, fill);
+        const int fw = std::max((int)std::lround(bw * fraction), bh);
+        RoundRect(dc, bx, by, bx + fw + 1, by + bh + 1, bh, bh);
+    }
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(track);
+    DeleteObject(fill);
+    if (!count.empty()) {
+        HFONT caption = font(ui::size::Caption, FW_NORMAL);
+        centred(count, caption, rgb(p.ink3), by + dp(16.0f));
+        DeleteObject(caption);
+    }
+    const std::string version = std::string("v") + MMDX12_VERSION;
+    HFONT caption = font(ui::size::Caption, FW_NORMAL);
+    centred(version, caption, rgb(p.ink3), height - dp(28.0f));
+    DeleteObject(caption);
+    BitBlt(hdc, 0, 0, width, height, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+}
+}  // namespace
+
 LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // A --ui-script or MCP input step owns mouse and keyboard: real input (the user's cursor over or off the window) would race it.
     const bool scripted = (!options_.uiScript.empty() || mcpInputActive_) &&
@@ -411,34 +532,30 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (lParam && wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0) themeDirty_ = true;
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     case WM_ERASEBKGND:
+        return 1;
     case WM_PAINT:
         if (loading_) {  // splash while the renderer initialises (GDI: nothing else is ready yet)
             PAINTSTRUCT ps;
-            HDC dc = BeginPaint(hwnd, &ps);
+            HDC hdc = BeginPaint(hwnd, &ps);
             RECT r;
             GetClientRect(hwnd, &r);
-            const bool dark = ui::IsDark();
-            HBRUSH bg = CreateSolidBrush(dark ? RGB(15, 19, 22) : RGB(243, 245, 248));
-            FillRect(dc, &r, bg);
-            DeleteObject(bg);
-            HFONT font = CreateFontW(-56, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0,
-                                     L"Segoe UI");
-            HGDIOBJ old = SelectObject(dc, font);
-            SetBkMode(dc, TRANSPARENT);
-            SIZE a{}, b{};
-            GetTextExtentPoint32W(dc, L"MMDX", 4, &a);
-            GetTextExtentPoint32W(dc, L"12", 2, &b);
-            const int x = (r.right - (a.cx + b.cx)) / 2, y = r.bottom / 2 - a.cy;
-            SetTextColor(dc, dark ? RGB(232, 236, 239) : RGB(17, 24, 32));
-            TextOutW(dc, x, y, L"MMDX", 4);
-            SetTextColor(dc, dark ? RGB(94, 216, 206) : RGB(0, 128, 110));
-            TextOutW(dc, x + a.cx, y, L"12", 2);
-            SelectObject(dc, old);
-            DeleteObject(font);
+            float fraction = 0.0f;
+            std::string status;
+            if (renderInitProgress_) {
+                fraction = renderInitProgress_->fraction.load();
+                status = renderInitProgress_->Status();
+            }
+            const uint32_t expected = GetExpectedShaderCount();
+            const std::string count = expected > 0 ? std::to_string(std::min(GetCompiledShaderCount(), expected)) + " / " +
+                                                         std::to_string(expected) + Tr(" 셰이더")
+                                                   : std::string();
+            const UINT winDpi = GetDpiForWindow(hwnd);
+            const float dpi = options_.uiScale > 0.0f ? options_.uiScale : (winDpi > 0 ? (float)winDpi / 96.0f : 1.0f);
+            PaintSplash(hdc, r, dpi, fraction, status, count);
             EndPaint(hwnd, &ps);
             return 0;
         }
-        return msg == WM_ERASEBKGND ? 1 : DefWindowProcW(hwnd, msg, wParam, lParam);
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
     case WM_DROPFILES: {   // shader pack zips / folders (PollShaderPacks installs them)
         HDROP drop = (HDROP)wParam;
         const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
@@ -805,6 +922,9 @@ void App::ClearHiddenOverrides() {
 }
 
 void App::StartScan() {
+    revalidateProgress_.cancel.store(true, std::memory_order_relaxed);
+    revalidating_ = false;
+    pendingLibraryResult_.reset();
     screen_ = Screen::Scanning;
     thumbsClearPending_ = true;
     scanProgress_.filesVisited.store(0, std::memory_order_relaxed);
@@ -819,13 +939,21 @@ void App::StartScan() {
     });
 }
 
-void App::PollScan() {
-    if (!scanFuture_.valid()) return;
-    if (scanFuture_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+void App::StartRevalidation() {
+    revalidating_ = true;
+    revalidateProgress_.cancel.store(false, std::memory_order_relaxed);
+    revalidateProgress_.filesVisited.store(0, std::memory_order_relaxed);
+    revalidateProgress_.filesTotal.store(0, std::memory_order_relaxed);
+    const std::filesystem::path path = ResolveLibraryPath();
+    const std::filesystem::path templateDir = ExecutableDir() / L"assets" / L"library_template";
+    const LibraryOverrides overrides = LoadLibraryOverrides();
+    revalidateFuture_ = std::async(std::launch::async, [this, path, templateDir, overrides] {
+        CreateLibrarySkeleton(path, templateDir);
+        return ScanLibrary(path, &revalidateProgress_, &overrides);
+    });
+}
 
-    library_ = scanFuture_.get();
-
-    // Restore selections by matching settings ids against asset ids.
+void App::RestoreSelectionsFromSettings() {
     selCharacter_ = -1;
     if (!settings_.lastCharacter.empty()) {
         const std::string needle = ToLowerAscii(settings_.lastCharacter);
@@ -844,9 +972,9 @@ void App::PollScan() {
         for (size_t i = 0; i < library_.songs.size(); ++i)
             if (ToLowerAscii(library_.songs[i].id) == needle) { selSong_ = (int)i; break; }
     }
+}
 
-    ApplyCommandLinePreselection();
-
+void App::ApplyStartScreen() {
     screen_ = Screen::Select;
     if (options_.startScreen == "bench" || options_.startScreen == "bench-gi") {
         screen_ = Screen::BenchLobby;
@@ -931,6 +1059,72 @@ void App::PollScan() {
             LOG_ERROR("benchmark: the library needs at least one character and one song");
         }
         options_.benchmarkCategory.clear();
+    }
+}
+
+void App::ApplyRevalidatedLibrary(LibraryScanResult fresh) {
+    if (LibraryScanResultsEqual(library_, fresh)) {
+        return;
+    }
+    LOG_INFO("library: background revalidation found changes; updating library");
+    std::string charId = (selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size())
+                             ? library_.characters[(size_t)selCharacter_].id : settings_.lastCharacter;
+    std::string stageId = (selStage_ >= 0 && (size_t)selStage_ < library_.stages.size())
+                            ? library_.stages[(size_t)selStage_].id : settings_.lastStage;
+    std::string songId = (selSong_ >= 0 && (size_t)selSong_ < library_.songs.size())
+                           ? library_.songs[(size_t)selSong_].id : settings_.lastSong;
+
+    library_ = std::move(fresh);
+    thumbsClearPending_ = true;
+
+    selCharacter_ = -1;
+    if (!charId.empty()) {
+        const std::string needle = ToLowerAscii(charId);
+        for (size_t i = 0; i < library_.characters.size(); ++i) {
+            if (ToLowerAscii(library_.characters[i].id) == needle) { selCharacter_ = (int)i; break; }
+        }
+    }
+    selStage_ = -1;
+    if (!stageId.empty()) {
+        const std::string needle = ToLowerAscii(stageId);
+        for (size_t i = 0; i < library_.stages.size(); ++i) {
+            if (ToLowerAscii(library_.stages[i].id) == needle) { selStage_ = (int)i; break; }
+        }
+    }
+    selSong_ = -1;
+    if (!songId.empty()) {
+        const std::string needle = ToLowerAscii(songId);
+        for (size_t i = 0; i < library_.songs.size(); ++i) {
+            if (ToLowerAscii(library_.songs[i].id) == needle) { selSong_ = (int)i; break; }
+        }
+    }
+    ApplyCommandLinePreselection();
+}
+
+void App::PollScan() {
+    if (scanFuture_.valid()) {
+        if (scanFuture_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            library_ = scanFuture_.get();
+            RestoreSelectionsFromSettings();
+            ApplyCommandLinePreselection();
+            ApplyStartScreen();
+        }
+        return;
+    }
+
+    if (revalidateFuture_.valid()) {
+        if (revalidateFuture_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            pendingLibraryResult_ = std::make_unique<LibraryScanResult>(revalidateFuture_.get());
+            revalidating_ = false;
+        }
+    }
+
+    if (pendingLibraryResult_) {
+        const bool isSafe = (screen_ == Screen::Select || screen_ == Screen::BenchLobby) && !loadFuture_.valid();
+        if (isSafe) {
+            ApplyRevalidatedLibrary(std::move(*pendingLibraryResult_));
+            pendingLibraryResult_.reset();
+        }
     }
 }
 

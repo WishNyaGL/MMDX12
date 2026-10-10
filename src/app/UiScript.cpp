@@ -146,9 +146,9 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                      bone.c_str(), value.c_str(), d.selectedBones.size(), poseBones, poseMorphs, poseFrame, d.gizmoTool,
                      (int)d.gizmoLocal, d.inspectorTab, (int)studioGizmoShown_, studioViewDrag_);
             // project + every model (save / reopen comparisons, prop following)
-            LOG_INFO("STUDIOPROJ path=%s dirty=%d models=%zu jobs=%zu audio=%s offset=%.3f end=%d camKeys=%zu "
+            LOG_INFO("STUDIOPROJ path=%s dirty=%d aspect=%s models=%zu jobs=%zu audio=%s offset=%.3f end=%d camKeys=%zu "
                      "lightKeys=%zu shadowKeys=%zu",
-                     PathToUtf8(d.projectPath.filename()).c_str(), (int)d.Dirty(), d.models.size(), studioJobs_.size(),
+                     PathToUtf8(d.projectPath.filename()).c_str(), (int)d.Dirty(), d.AspectLabel(), d.models.size(), studioJobs_.size(),
                      d.hasAudio ? PathToUtf8(d.audioPath.filename()).c_str() : "-", d.audioOffset, d.EndFrame(),
                      d.camera.camera.size(), d.camera.light.size(), d.camera.shadow.size());
             for (size_t i = 0; i < d.models.size(); ++i) {
@@ -247,6 +247,24 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 sched(now + 1 + k, "move", {std::to_string(pt.x + num(1) * f), std::to_string(pt.y + num(2) * f)});
             }
             sched(now + steps + 2, "up", {"l"});
+        }
+    } else if (cmd == "studioaspect") {  // studioaspect <w:h>
+        if (studio_ && !args.empty()) {
+            int idx = studio::AspectIndexFromLabel(args[0]);
+            if (idx >= 0) {
+                studio_->SetAspectPreset(idx);
+            } else {
+                size_t colon = args[0].find(':');
+                if (colon != std::string::npos) {
+                    int w = std::atoi(args[0].substr(0, colon).c_str());
+                    int h = std::atoi(args[0].substr(colon + 1).c_str());
+                    studio_->SetAspect(w, h);
+                } else {
+                    LOG_WARN("ui script: unknown aspect ratio '%s'", args[0].c_str());
+                    if (outError) *outError = "Unknown aspect ratio: " + args[0];
+                    return false;
+                }
+            }
         }
     } else if (cmd == "studiolightpreset") {  // studiolightpreset <0-3>
         if (studio_ && !args.empty()) {

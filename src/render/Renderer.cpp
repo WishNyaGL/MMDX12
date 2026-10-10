@@ -3,6 +3,7 @@
 #include "render/Passes.h"
 #include "asset/ImageLoader.h"
 #include "asset/PmxModel.h"
+#include "core/I18n.h"
 #include "core/Log.h"
 #include <directx/d3dx12.h>
 #include <algorithm>
@@ -111,14 +112,22 @@ void Renderer::CreateBuiltinTextures() {
     batch.Submit();
 }
 
-bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderDir) {
+bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderDir, RenderInitProgress* progress) {
     ctx_ = &ctx;
     shaderDir_ = shaderDir;
+    if (progress) {
+        progress->fraction.store(0.02f);
+        progress->SetStatus(Tr("업스케일러 초기화 중"));
+    }
     for (UpscalerKind k : {UpscalerKind::DLSS, UpscalerKind::FSR, UpscalerKind::XeSS}) {
         const size_t i = (size_t)k;
         upscalers_[i] = CreateUpscaler(k);
         upscalerAvailable_[i] = upscalers_[i]->Initialize(ctx);
         LOG_INFO("upscaler %s: %s", upscalers_[i]->DisplayName(), upscalerAvailable_[i] ? "available" : "unavailable");
+    }
+    if (progress) {
+        progress->fraction.store(std::max(progress->fraction.load(), 0.08f));
+        progress->SetStatus(Tr("렌더러 엔진 준비 중"));
     }
     packTextures_ = std::make_unique<PackTextures>();
     rt_ = std::make_unique<RtScene>();
@@ -157,14 +166,38 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     passes_.push_back(std::make_unique<BackdropPass>());
     passes_.push_back(std::make_unique<PresentPass>());
 
+    const uint32_t expectedShaders = GetExpectedShaderCount();
+    if (progress) {
+        progress->fraction.store(std::max(progress->fraction.load(), 0.15f));
+        progress->SetStatus(GetColdShaderCount() > 0 ? Tr("셰이더 컴파일 중 (첫 실행은 시간이 걸립니다)") : Tr("셰이더 로딩 중"));
+    }
+
     uint32_t msaa = SupportedMsaa(ctx, settings_.msaaSamples);
-    for (auto& pass : passes_) {
+    for (size_t p = 0; p < passes_.size(); ++p) {
+        auto& pass = passes_[p];
+        if (progress) {
+            uint32_t compiled = GetCompiledShaderCount();
+            float sFrac = expectedShaders > 0 ? std::clamp((float)compiled / (float)expectedShaders, 0.0f, 1.0f) : 0.0f;
+            float pFrac = (float)p / (float)passes_.size();
+            float f = 0.15f + 0.75f * std::max(sFrac, pFrac);
+            if (f > progress->fraction.load()) progress->fraction.store(f);
+            if (GetColdShaderCount() > 0) {
+                progress->SetStatus(Tr("셰이더 컴파일 중 (첫 실행은 시간이 걸립니다)"));
+            } else {
+                progress->SetStatus(Tr("셰이더 로딩 중"));
+            }
+        }
         if (!pass->CreatePipelines(ctx, shaderDir, msaa)) {
             LOG_ERROR("Renderer: failed to create pipelines for pass '%s'", pass->Name());
             return false;
         }
     }
     pipelineMsaa_ = msaa;
+
+    if (progress) {
+        progress->fraction.store(std::max(progress->fraction.load(), 0.95f));
+        progress->SetStatus(Tr("초기화 완료 중"));
+    }
 
     sceneCb_ = CreateMappedUpload(ctx.Device(), (uint64_t)kSceneCbSize * kCbSlots * (1 + kMaxExtraViews), &sceneCbMapped_, L"scene.cb");
     lightBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kLightBytes * kCbSlots, &lightBufMapped_, L"scene.lights");
@@ -186,6 +219,11 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
                  "CreateCommittedResource(timestamp readback)"))
         return false;
     ctx.Queue()->GetTimestampFrequency(&timestampFrequency_);
+    SaveExpectedShaderCount(GetCompiledShaderCount());
+    if (progress) {
+        progress->fraction.store(1.0f);
+        progress->SetStatus(Tr("완료"));
+    }
     return true;
 }
 

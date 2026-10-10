@@ -17,6 +17,26 @@ inline constexpr int kVideoResolutionCount = 4;
 inline constexpr uint32_t kVideoFpsChoices[] = {24, 30, 60};
 inline constexpr int kVideoFpsCount = 3;
 
+// Compute studio output size for a given short-side pixel count and aspect ratio.
+// Rounded to even integers for video encoding.
+inline void ComputeStudioRenderSize(uint32_t shortSide, float aspect, uint32_t& outW, uint32_t& outH) {
+    if (aspect <= 0.0f) aspect = 16.0f / 9.0f;
+    if (aspect >= 1.0f) {
+        outH = (shortSide + 1u) & ~1u;
+        outW = (uint32_t)std::lround(shortSide * aspect * 0.5f) * 2u;
+    } else {
+        outW = (shortSide + 1u) & ~1u;
+        outH = (uint32_t)std::lround(shortSide / aspect * 0.5f) * 2u;
+    }
+}
+
+// Compute studio render resolution from resolution preset (720p/1080p/1440p/4K) and aspect ratio.
+inline void StudioVideoResolution(int resIdx, float aspect, uint32_t& outW, uint32_t& outH) {
+    resIdx = std::clamp(resIdx, 0, kVideoResolutionCount - 1);
+    const uint32_t shortSide = kVideoResolutions[resIdx].height;
+    ComputeStudioRenderSize(shortSide, aspect, outW, outH);
+}
+
 // GI quality: the sampling budget of the path tracer and the irradiance cache.
 struct VideoQualityPreset {
     const char* label;
@@ -103,9 +123,16 @@ inline int RecommendedBitrateMbps(uint32_t height, int fps) {
 
 // Rough wall time of one video frame on an RTX 3060 Laptop at 4K "high", scaling with the pixel count
 // and the quality preset: the estimate shown until a sample render has measured the real time.
-inline double EstimatedSecondsPerFrame(const VideoRenderConfig& c) {
-    const VideoResolution& r = kVideoResolutions[std::clamp(c.resolution, 0, kVideoResolutionCount - 1)];
-    const double pixels = (double)r.width * r.height / (3840.0 * 2160.0);
+inline double EstimatedSecondsPerFrame(const VideoRenderConfig& c, float studioAspect = 0.0f) {
+    double pixels;
+    if (studioAspect > 0.0f) {
+        uint32_t sw = 0, sh = 0;
+        StudioVideoResolution(c.resolution, studioAspect, sw, sh);
+        pixels = (double)sw * sh / (3840.0 * 2160.0);
+    } else {
+        const VideoResolution& r = kVideoResolutions[std::clamp(c.resolution, 0, kVideoResolutionCount - 1)];
+        pixels = (double)r.width * r.height / (3840.0 * 2160.0);
+    }
     const int q = std::clamp(c.quality, 0, kVideoQualityCount - 1);
     double base4k, rel;
     switch (c.Renderer()) {

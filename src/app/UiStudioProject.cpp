@@ -173,6 +173,8 @@ ProjectData App::StudioProjectData() const {
     e.selectedModel = d.selectedModel;
     e.useMotionCamera = d.useMotionCamera;
     e.useShadowTrack = d.useShadowTrack;
+    e.aspectW = d.aspectW;
+    e.aspectH = d.aspectH;
     e.lights = d.lights;
     for (SceneLight& l : e.lights) {  // model uids do not survive a reload: spot targets are saved as 1 + the model's index
         if (l.targetUid == 0) continue;

@@ -363,6 +363,8 @@ static void TestRoundTrip() {
     data.audioOffset = -0.5;
     data.editor.frame = 120;
     data.editor.selectedModel = 2;
+    data.editor.aspectW = 9;
+    data.editor.aspectH = 16;
     data.editor.loop = true;
     data.editor.rangeStart = 10;
     data.editor.rangeEnd = 50;
@@ -465,8 +467,9 @@ static void TestRoundTrip() {
     Check(ed.frame == 120 && ed.selectedModel == 2 && ed.loop && ed.rangeStart == 10 && ed.rangeEnd == 50 &&
               ed.pxPerFrame == 3.5f && ed.camYaw == 0.5f && ed.camPitch == 0.2f && ed.camDistance == 30.0f &&
               ed.camFovDeg == 40.0f && ed.useMotionCamera && ed.useShadowTrack &&
-              ed.showCameraPath && ed.physics && Vec3Eq(ed.camTarget, {1, 2, 3}, 0),
-          "editor state kept");
+              ed.showCameraPath && ed.physics && Vec3Eq(ed.camTarget, {1, 2, 3}, 0) &&
+              ed.aspectW == 9 && ed.aspectH == 16,
+          "editor state kept (including non-default aspect 9:16)");
     // ---- the scene lights (version 2) ----
     Check(ed.lights.size() == data.editor.lights.size(), "scene light count kept", "size=%zu", ed.lights.size());
     {
@@ -1087,6 +1090,87 @@ static void TestPropOffsetMatrix() {
           "got (%g,%g,%g)", out.x, out.y, out.z);
 }
 
+static void TestAspectProject() {
+    const std::filesystem::path projDir = kTemp / "aspect";
+    std::filesystem::create_directories(projDir);
+    const std::filesystem::path projFile = projDir / "test.mmdxproj";
+    std::string err;
+    std::vector<std::string> warnings;
+
+    // 1. Test saving and loading each preset
+    for (int i = 0; i < kAspectPresetCount; ++i) {
+        ProjectData d;
+        d.editor.aspectW = kAspectPresets[i].w;
+        d.editor.aspectH = kAspectPresets[i].h;
+        Check(SaveProject(projFile, d, &err), "SaveProject aspect preset", "%s", kAspectPresets[i].label);
+
+        ProjectData loaded;
+        warnings.clear();
+        Check(LoadProject(projFile, loaded, &err, &warnings), "LoadProject aspect preset", "%s", kAspectPresets[i].label);
+        Check(loaded.editor.aspectW == kAspectPresets[i].w && loaded.editor.aspectH == kAspectPresets[i].h,
+              "aspect ratio round-trip matches preset", "%s", kAspectPresets[i].label);
+    }
+
+    // 2. Missing aspect in editor defaults to 16:9
+    {
+        {
+            std::ofstream f(projFile, std::ios::binary);
+            f << "{\"format\":\"mmdx12-studio-project\",\"version\":2,\"models\":[],\"camera\":null,\"audio\":null,\"editor\":{}}";
+        }
+        ProjectData loaded;
+        warnings.clear();
+        Check(LoadProject(projFile, loaded, &err, &warnings), "LoadProject without aspect field");
+        Check(loaded.editor.aspectW == 16 && loaded.editor.aspectH == 9, "missing aspect defaults to 16:9");
+    }
+
+    // 3. Unknown aspect values fall back to 16:9
+    {
+        // Unknown w/h in object
+        {
+            std::ofstream f(projFile, std::ios::binary);
+            f << "{\"format\":\"mmdx12-studio-project\",\"version\":2,\"models\":[],\"camera\":null,\"audio\":null,\"editor\":{\"aspect\":{\"w\":7,\"h\":3}}}";
+        }
+        ProjectData loaded;
+        warnings.clear();
+        Check(LoadProject(projFile, loaded, &err, &warnings), "LoadProject with unknown aspect object");
+        Check(loaded.editor.aspectW == 16 && loaded.editor.aspectH == 9, "unknown aspect object {7,3} falls back to 16:9");
+
+        // Unknown label string
+        {
+            std::ofstream f(projFile, std::ios::binary);
+            f << "{\"format\":\"mmdx12-studio-project\",\"version\":2,\"models\":[],\"camera\":null,\"audio\":null,\"editor\":{\"aspect\":\"unknown\"}}";
+        }
+        ProjectData loaded2;
+        warnings.clear();
+        Check(LoadProject(projFile, loaded2, &err, &warnings), "LoadProject with unknown aspect string");
+        Check(loaded2.editor.aspectW == 16 && loaded2.editor.aspectH == 9, "unknown aspect string falls back to 16:9");
+    }
+
+    // 4. String preset name loads correctly
+    {
+        {
+            std::ofstream f(projFile, std::ios::binary);
+            f << "{\"format\":\"mmdx12-studio-project\",\"version\":2,\"models\":[],\"camera\":null,\"audio\":null,\"editor\":{\"aspect\":\"9:16\"}}";
+        }
+        ProjectData loaded;
+        warnings.clear();
+        Check(LoadProject(projFile, loaded, &err, &warnings), "LoadProject with string aspect \"9:16\"");
+        Check(loaded.editor.aspectW == 9 && loaded.editor.aspectH == 16, "string aspect \"9:16\" loads as 9:16");
+    }
+
+    // 5. Array [w, h] loads correctly
+    {
+        {
+            std::ofstream f(projFile, std::ios::binary);
+            f << "{\"format\":\"mmdx12-studio-project\",\"version\":2,\"models\":[],\"camera\":null,\"audio\":null,\"editor\":{\"aspect\":[4,5]}}";
+        }
+        ProjectData loaded;
+        warnings.clear();
+        Check(LoadProject(projFile, loaded, &err, &warnings), "LoadProject with array aspect [4,5]");
+        Check(loaded.editor.aspectW == 4 && loaded.editor.aspectH == 5, "array aspect [4,5] loads as 4:5");
+    }
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // unbuffered: a crash mid-test loses buffered PASS lines
     std::error_code ec;
@@ -1094,6 +1178,7 @@ int main() {
     std::filesystem::create_directories(kTemp, ec);
 
     TestRoundTrip();
+    TestAspectProject();
     TestSceneLightFile();
     TestSceneLightReading();
     TestAreaLightProject();

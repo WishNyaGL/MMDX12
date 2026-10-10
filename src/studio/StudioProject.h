@@ -57,11 +57,49 @@ struct ProjectModel {
     MotionData motion;                 // its keys; motion.modelName is written as the VMD header model name
 };
 
+struct FrameAspectPreset {
+    const char* label;
+    int w;
+    int h;
+    float ratio;
+};
+
+inline constexpr FrameAspectPreset kAspectPresets[] = {
+    {"16:9", 16, 9, 16.0f / 9.0f},
+    {"9:16", 9, 16, 9.0f / 16.0f},
+    {"4:3", 4, 3, 4.0f / 3.0f},
+    {"1:1", 1, 1, 1.0f},
+    {"4:5", 4, 5, 4.0f / 5.0f},
+    {"2.39:1", 239, 100, 2.39f},
+};
+inline constexpr int kAspectPresetCount = 6;
+
+inline int AspectIndexFromWH(int w, int h) {
+    for (int i = 0; i < kAspectPresetCount; ++i) {
+        if (kAspectPresets[i].w == w && kAspectPresets[i].h == h) return i;
+    }
+    return 0;
+}
+
+inline int AspectIndexFromLabel(const std::string& s) {
+    for (int i = 0; i < kAspectPresetCount; ++i) {
+        if (s == kAspectPresets[i].label) return i;
+    }
+    if (s == "239:100") return 5;
+    return -1;
+}
+
+inline float AspectRatioOf(int w, int h) {
+    const int idx = AspectIndexFromWH(w, h);
+    return kAspectPresets[idx].ratio;
+}
+
 // Editor state restored with the project (view, playback options, free camera).
 struct ProjectEditor {
     int frame = 0;
     int selectedModel = -1;            // index into models, -1 = camera
     bool useMotionCamera = true, useShadowTrack = true, showCameraPath = true;
+    int aspectW = 16, aspectH = 9;     // frame aspect preset (defaults to 16:9)
     // The scene lights ("lights", see SceneLight.h). A spot's targetUid is 1 + the index into ProjectData::models here
     // (0 = the performer): the App converts it from / to the studio's model uids. A version 2 file without "lights"
     // has none; a version 1 file's "lighting" / "useLightTrack" are converted by LoadProject.

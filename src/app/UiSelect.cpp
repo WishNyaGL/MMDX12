@@ -396,6 +396,15 @@ void App::DrawSelect() {
         Segmented("##tabs", labels, 3, &libraryTab_, 0.0f, 40.0f, icons);
         char* filter = libraryTab_ == 0 ? filterCharacter_ : (libraryTab_ == 1 ? filterStage_ : filterSong_);
         const float sw = std::min(280.0f, (leftR - leftX) / Dpi() * 0.4f);
+        if (revalidating_) {
+            const char* updatingLabel = Tr("라이브러리 갱신 중...");
+            const ImVec2 us = TextSize(Font::Regular, size::Caption, updatingLabel);
+            const float indX = leftR - Dp(sw) - us.x - Dp(16.0f);
+            if (indX > leftX + Dp(360.0f)) {
+                Text(ImGui::GetWindowDrawList(), Font::Regular, size::Caption,
+                     ImVec2(indX, top + Dp(12.0f)), p.ink3, updatingLabel);
+            }
+        }
         ImGui::SetCursorScreenPos(ImVec2(leftR - Dp(sw), top + Dp(1.0f)));
         const char* hints[] = {Tr("캐릭터 검색"), Tr("스테이지 검색"), Tr("곡 검색")};
         SearchField("##search", filter, 128, hints[libraryTab_], sw);

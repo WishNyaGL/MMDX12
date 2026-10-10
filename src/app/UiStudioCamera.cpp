@@ -205,9 +205,10 @@ void App::DrawStudioCameraPanel(float w) {
         // render frame guides (shown when looking through the motion camera)
         ImGui::Dummy(ImVec2(w, Dp(6.0f)));
         const float gw = (w / Dpi() - 12.0f) / 3.0f;
-        if (Button("##fmask", Tr("16:9 프레임"), nullptr, d.frameMask ? ButtonKind::Primary : ButtonKind::Secondary, ImVec2(gw, 30.0f)))
+        const std::string maskLabel = std::string(d.AspectLabel()) + " " + Tr("프레임");
+        if (Button("##fmask", maskLabel.c_str(), nullptr, d.frameMask ? ButtonKind::Primary : ButtonKind::Secondary, ImVec2(gw, 30.0f)))
             d.frameMask = !d.frameMask;
-        Tooltip(Tr("카메라 모션으로 볼 때 렌더 영상과 같은 16:9 영역만 보여줘요."));
+        Tooltip(Tr("카메라 모션으로 볼 때 렌더 영상과 같은 영역만 보여줘요. 아래에서 화면 비율을 고릅니다."));
         ImGui::SameLine(0, Dp(6.0f));
         if (Button("##fthirds", Tr("3분할"), nullptr, d.showThirds ? ButtonKind::Primary : ButtonKind::Secondary, ImVec2(gw, 30.0f)))
             d.showThirds = !d.showThirds;
@@ -216,6 +217,15 @@ void App::DrawStudioCameraPanel(float w) {
         if (Button("##fsafe", Tr("세이프"), nullptr, d.showSafeFrames ? ButtonKind::Primary : ButtonKind::Secondary, ImVec2(gw, 30.0f)))
             d.showSafeFrames = !d.showSafeFrames;
         Tooltip(Tr("액션 세이프 93 % · 타이틀 세이프 90 %"));
+        if (d.frameMask) {
+            ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+            const char* presets[kAspectPresetCount];
+            for (int i = 0; i < kAspectPresetCount; ++i) presets[i] = kAspectPresets[i].label;
+            int curAspect = d.AspectIndex();
+            if (Segmented("##fmaskpreset", presets, kAspectPresetCount, &curAspect, w / Dpi(), 26.0f)) {
+                d.SetAspectPreset(curAspect);
+            }
+        }
     }
 
     // --- the camera at the playhead: always editable (auto-key keys the edit), key state like an AE/Blender property.
@@ -575,7 +585,7 @@ void App::StudioRenderRect(float x0, float y0, float x1, float y1, float out[4])
     out[0] = x0; out[1] = y0; out[2] = x1 - x0; out[3] = y1 - y0;
     if (d.viewLayout != 0 || !d.frameMask || !d.useMotionCamera || !d.cameraEval) return;
     const float area[4] = {x0, y0, x1 - x0, y1 - y0};
-    FitInArea(area, 16.0f, 9.0f, out);
+    FitInArea(area, (float)d.aspectW, (float)d.aspectH, out);
     for (int i = 0; i < 4; ++i) out[i] = std::floor(out[i]);  // whole pixels: the 3D image and the mask agree
 }
 
@@ -609,7 +619,7 @@ void App::DrawStudioFrameMask(float x0, float y0, float x1, float y1) {
             dl->AddRect(ImVec2(fx0 + mx, fy0 + my), ImVec2(fx1 - mx, fy1 - my), guide, 0.0f, 0, 1.0f);
         }
     }
-    Text(dl, Font::Regular, size::Caption, ImVec2(fx0 + Dp(8.0f), fy1 - Dp(20.0f)), IM_COL32(255, 255, 255, 150), "16:9");
+    Text(dl, Font::Regular, size::Caption, ImVec2(fx0 + Dp(8.0f), fy1 - Dp(20.0f)), IM_COL32(255, 255, 255, 150), d.AspectLabel());
 }
 
 void App::DrawStudioCameraPath(float x0, float y0, float x1, float y1) {
@@ -678,7 +688,7 @@ void App::DrawStudioCameraPath(float x0, float y0, float x1, float y1) {
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y1), true);
-    DrawCameraPath(dl, studioVp_, studioCamPath_.data() + p0, p1 - p0 + 1, studioCamKeys_.data() + k0, k1 - k0, selected, &cur, kRenderAspect, frustum, cut, style, keyFrames.data());
+    DrawCameraPath(dl, studioVp_, studioCamPath_.data() + p0, p1 - p0 + 1, studioCamKeys_.data() + k0, k1 - k0, selected, &cur, d.AspectRatio(), frustum, cut, style, keyFrames.data());
     dl->PopClipRect();
 }
 

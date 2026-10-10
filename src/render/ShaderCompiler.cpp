@@ -4,6 +4,7 @@
 #include <d3dcompiler.h>
 #include <dxcapi.h>
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -221,16 +222,61 @@ void CacheStore(const std::filesystem::path& path, ID3DBlob* blob) {
     if (ec) std::filesystem::remove(tmp, ec);
 }
 
+static std::atomic<uint32_t> g_compiledShaderCount{0};
+static std::atomic<uint32_t> g_coldShaderCount{0};
+
 ComPtr<ID3DBlob> Cached(bool dxc, const std::filesystem::path& file, const char* entry, const char* target,
                         const ShaderDefines& defines, std::string* errors) {
     const std::filesystem::path path = CachePath(file, entry, target, defines, dxc);
-    if (ComPtr<ID3DBlob> hit = CacheLoad(path)) return hit;
+    if (ComPtr<ID3DBlob> hit = CacheLoad(path)) {
+        g_compiledShaderCount.fetch_add(1, std::memory_order_relaxed);
+        return hit;
+    }
+    g_coldShaderCount.fetch_add(1, std::memory_order_relaxed);
     ComPtr<ID3DBlob> blob = dxc ? CompileShaderDxcUncached(file, entry, target, defines, errors)
                                 : CompileShaderUncached(file, entry, target, defines, errors);
     if (blob) CacheStore(path, blob.Get());
+    g_compiledShaderCount.fetch_add(1, std::memory_order_relaxed);
     return blob;
 }
 } // namespace
+
+uint32_t GetCompiledShaderCount() {
+    return g_compiledShaderCount.load(std::memory_order_relaxed);
+}
+
+uint32_t GetColdShaderCount() {
+    return g_coldShaderCount.load(std::memory_order_relaxed);
+}
+
+void ResetShaderCompileCounters() {
+    g_compiledShaderCount.store(0, std::memory_order_relaxed);
+    g_coldShaderCount.store(0, std::memory_order_relaxed);
+}
+
+uint32_t GetExpectedShaderCount() {
+    const std::filesystem::path countFile = ExecutableDir() / L"shader_cache" / L"compile_count.txt";
+    std::ifstream in(countFile);
+    uint32_t count = 0;
+    if (in >> count && count > 0) return count;
+    return 48; // Sensible fallback estimate
+}
+
+void SaveExpectedShaderCount(uint32_t count) {
+    if (count == 0) return;
+    const std::filesystem::path cacheDir = ExecutableDir() / L"shader_cache";
+    std::error_code ec;
+    std::filesystem::create_directories(cacheDir, ec);
+    const std::filesystem::path tmpFile = cacheDir / (L"compile_count.tmp." + std::to_wstring(GetCurrentProcessId()));
+    const std::filesystem::path countFile = cacheDir / L"compile_count.txt";
+    {
+        std::ofstream out(tmpFile);
+        if (!out) return;
+        out << count << "\n";
+    }
+    std::filesystem::rename(tmpFile, countFile, ec);
+    if (ec) std::filesystem::remove(tmpFile, ec);
+}
 
 void ResetShaderSourceHashes() {
     std::lock_guard<std::mutex> lock(hashMutex);

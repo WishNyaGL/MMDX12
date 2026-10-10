@@ -8,6 +8,7 @@
 #include "core/TextUtil.h"
 
 #include <json.hpp>
+#include <Windows.h>
 
 #include <algorithm>
 #include <chrono>
@@ -244,13 +245,201 @@ bool IsGenericStem(const std::string& stem) {
     return kGeneric.count(ToLowerAscii(stem)) > 0;
 }
 
+void WriteJsonAtomically(const std::filesystem::path& target, const nlohmann::json& j) {
+    std::error_code ec;
+    std::filesystem::create_directories(target.parent_path(), ec);
+    std::filesystem::path tmp = target;
+    tmp += L".tmp." + std::to_wstring(GetCurrentProcessId());
+    {
+        std::ofstream out(tmp, std::ios::binary);
+        if (!out) return;
+        const std::string text = j.dump(2);
+        out.write(text.data(), text.size());
+        if (!out) return;
+    }
+    std::filesystem::rename(tmp, target, ec);
+    if (ec) std::filesystem::remove(tmp, ec);
+}
+
+nlohmann::json ReadJsonFile(const std::filesystem::path& file) {
+    std::vector<uint8_t> bytes;
+    if (!ReadWholeFile(file, bytes, nullptr)) return {};
+    nlohmann::json j = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false, true);
+    if (j.is_discarded() || !j.is_object()) return {};
+    return j;
+}
+
 } // namespace
+
+bool SaveLibraryScanResult(const LibraryScanResult& result) {
+    const std::filesystem::path cacheDir = ExecutableDir() / L"cache";
+    const std::filesystem::path resultFile = cacheDir / L"library_result.json";
+    nlohmann::json j;
+    j["version"] = kLibraryScanResultVersion;
+    j["root"] = PathToUtf8(result.root);
+    j["scanSeconds"] = result.scanSeconds;
+    j["warnings"] = result.warnings;
+    j["notes"] = result.notes;
+
+    nlohmann::json chars = nlohmann::json::array();
+    for (const auto& c : result.characters) {
+        nlohmann::json jc;
+        jc["id"] = c.id;
+        jc["displayName"] = c.displayName;
+        jc["folderName"] = c.folderName;
+        jc["format"] = c.format;
+        jc["modelPath"] = PathToUtf8(c.modelPath);
+        jc["vertexCount"] = c.vertexCount;
+        jc["boneCount"] = c.boneCount;
+        jc["materialCount"] = c.materialCount;
+        chars.push_back(std::move(jc));
+    }
+    j["characters"] = std::move(chars);
+
+    nlohmann::json stages = nlohmann::json::array();
+    for (const auto& s : result.stages) {
+        nlohmann::json js;
+        js["id"] = s.id;
+        js["displayName"] = s.displayName;
+        js["format"] = s.format;
+        nlohmann::json parts = nlohmann::json::array();
+        for (const auto& p : s.parts) parts.push_back(PathToUtf8(p));
+        js["parts"] = std::move(parts);
+        js["vertexCount"] = s.vertexCount;
+        stages.push_back(std::move(js));
+    }
+    j["stages"] = std::move(stages);
+
+    nlohmann::json songs = nlohmann::json::array();
+    for (const auto& s : result.songs) {
+        nlohmann::json js;
+        js["id"] = s.id;
+        js["displayName"] = s.displayName;
+        js["danceVmd"] = PathToUtf8(s.danceVmd);
+        nlohmann::json extra = nlohmann::json::array();
+        for (const auto& e : s.extraVmds) extra.push_back(PathToUtf8(e));
+        js["extraVmds"] = std::move(extra);
+        js["cameraVmd"] = PathToUtf8(s.cameraVmd);
+        js["audioPath"] = PathToUtf8(s.audioPath);
+        js["durationSec"] = s.durationSec;
+        songs.push_back(std::move(js));
+    }
+    j["songs"] = std::move(songs);
+
+    WriteJsonAtomically(resultFile, j);
+    return true;
+}
+
+bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult& out) {
+    const std::filesystem::path cacheDir = ExecutableDir() / L"cache";
+    const std::filesystem::path resultFile = cacheDir / L"library_result.json";
+    nlohmann::json j = ReadJsonFile(resultFile);
+    if (!j.is_object()) return false;
+    if (j.value("version", 0u) != kLibraryScanResultVersion) return false;
+    const std::string rootStr = j.value("root", "");
+    if (rootStr.empty()) return false;
+    if (Utf8ToPath(rootStr).lexically_normal() != root.lexically_normal()) return false;
+
+    out = LibraryScanResult{};
+    out.root = root.lexically_normal();
+    out.scanSeconds = j.value("scanSeconds", 0.0);
+    if (j.contains("warnings") && j["warnings"].is_array()) {
+        for (const auto& w : j["warnings"]) if (w.is_string()) out.warnings.push_back(w.get<std::string>());
+    }
+    if (j.contains("notes") && j["notes"].is_array()) {
+        for (const auto& n : j["notes"]) if (n.is_string()) out.notes.push_back(n.get<std::string>());
+    }
+    if (j.contains("characters") && j["characters"].is_array()) {
+        for (const auto& jc : j["characters"]) {
+            if (!jc.is_object()) continue;
+            CharacterAsset c;
+            c.id = jc.value("id", "");
+            c.displayName = jc.value("displayName", "");
+            c.folderName = jc.value("folderName", "");
+            c.format = jc.value("format", "");
+            c.modelPath = Utf8ToPath(jc.value("modelPath", ""));
+            c.vertexCount = jc.value("vertexCount", 0u);
+            c.boneCount = jc.value("boneCount", 0u);
+            c.materialCount = jc.value("materialCount", 0u);
+            out.characters.push_back(std::move(c));
+        }
+    }
+    if (j.contains("stages") && j["stages"].is_array()) {
+        for (const auto& js : j["stages"]) {
+            if (!js.is_object()) continue;
+            StageAsset s;
+            s.id = js.value("id", "");
+            s.displayName = js.value("displayName", "");
+            s.format = js.value("format", "");
+            if (js.contains("parts") && js["parts"].is_array()) {
+                for (const auto& p : js["parts"])
+                    if (p.is_string()) s.parts.push_back(Utf8ToPath(p.get<std::string>()));
+            }
+            s.vertexCount = js.value("vertexCount", 0u);
+            out.stages.push_back(std::move(s));
+        }
+    }
+    if (j.contains("songs") && j["songs"].is_array()) {
+        for (const auto& js : j["songs"]) {
+            if (!js.is_object()) continue;
+            SongAsset s;
+            s.id = js.value("id", "");
+            s.displayName = js.value("displayName", "");
+            s.danceVmd = Utf8ToPath(js.value("danceVmd", ""));
+            if (js.contains("extraVmds") && js["extraVmds"].is_array()) {
+                for (const auto& e : js["extraVmds"])
+                    if (e.is_string()) s.extraVmds.push_back(Utf8ToPath(e.get<std::string>()));
+            }
+            s.cameraVmd = Utf8ToPath(js.value("cameraVmd", ""));
+            s.audioPath = Utf8ToPath(js.value("audioPath", ""));
+            s.durationSec = js.value("durationSec", 0.0f);
+            out.songs.push_back(std::move(s));
+        }
+    }
+    return true;
+}
+
+bool LibraryScanResultsEqual(const LibraryScanResult& a, const LibraryScanResult& b) {
+    if (a.characters.size() != b.characters.size() ||
+        a.stages.size() != b.stages.size() ||
+        a.songs.size() != b.songs.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.characters.size(); ++i) {
+        if (a.characters[i].id != b.characters[i].id ||
+            a.characters[i].displayName != b.characters[i].displayName ||
+            a.characters[i].modelPath != b.characters[i].modelPath ||
+            a.characters[i].vertexCount != b.characters[i].vertexCount ||
+            a.characters[i].boneCount != b.characters[i].boneCount ||
+            a.characters[i].materialCount != b.characters[i].materialCount)
+            return false;
+    }
+    for (size_t i = 0; i < a.stages.size(); ++i) {
+        if (a.stages[i].id != b.stages[i].id ||
+            a.stages[i].displayName != b.stages[i].displayName ||
+            a.stages[i].parts != b.stages[i].parts ||
+            a.stages[i].vertexCount != b.stages[i].vertexCount)
+            return false;
+    }
+    for (size_t i = 0; i < a.songs.size(); ++i) {
+        if (a.songs[i].id != b.songs[i].id ||
+            a.songs[i].displayName != b.songs[i].displayName ||
+            a.songs[i].danceVmd != b.songs[i].danceVmd ||
+            a.songs[i].cameraVmd != b.songs[i].cameraVmd ||
+            a.songs[i].audioPath != b.songs[i].audioPath ||
+            a.songs[i].extraVmds != b.songs[i].extraVmds ||
+            std::fabs(a.songs[i].durationSec - b.songs[i].durationSec) > 0.01f)
+            return false;
+    }
+    return true;
+}
 
 LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress* progress, const LibraryOverrides* overrides) {
     const std::filesystem::path root = rootIn.lexically_normal();
     LibraryScanResult result;
     result.root = root;
     const auto timerStart = std::chrono::steady_clock::now();
+    double walkSec = 0, modelSec = 0, vmdSec = 0, audioSec = 0, classifySec = 0;
 
     std::error_code ec;
     if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
@@ -355,11 +544,89 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     models.erase(std::remove_if(models.begin(), models.end(), [&](const ModelEntry& m) { return !wanted(m); }), models.end());
 
     if (progress) progress->filesTotal = (int)(models.size() + vmdFiles.size() + audioFiles.size());
+    const auto walkEnd = std::chrono::steady_clock::now();
+    walkSec = std::chrono::duration<double>(walkEnd - timerStart).count();
 
-    // ---- 3. probe models, vmds and audio in parallel ----
+    // ---- 3. probe models, vmds and audio in parallel (with persistent probe cache) ----
     const auto cancelled = [progress] { return progress && progress->cancel.load(); };
-    std::for_each(std::execution::par, models.begin(), models.end(), [&](ModelEntry& m) {
-        if (cancelled()) return;   // app exit: skip the remaining (slow) probes
+    const std::filesystem::path cacheDir = ExecutableDir() / L"cache";
+    const std::filesystem::path probeCacheFile = cacheDir / L"probes.json";
+    nlohmann::json cachedProbesJson = ReadJsonFile(probeCacheFile);
+    bool cacheValid = false;
+    std::map<std::string, nlohmann::json> probeCacheMap;
+    if (cachedProbesJson.is_object() &&
+        cachedProbesJson.value("version", 0u) == kProbeCacheVersion &&
+        cachedProbesJson.contains("files") && cachedProbesJson["files"].is_object()) {
+        cacheValid = true;
+        for (auto& [k, v] : cachedProbesJson["files"].items()) {
+            if (v.is_object()) probeCacheMap[k] = std::move(v);
+        }
+    }
+
+    std::vector<size_t> modelsToProbe;
+    for (size_t i = 0; i < models.size(); ++i) {
+        ModelEntry& m = models[i];
+        std::error_code ecFs;
+        const uintmax_t sz = std::filesystem::file_size(m.path, ecFs);
+        const auto lwt = std::filesystem::last_write_time(m.path, ecFs);
+        const int64_t mt = ecFs ? 0 : lwt.time_since_epoch().count();
+        bool hit = false;
+        if (cacheValid) {
+            auto it = probeCacheMap.find(m.rel);
+            if (it != probeCacheMap.end()) {
+                const auto& ent = it->second;
+                if (ent.value("size", uint64_t(0)) == sz && ent.value("mtime", int64_t(0)) == mt) {
+                    m.probed = ent.value("probed", false);
+                    m.error = ent.value("error", "");
+                    m.humanoid = ent.value("humanoid", false);
+                    m.vertexCount = ent.value("vertexCount", 0u);
+                    m.boneCount = ent.value("boneCount", 0u);
+                    m.materialCount = ent.value("materialCount", 0u);
+                    m.name = ent.value("name", "");
+                    if (ent.contains("pmx") && ent["pmx"].is_object()) {
+                        PmxProbe p;
+                        const auto& jp = ent["pmx"];
+                        p.name = jp.value("name", "");
+                        p.nameEn = jp.value("nameEn", "");
+                        p.comment = jp.value("comment", "");
+                        p.vertexCount = jp.value("vertexCount", 0u);
+                        p.faceCount = jp.value("faceCount", 0u);
+                        p.textureCount = jp.value("textureCount", 0u);
+                        p.materialCount = jp.value("materialCount", 0u);
+                        p.boneCount = jp.value("boneCount", 0u);
+                        if (jp.contains("boneNames") && jp["boneNames"].is_array()) {
+                            for (const auto& bn : jp["boneNames"])
+                                if (bn.is_string()) p.boneNames.push_back(bn.get<std::string>());
+                        }
+                        m.pmx = std::move(p);
+                    }
+                    if (ent.contains("other") && ent["other"].is_object()) {
+                        ModelProbe p;
+                        const auto& jo = ent["other"];
+                        p.name = jo.value("name", "");
+                        p.vertexCount = jo.value("vertexCount", 0u);
+                        p.materialCount = jo.value("materialCount", 0u);
+                        p.boneCount = jo.value("boneCount", 0u);
+                        p.skinned = jo.value("skinned", false);
+                        p.morphed = jo.value("morphed", false);
+                        p.humanoid = jo.value("humanoid", false);
+                        p.humanoidNote = jo.value("humanoidNote", "");
+                        p.heightMeters = jo.value("heightMeters", 0.0f);
+                        p.extentMeters = jo.value("extentMeters", 0.0f);
+                        p.unsupported = jo.value("unsupported", "");
+                        m.other = std::move(p);
+                    }
+                    hit = true;
+                }
+            }
+        }
+        if (!hit) modelsToProbe.push_back(i);
+        else if (progress) ++progress->filesVisited;
+    }
+
+    std::for_each(std::execution::par, modelsToProbe.begin(), modelsToProbe.end(), [&](size_t idx) {
+        if (cancelled()) return;
+        ModelEntry& m = models[idx];
         std::string err;
         if (IsMmdModelFormat(m.format)) {
             PmxProbe probe;
@@ -387,28 +654,166 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         m.error = err;
         if (progress) ++progress->filesVisited;
     });
+    const auto modelEnd = std::chrono::steady_clock::now();
+    modelSec = std::chrono::duration<double>(modelEnd - walkEnd).count();
+
     std::vector<std::optional<VmdProbe>> vmdProbes(vmdFiles.size());
     std::vector<std::string> vmdErrors(vmdFiles.size());
-    {
-        std::vector<size_t> idx(vmdFiles.size());
-        for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
-        std::for_each(std::execution::par, idx.begin(), idx.end(), [&](size_t i) {
-            if (cancelled()) return;
-            VmdProbe probe;
-            if (ProbeVmd(vmdFiles[i], probe, &vmdErrors[i])) vmdProbes[i] = std::move(probe);
-            if (progress) ++progress->filesVisited;
-        });
+    std::vector<size_t> vmdsToProbe;
+    for (size_t i = 0; i < vmdFiles.size(); ++i) {
+        const std::string rel = RelKey(vmdFiles[i], root);
+        std::error_code ecFs;
+        const uintmax_t sz = std::filesystem::file_size(vmdFiles[i], ecFs);
+        const auto lwt = std::filesystem::last_write_time(vmdFiles[i], ecFs);
+        const int64_t mt = ecFs ? 0 : lwt.time_since_epoch().count();
+        bool hit = false;
+        if (cacheValid) {
+            auto it = probeCacheMap.find(rel);
+            if (it != probeCacheMap.end()) {
+                const auto& ent = it->second;
+                if (ent.value("size", uint64_t(0)) == sz && ent.value("mtime", int64_t(0)) == mt) {
+                    bool ok = ent.value("ok", false);
+                    vmdErrors[i] = ent.value("error", "");
+                    if (ok && ent.contains("probe") && ent["probe"].is_object()) {
+                        VmdProbe p;
+                        const auto& jp = ent["probe"];
+                        p.modelName = jp.value("modelName", "");
+                        p.boneKeyCount = jp.value("boneKeyCount", 0u);
+                        p.morphKeyCount = jp.value("morphKeyCount", 0u);
+                        p.cameraKeyCount = jp.value("cameraKeyCount", 0u);
+                        p.maxFrame = jp.value("maxFrame", 0u);
+                        vmdProbes[i] = std::move(p);
+                    }
+                    hit = true;
+                }
+            }
+        }
+        if (!hit) vmdsToProbe.push_back(i);
+        else if (progress) ++progress->filesVisited;
     }
+    std::for_each(std::execution::par, vmdsToProbe.begin(), vmdsToProbe.end(), [&](size_t i) {
+        if (cancelled()) return;
+        VmdProbe probe;
+        if (ProbeVmd(vmdFiles[i], probe, &vmdErrors[i])) vmdProbes[i] = std::move(probe);
+        if (progress) ++progress->filesVisited;
+    });
+    const auto vmdEnd = std::chrono::steady_clock::now();
+    vmdSec = std::chrono::duration<double>(vmdEnd - modelEnd).count();
+
     std::vector<AudioEntry> audios(audioFiles.size());
-    {
-        std::vector<size_t> idx(audioFiles.size());
-        for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
-        std::for_each(std::execution::par, idx.begin(), idx.end(), [&](size_t i) {
-            audios[i].path = audioFiles[i];
-            if (cancelled()) return;
-            audios[i].sec = AudioDurationSec(audioFiles[i]);
-            if (progress) ++progress->filesVisited;
-        });
+    std::vector<size_t> audiosToProbe;
+    for (size_t i = 0; i < audioFiles.size(); ++i) {
+        audios[i].path = audioFiles[i];
+        const std::string rel = RelKey(audioFiles[i], root);
+        std::error_code ecFs;
+        const uintmax_t sz = std::filesystem::file_size(audioFiles[i], ecFs);
+        const auto lwt = std::filesystem::last_write_time(audioFiles[i], ecFs);
+        const int64_t mt = ecFs ? 0 : lwt.time_since_epoch().count();
+        bool hit = false;
+        if (cacheValid) {
+            auto it = probeCacheMap.find(rel);
+            if (it != probeCacheMap.end()) {
+                const auto& ent = it->second;
+                if (ent.value("size", uint64_t(0)) == sz && ent.value("mtime", int64_t(0)) == mt) {
+                    audios[i].sec = ent.value("sec", 0.0);
+                    hit = true;
+                }
+            }
+        }
+        if (!hit) audiosToProbe.push_back(i);
+        else if (progress) ++progress->filesVisited;
+    }
+    std::for_each(std::execution::par, audiosToProbe.begin(), audiosToProbe.end(), [&](size_t i) {
+        if (cancelled()) return;
+        audios[i].sec = AudioDurationSec(audioFiles[i]);
+        if (progress) ++progress->filesVisited;
+    });
+    const auto audioEnd = std::chrono::steady_clock::now();
+    audioSec = std::chrono::duration<double>(audioEnd - vmdEnd).count();
+
+    // Save updated probe cache atomically (dropping vanished entries) if scan not cancelled
+    if (!cancelled()) {
+        nlohmann::json newFiles = nlohmann::json::object();
+        for (const auto& m : models) {
+            std::error_code ecFs;
+            uintmax_t sz = std::filesystem::file_size(m.path, ecFs);
+            int64_t mt = ecFs ? 0 : std::filesystem::last_write_time(m.path, ecFs).time_since_epoch().count();
+            nlohmann::json ent;
+            ent["size"] = sz;
+            ent["mtime"] = mt;
+            ent["probed"] = m.probed;
+            ent["error"] = m.error;
+            ent["humanoid"] = m.humanoid;
+            ent["vertexCount"] = m.vertexCount;
+            ent["boneCount"] = m.boneCount;
+            ent["materialCount"] = m.materialCount;
+            ent["name"] = m.name;
+            if (m.pmx) {
+                nlohmann::json jp;
+                jp["name"] = m.pmx->name;
+                jp["nameEn"] = m.pmx->nameEn;
+                jp["comment"] = m.pmx->comment;
+                jp["vertexCount"] = m.pmx->vertexCount;
+                jp["faceCount"] = m.pmx->faceCount;
+                jp["textureCount"] = m.pmx->textureCount;
+                jp["materialCount"] = m.pmx->materialCount;
+                jp["boneCount"] = m.pmx->boneCount;
+                jp["boneNames"] = m.pmx->boneNames;
+                ent["pmx"] = std::move(jp);
+            }
+            if (m.other) {
+                nlohmann::json jo;
+                jo["name"] = m.other->name;
+                jo["vertexCount"] = m.other->vertexCount;
+                jo["materialCount"] = m.other->materialCount;
+                jo["boneCount"] = m.other->boneCount;
+                jo["skinned"] = m.other->skinned;
+                jo["morphed"] = m.other->morphed;
+                jo["humanoid"] = m.other->humanoid;
+                jo["humanoidNote"] = m.other->humanoidNote;
+                jo["heightMeters"] = m.other->heightMeters;
+                jo["extentMeters"] = m.other->extentMeters;
+                jo["unsupported"] = m.other->unsupported;
+                ent["other"] = std::move(jo);
+            }
+            newFiles[m.rel] = std::move(ent);
+        }
+        for (size_t i = 0; i < vmdFiles.size(); ++i) {
+            const std::string rel = RelKey(vmdFiles[i], root);
+            std::error_code ecFs;
+            uintmax_t sz = std::filesystem::file_size(vmdFiles[i], ecFs);
+            int64_t mt = ecFs ? 0 : std::filesystem::last_write_time(vmdFiles[i], ecFs).time_since_epoch().count();
+            nlohmann::json ent;
+            ent["size"] = sz;
+            ent["mtime"] = mt;
+            ent["ok"] = vmdProbes[i].has_value();
+            ent["error"] = vmdErrors[i];
+            if (vmdProbes[i]) {
+                nlohmann::json jp;
+                jp["modelName"] = vmdProbes[i]->modelName;
+                jp["boneKeyCount"] = vmdProbes[i]->boneKeyCount;
+                jp["morphKeyCount"] = vmdProbes[i]->morphKeyCount;
+                jp["cameraKeyCount"] = vmdProbes[i]->cameraKeyCount;
+                jp["maxFrame"] = vmdProbes[i]->maxFrame;
+                ent["probe"] = std::move(jp);
+            }
+            newFiles[rel] = std::move(ent);
+        }
+        for (size_t i = 0; i < audioFiles.size(); ++i) {
+            const std::string rel = RelKey(audioFiles[i], root);
+            std::error_code ecFs;
+            uintmax_t sz = std::filesystem::file_size(audioFiles[i], ecFs);
+            int64_t mt = ecFs ? 0 : std::filesystem::last_write_time(audioFiles[i], ecFs).time_since_epoch().count();
+            nlohmann::json ent;
+            ent["size"] = sz;
+            ent["mtime"] = mt;
+            ent["sec"] = audios[i].sec;
+            newFiles[rel] = std::move(ent);
+        }
+        nlohmann::json rootJ;
+        rootJ["version"] = kProbeCacheVersion;
+        rootJ["files"] = std::move(newFiles);
+        WriteJsonAtomically(probeCacheFile, rootJ);
     }
 
     {
@@ -878,11 +1283,17 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     std::sort(result.stages.begin(), result.stages.end(), byLowerName);
     std::sort(result.songs.begin(), result.songs.end(), byLowerName);
     result.scanSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - timerStart).count();
+    classifySec = std::chrono::duration<double>(std::chrono::steady_clock::now() - audioEnd).count();
 
     for (const auto& n : result.notes) LOG_INFO("library: %s", n.c_str());
+    LOG_INFO("library scan phases: walk=%.3fs, model_probes=%.3fs, vmd_probes=%.3fs, audio_durations=%.3fs, classification=%.3fs (total=%.3fs)",
+             walkSec, modelSec, vmdSec, audioSec, classifySec, result.scanSeconds);
     LOG_INFO("library scan: %d characters, %d stages, %d songs, %d warnings in %.2fs",
              static_cast<int>(result.characters.size()), static_cast<int>(result.stages.size()),
              static_cast<int>(result.songs.size()), static_cast<int>(result.warnings.size()), result.scanSeconds);
+    if (!cancelled()) {
+        SaveLibraryScanResult(result);
+    }
     return result;
 }
 

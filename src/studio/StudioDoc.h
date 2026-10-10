@@ -135,7 +135,23 @@ struct StudioDoc {
     float quadHeight[3] = {40.0f, 40.0f, 40.0f};  // per ortho view: world units across its height (zoom)
     bool possessCamera = false;     // C4D style: viewport navigation edits the motion camera instead of the free view
     int shading = 0;                // viewport shading (ViewShading): 0 lit, 1 unlit, 2 wireframe (raster path only)
-    bool frameMask = true;         // camera view: render the 16:9 frame only and dim the rest (WYSIWYG with the video)
+    bool frameMask = true;         // camera view: render the frame only and dim the rest (WYSIWYG with the video)
+    int aspectW = 16, aspectH = 9; // frame aspect ratio (default 16:9)
+    int AspectIndex() const { return AspectIndexFromWH(aspectW, aspectH); }
+    const char* AspectLabel() const { return kAspectPresets[AspectIndex()].label; }
+    float AspectRatio() const { return AspectRatioOf(aspectW, aspectH); }
+    void SetAspect(int w, int h) {
+        int idx = AspectIndexFromWH(w, h);
+        SetAspectPreset(idx);
+    }
+    void SetAspectPreset(int idx) {
+        idx = std::clamp(idx, 0, kAspectPresetCount - 1);
+        if (aspectW != kAspectPresets[idx].w || aspectH != kAspectPresets[idx].h) {
+            aspectW = kAspectPresets[idx].w;
+            aspectH = kAspectPresets[idx].h;
+            ++projectVersion;
+        }
+    }
     bool showSafeFrames = false;    // title / action safe rectangles inside the frame
     bool showThirds = false;        // rule-of-thirds guides inside the frame
     bool autoKey = true;           // editing a value in the inspector keys it at the playhead (Adobe / Blender style)

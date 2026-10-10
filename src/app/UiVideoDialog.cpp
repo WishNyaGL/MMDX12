@@ -271,6 +271,18 @@ void App::DrawVideoRenderDialog() {
         // 4. 해상도, 프레임 레이트, 비트 전송률 (the format: changed least, so it comes last)
         bool formatChanged = false;
 
+        if (studio) {
+            Gap(10.0f);
+            SectionLabel(Tr("화면 비율"));
+            const char* aspectLabels[studio::kAspectPresetCount];
+            for (int i = 0; i < studio::kAspectPresetCount; ++i) aspectLabels[i] = studio::kAspectPresets[i].label;
+            int curAspect = studio_->AspectIndex();
+            if (Segmented("##vstudioaspect", aspectLabels, studio::kAspectPresetCount, &curAspect, colW / Dpi(), 36.0f)) {
+                studio_->SetAspectPreset(curAspect);
+                formatChanged = true;
+            }
+        }
+
         Gap(10.0f);
         const float halfW = (colW - gapX * 2.0f) * 0.5f;
         ImGui::BeginGroup();
@@ -356,8 +368,12 @@ void App::DrawVideoRenderDialog() {
     // Second line: 총 N프레임 · M:SS · W×H · F fps · 파일 약 X.X GB
     const float y2 = footerY + Dp(42.0f);
     char l2[160];
+    uint32_t realW = curRes.width, realH = curRes.height;
+    if (studio) {
+        StudioVideoResolution(cfg.resolution, studio_->AspectRatio(), realW, realH);
+    }
     std::snprintf(l2, sizeof(l2), Tr("총 %d프레임 · %s · %u×%u · %d fps · 파일 약 %.1f GB"), est.frames,
-                  MinSec(durationSec).c_str(), curRes.width, curRes.height, cfg.fps, est.fileGigabytes);
+                  MinSec(durationSec).c_str(), realW, realH, cfg.fps, est.fileGigabytes);
     Text(dl, Font::Regular, size::Body, ImVec2(x0, y2), p.ink2, l2);
 
     // Third line: 프레임당 약 X.X초로 측정한 값입니다 / 실제 시간은 PC 성능과 장면에 따라 달라집니다

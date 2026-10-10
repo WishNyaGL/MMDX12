@@ -582,6 +582,8 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
             ed["useMotionCamera"] = data.editor.useMotionCamera;
             ed["useShadowTrack"] = data.editor.useShadowTrack;
             ed["showCameraPath"] = data.editor.showCameraPath;
+            const int aspectIdx = AspectIndexFromWH(data.editor.aspectW, data.editor.aspectH);
+            ed["aspect"] = {{"w", kAspectPresets[aspectIdx].w}, {"h", kAspectPresets[aspectIdx].h}};
             ed["loop"] = data.editor.loop;
             ed["physics"] = data.editor.physics;
             ed["range"] = {data.editor.rangeStart, data.editor.rangeEnd};
@@ -797,6 +799,26 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
             ed.useMotionCamera = ReadBool(e, "useMotionCamera", ed.useMotionCamera);
             ed.useShadowTrack = ReadBool(e, "useShadowTrack", ed.useShadowTrack);
             ed.showCameraPath = ReadBool(e, "showCameraPath", ed.showCameraPath);
+            if (e.contains("aspect")) {
+                int w = 16, h = 9;
+                const auto& a = e["aspect"];
+                if (a.is_object()) {
+                    w = ReadInt(a, "w", 16);
+                    h = ReadInt(a, "h", 9);
+                } else if (a.is_string()) {
+                    const int idx = AspectIndexFromLabel(a.get<std::string>());
+                    if (idx >= 0) { w = kAspectPresets[idx].w; h = kAspectPresets[idx].h; }
+                } else if (a.is_array() && a.size() == 2 && a[0].is_number() && a[1].is_number()) {
+                    w = a[0].get<int>();
+                    h = a[1].get<int>();
+                }
+                const int idx = AspectIndexFromWH(w, h);
+                ed.aspectW = kAspectPresets[idx].w;
+                ed.aspectH = kAspectPresets[idx].h;
+            } else {
+                ed.aspectW = 16;
+                ed.aspectH = 9;
+            }
             ed.loop = ReadBool(e, "loop", ed.loop);
             ed.physics = ReadBool(e, "physics", ed.physics);
             const auto range = e.find("range");
