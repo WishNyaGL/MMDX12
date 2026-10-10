@@ -67,11 +67,13 @@ struct AppSettings {
     void AddRecentProject(const std::string& path);  // moves it to the front (case-insensitive match)
     void RemoveRecentProject(const std::string& path);
 
+    // A unit song's last cast, keyed by each part's dance file name (part order may change between scans).
     struct SavedFormation {
-        int centerIndex = 0;
-        std::vector<std::string> characterIds; // character id or empty
+        std::string centerDance;                        // dance file name of the center part
+        std::map<std::string, std::string> byDance;     // dance file name -> character id (cast parts only)
     };
     std::map<std::string, SavedFormation> songFormations; // song id -> saved formation
+    std::map<std::string, std::string> songCameras;       // song id -> chosen camera VMD file name (songs with several)
 
     const VideoProbe* FindVideoProbe(uint64_t key) const;
     void SetVideoProbe(uint64_t key, double secondsPerFrame);  // replaces an entry with the same key

@@ -8,6 +8,9 @@ progress.md is the session log. Read its latest entry first.
   The default dir is `build`; the output is `build\bin\MMDX12.exe`. CMake and Ninja come from pip (`%USERPROFILE%\miniconda3\Scripts`).
   From bash: `cmd //c "F:\\repos\\MMDX12\\build.cmd build"`.
 - The source lists are globbed (`CONFIGURE_DEPENDS`). If a new `.cpp` is not picked up, delete the build dir.
+- Header dependencies come from cl's localized `/showIncludes` prefix stored at configure time; a dir configured from a
+  UTF-8 console stored it in the wrong code page (no deps: header edits rebuilt nothing, stale-layout crashes).
+  build.cmd detects that and reconfigures once.
 - Shaders are compiled at runtime from `build/bin/shaders` (the `copy_shaders` target keeps them in sync).
   Raster shaders use FXC (`*_5_1`); ray-query shaders use DXC (`*_6_5`, `-HV 2018` because common.hlsli uses vector ternaries that HLSL 2021 rejects). `dxcompiler.dll`/`dxil.dll` are copied from the Windows SDK.
 - Upscaler runtime DLLs are git-ignored: run `tools/fetch_sdks.ps1` once (DLSS 310.9.1, XeSS 3.0.2, FidelityFX 2.3.0), then rebuild. Missing DLLs only disable that upscaler.
@@ -74,9 +77,13 @@ progress.md is the session log. Read its latest entry first.
 - `core`: logging, text encodings (Shift-JIS/UTF-16/UTF-8).
 - `asset`: PMX/VMD parsers, image loading (stb with a WIC fallback, also from memory), `AssetLibrary`, `ModelImport`.
   - Unit songs: same-length dances in one song folder are the song's `SongAsset::parts` (byte-identical renamed copies
-    merge, labels from the file names; `danceVmd` stays the primary part). Play / Enter / the lobby video render go
+    merge, labels from the file names; `danceVmd` stays the primary part), ordered left to right on stage and with
+    `centerPart` = the part closest to the group's middle in most samples (from `VmdProbe::stageX`, the sampled
+    センター + 全ての親 X). Cameras: every candidate in `SongAsset::cameraVmds`; the default prefers plain MMD cameras over
+    plugin ones ("Camera for FOVMOD", MME/MMM; "normal" wins); the lobby's song header offers the others when there are
+    several (`songCamera=` ini, `App::SongAsChosen` applies it to every load). Play / Enter / the lobby video render go
     through `App::StartLobbyLoad`: >= 2 parts open the formation modal (`app/UiFormation.cpp`: slots, center, auto
-    formation by part-label tokens, saved per song as `songFormation=` ini lines); the cast loads into
+    formation by part-label tokens, saved per song by dance file as `songFormationPart=` / `songFormationCenter=` ini lines); the cast loads into
     `ScenePackage::character` (the center: focus, spotlights, F framing) + `extraCharacters`, posed every frame as
     `SceneRuntime::extras` (the render benchmark's extras stay posed once).
   - `AssetLibrary` precedence: app overrides (`library_overrides.json` next to the exe, right-click on a card) > `mmdx.json`

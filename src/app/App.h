@@ -584,6 +584,7 @@ private:
     FormationState formationModal_;
 
     void StartLobbyLoad(LoadTarget target, bool allowModal = true);
+    SongAsset SongAsChosen(const SongAsset& song) const;   // with the camera picked in the lobby (songs with several)
     void OpenFormationModal(LoadTarget target);
     void DrawFormationModal();
     void AutoFormation();

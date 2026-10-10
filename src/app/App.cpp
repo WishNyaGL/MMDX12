@@ -1331,7 +1331,7 @@ void App::StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsse
     const CharacterAsset& c = *ch;
     const bool hasStage = st != nullptr;
     const StageAsset s = hasStage ? *st : StageAsset{};
-    const SongAsset so = *song;
+    const SongAsset so = SongAsChosen(*song);
     const bool hasFormation = formation != nullptr && !formation->empty();
     const std::vector<PerformerCast> form = hasFormation ? *formation : std::vector<PerformerCast>{};
     loadFuture_ = std::async(std::launch::async, [=, pkg = loadPackage_.get(), this] {

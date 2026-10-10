@@ -79,6 +79,11 @@ struct VmdProbe {
     std::string modelName;
     uint32_t boneKeyCount = 0, morphKeyCount = 0, cameraKeyCount = 0;
     uint32_t maxFrame = 0;  // over bone, morph and camera keys
+    // Stage position: X of センター + 全ての親 (linear between keys), one sample every `stageStep` frames from
+    // frame 0; empty when the motion keys neither bone. Unit songs use it to find each part's place (left to
+    // right) and the center.
+    std::vector<float> stageX;
+    uint32_t stageStep = 0;
 };
 bool ProbeVmd(const std::filesystem::path& path, VmdProbe& out, std::string* error = nullptr);
 

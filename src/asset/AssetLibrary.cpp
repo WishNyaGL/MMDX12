@@ -130,6 +130,17 @@ bool LooksLikeCameraName(const std::string& stem) {
     return l.find("cam") != std::string::npos || l.find("\xE3\x82\xAB\xE3\x83\xA1\xE3\x83\xA9") != std::string::npos;  // カメラ
 }
 
+// Camera choice among several in one folder: plain MMD cameras over ones made for a plugin ("Camera for FOVMOD",
+// MME / MMM variants), which need that plugin to look right; "normal" in the name wins.
+int CameraNamePreference(const std::string& stem) {
+    const std::string l = ToLowerAscii(stem);
+    int score = 0;
+    if (l.find("normal") != std::string::npos) score += 2;
+    for (const char* plugin : {"fovmod", "fov mod", "fov_mod", "mme", "mmm", "for mod", "_mod", " mod"})
+        if (l.find(plugin) != std::string::npos) { score -= 3; break; }
+    return score;
+}
+
 // "worldismine_motion" -> "worldismine"; "Motion_Rin" -> "Rin".
 std::string SongNameFromStem(const std::string& stem) {
     std::string out, cur;
@@ -366,6 +377,10 @@ bool SaveLibraryScanResult(const LibraryScanResult& result) {
             jparts.push_back(std::move(jp));
         }
         js["parts"] = std::move(jparts);
+        js["centerPart"] = s.centerPart;
+        nlohmann::json jcams = nlohmann::json::array();
+        for (const auto& c : s.cameraVmds) jcams.push_back(PathToUtf8(c));
+        js["cameraVmds"] = std::move(jcams);
         songs.push_back(std::move(js));
     }
     j["songs"] = std::move(songs);
@@ -450,6 +465,10 @@ bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult&
                     s.parts.push_back(std::move(p));
                 }
             }
+            s.centerPart = js.value("centerPart", -1);
+            if (js.contains("cameraVmds") && js["cameraVmds"].is_array())
+                for (const auto& c : js["cameraVmds"])
+                    if (c.is_string()) s.cameraVmds.push_back(Utf8ToPath(c.get<std::string>()));
             out.songs.push_back(std::move(s));
         }
     }
@@ -487,7 +506,8 @@ bool LibraryScanResultsEqual(const LibraryScanResult& a, const LibraryScanResult
             a.songs[i].extraVmds != b.songs[i].extraVmds ||
             std::fabs(a.songs[i].durationSec - b.songs[i].durationSec) > 0.01f)
             return false;
-        if (a.songs[i].parts.size() != b.songs[i].parts.size())
+        if (a.songs[i].parts.size() != b.songs[i].parts.size() || a.songs[i].centerPart != b.songs[i].centerPart ||
+            a.songs[i].cameraVmds != b.songs[i].cameraVmds)
             return false;
         for (size_t j = 0; j < a.songs[i].parts.size(); ++j) {
             if (a.songs[i].parts[j].label != b.songs[i].parts[j].label ||
@@ -747,6 +767,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                         p.morphKeyCount = jp.value("morphKeyCount", 0u);
                         p.cameraKeyCount = jp.value("cameraKeyCount", 0u);
                         p.maxFrame = jp.value("maxFrame", 0u);
+                        p.stageStep = jp.value("stageStep", 0u);
+                        if (jp.contains("stageX") && jp["stageX"].is_array())
+                            for (const auto& v : jp["stageX"]) p.stageX.push_back(v.get<float>());
                         vmdProbes[i] = std::move(p);
                     }
                     hit = true;
@@ -860,6 +883,12 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                 jp["morphKeyCount"] = vmdProbes[i]->morphKeyCount;
                 jp["cameraKeyCount"] = vmdProbes[i]->cameraKeyCount;
                 jp["maxFrame"] = vmdProbes[i]->maxFrame;
+                if (!vmdProbes[i]->stageX.empty()) {
+                    jp["stageStep"] = vmdProbes[i]->stageStep;
+                    nlohmann::json xs = nlohmann::json::array();
+                    for (float v : vmdProbes[i]->stageX) xs.push_back(std::round(v * 100.0f) / 100.0f);
+                    jp["stageX"] = std::move(xs);
+                }
                 ent["probe"] = std::move(jp);
             }
             newFiles[rel] = std::move(ent);
@@ -1318,6 +1347,50 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                 std::sort(d.song.extraVmds.begin(), d.song.extraVmds.end());
             }
 
+            // Unit songs: order the parts as they stand on stage (left to right seen from the front, MMD +X = viewer's
+            // right) and find the center = the part closest to the group's middle in most samples. Positions come
+            // from the dances' sampled センター + 全ての親 X (VmdProbe::stageX).
+            for (auto& d : drafts) {
+                std::vector<SongPart>& parts = d.song.parts;
+                if (parts.size() < 2) continue;
+                std::vector<const VmdProbe*> probes;
+                for (const auto& p : parts) {
+                    auto it = vmdByPath.find(p.danceVmd);
+                    probes.push_back(it != vmdByPath.end() ? it->second->probe : nullptr);
+                }
+                size_t samples = SIZE_MAX;
+                bool usable = true;
+                for (const VmdProbe* pr : probes) {
+                    if (!pr || pr->stageX.empty() || pr->stageStep != probes[0]->stageStep) { usable = false; break; }
+                    samples = std::min(samples, pr->stageX.size());
+                }
+                if (!usable || samples == 0) continue;
+                std::vector<double> rankSum(parts.size(), 0.0);
+                std::vector<int> middleCount(parts.size(), 0);
+                std::vector<size_t> order(parts.size());
+                for (size_t k = 0; k < samples; ++k) {
+                    double mean = 0.0;
+                    for (const VmdProbe* pr : probes) mean += pr->stageX[k];
+                    mean /= (double)probes.size();
+                    size_t mid = 0;
+                    for (size_t i = 0; i < probes.size(); ++i)
+                        if (std::fabs(probes[i]->stageX[k] - mean) < std::fabs(probes[mid]->stageX[k] - mean)) mid = i;
+                    ++middleCount[mid];
+                    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+                    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return probes[a]->stageX[k] < probes[b]->stageX[k]; });
+                    for (size_t r = 0; r < order.size(); ++r) rankSum[order[r]] += (double)r;
+                }
+                const size_t center = (size_t)(std::max_element(middleCount.begin(), middleCount.end()) - middleCount.begin());
+                for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+                std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return rankSum[a] < rankSum[b]; });
+                std::vector<SongPart> sorted;
+                for (size_t i : order) {
+                    if (i == center) d.song.centerPart = (int)sorted.size();
+                    sorted.push_back(std::move(parts[i]));
+                }
+                parts = std::move(sorted);
+            }
+
             // Generic one-to-one matcher: cost = relative length difference, names halve it.
             // A pair is allowed when names match or lengths agree within the tolerance.
             auto assign = [&](std::vector<Draft*> targets, const std::vector<std::pair<std::filesystem::path, double>>& items,
@@ -1362,13 +1435,17 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                     }
                 }
                 if (single) {
-                    // One song: the camera with the most keys, whatever its length.
-                    const VmdEntry* best = nullptr;
-                    for (auto& [p, len] : camItems) {
-                        const VmdEntry* e = vmdByPath[p];
-                        if (!best || e->probe->cameraKeyCount > best->probe->cameraKeyCount) best = e;
-                    }
-                    if (best) drafts[0].song.cameraVmd = *best->path;
+                    // One song: a plain MMD camera before plugin cameras, then the most keys, whatever its length.
+                    // Every candidate stays listed (cameraVmds) so the lobby can offer the others.
+                    std::vector<const VmdEntry*> cands;
+                    for (auto& [p, len] : camItems) cands.push_back(vmdByPath[p]);
+                    std::stable_sort(cands.begin(), cands.end(), [](const VmdEntry* a, const VmdEntry* b) {
+                        const int pa = CameraNamePreference(FileStemUtf8(*a->path)), pb = CameraNamePreference(FileStemUtf8(*b->path));
+                        if (pa != pb) return pa > pb;
+                        return a->probe->cameraKeyCount > b->probe->cameraKeyCount;
+                    });
+                    if (!cands.empty()) drafts[0].song.cameraVmd = *cands[0]->path;
+                    for (const auto* c : cands) drafts[0].song.cameraVmds.push_back(*c->path);
                 } else {
                     assign(all, camItems, 10.0, 0.10, [](Draft& d, const std::filesystem::path& p) { d.song.cameraVmd = p; });
                 }

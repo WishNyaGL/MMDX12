@@ -1,4 +1,6 @@
 #include "asset/VmdMotion.h"
+#include <vector>
+#include <algorithm>
 #include "asset/BinaryReader.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
@@ -241,13 +243,41 @@ bool ProbeVmd(const std::filesystem::path& path, VmdProbe& out, std::string* err
             return false;
         }
         out.boneKeyCount = boneCount;
+        static const char kCenter[] = "\x83\x5A\x83\x93\x83\x5E\x81\x5B";     // センター (Shift-JIS)
+        static const char kRoot[] = "\x91\x53\x82\xC4\x82\xCC\x90\x65";       // 全ての親
+        std::vector<std::pair<uint32_t, float>> centerKeys, rootKeys;
         for (uint32_t i = 0; i < boneCount; ++i) {
+            char name[15];
             uint32_t frame = 0;
-            if (!r.Skip(15) || !r.Read(frame) || !r.Skip(92)) {
+            float x = 0.0f;
+            if (!r.Read(name, 15) || !r.Read(frame) || !r.Read(x) || !r.Skip(88)) {
                 if (error) *error = "corrupt bone section";
                 return false;
             }
             out.maxFrame = UpdateMaxFrame(out.maxFrame, frame);
+            const auto is = [&](const char* n) { return std::memcmp(name, n, 8) == 0 && name[8] == '\0'; };
+            if (is(kCenter)) centerKeys.push_back({frame, x});
+            else if (is(kRoot)) rootKeys.push_back({frame, x});
+        }
+        if (!centerKeys.empty() || !rootKeys.empty()) {
+            const auto prepare = [](std::vector<std::pair<uint32_t, float>>& k) {
+                std::sort(k.begin(), k.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+            };
+            prepare(centerKeys);
+            prepare(rootKeys);
+            const auto at = [](const std::vector<std::pair<uint32_t, float>>& k, float f) {
+                if (k.empty()) return 0.0f;
+                if (f <= (float)k.front().first) return k.front().second;
+                if (f >= (float)k.back().first) return k.back().second;
+                const auto it = std::upper_bound(k.begin(), k.end(), f, [](float v, const auto& e) { return v < (float)e.first; });
+                const auto& b = *it;
+                const auto& a = *(it - 1);
+                const float t = (f - (float)a.first) / std::max(1.0f, (float)(b.first - a.first));
+                return a.second + (b.second - a.second) * t;
+            };
+            out.stageStep = std::max(10u, out.maxFrame / 1000u + 1u);
+            for (uint32_t f = 0; f <= out.maxFrame; f += out.stageStep)
+                out.stageX.push_back(at(centerKeys, (float)f) + at(rootKeys, (float)f));
         }
 
         // ---- morph keys: read the frame at offset 15 of each 23-byte record ----

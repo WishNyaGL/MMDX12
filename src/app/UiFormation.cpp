@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -62,7 +63,9 @@ float PartMatchScore(const std::string& label, const CharacterAsset& c) {
     return best;
 }
 
-int PrimaryPartIndex(const SongAsset& song) {
+// The center: the part the library measured in the middle of the stage, else the song's primary dance.
+int DefaultCenterPart(const SongAsset& song) {
+    if (song.centerPart >= 0 && (size_t)song.centerPart < song.parts.size()) return song.centerPart;
     for (size_t i = 0; i < song.parts.size(); ++i)
         if (song.parts[i].danceVmd == song.danceVmd) return (int)i;
     return 0;
@@ -112,6 +115,15 @@ std::vector<PerformerCast> App::ParseFormationSpec(const std::string& spec, cons
     return cast;
 }
 
+SongAsset App::SongAsChosen(const SongAsset& song) const {
+    SongAsset s = song;
+    const auto it = settings_.songCameras.find(song.id);
+    if (it != settings_.songCameras.end())
+        for (const auto& c : song.cameraVmds)
+            if (PathToUtf8(c.filename()) == it->second) { s.cameraVmd = c; break; }
+    return s;
+}
+
 // Play / Enter / the lobby's video render: a song with several parts asks for the formation first; --formation
 // casts it directly, and `allowModal` false (CLI autoplay) keeps the single-character load.
 void App::StartLobbyLoad(LoadTarget target, bool allowModal) {
@@ -155,21 +167,15 @@ void App::OpenFormationModal(LoadTarget target) {
     auto it = settings_.songFormations.find(song.id);
     if (it != settings_.songFormations.end()) {
         const AppSettings::SavedFormation& saved = it->second;
-        if (saved.characterIds.size() == song.parts.size()) {
-            bool anyValid = false;
-            for (size_t i = 0; i < song.parts.size(); ++i) {
-                const std::string& cid = saved.characterIds[i];
-                if (!cid.empty() && FindCharacter(cid) != nullptr) {
-                    formationModal_.slots[i].characterId = cid;
-                    anyValid = true;
-                } else {
-                    formationModal_.slots[i].characterId.clear();
-                }
-            }
-            if (anyValid) {
-                formationModal_.centerIndex = std::clamp(saved.centerIndex, 0, (int)song.parts.size() - 1);
+        formationModal_.centerIndex = DefaultCenterPart(song);
+        for (size_t i = 0; i < song.parts.size(); ++i) {
+            const std::string dance = PathToUtf8(song.parts[i].danceVmd.filename());
+            const auto c = saved.byDance.find(dance);
+            if (c != saved.byDance.end() && FindCharacter(c->second)) {
+                formationModal_.slots[i].characterId = c->second;
                 restored = true;
             }
+            if (dance == saved.centerDance) formationModal_.centerIndex = (int)i;
         }
     }
 
@@ -182,8 +188,8 @@ void App::AutoFormation() {
     if (formationModal_.songIndex < 0 || (size_t)formationModal_.songIndex >= library_.songs.size()) return;
     const SongAsset& song = library_.songs[(size_t)formationModal_.songIndex];
     formationModal_.slots.assign(song.parts.size(), {});
-    const int primary = PrimaryPartIndex(song);
-    formationModal_.centerIndex = primary;
+    const int center = DefaultCenterPart(song);
+    formationModal_.centerIndex = center;
 
     // each part takes its best-named character (at least half the label's words); a character is cast once
     std::vector<char> used(library_.characters.size(), 0);
@@ -206,10 +212,15 @@ void App::AutoFormation() {
             used[(size_t)best] = 1;
         }
     }
-    // the lobby's character: on the primary part when that part found nobody
-    if (formationModal_.slots[(size_t)primary].characterId.empty() && selCharacter_ >= 0 &&
-        (size_t)selCharacter_ < library_.characters.size())
-        formationModal_.slots[(size_t)primary].characterId = library_.characters[(size_t)selCharacter_].id;
+    // the lobby's character (unless a part already named it): the free part nearest the center
+    if (selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size() && !used[(size_t)selCharacter_]) {
+        int best = -1;
+        for (int i = 0; i < (int)formationModal_.slots.size(); ++i)
+            if (formationModal_.slots[(size_t)i].characterId.empty() &&
+                (best < 0 || std::abs(i - center) < std::abs(best - center)))
+                best = i;
+        if (best >= 0) formationModal_.slots[(size_t)best].characterId = library_.characters[(size_t)selCharacter_].id;
+    }
 }
 
 void App::StartFormationLoad() {
@@ -246,8 +257,11 @@ void App::StartFormationLoad() {
 
     // Save formation to settings
     AppSettings::SavedFormation sf;
-    sf.centerIndex = formationModal_.centerIndex;
-    for (const auto& s : formationModal_.slots) sf.characterIds.push_back(s.characterId);
+    for (size_t i = 0; i < formationModal_.slots.size() && i < song.parts.size(); ++i) {
+        const std::string dance = PathToUtf8(song.parts[i].danceVmd.filename());
+        if (!formationModal_.slots[i].characterId.empty()) sf.byDance[dance] = formationModal_.slots[i].characterId;
+        if ((int)i == formationModal_.centerIndex) sf.centerDance = dance;
+    }
     settings_.songFormations[song.id] = sf;
     settings_.Save(settingsPath_);
 

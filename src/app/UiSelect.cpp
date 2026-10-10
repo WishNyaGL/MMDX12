@@ -670,6 +670,40 @@ void App::DrawSelect() {
             if (song) sub += "  ·  " + MinSec(song->durationSec);
             TextEllipsis(dl, Font::Regular, size::Small, ImVec2(pa.x + ip, y), pb.x - ip, p.ink2, sub.c_str());
         }
+        // a song folder with several cameras (e.g. a plain MMD one and one made for a plugin): which one plays
+        if (song && song->cameraVmds.size() >= 2) {
+            y += Dp(26.0f);
+            const SongAsset chosen = SongAsChosen(*song);
+            const std::string current = PathToUtf8(chosen.cameraVmd.stem());
+            const ImVec2 ca(pa.x + ip, y), cb(pb.x - ip, y + Dp(28.0f));
+            bool hovered = false;
+            if (CardItem("##songcamera", ca, cb, &hovered, Tr("카메라"))) ImGui::OpenPopup("##songcamerapop");
+            dl->AddRectFilled(ca, cb, hovered ? Mix(p.sunken, p.surface, 0.3f) : p.sunken, Dp(8.0f));
+            Icon(dl, icon::VideoCamera, 14.0f, ImVec2(ca.x + Dp(14.0f), (ca.y + cb.y) * 0.5f), p.ink2);
+            const char* camLabel = Tr("카메라");
+            Text(dl, Font::Semibold, size::Caption, ImVec2(ca.x + Dp(28.0f), ca.y + Dp(7.0f)), p.ink2, camLabel);
+            const float lx = ca.x + Dp(32.0f) + TextSize(Font::Semibold, size::Caption, camLabel).x;
+            TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(lx, ca.y + Dp(7.0f)), cb.x - Dp(28.0f), p.ink, current.c_str());
+            Icon(dl, icon::CaretDown, 12.0f, ImVec2(cb.x - Dp(14.0f), (ca.y + cb.y) * 0.5f), p.ink2);
+            Tooltip(Tr("이 곡 폴더에 카메라가 여러 개 있습니다. 플러그인용 카메라(FOVMOD 등)는 MMDX12에서 화각이 어긋날 수 있어요."));
+            ImGui::SetNextWindowPos(ImVec2(ca.x, cb.y + Dp(4.0f)));
+            ImGui::SetNextWindowSize(ImVec2(cb.x - ca.x, 0.0f));
+            if (ImGui::BeginPopup("##songcamerapop")) {
+                for (size_t ci = 0; ci < song->cameraVmds.size(); ++ci) {
+                    const std::filesystem::path& c = song->cameraVmds[ci];
+                    std::string label = PathToUtf8(c.stem());
+                    if (ci == 0) label += std::string("  ·  ") + Tr("기본");
+                    label += "##cam" + std::to_string(ci);
+                    if (ImGui::Selectable(label.c_str(), c == chosen.cameraVmd)) {
+                        if (ci == 0) settings_.songCameras.erase(song->id);
+                        else settings_.songCameras[song->id] = PathToUtf8(c.filename());
+                        settings_.Save(settingsPath_);
+                    }
+                }
+                ImGui::EndPopup();
+            }
+            y += Dp(8.0f);
+        }
         y += Dp(34.0f);
         dl->AddLine(ImVec2(pa.x + ip, y), ImVec2(pb.x - ip, y), p.line);
         y += Dp(16.0f);

@@ -79,7 +79,7 @@ void App::StartStudioLoad(const CharacterAsset* ch, const StageAsset* st, const 
     const CharacterAsset c = *ch;
     const bool hasStage = st != nullptr, hasSong = song != nullptr;
     const StageAsset s = hasStage ? *st : StageAsset{};
-    const SongAsset so = hasSong ? *song : SongAsset{};
+    const SongAsset so = hasSong ? SongAsChosen(*song) : SongAsset{};
     loadFuture_ = std::async(std::launch::async, [=, pkg = studioPackage_.get(), this] {
         return LoadStudioPackage(c, hasStage ? &s : nullptr, hasSong ? &so : nullptr, *pkg, &loadProgress_, &loadError_);
     });

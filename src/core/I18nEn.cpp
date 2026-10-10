@@ -676,6 +676,7 @@ const Entry kEnglish[] = {
     {"파트", "Part"},
     {"파트 이름과 같은 이름의 캐릭터를 배치합니다", "Casts the characters named like the parts"},
     {"혼자 플레이", "Play solo"},
+    {"이 곡 폴더에 카메라가 여러 개 있습니다. 플러그인용 카메라(FOVMOD 등)는 MMDX12에서 화각이 어긋날 수 있어요.", "This song folder holds several cameras. Cameras made for a plugin (FOVMOD etc.) may frame wrongly in MMDX12."},
     {"확대 / 축소", "Zoom in / out"},
     {"위아래 스크롤", "Scroll up / down"},
     {"Ctrl+휠", "Ctrl+wheel"},

@@ -65,9 +65,13 @@ int wmain(int argc, wchar_t** argv) {
                s.audioPath.empty() ? "-" : Rel(s.audioPath, scan.root).c_str(),
                static_cast<int>(s.extraVmds.size()),
                s.parts.size() >= 2 ? (" | parts=" + std::to_string(s.parts.size())).c_str() : "");
+        if (s.cameraVmds.size() >= 2)
+            for (const auto& c : s.cameraVmds)
+                printf("    - camera%s: %s\n", c == s.cameraVmd ? " (default)" : "", Rel(c, scan.root).c_str());
         if (s.parts.size() >= 2) {
-            for (const auto& p : s.parts) {
-                printf("    - part: %s | %s | extra=%d\n", p.label.c_str(),
+            for (size_t pi = 0; pi < s.parts.size(); ++pi) {
+                const auto& p = s.parts[pi];
+                printf("    - part%s: %s | %s | extra=%d\n", (int)pi == s.centerPart ? " (center)" : "", p.label.c_str(),
                        p.danceVmd.empty() ? "-" : Rel(p.danceVmd, scan.root).c_str(),
                        static_cast<int>(p.extraVmds.size()));
             }
