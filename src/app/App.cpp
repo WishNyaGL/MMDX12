@@ -47,6 +47,8 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.stage = WideToUtf8(next());
         } else if (arg == L"--song") {
             opt.song = WideToUtf8(next());
+        } else if (arg == L"--formation") {
+            opt.formation = WideToUtf8(next());
         } else if (arg == L"--autoplay") {
             opt.autoplay = true;
         } else if (arg == L"--seek") {
@@ -744,6 +746,7 @@ void App::RenderFrame() {
         UpdateVideoProbe();
         DrawSelect();
         DrawVideoRenderDialog();
+        DrawFormationModal();
         DrawRecoveryPrompt();
         DrawUpdateNotice();
         DrawToast();
@@ -1021,8 +1024,7 @@ void App::ApplyStartScreen() {
 
     // One-shot command line auto-actions.
     if (options_.autoplay && selCharacter_ >= 0 && selSong_ >= 0) {
-        StartLoad(LoadTarget::Play, &library_.characters[selCharacter_],
-                  selStage_ >= 0 ? &library_.stages[selStage_] : nullptr, &library_.songs[selSong_]);
+        StartLobbyLoad(LoadTarget::Play, false);
         options_.autoplay = false;
     } else if (!options_.benchmarkCategory.empty()) {
         int cat = 0;
@@ -1316,7 +1318,7 @@ void App::ApplyColorLut() {
 // ---------------------------------------------------------------------------
 
 void App::StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsset* st,
-                    const SongAsset* song) {
+                    const SongAsset* song, const std::vector<PerformerCast>* formation) {
     StopVideoProbe(false);
     UnloadScene();
     screen_ = Screen::Loading;
@@ -1330,8 +1332,11 @@ void App::StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsse
     const bool hasStage = st != nullptr;
     const StageAsset s = hasStage ? *st : StageAsset{};
     const SongAsset so = *song;
+    const bool hasFormation = formation != nullptr && !formation->empty();
+    const std::vector<PerformerCast> form = hasFormation ? *formation : std::vector<PerformerCast>{};
     loadFuture_ = std::async(std::launch::async, [=, pkg = loadPackage_.get(), this] {
-        return LoadScenePackage(c, hasStage ? &s : nullptr, so, *pkg, &loadProgress_, &loadError_);
+        return LoadScenePackage(c, hasStage ? &s : nullptr, so, *pkg, &loadProgress_, &loadError_,
+                                hasFormation ? &form : nullptr);
     });
 }
 
@@ -1464,8 +1469,12 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     UploadBatch batch(ctx_);
 
     s->character = std::make_unique<ModelInstance>(pkg.character.pmx);
-    if (selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size())
+    if (!pkg.characterId.empty()) {
+        s->characterId = pkg.characterId;
+    } else if (selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size()) {
         s->characterId = library_.characters[(size_t)selCharacter_].id;
+    }
+    s->characterDisplayName = !pkg.characterDisplayName.empty() ? pkg.characterDisplayName : (s->character ? s->character->Model().name : "");
     s->characterGpu = renderer_.CreateModel(batch, *pkg.character.pmx, pkg.character.textures);
     if (!s->characterGpu) return false;
 
@@ -1475,6 +1484,8 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         perf.gpu = renderer_.CreateModel(batch, *pkg.extraCharacters[i].pmx, pkg.extraCharacters[i].textures);
         if (!perf.gpu) return false;
         perf.motion = i < pkg.extraMotions.size() ? pkg.extraMotions[i] : nullptr;
+        if (i < pkg.extraCharacterIds.size()) perf.characterId = pkg.extraCharacterIds[i];
+        if (i < pkg.extraCharacterDisplayNames.size()) perf.displayName = pkg.extraCharacterDisplayNames[i];
         s->extras.push_back(std::move(perf));
     }
 
@@ -1542,7 +1553,8 @@ void App::UpdateScene(float frame) {
     ch.EnablePhysics(screen_ == Screen::BenchRun || (settings_.physics && !options_.noPhysics));
     float physicsDt = 0.0f;
     if (scene_->physicsFrame >= 0.0f) physicsDt = (frame - scene_->physicsFrame) / kMmdFps;
-    if (scene_->physicsFrame < 0.0f || physicsDt < 0.0f || physicsDt > 0.25f) {
+    const bool resetPhysics = scene_->physicsFrame < 0.0f || physicsDt < 0.0f || physicsDt > 0.25f;
+    if (resetPhysics) {
         ch.ResetPhysics();
         physicsDt = 0.0f;
     }
@@ -1559,6 +1571,36 @@ void App::UpdateScene(float frame) {
                                           scene_->stages[i]->MorphVersion());
         const ModelInstance& st = *scene_->stages[i];
         scene_->stageGpu[i]->UpdateMaterials(slot, st.MaterialMul(), st.MaterialAdd(), st.MaterialVersion());
+    }
+    if (screen_ != Screen::BenchRender) {
+        for (auto& extra : scene_->extras) {
+            if (!extra.instance || !extra.gpu) continue;
+            if (extra.motion) {
+                extra.motion->Evaluate(frame, *extra.instance);
+            } else {
+                extra.instance->ResetPose();
+            }
+            extra.instance->SetScale(screen_ == Screen::BenchRun || extra.characterId.empty()
+                                         ? 1.0f
+                                         : settings_.CharacterScale(extra.characterId));
+            extra.instance->EnablePhysics(screen_ == Screen::BenchRun || (settings_.physics && !options_.noPhysics));
+            if (resetPhysics) extra.instance->ResetPhysics();
+            extra.instance->UpdatePose(physicsDt);
+            extra.gpu->UpdateSkinning(slot, extra.instance->SkinMatrices());
+            extra.gpu->UpdateMorphs(slot, extra.instance->VertexMorphDeltas(),
+                                    extra.instance->MorphVersion());
+            ShaderChoice choice;
+            if (screen_ == Screen::BenchRun) {
+                choice = {};
+            } else if (options_.shaderPackSet) {
+                choice = PlayShaderChoice();
+            } else if (!extra.characterId.empty()) {
+                choice = settings_.CharacterShader(extra.characterId);
+            }
+            ApplyShaderChoice(*extra.gpu, choice);
+            extra.gpu->UpdateMaterials(slot, extra.instance->MaterialMul(), extra.instance->MaterialAdd(),
+                                       extra.instance->MaterialVersion());
+        }
     }
 }
 
@@ -1584,6 +1626,9 @@ void App::BuildFrameView(float frame, FrameView& view) {
     }
     for (const auto& g : scene_->stageGpu) view.models.push_back(g.get());
     if (scene_->characterGpu) view.models.push_back(scene_->characterGpu.get());
+    for (const auto& extra : scene_->extras) {
+        if (extra.gpu) view.models.push_back(extra.gpu.get());
+    }
     view.studioFloor = scene_->stageGpu.empty();
 
     // Spotlights follow the performer (center bone when present).

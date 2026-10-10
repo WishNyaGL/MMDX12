@@ -58,12 +58,20 @@ int wmain(int argc, wchar_t** argv) {
     }
     printf("songs (%d):\n", static_cast<int>(scan.songs.size()));
     for (const auto& s : scan.songs) {
-        printf("  %s | %s | %.1fs | dance=%s | cam=%s | audio=%s | extra=%d\n",
+        printf("  %s | %s | %.1fs | dance=%s | cam=%s | audio=%s | extra=%d%s\n",
                s.displayName.c_str(), s.id.c_str(), s.durationSec,
                s.danceVmd.empty() ? "-" : Rel(s.danceVmd, scan.root).c_str(),
                s.cameraVmd.empty() ? "-" : Rel(s.cameraVmd, scan.root).c_str(),
                s.audioPath.empty() ? "-" : Rel(s.audioPath, scan.root).c_str(),
-               static_cast<int>(s.extraVmds.size()));
+               static_cast<int>(s.extraVmds.size()),
+               s.parts.size() >= 2 ? (" | parts=" + std::to_string(s.parts.size())).c_str() : "");
+        if (s.parts.size() >= 2) {
+            for (const auto& p : s.parts) {
+                printf("    - part: %s | %s | extra=%d\n", p.label.c_str(),
+                       p.danceVmd.empty() ? "-" : Rel(p.danceVmd, scan.root).c_str(),
+                       static_cast<int>(p.extraVmds.size()));
+            }
+        }
     }
     printf("warnings (%d):\n", static_cast<int>(scan.warnings.size()));
     for (const auto& w : scan.warnings) {

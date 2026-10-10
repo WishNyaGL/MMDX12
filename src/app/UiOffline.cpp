@@ -313,15 +313,18 @@ void App::SaveOfflinePose() {
         return;
     }
     if (!scene_) return;
-    save(*scene_->character);
     for (const auto& st : scene_->stages) save(*st);
+    if (scene_->character) save(*scene_->character);
+    for (const auto& extra : scene_->extras) {
+        if (extra.instance) save(*extra.instance);
+    }
     offline_.prevCenter = CharacterCenter();
 }
 
 DirectX::XMFLOAT3 App::CharacterCenter() const {
     if (offline_.studio) return StudioPerformerCenter();
     if (!scene_ || !scene_->character) return {};
-    const int center = scene_->character->Model().FindBone("ã»ã³ã¿ã¼");
+    const int center = scene_->character->Model().FindBone("\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xBC");
     return center >= 0 ? scene_->character->BoneWorldPosition(center) : DirectX::XMFLOAT3{};
 }
 
@@ -338,10 +341,18 @@ void App::UploadOfflinePrevPose(uint64_t slot) {
             upload(*studio_->models[i]->gpu, offline_.prevPose[i], *studio_->models[i]->inst);
         return;
     }
-    if (!scene_ || offline_.prevPose.size() != 1 + scene_->stages.size()) return;
-    upload(*scene_->characterGpu, offline_.prevPose[0], *scene_->character);
+    if (!scene_) return;
+    const size_t expected = scene_->stages.size() + (scene_->character ? 1 : 0) + scene_->extras.size();
+    if (offline_.prevPose.size() != expected) return;
+    size_t idx = 0;
     for (size_t i = 0; i < scene_->stages.size(); ++i)
-        upload(*scene_->stageGpu[i], offline_.prevPose[1 + i], *scene_->stages[i]);
+        upload(*scene_->stageGpu[i], offline_.prevPose[idx++], *scene_->stages[i]);
+    if (scene_->character && scene_->characterGpu)
+        upload(*scene_->characterGpu, offline_.prevPose[idx++], *scene_->character);
+    for (size_t i = 0; i < scene_->extras.size(); ++i) {
+        if (scene_->extras[i].instance && scene_->extras[i].gpu)
+            upload(*scene_->extras[i].gpu, offline_.prevPose[idx++], *scene_->extras[i].instance);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -844,8 +855,7 @@ void App::StartVideoRenderLoad() {
     settings_.video.Clamp();
     settings_.Save(settingsPath_);
     videoDialogOpen_ = false;
-    StartLoad(LoadTarget::OfflineVideo, &library_.characters[(size_t)selCharacter_],
-              selStage_ >= 0 ? &library_.stages[(size_t)selStage_] : nullptr, &library_.songs[(size_t)selSong_]);
+    StartLobbyLoad(LoadTarget::OfflineVideo);
 }
 
 void App::StartOfflineProbe() {

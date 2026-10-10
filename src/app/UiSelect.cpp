@@ -963,7 +963,7 @@ void App::DrawSelect() {
         const float videoW = 138.0f;  // dp
         if (Button("##play", Tr("플레이"), icon::Play, ButtonKind::Primary, ImVec2(innerW / Dpi() - videoW - 10.0f, 52.0f))) {
             settings_.Save(settingsPath_);
-            StartLoad(LoadTarget::Play, ch, st, song);
+            StartLobbyLoad(LoadTarget::Play);
         }
         ImGui::SameLine(0.0f, Dp(10.0f));
         if (Button("##video", Tr("영상 렌더"), icon::FilmStrip, ButtonKind::Secondary, ImVec2(videoW, 52.0f))) {
@@ -1030,10 +1030,9 @@ void App::DrawSelect() {
     }
 
     // keyboard: Enter starts playback
-    if (selCharacter_ >= 0 && selSong_ >= 0 && !videoDialogOpen_ && !ImGui::GetIO().WantTextInput &&
+    if (selCharacter_ >= 0 && selSong_ >= 0 && !videoDialogOpen_ && !formationModal_.open && !ImGui::GetIO().WantTextInput &&
         ImGui::IsKeyPressed(ImGuiKey_Enter, false))
-        StartLoad(LoadTarget::Play, &library_.characters[(size_t)selCharacter_],
-                  selStage_ >= 0 ? &library_.stages[(size_t)selStage_] : nullptr, &library_.songs[(size_t)selSong_]);
+        StartLobbyLoad(LoadTarget::Play);
     EndScreen();
 }
 

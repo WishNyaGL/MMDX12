@@ -66,10 +66,173 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
 }
 
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
-                      ScenePackage& out, LoadProgress* progress, std::string* error) {
+                      ScenePackage& out, LoadProgress* progress, std::string* error,
+                      const std::vector<PerformerCast>* formation) {
     try {
         out = ScenePackage{};
 
+        if (formation && !formation->empty()) {
+            // Find center performer and extra performers
+            PerformerCast centerPerf;
+            bool foundCenter = false;
+            std::vector<PerformerCast> extraPerfs;
+            for (const auto& p : *formation) {
+                if (p.isCenter && !foundCenter) {
+                    centerPerf = p;
+                    foundCenter = true;
+                } else {
+                    extraPerfs.push_back(p);
+                }
+            }
+            if (!foundCenter && !extraPerfs.empty()) {
+                centerPerf = extraPerfs.front();
+                extraPerfs.erase(extraPerfs.begin());
+            }
+
+            const size_t totalPerformers = 1 + extraPerfs.size();
+            const size_t stageCount = stage ? stage->parts.size() : 0;
+            const float totalUnits = (float)(totalPerformers + (stageCount > 0 ? 1 : 0));
+            float curUnit = 0.0f;
+
+            // 1. Center performer
+            {
+                std::string err;
+                if (progress) {
+                    progress->fraction.store(curUnit / totalUnits, std::memory_order_relaxed);
+                    progress->SetStatus(Tr("캐릭터 로드: ") + centerPerf.character.displayName);
+                }
+                out.character.pmx = std::make_shared<PmxModel>();
+                if (!LoadModelFile(centerPerf.character.modelPath, ModelRole::Character, *out.character.pmx, &err)) {
+                    if (error) *error = centerPerf.character.displayName + ": " + Tr("캐릭터를 불러오지 못했습니다: ") + err;
+                    return false;
+                }
+                out.characterId = centerPerf.character.id;
+                out.characterDisplayName = centerPerf.character.displayName;
+
+                float frac0 = curUnit / totalUnits;
+                float frac1 = (curUnit + 0.8f) / totalUnits;
+                DecodeModelTextures(out.character, progress, frac0, frac1, centerPerf.character.displayName.c_str());
+
+                if (progress) progress->SetStatus(Tr("모션 로드: ") + centerPerf.character.displayName);
+                VmdMotion dance;
+                if (!LoadVmd(centerPerf.part.danceVmd, dance, &err)) {
+                    if (error) *error = centerPerf.character.displayName + ": " + Tr("모션을 불러오지 못했습니다: ") + err;
+                    return false;
+                }
+                std::vector<std::unique_ptr<VmdMotion>> extraStorage;
+                std::vector<const VmdMotion*> layers = {&dance};
+                for (const std::filesystem::path& extra : centerPerf.part.extraVmds) {
+                    auto vmd = std::make_unique<VmdMotion>();
+                    std::string extraErr;
+                    if (!LoadVmd(extra, *vmd, &extraErr)) {
+                        LOG_WARN("extra vmd load skipped: %s: %s", PathToUtf8(extra).c_str(), extraErr.c_str());
+                        continue;
+                    }
+                    layers.push_back(vmd.get());
+                    extraStorage.push_back(std::move(vmd));
+                }
+                out.motion = BoundMotion::Bind(*out.character.pmx, layers);
+                curUnit += 1.0f;
+            }
+
+            // 2. Extra performers
+            for (const auto& ep : extraPerfs) {
+                std::string err;
+                if (progress) {
+                    progress->fraction.store(curUnit / totalUnits, std::memory_order_relaxed);
+                    progress->SetStatus(Tr("캐릭터 로드: ") + ep.character.displayName);
+                }
+                LoadedModelCpu extraM;
+                extraM.pmx = std::make_shared<PmxModel>();
+                if (!LoadModelFile(ep.character.modelPath, ModelRole::Character, *extraM.pmx, &err)) {
+                    if (error) *error = ep.character.displayName + ": " + Tr("캐릭터를 불러오지 못했습니다: ") + err;
+                    return false;
+                }
+
+                float frac0 = curUnit / totalUnits;
+                float frac1 = (curUnit + 0.8f) / totalUnits;
+                DecodeModelTextures(extraM, progress, frac0, frac1, ep.character.displayName.c_str());
+
+                if (progress) progress->SetStatus(Tr("모션 로드: ") + ep.character.displayName);
+                VmdMotion extraDance;
+                if (!LoadVmd(ep.part.danceVmd, extraDance, &err)) {
+                    if (error) *error = ep.character.displayName + ": " + Tr("모션을 불러오지 못했습니다: ") + err;
+                    return false;
+                }
+                std::vector<std::unique_ptr<VmdMotion>> epStorage;
+                std::vector<const VmdMotion*> epLayers = {&extraDance};
+                for (const std::filesystem::path& extra : ep.part.extraVmds) {
+                    auto vmd = std::make_unique<VmdMotion>();
+                    std::string extraErr;
+                    if (!LoadVmd(extra, *vmd, &extraErr)) {
+                        LOG_WARN("extra vmd load skipped: %s: %s", PathToUtf8(extra).c_str(), extraErr.c_str());
+                        continue;
+                    }
+                    epLayers.push_back(vmd.get());
+                    epStorage.push_back(std::move(vmd));
+                }
+                auto epMotion = BoundMotion::Bind(*extraM.pmx, epLayers);
+                out.extraCharacters.push_back(std::move(extraM));
+                out.extraCharacterIds.push_back(ep.character.id);
+                out.extraCharacterDisplayNames.push_back(ep.character.displayName);
+                out.extraMotions.push_back(epMotion);
+                curUnit += 1.0f;
+            }
+
+            // 3. Stage parts
+            if (stage) {
+                const size_t n = stage->parts.size();
+                for (size_t k = 0; k < n; ++k) {
+                    const std::filesystem::path& partPath = stage->parts[k];
+                    std::string label = stage->displayName +
+                                        (n > 1 ? " " + std::to_string(k + 1) + "/" + std::to_string(n) : "");
+                    if (progress) progress->SetStatus(Tr("스테이지 로드: ") + label);
+
+                    LoadedModelCpu part;
+                    part.pmx = std::make_shared<PmxModel>();
+                    std::string err;
+                    if (!LoadModelFile(partPath, ModelRole::Stage, *part.pmx, &err)) {
+                        LOG_WARN("stage part load failed: %s: %s", PathToUtf8(partPath).c_str(), err.c_str());
+                        continue;
+                    }
+                    float begin = (curUnit + (float)k / (float)std::max<size_t>(n, 1)) / totalUnits;
+                    float end = (curUnit + (float)(k + 1) / (float)std::max<size_t>(n, 1)) / totalUnits;
+                    DecodeModelTextures(part, progress, begin, end, label.c_str());
+                    out.stageParts.push_back(std::move(part));
+                }
+            }
+
+            // 4. Camera
+            if (!song.cameraVmd.empty()) {
+                VmdMotion camVmd;
+                std::string camErr;
+                if (LoadVmd(song.cameraVmd, camVmd, &camErr)) {
+                    out.camera = CameraMotion::Create(camVmd);
+                    out.lightKeys = camVmd.lightKeys;
+                    out.shadowKeys = camVmd.shadowKeys;
+                    if (!out.camera) LOG_WARN("no camera keys in %s", PathToUtf8(song.cameraVmd).c_str());
+                } else {
+                    LOG_WARN("camera vmd load failed: %s: %s", PathToUtf8(song.cameraVmd).c_str(), camErr.c_str());
+                }
+            }
+
+            // 5. Footer data
+            out.audioPath = song.audioPath;
+            float endFrame = out.motion ? out.motion->EndFrame() : 0.0f;
+            for (const auto& m : out.extraMotions) {
+                if (m) endFrame = std::max(endFrame, m->EndFrame());
+            }
+            if (out.camera) endFrame = std::max(endFrame, out.camera->EndFrame());
+            out.endFrame = endFrame;
+
+            if (progress) {
+                progress->fraction.store(1.0f, std::memory_order_relaxed);
+                progress->SetStatus(Tr("GPU 업로드"));
+            }
+            return true;
+        }
+
+        // Single character (default path)
         // 1. Character.
         {
             std::string err;
@@ -82,6 +245,8 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
                 if (error) *error = Tr("캐릭터를 불러오지 못했습니다: ") + err;
                 return false;
             }
+            out.characterId = character.id;
+            out.characterDisplayName = character.displayName;
         }
 
         // 2. Character textures.

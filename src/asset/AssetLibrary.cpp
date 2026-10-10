@@ -145,6 +145,39 @@ std::string SongNameFromStem(const std::string& stem) {
     return out;
 }
 
+std::string DerivePartLabel(const std::string& stem, const std::string& songOrDir) {
+    std::string s = stem;
+    size_t dash = s.find(" - ");
+    if (dash != std::string::npos) {
+        s = s.substr(dash + 3);
+    } else {
+        static const char* kPrefixes[] = {"motion_", "motion ", "dance_", "dance_"};
+        for (const char* pfx : kPrefixes) {
+            size_t len = strlen(pfx);
+            if (s.size() > len && ToLowerAscii(s.substr(0, len)) == pfx) {
+                s = s.substr(len);
+                break;
+            }
+        }
+    }
+    static const char* kSuffixes[] = {"_motion", " motion", "_dance", " dance"};
+    for (const char* sfx : kSuffixes) {
+        size_t len = strlen(sfx);
+        if (s.size() > len && ToLowerAscii(s.substr(s.size() - len)) == sfx) {
+            s = s.substr(0, s.size() - len);
+            break;
+        }
+    }
+    size_t b = s.find_first_not_of(" \t\r\n_-.");
+    if (b != std::string::npos) {
+        size_t e = s.find_last_not_of(" \t\r\n_-.");
+        s = s.substr(b, e - b + 1);
+    } else {
+        s.clear();
+    }
+    return s.empty() ? stem : s;
+}
+
 bool DurationsMatch(double a, double b, double absTol, double relTol) {
     if (a <= 0 || b <= 0) return false;
     return std::fabs(a - b) <= std::max(absTol, relTol * std::max(a, b));
@@ -322,6 +355,17 @@ bool SaveLibraryScanResult(const LibraryScanResult& result) {
         js["cameraVmd"] = PathToUtf8(s.cameraVmd);
         js["audioPath"] = PathToUtf8(s.audioPath);
         js["durationSec"] = s.durationSec;
+        nlohmann::json jparts = nlohmann::json::array();
+        for (const auto& p : s.parts) {
+            nlohmann::json jp;
+            jp["label"] = p.label;
+            jp["danceVmd"] = PathToUtf8(p.danceVmd);
+            nlohmann::json pextra = nlohmann::json::array();
+            for (const auto& e : p.extraVmds) pextra.push_back(PathToUtf8(e));
+            jp["extraVmds"] = std::move(pextra);
+            jparts.push_back(std::move(jp));
+        }
+        js["parts"] = std::move(jparts);
         songs.push_back(std::move(js));
     }
     j["songs"] = std::move(songs);
@@ -393,6 +437,19 @@ bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult&
             s.cameraVmd = Utf8ToPath(js.value("cameraVmd", ""));
             s.audioPath = Utf8ToPath(js.value("audioPath", ""));
             s.durationSec = js.value("durationSec", 0.0f);
+            if (js.contains("parts") && js["parts"].is_array()) {
+                for (const auto& jp : js["parts"]) {
+                    if (!jp.is_object()) continue;
+                    SongPart p;
+                    p.label = jp.value("label", "");
+                    p.danceVmd = Utf8ToPath(jp.value("danceVmd", ""));
+                    if (jp.contains("extraVmds") && jp["extraVmds"].is_array()) {
+                        for (const auto& e : jp["extraVmds"])
+                            if (e.is_string()) p.extraVmds.push_back(Utf8ToPath(e.get<std::string>()));
+                    }
+                    s.parts.push_back(std::move(p));
+                }
+            }
             out.songs.push_back(std::move(s));
         }
     }
@@ -430,6 +487,14 @@ bool LibraryScanResultsEqual(const LibraryScanResult& a, const LibraryScanResult
             a.songs[i].extraVmds != b.songs[i].extraVmds ||
             std::fabs(a.songs[i].durationSec - b.songs[i].durationSec) > 0.01f)
             return false;
+        if (a.songs[i].parts.size() != b.songs[i].parts.size())
+            return false;
+        for (size_t j = 0; j < a.songs[i].parts.size(); ++j) {
+            if (a.songs[i].parts[j].label != b.songs[i].parts[j].label ||
+                a.songs[i].parts[j].danceVmd != b.songs[i].parts[j].danceVmd ||
+                a.songs[i].parts[j].extraVmds != b.songs[i].parts[j].extraVmds)
+                return false;
+        }
     }
     return true;
 }
@@ -1069,6 +1134,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             }
             for (const auto& x : s.extra)
                 if (vmdByPath.count(x)) song.extraVmds.push_back(x), claimedVmd.insert(x);
+            song.parts.push_back({song.displayName, song.danceVmd, song.extraVmds});
             result.songs.push_back(std::move(song));
         }
 
@@ -1121,6 +1187,11 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             };
             std::vector<Draft> drafts;
             for (auto& c : clusters) {
+                // Sort dances in cluster case-insensitively by filename so part order is stable
+                std::sort(c.begin(), c.end(), [](const VmdEntry* a, const VmdEntry* b) {
+                    return ToLowerAscii(FileNameUtf8(*a->path)) < ToLowerAscii(FileNameUtf8(*b->path));
+                });
+
                 // Primary: the dance whose length matches the folder's only audio file; otherwise
                 // the most bone keys, where a dance named like a camera only wins when nothing else is there.
                 const double audioSec = clusters.size() == 1 && ownAudioCount == 1 ? audioByDir[dir][0]->sec : 0;
@@ -1131,12 +1202,57 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                     if (audioSec > 0 && c.size() > 1) score = -std::fabs(d->sec - audioSec) + score * 1e-9;
                     if (score > bestScore) bestScore = score, primary = d;
                 }
-                for (const auto* d : c)
-                    if (d != primary) LOG_INFO("extra dance ignored: %s", d->rel.c_str());
+
                 Draft dr;
                 dr.dance = primary;
                 dr.song.danceVmd = *primary->path;
                 dr.song.durationSec = (float)primary->sec;
+
+                // Group byte-identical copies (same size and same probe counts/maxFrame)
+                struct PartGroup {
+                    const VmdEntry* kept = nullptr;
+                    std::vector<std::string> names;
+                };
+                std::vector<PartGroup> partGroups;
+                for (const auto* d : c) {
+                    std::string name = DerivePartLabel(FileStemUtf8(*d->path), genericDirName(dir));
+                    std::error_code ecA;
+                    uintmax_t szA = std::filesystem::file_size(*d->path, ecA);
+                    bool matched = false;
+                    for (auto& pg : partGroups) {
+                        std::error_code ecB;
+                        uintmax_t szB = std::filesystem::file_size(*pg.kept->path, ecB);
+                        if (!ecA && !ecB && szA == szB &&
+                            d->probe->boneKeyCount == pg.kept->probe->boneKeyCount &&
+                            d->probe->morphKeyCount == pg.kept->probe->morphKeyCount &&
+                            d->probe->cameraKeyCount == pg.kept->probe->cameraKeyCount &&
+                            d->probe->maxFrame == pg.kept->probe->maxFrame) {
+                            matched = true;
+                            if (d == primary) pg.kept = d;
+                            if (std::none_of(pg.names.begin(), pg.names.end(), [&](const std::string& n) {
+                                return ToLowerAscii(n) == ToLowerAscii(name);
+                            })) {
+                                pg.names.push_back(name);
+                            }
+                            break;
+                        }
+                    }
+                    if (!matched) {
+                        partGroups.push_back({d, {name}});
+                    }
+                }
+
+                for (const auto& pg : partGroups) {
+                    std::string label = pg.names[0];
+                    for (size_t ni = 1; ni < pg.names.size(); ++ni) {
+                        label += " / " + pg.names[ni];
+                    }
+                    SongPart part;
+                    part.label = label;
+                    part.danceVmd = *pg.kept->path;
+                    dr.song.parts.push_back(std::move(part));
+                }
+
                 drafts.push_back(std::move(dr));
             }
             const bool single = drafts.size() == 1;
@@ -1163,13 +1279,44 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                                        " songs in one folder, matched by length and file names");
 
             // Layers (facial, lip sync): to the song of the closest length.
+            // Layers whose name matches a part's label go to that part, the rest to the primary as today.
             for (const auto* l : layers) {
                 Draft* best = nullptr;
                 for (auto& d : drafts)
                     if (!best || std::fabs(d.dance->sec - l->sec) < std::fabs(best->dance->sec - l->sec)) best = &d;
-                best->song.extraVmds.push_back(*l->path);
+                if (!best) continue;
+
+                const auto lTokens = NameTokens(FileStemUtf8(*l->path));
+                SongPart* targetPart = nullptr;
+                for (auto& p : best->song.parts) {
+                    if (NamesMatch(NameTokens(p.label), lTokens)) {
+                        targetPart = &p;
+                        break;
+                    }
+                }
+                if (!targetPart) {
+                    for (auto& p : best->song.parts) {
+                        if (p.danceVmd == best->song.danceVmd) {
+                            targetPart = &p;
+                            break;
+                        }
+                    }
+                }
+                if (targetPart) {
+                    targetPart->extraVmds.push_back(*l->path);
+                } else {
+                    best->song.extraVmds.push_back(*l->path);
+                }
             }
-            for (auto& d : drafts) std::sort(d.song.extraVmds.begin(), d.song.extraVmds.end());
+            for (auto& d : drafts) {
+                for (auto& p : d.song.parts) {
+                    std::sort(p.extraVmds.begin(), p.extraVmds.end());
+                    if (p.danceVmd == d.song.danceVmd) {
+                        d.song.extraVmds = p.extraVmds;
+                    }
+                }
+                std::sort(d.song.extraVmds.begin(), d.song.extraVmds.end());
+            }
 
             // Generic one-to-one matcher: cost = relative length difference, names halve it.
             // A pair is allowed when names match or lengths agree within the tolerance.

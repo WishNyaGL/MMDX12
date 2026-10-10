@@ -18,8 +18,16 @@ struct LoadedModelCpu {
     std::vector<ImageRGBA8> textures;  // parallel to pmx->textures; empty = missing/failed
 };
 
+struct PerformerCast {
+    CharacterAsset character;
+    SongPart part;
+    bool isCenter = false;
+};
+
 struct ScenePackage {
     LoadedModelCpu character;
+    std::string characterId;
+    std::string characterDisplayName;
     std::vector<LoadedModelCpu> stageParts;   // empty when no stage selected
     std::shared_ptr<BoundMotion> motion;      // bound to character
     std::shared_ptr<CameraMotion> camera;     // null if the song has no camera vmd
@@ -27,9 +35,11 @@ struct ScenePackage {
     std::vector<VmdShadowKey> shadowKeys;
     std::filesystem::path audioPath;          // may be empty
     float endFrame = 0;                       // max(motion end, camera end)
-    // Render benchmark only: performers after `character`, each with its own bound dance
-    // (parallel vectors). Empty for normal scenes.
+    // Performers after `character`, each with its own bound dance
+    // (parallel vectors).
     std::vector<LoadedModelCpu> extraCharacters;
+    std::vector<std::string> extraCharacterIds;
+    std::vector<std::string> extraCharacterDisplayNames;
     std::vector<std::shared_ptr<BoundMotion>> extraMotions;
 };
 
@@ -52,8 +62,10 @@ std::shared_ptr<PmxModel> LoadCharacterModelOnly(const std::filesystem::path& pa
 // `stage` may be null. Returns false with *error on failure of the character or motion;
 // a stage part or texture that fails to load only logs a warning.
 // Textures are decoded in parallel (std::for_each with std::execution::par).
+// If `formation` is provided and non-empty, loads the cast performers into character (center) and extraCharacters.
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
-                      ScenePackage& out, LoadProgress* progress, std::string* error);
+                      ScenePackage& out, LoadProgress* progress, std::string* error,
+                      const std::vector<PerformerCast>* formation = nullptr);
 
 // Render benchmark scene: characters[i] posed by the dance of songs[i] (sizes equal, >= 1).
 // out.character / out.motion = index 0, out.extraCharacters / out.extraMotions = the rest.

@@ -235,6 +235,14 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         s["character"] = selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size()
                              ? library_.characters[(size_t)selCharacter_].displayName
                              : std::string(scene_ ? scene_->characterId : "");
+        if (scene_ && !scene_->extras.empty()) {
+            std::vector<std::string> performers;
+            performers.push_back(!scene_->characterDisplayName.empty() ? scene_->characterDisplayName : scene_->characterId);
+            for (const auto& extra : scene_->extras) {
+                performers.push_back(!extra.displayName.empty() ? extra.displayName : extra.characterId);
+            }
+            s["performers"] = performers;
+        }
         s["stage"] = (selStage_ >= 0 && (size_t)selStage_ < library_.stages.size() ? library_.stages[(size_t)selStage_].displayName : "none");
         s["song"] = (selSong_ >= 0 && (size_t)selSong_ < library_.songs.size() ? library_.songs[(size_t)selSong_].displayName : "");
         s["render_path"] = (settings_.renderPath == 1 ? "rt" : settings_.renderPath == 2 ? "pt" : "raster");

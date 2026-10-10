@@ -148,10 +148,13 @@ void App::UpdateFreeCamera() {
         cam.distance = std::clamp(cam.distance * std::pow(0.88f, io.MouseWheel), 2.0f, 600.0f);
     // F: frame the performer again (center bone)
     if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F, false) && scene_ && scene_->character) {
-        const int center = scene_->character->Model().FindBone("ã»ã³ã¿ã¼");
+        const int center = scene_->character->Model().FindBone("\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xBC");
         if (center >= 0) {
             cam.target = scene_->character->BoneWorldPosition(center);
             cam.target.y += 2.0f;
+            // whole-body framing (~24 units tall) for the current lens: handed-over VMD cameras may be narrow
+            const float halfFov = DirectX::XMConvertToRadians(std::clamp(cam.fovDeg, 5.0f, 120.0f)) * 0.5f;
+            cam.distance = std::clamp(12.0f / std::tan(halfFov), 2.0f, 600.0f);
         }
     }
 }
@@ -241,8 +244,17 @@ void App::DrawPlayOverlay() {
         const CharacterAsset* ch = selCharacter_ >= 0 ? &library_.characters[(size_t)selCharacter_] : nullptr;
         const StageAsset* st = selStage_ >= 0 ? &library_.stages[(size_t)selStage_] : nullptr;
         const std::string title = song ? song->displayName : std::string(Tr("재생 중"));
+        std::string charDesc;
+        if (s && !s->extras.empty()) {
+            std::string centerName = !s->characterDisplayName.empty() ? s->characterDisplayName : (ch ? ch->displayName : "");
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), Tr(" 외 %d명"), (int)s->extras.size());
+            charDesc = centerName + buf;
+        } else {
+            charDesc = ch ? ch->displayName : std::string();
+        }
         const std::string sub =
-            (ch ? ch->displayName : std::string()) + "  ·  " + (st ? st->displayName : std::string(Tr("스튜디오")));
+            charDesc + "  ·  " + (st ? st->displayName : std::string(Tr("스튜디오")));
         const ImVec2 ts = TextSize(Font::Semibold, size::Title, title.c_str());
         const ImVec2 ss = TextSize(Font::Regular, size::Caption, sub.c_str());
         const float w = std::min(std::max(ts.x, ss.x) + Dp(40.0f), Dp(520.0f));

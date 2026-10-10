@@ -258,6 +258,27 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "lastCharacter") lastCharacter = value;
         else if (key == "lastStage") lastStage = value;
         else if (key == "lastSong") lastSong = value;
+        else if (key == "songFormation") {
+            // songFormation=<centerIndex>|<slot0>;<slot1>...|<song id>
+            const size_t bar1 = value.find('|');
+            const size_t bar2 = bar1 != std::string::npos ? value.find('|', bar1 + 1) : std::string::npos;
+            if (bar1 != std::string::npos && bar2 != std::string::npos && bar2 + 1 < value.size()) {
+                SavedFormation sf;
+                if (ParseInt(value.substr(0, bar1), i)) sf.centerIndex = std::max(0, i);
+                const std::string slotsStr = value.substr(bar1 + 1, bar2 - bar1 - 1);
+                size_t pos = 0;
+                while (pos <= slotsStr.size()) {
+                    size_t nextSemi = slotsStr.find(';', pos);
+                    if (nextSemi == std::string::npos) nextSemi = slotsStr.size();
+                    std::string slot = slotsStr.substr(pos, nextSemi - pos);
+                    sf.characterIds.push_back(slot == "-" ? "" : slot);
+                    if (nextSemi == slotsStr.size()) break;
+                    pos = nextSemi + 1;
+                }
+                const std::string songId = value.substr(bar2 + 1);
+                songFormations[songId] = std::move(sf);
+            }
+        }
         else if (key == "recentProject" && !value.empty() && recentProjects.size() < 8) recentProjects.push_back(value);
         else if (key == "windowWidth" && ParseInt(value, i)) windowWidth = i;
         else if (key == "windowHeight" && ParseInt(value, i)) windowHeight = i;
@@ -401,6 +422,13 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     std::fprintf(f, "lastCharacter=%s\n", lastCharacter.c_str());
     std::fprintf(f, "lastStage=%s\n", lastStage.c_str());
     std::fprintf(f, "lastSong=%s\n", lastSong.c_str());
+    for (const auto& [songId, form] : songFormations) {
+        std::string slotList;
+        for (const auto& cid : form.characterIds) {
+            slotList += (slotList.empty() ? "" : ";") + (cid.empty() ? "-" : cid);
+        }
+        std::fprintf(f, "songFormation=%d|%s|%s\n", form.centerIndex, slotList.c_str(), songId.c_str());
+    }
     for (const std::string& r : recentProjects) std::fprintf(f, "recentProject=%s\n", r.c_str());
     std::fprintf(f, "windowWidth=%d\n", windowWidth);
     std::fprintf(f, "windowHeight=%d\n", windowHeight);

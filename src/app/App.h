@@ -151,6 +151,7 @@ struct AppOptions {
     int language = -1;  // --lang auto|ko|en|ja|zh for this run only (-1: keep the saved setting)
     std::filesystem::path project;  // --project
     float uiScale = 0.0f;           // --ui-scale (0 = the window's DPI scale)
+    std::string formation;          // --formation <spec>
     std::string startScreen;  // --screen select|bench: open that screen after the scan; --frames then counts every frame  // --free-camera: start in the orbit camera instead of the VMD camera
     std::string updateFeed;   // --update-feed: feed URL / file override (empty: the default feed)
     bool applyUpdate = false; // --apply-update (internal): apply a staged update, then exit
@@ -181,6 +182,7 @@ private:
     struct SceneRuntime {
         std::unique_ptr<ModelInstance> character;
         std::string characterId;  // library id, key of the saved display scale
+        std::string characterDisplayName;
         std::unique_ptr<GpuModel> characterGpu;
         std::vector<std::unique_ptr<ModelInstance>> stages;
         std::vector<std::unique_ptr<GpuModel>> stageGpu;
@@ -199,6 +201,8 @@ private:
             std::unique_ptr<ModelInstance> instance;
             std::unique_ptr<GpuModel> gpu;
             std::shared_ptr<BoundMotion> motion;
+            std::string characterId;
+            std::string displayName;
         };
         std::vector<Performer> extras;
     };
@@ -234,7 +238,11 @@ private:
     void ApplyColorLut();               // uploads settings_.colorLut when it differs from appliedLut_
 
     // --- scene (App.cpp)
-    void StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsset* st, const SongAsset* song);
+    void StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsset* st, const SongAsset* song) {
+        StartLoad(target, ch, st, song, nullptr);
+    }
+    void StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsset* st, const SongAsset* song,
+                   const std::vector<PerformerCast>* formation);
     void PollLoad();
     bool BuildSceneRuntime(ScenePackage& pkg);  // GPU upload on the main thread
     void UnloadScene();                          // WaitForGpu, release runtime + audio
@@ -559,6 +567,29 @@ private:
     void FinishOffline(bool cancelled);  // Offline -> Play (paused); closes the encoder; toast
     void DrawOfflineOverlay();  // progress panel over the preview (screen_ == Offline)
     void DrawVideoRenderDialog();  // video render settings + start (Select, UiVideoDialog.cpp)
+    // formation modal (UiFormation.cpp)
+    struct FormationSlot {
+        std::string characterId;
+    };
+    struct FormationState {
+        bool open = false;
+        LoadTarget target = LoadTarget::Play;
+        int songIndex = -1;
+        int centerIndex = 0;
+        std::vector<FormationSlot> slots;
+        int pickerSlot = -1;
+        char pickerSearch[64] = {};
+        bool justOpened = false;   // set by OpenFormationModal: keys of that frame belong to the lobby
+    };
+    FormationState formationModal_;
+
+    void StartLobbyLoad(LoadTarget target, bool allowModal = true);
+    void OpenFormationModal(LoadTarget target);
+    void DrawFormationModal();
+    void AutoFormation();
+    void StartFormationLoad();
+    std::vector<PerformerCast> ParseFormationSpec(const std::string& spec, const SongAsset& song);
+
     void DrawToast();           // completion / error toast (Select, Play)
     // shader packs (UiShaderPack.cpp)
     void ApplyShaderChoice(GpuModel& gpu, const ShaderChoice& choice);   // every frame, before UpdateMaterials

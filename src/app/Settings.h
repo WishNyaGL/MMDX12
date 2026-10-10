@@ -67,6 +67,12 @@ struct AppSettings {
     void AddRecentProject(const std::string& path);  // moves it to the front (case-insensitive match)
     void RemoveRecentProject(const std::string& path);
 
+    struct SavedFormation {
+        int centerIndex = 0;
+        std::vector<std::string> characterIds; // character id or empty
+    };
+    std::map<std::string, SavedFormation> songFormations; // song id -> saved formation
+
     const VideoProbe* FindVideoProbe(uint64_t key) const;
     void SetVideoProbe(uint64_t key, double secondsPerFrame);  // replaces an entry with the same key
 

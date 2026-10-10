@@ -35,6 +35,12 @@ struct StageAsset {
     uint32_t vertexCount = 0;     // sum over parts
 };
 
+struct SongPart {
+    std::string label;                             // short display label derived from file name(s)
+    std::filesystem::path danceVmd;                 // dance motion
+    std::vector<std::filesystem::path> extraVmds;   // facial/morph layer VMDs belonging to this part
+};
+
 struct SongAsset {
     std::string id;               // library-relative path of the directory ("#<dance file>" appended when a folder holds several songs)
     std::string displayName;      // directory name (if dir is named "src", the parent's name), or the dance file's name
@@ -43,6 +49,7 @@ struct SongAsset {
     std::filesystem::path cameraVmd;                // may be empty
     std::filesystem::path audioPath;                // may be empty (.wav/.mp3/.flac/.ogg)
     float durationSec = 0;        // dance maxFrame / 30
+    std::vector<SongPart> parts;  // performer parts (>= 1 for playable songs; primary part has danceVmd)
 };
 
 struct LibraryScanResult {
@@ -77,7 +84,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& root, ScanProgress* p
 bool CreateLibrarySkeleton(const std::filesystem::path& root, const std::filesystem::path& templateDir);
 
 // Persistent library scan result and probe cache (Requirements B.5, B.6, B.7)
-inline constexpr uint32_t kLibraryScanResultVersion = 1;
+inline constexpr uint32_t kLibraryScanResultVersion = 2;
 inline constexpr uint32_t kProbeCacheVersion = 1;
 
 bool SaveLibraryScanResult(const LibraryScanResult& result);

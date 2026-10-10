@@ -15,6 +15,7 @@ progress.md is the session log. Read its latest entry first.
 - No debugger is installed (no cdb). For crashes, use the dbghelp `CrashFilter` in `tools/render_smoke.cpp`.
 - Visual verification without a human: render a frame headlessly, then Read the PNG.
   - Play scene: `MMDX12.exe --character <s> --stage <s|none> --song <s> --autoplay --seek <sec> --frames N --capture out.png`
+    Unit formation: `--formation <spec>` (one entry per part in part order, each a character name substring or `-` for empty; optional `*` suffix marks the center; skips the modal).
   - Menu screens: `--screen select|bench --frames N --capture ui.png`
   - Offline GI still/video: `--autoplay --seek <sec> --offline-still out.png` (or `--offline-video out.mp4 --offline-range a b`);
     add `--offline-size 960 540 --offline-spp 256` for quick checks. The app quits by itself when done.
@@ -49,6 +50,7 @@ progress.md is the session log. Read its latest entry first.
     that spot's values through the ordinary undoable insert.
     While a script runs, real mouse/keyboard input is ignored.
     Frames count like `--frames`. Use it to click through editor features headlessly (examples: `captures/studio/t*.txt`).
+  - `--frames N` counts frames only inside a scene or with `--screen`; a run with neither never quits.
   - Benchmark: `--benchmark dx12-raster-fhd --bench-frames 600 --frames 100000` (result goes to `build/bin/mmdx12.log` as a `BENCHMARK` line)
   - GI render benchmark: `--benchmark dx12-gi-render` (quits by itself; ~41 s). Quick check: add `--bench-spp 64 --offline-size 960 540`.
     Add `--frames 100000 --capture out.png` to capture the result screen.
@@ -71,6 +73,12 @@ progress.md is the session log. Read its latest entry first.
 ## Architecture (src/)
 - `core`: logging, text encodings (Shift-JIS/UTF-16/UTF-8).
 - `asset`: PMX/VMD parsers, image loading (stb with a WIC fallback, also from memory), `AssetLibrary`, `ModelImport`.
+  - Unit songs: same-length dances in one song folder are the song's `SongAsset::parts` (byte-identical renamed copies
+    merge, labels from the file names; `danceVmd` stays the primary part). Play / Enter / the lobby video render go
+    through `App::StartLobbyLoad`: >= 2 parts open the formation modal (`app/UiFormation.cpp`: slots, center, auto
+    formation by part-label tokens, saved per song as `songFormation=` ini lines); the cast loads into
+    `ScenePackage::character` (the center: focus, spotlights, F framing) + `extraCharacters`, posed every frame as
+    `SceneRuntime::extras` (the render benchmark's extras stay posed once).
   - `AssetLibrary` precedence: app overrides (`library_overrides.json` next to the exe, right-click on a card) > `mmdx.json`
     sidecars > folder names (characters/models, stages, songs/motions, several languages) > content. Several songs in one
     folder are split only when it also holds several audio files or cameras; audio/cameras are matched by length + file name.
