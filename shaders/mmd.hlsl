@@ -29,6 +29,11 @@ cbuffer MaterialCB : register(b1) {
 #define MAT_HAS_SPHERE_TEX 256u
 #endif
 
+// Shader-pack material class: the PackClass lives in bits 0..7 of gPackClass, bits 8..15 hold the class's alpha key
+// (round(key * 255), pack.json "alphaKey"). Every consumer masks the class with PackClassLow; the key is PackAlphaKey.
+#define PackClassLow(gc)    ((gc) & 0xFFu)
+#define PackAlphaKey(gc)    (float(((gc) >> 8) & 0xFFu) * (1.0 / 255.0))
+
 // FXC ignores pack_matrix for structured-buffer elements: state row_major explicitly.
 struct BoneMatrix { row_major float4x4 m; };
 StructuredBuffer<BoneMatrix> gBones : register(t0);
@@ -610,7 +615,10 @@ PSOut PSPack(VSOut i, bool front : SV_IsFrontFace) {
     s.tex = (gFlags & MAT_HAS_TEXTURE) ? ApplyTexFactor(gTexture.Sample(gWrap, i.uv), gTexMul, gTexAdd) : float4(1, 1, 1, 1);
     s.alpha = gDiffuse.a * s.tex.a;
     if (s.alpha < 0.004) discard;
-    s.materialClass = (gPackClass == PACK_CLASS_OFF) ? PACK_BODY : gPackClass;
+    // pack alpha key (colour-key cut-out): cut pixels whose texture red is below the key, before the pack shading
+    const float alphaKey = PackAlphaKey(gPackClass);
+    if (alphaKey > 0.0 && s.tex.r < alphaKey) discard;
+    s.materialClass = (PackClassLow(gPackClass) == PACK_CLASS_OFF) ? PACK_BODY : PackClassLow(gPackClass);
     float rawShadow = (gFlags & MAT_RECEIVE) ? SHADOW_TERM(i.worldPos, s.N, i.viewZ, i.pos.xy) : 1.0;
     float occ = (1.0 - rawShadow) * gSunShadowParams.z;
     s.shadow = 1.0 - occ;
@@ -646,7 +654,7 @@ EdgeOut VSEdge(VSIn v) {
 #if PACK_HAS_EDGE
     // pack outlines (PackEdge): per-material width scale; PackEdgeUv2 carries this vertex's uv2
     PackEdgeUv2 = v.uv2;
-    uint edgeClass = (gPackClass == PACK_CLASS_OFF) ? PACK_BODY : gPackClass;
+    uint edgeClass = (PackClassLow(gPackClass) == PACK_CLASS_OFF) ? PACK_BODY : PackClassLow(gPackClass);
     px *= max(PackEdge(edgeClass, gEdgeColor, gEdgeSize).widthScale, 0.0);
 #endif
     o.pos = ExpandEdge(mul(wp, gViewProj), wn, px);
@@ -665,16 +673,20 @@ PSOut PSEdge(EdgeOut i) {
 
 // Depth only (path tracer outlines, ScenePass in PT mode): the edges' depth pre-pass, the alpha test of the ray
 // tracer's binary alpha (>= 0.5), as offline_edge.hlsl PSDepth. Colour writes are masked off by the PSO.
+// Pack alpha key (pack.json "alphaKey"): a keyed material does not write depth for its cut pixels.
 void PSDepthAlpha(VSOut i) {
-    float a = gDiffuse.a * ((gFlags & MAT_HAS_TEXTURE) ? gTexture.Sample(gWrap, i.uv).a : 1.0);
+    float4 tex = (gFlags & MAT_HAS_TEXTURE) ? gTexture.Sample(gWrap, i.uv) : float4(1, 1, 1, 1);
+    float a = gDiffuse.a * tex.a;
     clip(a - 0.5);
+    const float alphaKey = PackAlphaKey(gPackClass);
+    if (alphaKey > 0.0) clip(tex.r - alphaKey);
 }
 
 // Pack outlines (PACK_HAS_EDGE in the pack's surface.hlsl): PackEdge sets the colour and width scale.
 // Compiled only for the pack's edge PSO (MMDX_PACK); otherwise the default PSEdge above draws.
 #if PACK_HAS_EDGE
 PSOut PSEdgePack(EdgeOut i) {
-    uint edgeClass = (gPackClass == PACK_CLASS_OFF) ? PACK_BODY : gPackClass;
+    uint edgeClass = (PackClassLow(gPackClass) == PACK_CLASS_OFF) ? PACK_BODY : PackClassLow(gPackClass);
     PackEdgeResult e = PackEdge(edgeClass, gEdgeColor, gEdgeSize);
     PSOut o;
     o.color = float4(SrgbToLinear(saturate(e.color.rgb)) * gSunIntensity * 0.85, saturate(e.color.a));
@@ -809,7 +821,10 @@ ShadowOut VSShadow(VSIn v) {
 }
 
 void PSShadowAlpha(ShadowOut i) {
-    float a = gDiffuse.a * ((gFlags & MAT_HAS_TEXTURE) ? gTexture.Sample(gWrap, i.uv).a : 1.0);
+    float4 tex = (gFlags & MAT_HAS_TEXTURE) ? gTexture.Sample(gWrap, i.uv) : float4(1, 1, 1, 1);
+    float a = gDiffuse.a * tex.a;
     clip(a - 0.5);
+    const float alphaKey = PackAlphaKey(gPackClass);
+    if (alphaKey > 0.0) clip(tex.r - alphaKey);
 }
 #endif

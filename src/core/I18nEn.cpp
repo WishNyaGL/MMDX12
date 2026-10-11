@@ -1011,10 +1011,10 @@ const Entry kEnglish[] = {
     {"파라미터 많은 순", "Most parameters"},
     {"조건에 맞는 팩이 없습니다", "No packs match"},
     {"필터 지우기", "Clear filters"},
-    {"프로젝트 세카이 모델", "Project Sekai model"},
-    {"세카이 툰 셰이더를 적용했습니다", "Applied the Sekai toon shader"},
-    {"온라인 갤러리에서 '프로젝트 세카이 툰' 셰이더를 받을 수 있습니다",
-     "You can get the 'Project Sekai Toon' shader from the online gallery"},
+    {"셰이더 팩 추천", "Shader pack suggestion"},
+    {"셰이더가 이 모델에 잘 맞아 보여요 · 셰이더 메뉴에서 켜 보세요",
+     "The shader looks like a good fit for this model · turn it on in the shader menu"},
+    {"추천", "Suggested"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

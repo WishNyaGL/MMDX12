@@ -486,7 +486,9 @@ void App::DrawPlayOverlay() {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(16.0f), Dp(14.0f)));
         if (ImGui::BeginPopup("##shaderpopup")) {
             SectionLabel(Tr("셰이더"));
-            bool changed = DrawShaderSelector("##playshader", choice, ImGui::GetContentRegionAvail().x);
+            const ModelTraits playTraits = scene_->characterGpu ? scene_->characterGpu->Traits() : ModelTraits{};
+            bool changed = DrawShaderSelector("##playshader", choice, ImGui::GetContentRegionAvail().x,
+                                           scene_->characterGpu ? &playTraits : nullptr);
             Gap(8.0f);
             changed |= DrawShaderPackParams(choice);
             if (!choice.pack.empty() && s->character) {   // per-material classes, folded away until asked for

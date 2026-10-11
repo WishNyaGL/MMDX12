@@ -2,7 +2,7 @@
 #include "render/GpuModel.h"
 #include "asset/PmxModel.h"
 #include "asset/ImageLoader.h"
-#include "asset/SekaiLayout.h"
+#include "asset/ModelTraits.h"
 #include "render/ShaderInterop.h"
 #include "core/Log.h"
 #include <directx/d3dx12.h>
@@ -21,9 +21,9 @@ DirectX::XMFLOAT4X4 Identity4x4() {
     return r;
 }
 
-// Face-like material names of the Project Sekai rigs (their Face.fx uses an SDF face map we
+// Face-like material names of MME game rigs (a Face.fx with an SDF face map we
 // don't have; flat shading is the closest match).
-bool IsSekaiFaceMaterial(const std::string& name) {
+bool IsFlatFaceMaterial(const std::string& name) {
     std::string n = name;
     for (char& ch : n) ch = (char)std::tolower((unsigned char)ch);
     return n == "face" || n == "eyelash" || n == "eyebrow";
@@ -204,7 +204,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     }
 
     // Referenced texture indices.
-    // Sekai layout: a toon slot holding a UV-mapped shadow colour (_S) makes the sphere slot a
+    // MME data layout: a toon slot holding a UV-mapped shadow colour (_S) makes the sphere slot a
     // UV-space parameter mask (_H), so the sphere texture is bound whatever its PMX sphere mode.
     auto ToonMapMaterial = [&](const PmxMaterial& m) {
         if (m.sharedToon || m.toonIndex < 0 || (size_t)m.toonIndex >= textures.size()) return false;
@@ -251,7 +251,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             (m.sphereMode == PmxSphereMode::Multiply || m.sphereMode == PmxSphereMode::Add) &&
             m.sphereTextureIndex >= 0 && (size_t)m.sphereTextureIndex < textures_.size() &&
             textures_[m.sphereTextureIndex];
-        // A real sphere-slot texture is bound (Mode Multiply/Add, or the Sekai toon-map layout).
+        // A real sphere-slot texture is bound (Mode Multiply/Add, or the toon-map data layout).
         const bool sphereBound = sphereRef || (SphereUsed(m) && m.sphereTextureIndex >= 0 &&
                                                (size_t)m.sphereTextureIndex < textures_.size() &&
                                                textures_[m.sphereTextureIndex]);
@@ -266,11 +266,11 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         } else if (m.toonIndex >= 0 && (size_t)m.toonIndex < textures_.size() && textures_[m.toonIndex]) {
             c.flags |= MatFlag_HasToon;
             if (!IsToonRampImage(textures[m.toonIndex])) {
-                // Sekai layout: toon = shadow colour (_S), sphere = UV-space parameter mask (_H),
+                // MME toon-map layout: toon = shadow colour (_S), sphere = UV-space parameter mask (_H),
                 // which must not be added as an environment sphere.
                 c.flags |= MatFlag_ToonMap;
                 c.flags &= ~(MatFlag_SphereMul | MatFlag_SphereAdd);
-                if (IsSekaiFaceMaterial(m.name)) c.flags |= MatFlag_FlatShade;
+                if (IsFlatFaceMaterial(m.name)) c.flags |= MatFlag_FlatShade;
             }
         }
         // No toon on a character material: the author wants it unmodelled (typically the face,
@@ -522,7 +522,13 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
     packOverrides_ = pack ? materials : MaterialClassOverrides{};
     if (!pack) {
         for (auto& m : materials_) m.packOff = false;
-        return;   // the default PSOs ignore the pack fields
+        // no pack = no class and no alpha key (clears the encoding of a pack switched off)
+        for (size_t i = 0; i < baseConsts_.size(); ++i) {
+            baseConsts_[i].packClass = 0;
+            materialConsts_[i].packClass = 0;
+        }
+        for (uint64_t& v : materialEntryVersion_) v = ~0ull;
+        return;
     }
     for (size_t i = 0; i < baseConsts_.size(); ++i) {
         const auto& names = materialNames_[i];
@@ -540,9 +546,12 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
         } else {
             clsVal = static_cast<uint32_t>(pack->Classify(names.first, names.second, materialTextures_[i]));
         }
+        // The alpha key follows the material's FINAL class (per-material override included); kPackClassOff = no key.
+        const float key = isOff ? 0.0f : PackAlphaKeyForClass(pack->alphaKey, clsVal);
+        const uint32_t encodedClass = PackClassEncode(clsVal, key);
         if (i < materials_.size()) materials_[i].packOff = isOff;
         for (MaterialConstants* c : {&baseConsts_[i], &materialConsts_[i]}) {
-            c->packClass = clsVal;
+            c->packClass = encodedClass;
             c->packHeadBone = headBone_ >= 0 ? (uint32_t)headBone_ : 0u;
             c->packHead = {headPos_.x, headPos_.y, headPos_.z, headBone_ >= 0 ? 1.0f : 0.0f};
             for (uint32_t k = 0; k < kPackMaxParams; ++k) (&c->packParams[0].x)[k] = params[k];
@@ -552,11 +561,13 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
     for (uint64_t& v : materialEntryVersion_) v = ~0ull;
 }
 
-bool GpuModel::HasSekaiLayout() const {
-    if (!hasAdditionalUv_ || additionalUvCount_ < 2) return false;
+ModelTraits GpuModel::Traits() const {
+    ModelTraits t;
+    t.additionalUvCount = hasAdditionalUv_ ? additionalUvCount_ : 0;
+    t.materials = (int)materialConsts_.size();
     for (const MaterialConstants& c : materialConsts_)
-        if (c.flags & MatFlag_ToonMap) return true;
-    return false;
+        if (c.flags & MatFlag_ToonMap) ++t.toonMapMaterials;
+    return t;
 }
 
 bool GpuModel::PackActive() const {

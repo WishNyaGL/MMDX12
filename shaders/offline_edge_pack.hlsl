@@ -13,14 +13,14 @@ float4 VSEdgeOfflinePack(VSIn v) : SV_Position {
     SkinAt(v, wp, wn);
     float px = gEdgeSize * v.edge * gEdgeScale;   // outline width in pixels (scaled with height / 1080)
     PackEdgeUv2 = v.uv2;   // API v6: this vertex's additional UV2 for PackEdge width scaling
-    uint edgeClass = (gPackClass == PACK_CLASS_OFF) ? PACK_BODY : gPackClass;
+    uint edgeClass = (PackClassLow(gPackClass) == PACK_CLASS_OFF) ? PACK_BODY : PackClassLow(gPackClass);
     px *= max(PackEdge(edgeClass, gEdgeColor, gEdgeSize).widthScale, 0.0);
     return OfflineEdgeClip(wp, wn, px);
 }
 
 // Premultiplied output (blend ONE / INV_SRC_ALPHA), the colour of mmd.hlsl PSEdgePack.
 float4 PSEdgeOfflinePack(float4 pos : SV_Position) : SV_Target {
-    uint edgeClass = (gPackClass == PACK_CLASS_OFF) ? PACK_BODY : gPackClass;
+    uint edgeClass = (PackClassLow(gPackClass) == PACK_CLASS_OFF) ? PACK_BODY : PackClassLow(gPackClass);
     PackEdgeResult e = PackEdge(edgeClass, gEdgeColor, gEdgeSize);
     float a = saturate(e.color.a);
     return float4(SrgbToLinear(saturate(e.color.rgb)) * gSunIntensity * 0.85 * a, a);

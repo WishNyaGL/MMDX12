@@ -3,6 +3,8 @@
 // Keep both sides in sync (shaders/common.hlsli). HLSL uses `#pragma pack_matrix(row_major)`
 // and mul(v, M), so DirectXMath matrices are uploaded as-is (no transpose).
 #include <DirectXMath.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace mmdx {
@@ -57,6 +59,25 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 
+// Shader-pack alpha key (pack.json class rule "alphaKey", 0..1; 0 = off). PackClass stays in bits 0..7 of
+// MaterialConstants::packClass, the key lives in bits 8..15 as round(key * 255). The HLSL side (mmd.hlsl,
+// pack_api.hlsli, rt_common.hlsli) mirrors this with PackClassLow / PackAlphaKey.
+inline constexpr float kPackAlphaKeyScale = 255.0f;
+inline uint32_t PackClassLow(uint32_t packClass) { return packClass & 0xFFu; }
+inline float PackAlphaKeyFromClass(uint32_t packClass) {
+    return (float)((packClass >> 8) & 0xFFu) / kPackAlphaKeyScale;
+}
+inline uint32_t PackClassEncode(uint32_t cls, float alphaKey) {
+    const uint32_t k = alphaKey > 0.0f
+                           ? (uint32_t)std::lround(std::clamp(alphaKey, 0.0f, 1.0f) * kPackAlphaKeyScale)
+                           : 0u;
+    return (cls & 0xFFu) | (k << 8);
+}
+// The key a material's final class carries (`key[cls]`), or 0 for the off class / a null pack.
+inline float PackAlphaKeyForClass(const float alphaKey[6], uint32_t cls) {
+    return cls < 6u ? alphaKey[cls] : 0.0f;
+}
+
 enum MaterialShaderFlags : uint32_t {
     MatFlag_HasTexture    = 1u << 0,
     MatFlag_HasToon       = 1u << 1,
@@ -64,7 +85,7 @@ enum MaterialShaderFlags : uint32_t {
     MatFlag_SphereAdd     = 1u << 3,
     MatFlag_ReceiveShadow = 1u << 4,
     MatFlag_Stage         = 1u << 5,  // material belongs to a stage model (floor gloss, no rim)
-    MatFlag_ToonMap       = 1u << 6,  // "toon" is a UV-mapped shadow-colour texture (Project Sekai style)
+    MatFlag_ToonMap       = 1u << 6,  // "toon" is a UV-mapped shadow-colour texture (an MME data layout)
     MatFlag_FlatShade     = 1u << 7,  // no N.L modelling (faces): only cast shadows darken
     MatFlag_HasSphereTex  = 1u << 8,  // a real sphere-slot texture is bound (not the white fallback)
 };
@@ -131,7 +152,7 @@ struct GpuSdef {
 };
 static_assert(sizeof(GpuSdef) == 40, "GpuSdef layout");
 
-// Vertex buffer slot 4 (static): additional UV1 / UV2 per vertex (Project Sekai MME models). Models
+// Vertex buffer slot 4 (static): additional UV1 / UV2 per vertex (MME models that use them). Models
 // without additional UVs bind one zero element with stride 0. Also exposed to ray tracing as a raw
 // (ByteAddress) SRV (GpuModel::AddUvSrv()).
 struct GpuAddUv {
@@ -190,7 +211,8 @@ struct RtGeometry {
     uint32_t toonSrv;      // srvTable + 2
     uint32_t packSrv;      // SrvHeap index of raw ByteAddressBuffer holding RtPtPackRecord (when RtGeom_PtPack)
     uint32_t addUvSrv;     // SrvHeap index of raw ByteAddressBuffer with the add-UV stream (0xFFFFFFFF = none)
-    uint32_t _padAddUv[3]; // keeps the float4 block 16-byte aligned (StructuredBuffer stride = 192)
+    float alphaKey;        // pack alpha key (0 = off): cut pixels whose texture red < alphaKey at alpha evaluation
+    uint32_t _padAddUv[2]; // keeps the float4 block 16-byte aligned (StructuredBuffer stride = 192)
     // material morph texture factors, as MaterialConstants::texMul..toonAdd
     DirectX::XMFLOAT4 texMul, texAdd, sphereMul, sphereAdd, toonMul, toonAdd;
 };

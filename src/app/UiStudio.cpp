@@ -116,7 +116,7 @@ bool App::FinishStudioLoad() {
             return false;
         }
         sm->gpu->SetDefaultPackTextureFolder(m.defaultPackTextureFolder);
-        if (!pkg.fromProject) StudioAutoApplySekaiShader(*sm);   // added character: no saved choice -> project_sekai_toon
+        if (!pkg.fromProject) StudioSuggestShader(*sm);   // added character with no shader choice: maybe suggest a pack
         sm->motion = std::move(m.motion);
         sm->BuildRowGroups();
         sm->inst->UpdatePose();

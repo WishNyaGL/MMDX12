@@ -10,6 +10,7 @@
 #include "render/ShaderPack.h"
 
 #include <Windows.h>
+#include <json.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -121,6 +122,11 @@ bool PrintManifest(const ShaderPack& pack, const std::string& error) {
     PrintText("name", pack.name);
     PrintText("description", pack.description);
     PrintText("recommendedFor", pack.recommendedFor);
+    if (pack.suggest.present)
+        printf("  suggest: additionalUvsMin=%d toonMapMaterialsMin=%d\n", pack.suggest.additionalUvsMin,
+               pack.suggest.toonMapMaterialsMin);
+    else
+        printf("  suggest: (none)\n");
     if (pack.authors.empty()) {
         printf("  authors: (none)\n");
     } else {
@@ -146,6 +152,8 @@ bool PrintManifest(const ShaderPack& pack, const std::string& error) {
             printf("  class %s:", kClasses[(size_t)r.cls]);
             for (const std::string& m : r.match) printf(" \"%s\"", m.c_str());
             for (const std::string& t : r.texture) printf(" texture:\"%s\"", t.c_str());
+            const float key = pack.alphaKey[(size_t)r.cls];
+            if (key > 0.0f) printf(" alphaKey:%.4g", key);
             printf("\n");
         }
     }
@@ -422,6 +430,14 @@ int wmain(int argc, wchar_t** argv) {
             fclose(f);
         }
         mmdx::ParseShaderPackManifest(json, dir, pack, error);
+        // "suggest": unknown keys are ignored by the app; warn so typos show up (type errors are manifest problems)
+        try {
+            const nlohmann::json j = nlohmann::json::parse(json);
+            if (auto it = j.find("suggest"); it != j.end() && it->is_object())
+                for (auto kv = it->begin(); kv != it->end(); ++kv)
+                    if (kv.key() != "additionalUvsMin" && kv.key() != "toonMapMaterialsMin")
+                        printf("  [warn] suggest: unknown key '%s' (ignored)\n", kv.key().c_str());
+        } catch (...) {}
     }
     ok = PrintManifest(pack, error) && ok;
     ok = CheckFiles(dir) && ok;

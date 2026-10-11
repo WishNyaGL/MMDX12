@@ -13,7 +13,7 @@
 
 cbuffer MaterialCB : register(b1) {
     float4 gDiffuse; float3 gSpecular; float gSpecularPower; float3 gAmbient; float gEdgeSize;
-    float4 gEdgeColor; uint gFlags; float gReflectivity; uint2 _mp;
+    float4 gEdgeColor; uint gFlags; float gReflectivity; uint gPackClass; uint gPackHeadBone;
     // material morph factors (ApplyTexFactor): texture, sphere, toon
     float4 gTexMul; float4 gTexAdd; float4 gSphereMul; float4 gSphereAdd; float4 gToonMul; float4 gToonAdd;
 };
@@ -36,6 +36,9 @@ struct VSIn {
 #include "offline_edge_skin.hlsli"   // EdgeCB (b2), SkinAt, ToClip, OfflineEdgeClip
 
 struct DepthOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+// Coverage test like the ray tracer's binary alpha (>= 0.5). Pack alpha key (pack.json "alphaKey"):
+// a keyed material does not write depth for its cut pixels. (packClass bits 8..15 hold round(key*255).)
+#define PackAlphaKey(gc) (float(((gc) >> 8) & 0xFFu) * (1.0 / 255.0))
 
 DepthOut VSDepth(VSIn v) {
     float3 wp, wn;
@@ -46,10 +49,14 @@ DepthOut VSDepth(VSIn v) {
     return o;
 }
 
-// Coverage test like the ray tracer's binary alpha (>= 0.5).
+// Coverage test like the ray tracer's binary alpha (>= 0.5). Pack alpha key (pack.json "alphaKey"):
+// a keyed material does not write depth for its cut pixels. (packClass bits 8..15 hold round(key*255).)
 void PSDepth(DepthOut i) {
-    float a = gDiffuse.a * ((gFlags & MAT_HAS_TEXTURE) ? gTexture.Sample(gWrap, i.uv).a : 1.0);
+    float4 tex = (gFlags & MAT_HAS_TEXTURE) ? gTexture.Sample(gWrap, i.uv) : float4(1, 1, 1, 1);
+    float a = gDiffuse.a * tex.a;
     clip(a - 0.5);
+    const float alphaKey = PackAlphaKey(gPackClass);
+    if (alphaKey > 0.0) clip(tex.r - alphaKey);
 }
 
 float4 VSEdge(VSIn v) : SV_Position {

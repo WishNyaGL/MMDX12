@@ -1,4 +1,4 @@
-#include "asset/SekaiLayout.h"
+#include "asset/ModelTraits.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -25,17 +25,16 @@ bool IsToonRampImage(const ImageRGBA8& img) {
     return dev < n * 4;  // mean absolute deviation along x below ~1.5%
 }
 
-SekaiLayoutInfo DetectSekaiLayout(const PmxModel& pmx, const std::vector<ImageRGBA8>& textures) {
-    SekaiLayoutInfo info;
-    info.additionalUvCount = pmx.additionalUvCount;
-    info.materials = (int)pmx.materials.size();
+ModelTraits ComputeModelTraits(const PmxModel& pmx, const std::vector<ImageRGBA8>& textures) {
+    ModelTraits t;
+    t.additionalUvCount = pmx.additionalUvCount;
+    t.materials = (int)pmx.materials.size();
     for (const PmxMaterial& m : pmx.materials) {
         if (m.sharedToon || m.toonIndex < 0 || (size_t)m.toonIndex >= textures.size()) continue;
         if (textures[m.toonIndex].Empty()) continue;
-        if (!IsToonRampImage(textures[m.toonIndex])) ++info.toonMapMaterials;
+        if (!IsToonRampImage(textures[m.toonIndex])) ++t.toonMapMaterials;
     }
-    info.sekai = pmx.additionalUvCount >= 2 && info.toonMapMaterials > 0;
-    return info;
+    return t;
 }
 
 } // namespace mmdx

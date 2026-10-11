@@ -1607,7 +1607,7 @@ void App::UpdateScene(float frame) {
             } else if (options_.shaderPackSet) {
                 choice = PlayShaderChoice(*extra.gpu, extra.characterId);
             } else if (!extra.characterId.empty()) {
-                // render benchmark extras keep their saved choice (deterministic); play mode adds the Sekai auto-apply
+                // render benchmark extras keep their saved choice (deterministic); play mode also suggests fitting packs
                 choice = screen_ == Screen::BenchRender ? settings_.CharacterShader(extra.characterId)
                                                         : PlayShaderChoice(*extra.gpu, extra.characterId);
             }

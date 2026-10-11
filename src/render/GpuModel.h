@@ -6,6 +6,7 @@
 #include "render/Dx12Context.h"
 #include "render/ShaderInterop.h"
 #include "render/ShaderPack.h"
+#include "asset/ModelTraits.h"
 #include "asset/PmxModel.h"
 #include <DirectXMath.h>
 #include <string>
@@ -100,8 +101,8 @@ public:
     bool HasAdditionalUv() const { return hasAdditionalUv_; }
     // Raw (ByteAddress) SRV heap index over the add-UV buffer; 0xFFFFFFFF when the model has none.
     uint32_t AddUvSrv() const { return addUvSrv_; }
-    // Project Sekai layout: >= 2 additional UVs and at least one toon-map material.
-    bool HasSekaiLayout() const;
+    // Generic data traits of the model (additional UVs, toon-map materials) for ShaderPack::Suggests.
+    ModelTraits Traits() const;
     D3D12_GPU_VIRTUAL_ADDRESS BoneBuffer(uint64_t frame) const;      // StructuredBuffer<float4x4> (t0)
     D3D12_GPU_VIRTUAL_ADDRESS PrevBoneBuffer(uint64_t frame) const;  // previous frame (t4)
     const DirectX::XMFLOAT4X4* BoneMatricesCpu(uint64_t frame) const {

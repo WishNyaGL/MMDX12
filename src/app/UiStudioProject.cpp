@@ -554,7 +554,7 @@ void App::StudioPollJobs() {
                     continue;
                 }
                 sm->gpu->SetDefaultPackTextureFolder(pm.defaultPackTextureFolder);
-                StudioAutoApplySekaiShader(*sm);   // Sekai-layout character with no shader choice -> project_sekai_toon
+                StudioSuggestShader(*sm);   // character with no shader choice: maybe suggest a pack
                 sm->BuildRowGroups();
                 sm->inst->UpdatePose();
                 // the rest of a replacing library stage goes right after the replaced part (stage parts come first)
@@ -699,24 +699,9 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
     return true;
 }
 
-void App::StudioAutoApplySekaiShader(studio::StudioModel& m) {
-    if (m.shader.pack.empty() && m.kind == studio::ModelKind::Character && m.gpu && m.gpu->HasSekaiLayout() &&
-        !options_.shaderPackSet && !HeadlessRun()) {
-        if (ShaderPacks().Find("project_sekai_toon") != nullptr) {
-            m.shader.pack = "project_sekai_toon";
-            ++studio_->projectVersion;   // saved with the project; a later user switch is never overridden
-            toast_ = {Tr("프로젝트 세카이 모델"), Tr("세카이 툰 셰이더를 적용했습니다"), {}, false, timeSeconds_ + 6.0};
-        } else {
-            // The pack is online-gallery-only from now on: a detected Sekai model without it installed gets a one-time
-            // hint instead of silently doing nothing (remembered so it never repeats).
-            if (!m.libraryId.empty() && !settings_.CharacterShaderAuto(m.libraryId)) {
-                settings_.SetCharacterShaderAuto(m.libraryId);
-                settings_.Save(settingsPath_);
-                toast_ = {Tr("프로젝트 세카이 모델"),
-                          Tr("온라인 갤러리에서 '프로젝트 세카이 툰' 셰이더를 받을 수 있습니다"), {}, false, timeSeconds_ + 6.0};
-            }
-        }
-    }
+void App::StudioSuggestShader(studio::StudioModel& m) {
+    if (m.shader.pack.empty() && m.kind == studio::ModelKind::Character && m.gpu && !m.libraryId.empty())
+        SuggestShaderPack(*m.gpu, m.libraryId);
 }
 
 void App::StudioSelectModel(int index) {

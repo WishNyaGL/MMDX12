@@ -250,28 +250,24 @@ ShaderChoice App::PlayShaderChoice(const GpuModel& gpu, const std::string& chara
         c.pack = options_.shaderPack;
         return c;
     }
-    // Auto-apply project_sekai_toon to a character with the Sekai data layout: only when the user has never chosen a
-    // shader for it (no saved choice and never auto-applied), and never in a scripted/headless run (deterministic).
-    if (c.pack.empty() && !characterId.empty() && !settings_.CharacterShaderAuto(characterId) && !HeadlessRun() &&
-        gpu.HasSekaiLayout()) {
-        if (ShaderPacks().Find("project_sekai_toon") != nullptr) {
-            c.pack = "project_sekai_toon";
-            // save it as an ordinary choice so a later user switch (including "default shading") sticks; the auto flag only
-            // stops the app from auto-applying again after the user cleared it.
-            settings_.SetCharacterShader(characterId, c);
-            settings_.SetCharacterShaderAuto(characterId);
-            settings_.Save(settingsPath_);
-            toast_ = {Tr("프로젝트 세카이 모델"), Tr("세카이 툰 셰이더를 적용했습니다"), {}, false, timeSeconds_ + 6.0};
-        } else {
-            // The pack is online-gallery-only from now on: a detected Sekai model without it installed gets a one-time
-            // hint instead of silently doing nothing (remembered so it never repeats).
-            settings_.SetCharacterShaderAuto(characterId);
-            settings_.Save(settingsPath_);
-            toast_ = {Tr("프로젝트 세카이 모델"), Tr("온라인 갤러리에서 '프로젝트 세카이 툰' 셰이더를 받을 수 있습니다"),
-                      {}, false, timeSeconds_ + 6.0};
-        }
-    }
+    if (c.pack.empty()) SuggestShaderPack(gpu, characterId);
     return c;
+}
+
+void App::SuggestShaderPack(const GpuModel& gpu, const std::string& characterId) {
+    if (characterId.empty() || options_.shaderPackSet || HeadlessRun()) return;
+    if (!suggestChecked_.insert(characterId).second) return;
+    const ModelTraits traits = gpu.Traits();
+    for (const ShaderPack& p : ShaderPacks().Packs()) {
+        if (p.type != PackType::Surface || !p.Selectable() || !p.Suggests(traits)) continue;
+        if (settings_.ShaderSuggested(p.id, characterId)) continue;
+        settings_.SetShaderSuggested(p.id, characterId);
+        settings_.Save(settingsPath_);
+        toast_ = {Tr("셰이더 팩 추천"),
+                  "'" + p.name.Get(PackLanguage()) + "' " + Tr("셰이더가 이 모델에 잘 맞아 보여요 · 셰이더 메뉴에서 켜 보세요"),
+                  {}, false, timeSeconds_ + 6.0};
+        return;
+    }
 }
 
 void App::CheckShaderPackErrors() {
@@ -486,7 +482,7 @@ void App::DrawPackCompare(const char* id, ImDrawList* dl, uint64_t before, const
 
 // ---- picker ---------------------------------------------------------------------------------------------------------
 
-bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width) {
+bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width, const ModelTraits* traits) {
     const Palette& p = P();
     ShaderPackRegistry& reg = ShaderPacks();
     const std::string lang = PackLanguage();
@@ -559,7 +555,16 @@ bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width) 
             std::string sb = pk ? "v" + pk->version + (pk->authors.empty() ? "" : "  ·  " + PackAuthorLine(pk->authors))
                                 : std::string(Tr("앱 기본 셰이딩"));
             if (pk && !selectable) sb = Tr("사용할 수 없음 · 셰이더 탭에서 확인");
-            TextEllipsis(ldl, Font::Semibold, size::Small, ImVec2(x, ra.y + Dp(10.0f)), r, selectable ? p.ink : p.ink3, nm.c_str());
+            float nameR = r;
+            if (pk && selectable && traits && pk->Suggests(*traits)) {   // pack.json "suggest" fits this model
+                const char* tag = Tr("추천");
+                const float bw = TextSize(Font::Semibold, size::Caption, tag).x + Dp(16.0f);
+                const float nw = TextSize(Font::Semibold, size::Small, nm.c_str()).x;
+                const float bx = std::max(x, std::min(x + nw + Dp(6.0f), r - bw));
+                Badge(ldl, ImVec2(bx, ra.y + Dp(8.0f)), tag, p.accentSoft, p.accentInk);
+                nameR = bx - Dp(4.0f);
+            }
+            TextEllipsis(ldl, Font::Semibold, size::Small, ImVec2(x, ra.y + Dp(10.0f)), nameR, selectable ? p.ink : p.ink3, nm.c_str());
             TextEllipsis(ldl, Font::Regular, size::Caption, ImVec2(x, ra.y + Dp(30.0f)), r, selectable ? p.ink3 : p.warn,
                          sb.c_str());
             if (selected) Icon(ldl, icon::Check, 14.0f, ImVec2(rb.x - Dp(14.0f), (ra.y + rb.y) * 0.5f), p.accentInk);
@@ -720,7 +725,8 @@ void App::DrawStudioShaderRow(float w) {
         ImGui::Dummy(ImVec2(w, Dp(20.0f)));
     }
     ShaderChoice choice = m->shader;
-    bool changed = DrawShaderSelector("##studioshader", choice, w);
+    const ModelTraits studioTraits = m->gpu ? m->gpu->Traits() : ModelTraits{};
+    bool changed = DrawShaderSelector("##studioshader", choice, w, m->gpu ? &studioTraits : nullptr);
     if (options_.shaderPackSet) {
         PushFont(Font::Regular, size::Caption);
         ImGui::TextDisabled("%s", Tr("--shader-pack 이 이번 실행 동안 우선합니다"));

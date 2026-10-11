@@ -53,7 +53,9 @@ std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> BuildGeometryDescs(GpuModel& model, 
         d.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
         // a stage BLAS is built once: materials a material morph targets stay non-opaque so the ray
         // queries see their run-time alpha (RtGeometry). Character BLAS are rebuilt every frame.
-        const bool alphaTest = m.alphaTested || c.diffuse.w < 0.999f || (m.morphable && model.Role() == ModelRole::Stage);
+        const bool alphaTest = m.alphaTested || c.diffuse.w < 0.999f ||
+                               PackAlphaKeyFromClass(c.packClass) > 0.0f ||
+                               (m.morphable && model.Role() == ModelRole::Stage);
         d.Flags = (m.castShadow && !alphaTest) ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE
                                                : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
         d.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
@@ -479,7 +481,8 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
         for (uint32_t mi : rt.geometryMaterials) {
             const GpuModel::Material& m2 = m->Materials()[mi];
             const MaterialConstants& c = m->MaterialConstantsCpu()[mi];
-            const bool alphaTest = m2.alphaTested || c.diffuse.w < 0.999f ||
+            const float alphaKey = PackAlphaKeyFromClass(c.packClass);
+            const bool alphaTest = m2.alphaTested || c.diffuse.w < 0.999f || alphaKey > 0.0f ||
                                    (m2.morphable && m->Role() == ModelRole::Stage);
             RtGeometry e{};
             e.vertexSrv = rt.srv;
@@ -496,12 +499,13 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
             e.sphereSrv = m2.srvTable + 1;
             e.toonSrv = m2.srvTable + 2;
             e.addUvSrv = m->AddUvSrv();
+            e.alphaKey = alphaKey;
 
             if (isPtPack && curPackRecord < packRecordCapacity_) {
                 uint32_t recordIdx = (uint32_t)slotPackBase + curPackRecord;
                 RtPtPackRecord* rec = reinterpret_cast<RtPtPackRecord*>(
                     packRecordsMapped_ + recordIdx * sizeof(RtPtPackRecord));
-                rec->materialClass = c.packClass;
+                rec->materialClass = PackClassLow(c.packClass);
                 rec->headValid = headValid;
                 rec->texBase = texBase;
                 rec->texInfo = texInfo;

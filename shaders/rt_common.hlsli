@@ -55,7 +55,8 @@ struct RtGeometry {
     uint toonSrv;
     uint packSrv;
     uint addUvSrv;   // raw ByteAddressBuffer of the add-UV stream; 0xFFFFFFFF = none
-    uint _padAddUv[3];   // keeps the float4 block 16-byte aligned (mirror of ShaderInterop.h)
+    float alphaKey;  // pack alpha key (0 = off): cut pixels whose texture red < alphaKey at alpha evaluation
+    uint _padAddUv[2];   // keeps the float4 block 16-byte aligned (mirror of ShaderInterop.h)
     float4 texMul, texAdd, sphereMul, sphereAdd, toonMul, toonAdd;   // material morph factors
 };
 
@@ -143,11 +144,14 @@ float4 SampleBaseTexture(RtGeometry g, float2 uv, float lod) {
                           g.texMul, g.texAdd);
 }
 
-// Coverage of a candidate (diffuse alpha * texture alpha), mip 0.
+// Coverage of a candidate (diffuse alpha * texture alpha), mip 0. A pack alpha key cuts the pixel out
+// (returns 0) when the texture red is below the key, the same colour key the raster PSPack applies.
 float CandidateAlpha(RtGeometry g, uint prim, float2 bary) {
     if ((g.flags & MAT_HAS_TEXTURE) == 0) return g.diffuse.a;
     float2 uv = LoadUv(g, LoadTriangle(g, prim), bary);
-    return g.diffuse.a * SampleBaseTexture(g, uv, 0).a;
+    float4 tex = SampleBaseTexture(g, uv, 0);
+    if (g.alphaKey > 0.0 && tex.r < g.alphaKey) return 0.0;
+    return g.diffuse.a * tex.a;
 }
 
 // Albedo in gamma space, the same model as the raster pass (mmd.hlsl PSMain).

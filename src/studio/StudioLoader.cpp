@@ -14,7 +14,7 @@ namespace mmdx::studio {
 
 namespace {
 // The model's default shader-pack texture folder: the directory of the face texture the model's own MME files
-// reference (project_sekai_toon's face SDF). Never guesses names: only the asset's references are followed.
+// reference (e.g. a face SDF a pack samples). Never guesses names: only the asset's references are followed.
 std::filesystem::path ModelPackTextureFolder(const std::filesystem::path& modelPath) {
     const MmeHints hints = ReadMmeHints(modelPath);
     for (const MmeTexRef& t : hints.textures)

@@ -33,6 +33,31 @@ A pack can also draw the model's outline: `#define PACK_HAS_EDGE 1` at the top o
 `PackEdgeResult PackEdge(uint materialClass, float4 mmdEdgeColor, float mmdEdgeSize)` (colour in gamma space,
 `widthScale` multiplying the MMD outline width). Commented examples are in `surface.hlsl`.
 
+## Alpha key (`alphaKey`)
+
+A `classes` rule can carry `"alphaKey": <0..1>`: cut out every pixel whose texture red is below the value (additive-key
+sprites such as MME eye highlights). It applies in every render path (raster, RT, PT, offline GI). The key belongs to the
+class the rule assigns; when several rules of one class give different keys, the first one wins.
+
+```json
+"classes": [
+  { "class": "weapon", "texture": ["_ehl_"], "alphaKey": 0.45 }
+]
+```
+
+## Suggesting the pack for fitting models
+
+A pack can declare the model-data traits it fits; the app then tags it with "추천" in the pack pickers and shows a
+one-time toast when such a model has no shader choice yet. It never applies the pack by itself.
+
+```json
+"suggest": { "additionalUvsMin": 2, "toonMapMaterialsMin": 1 }
+```
+
+`additionalUvsMin` / `toonMapMaterialsMin` are optional non-negative integers; every given condition must hold
+(`toonMapMaterials` counts the materials whose own toon slot holds a UV-mapped, non-ramp image). Unknown keys and a
+missing `suggest` are fine.
+
 ## Docs
 
 The full guide (manifest fields, the `PackSurface` / `PackResult` contract, compiling and debugging) lives at

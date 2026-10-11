@@ -255,11 +255,13 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   `tools/pack_previews.py` has its shot): the Project Sekai MME look (hard terminator with the `_H` shadow bias, the `_S`
   shadow colour, the skin ramp, the uv1 face SDF and uv2 masks) from the model's own data only; `asset/MmeHints` follows the
   model's own `.emd` / `.fx` references (same-stem .emd, else the folder's only .emd; never folder / file-name guesses) to
-  find its face SDF and set a per-model default pack texture folder. Detection = `asset/SekaiLayout` `DetectSekaiLayout`
-  (>= 2 additional UVs + a non-ramp UV-mapped toon texture; `GpuModel::HasSekaiLayout()`), checked over the whole library by
-  `tools/sekai_detect_test` (self test + scan; 2026-10-12: 49 of 180 models, all Sekai rigs, no false positives). A detected
-  character with no saved choice gets the pack once (`characterShaderAuto` ini, toast) when it is installed, else a one-time
-  toast pointing at the gallery. Users fill their library their own way: nothing may depend on its layout or names.
+  find its face SDF and set a per-model default pack texture folder. Packs declare the model-data traits they fit in an
+  optional pack.json `"suggest"` block (`additionalUvsMin` / `toonMapMaterialsMin`; `ShaderPack::Suggests`), evaluated
+  generically over `ModelTraits` (`ComputeModelTraits`: additional UV count + non-ramp UV-mapped toon-slot materials;
+  `GpuModel::Traits()`), checked over the whole library by `tools/pack_suggest_test` (self test + scan). The app only
+  SUGGESTS such a pack: one toast per (pack id, character id) when a character with no saved shader choice matches the
+  first suggesting installed pack (remembered as `characterShaderSuggested` ini lines), a "추천" tag in the pack pickers,
+  and the choice is never set by the app. Users fill their library their own way: nothing may depend on its layout or names.
   API v2 (`kPackApiVersion` 2; apiVersion 1 packs still load): a pack may declare `"textures"` in pack.json (at most 16:
   `{ "file": "textures/x.png", "address": "wrap"|"clamp", "srgb": true }`, png/jpg/jpeg, paths inside the pack), uploaded
   once per pack (DEFAULT heap, `ScenePass::EnsurePackTextures`) and shared by every model using it; sampled with
@@ -273,7 +275,9 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   `characterShaderTextures=<folder>|<character id>`, `.mmdxproj` "shader"."textureFolder", the "텍스처 폴더" row under the
   pack's sliders); it wins over the pack-level folder, and ScenePass keeps one texture set per (pack id, folder).
   Class rules can match the material's diffuse texture path (`"texture": [...]`), not only its names: game texture
-  sets follow the texture sheet (hoyo_toon_v2 picks hair maps for anything on the hair sheet). A pack with all textures missing
+  sets follow the texture sheet (hoyo_toon_v2 picks hair maps for anything on the hair sheet). A class rule may carry
+  `"alphaKey": <0..1>` (colour-key cut-out: cut out pixels whose texture red is below the value, an additive-key
+  sprite such as an MME eye highlight; applies in every render path; the first rule of a class wins). A pack with all textures missing
   still compiles and renders. `PACK_HAS_EDGE` + `PackEdge` in surface.hlsl wire the pack into the edge pass (per-material
   outline colour + width scale; `PSEdgePack` / a `VSEdge` width-scale build from `PackPsos`, root param 12 bound there
   too); otherwise the edge pass is unchanged. PT and offline GI draw the same pack outlines: PT through `ScenePass::DrawPtEdges`

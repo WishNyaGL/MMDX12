@@ -460,9 +460,8 @@ private:
     bool StudioReplaceModel(int index, studio::StudioPackageModel& pm, std::string* note);
     void StudioClearEditState();                      // undo history, selection, clipboard, drags (model list changed)
     void StudioSelectModel(int index);                // -1 camera
-    // Auto-applies project_sekai_toon to a freshly added / opened character with the Sekai data layout and no shader
-    // choice yet (once, at load; a saved choice is never touched). Sets the model's shader + a toast.
-    void StudioAutoApplySekaiShader(studio::StudioModel& m);
+    // A freshly added / opened character with no shader choice: SuggestShaderPack for its library id (never applies).
+    void StudioSuggestShader(studio::StudioModel& m);
     DirectX::XMFLOAT4X4 StudioPropRoot(const studio::StudioModel& m) const;  // world matrix of a prop's origin
     void StudioSeekAudio();                           // audio cursor <- timeline time (audio offset)
     void DrawStudioAddMenu();                         // the outliner's "+" popup (library / file)
@@ -603,12 +602,17 @@ private:
     void DrawToast();           // completion / error toast (Select, Play)
     // shader packs (UiShaderPack.cpp)
     void ApplyShaderChoice(GpuModel& gpu, const ShaderChoice& choice);   // every frame, before UpdateMaterials
-    // Play character: the saved settings choice, the --shader-pack override, or auto-applied project_sekai_toon. When
-    // `gpu` has the Sekai data layout and the user has never chosen a shader for `characterId`, this selects the pack
-    // once (remembered as characterShaderAuto + a toast), so a later user choice is never overridden again.
+    // Play character: the saved settings choice or the --shader-pack override. A character with no saved choice also
+    // gets SuggestShaderPack (a toast only; the choice is never set by the app).
     ShaderChoice PlayShaderChoice(const GpuModel& gpu, const std::string& characterId);
+    // Shows ONE toast per (installed pack that Suggests the model's traits, character id), remembered in
+    // AppSettings::characterShaderSuggested. Skipped in headless / scripted runs and with --shader-pack. The first
+    // suggesting pack in registry order wins. Cheap to call every frame (checked ids are cached per session).
+    void SuggestShaderPack(const GpuModel& gpu, const std::string& characterId);
+    std::set<std::string> suggestChecked_;   // character ids SuggestShaderPack already evaluated this session
     // A row showing the chosen pack; click opens a searchable pack list (+ "셰이더 관리"). True = changed.
-    bool DrawShaderSelector(const char* id, ShaderChoice& choice, float width);
+    // `traits` = the shown model's data traits (null = unknown, e.g. the lobby): packs that Suggest them get a "추천" tag.
+    bool DrawShaderSelector(const char* id, ShaderChoice& choice, float width, const ModelTraits* traits = nullptr);
     bool DrawShaderPackParams(ShaderChoice& choice);                     // the chosen pack's sliders + reset
     // per-material class / default-shading list of a pack model (`maxHeight` caps the scrolling list)
     bool DrawMaterialShaderList(const char* id, ShaderChoice& choice, const PmxModel& pmx, float width, float maxHeight);

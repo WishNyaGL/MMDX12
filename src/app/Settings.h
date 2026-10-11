@@ -55,11 +55,16 @@ struct AppSettings {
     std::map<std::string, ShaderChoice> characterShaders;  // character id -> shader pack (absent = default shading)
     ShaderChoice CharacterShader(const std::string& id) const;
     void SetCharacterShader(const std::string& id, const ShaderChoice& choice);  // empty pack removes the entry
-    // Characters the app auto-applied a shader pack to (project_sekai_toon, HasSekaiLayout): a later user choice,
-    // including "default shading", is never overridden again. Persisted as "characterShaderAuto=<character id>" lines.
-    std::set<std::string> characterShaderAuto;
-    bool CharacterShaderAuto(const std::string& id) const { return characterShaderAuto.count(id) != 0; }
-    void SetCharacterShaderAuto(const std::string& id) { characterShaderAuto.insert(id); }
+    // (pack, character) pairs the app already suggested once (ShaderPack "suggest" fits the model's data): never
+    // suggested again. Persisted as "characterShaderSuggested=<pack id>|<character id>" lines (pack ids hold no '|').
+    // Old "characterShaderAuto" lines are ignored on load.
+    std::set<std::string> characterShaderSuggested;   // "<pack id>|<character id>"
+    bool ShaderSuggested(const std::string& packId, const std::string& characterId) const {
+        return characterShaderSuggested.count(packId + "|" + characterId) != 0;
+    }
+    void SetShaderSuggested(const std::string& packId, const std::string& characterId) {
+        characterShaderSuggested.insert(packId + "|" + characterId);
+    }
     // Persisted as "characterShaderTextures=<utf-8 folder>|<character id>" ini lines: the choice's
     // per-character texture folder (a separate line: the ids in characterShader= are already last).
     // Old ini files without it load unchanged.

@@ -1,6 +1,6 @@
 #pragma once
-// Follows the MikuMikuEffect references a model file carries, so a shader pack can find the model's own data (the
-// Project Sekai face SDF, light maps, ...) without guessing folder names. The model's ".emd" sidecar (MME convention:
+// Follows the MikuMikuEffect references a model file carries, so a shader pack can find the model's own data (a
+// face SDF, light maps, ...) without guessing folder names. The model's ".emd" sidecar (MME convention:
 // same stem as the model) lists the effects it loads (".fx" files, paths relative to the .emd); each .fx and its
 // #include chain declares textures with MME's ResourceName and a #define NAME "string"|number table. Nothing here
 // depends on where the user keeps the model: only the references the asset files themselves contain are followed.

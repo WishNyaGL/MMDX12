@@ -346,12 +346,14 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     out.name = {};
     out.description = {};
     out.recommendedFor = {};
+    out.suggest = {};
     out.authors.clear();
     out.license.clear();
     out.homepage.clear();
     out.repository.clear();
     out.tags.clear();
     out.rules.clear();
+    for (float& k : out.alphaKey) k = 0.0f;
     out.params.clear();
     out.textures.clear();
     out.hasEdge = false;
@@ -426,6 +428,29 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     out.description = Text(j, "description");
     out.recommendedFor = Text(j, "recommendedFor");
 
+    // suggest: optional {"additionalUvsMin": N, "toonMapMaterialsMin": M}; unknown keys ignored
+    if (auto it = j.find("suggest"); it != j.end()) {
+        if (!it->is_object()) {
+            problems.push_back("suggest must be an object");
+        } else {
+            out.suggest.present = true;
+            for (auto k = it->begin(); k != it->end(); ++k)
+                if (k.key() != "additionalUvsMin" && k.key() != "toonMapMaterialsMin")
+                    LOG_WARN("shader pack %s: suggest: unknown key '%s' (ignored)", out.id.c_str(), k.key().c_str());
+            const auto readInt = [&](const char* key, int& dst) {
+                auto k = it->find(key);
+                if (k == it->end()) return;
+                if (!k->is_number_integer() || k->get<long long>() < 0 || k->get<long long>() > 1000000) {
+                    problems.push_back(std::string("suggest.") + key + " must be a non-negative integer");
+                    return;
+                }
+                dst = (int)k->get<long long>();
+            };
+            readInt("additionalUvsMin", out.suggest.additionalUvsMin);
+            readInt("toonMapMaterialsMin", out.suggest.toonMapMaterialsMin);
+        }
+    }
+
     // authors: [{name, role, url}]; the old "author": "string" is one author
     if (auto a = j.find("author"); a != j.end() && a->is_string() && !a->get<std::string>().empty())
         out.authors.push_back({a->get<std::string>(), {}, {}});
@@ -489,6 +514,22 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
             if (auto m = r.find("texture"); m != r.end() && m->is_array())
                 for (const auto& s : *m)
                     if (s.is_string() && !s.get<std::string>().empty()) rule.texture.push_back(s.get<std::string>());
+            // "alphaKey": optional 0..1 colour-key cut-out for the class this rule assigns (bad type / range =
+            // a manifest problem, like the other pack.json fields). The first rule of a class sets its key.
+            if (auto a = r.find("alphaKey"); a != r.end() && !a->is_null()) {
+                if (!a->is_number()) {
+                    problems.push_back("class '" + Str(r, "class") + "': alphaKey must be a number between 0 and 1");
+                } else {
+                    const double v = a->get<double>();
+                    if (v < 0.0 || v > 1.0) {
+                        problems.push_back("class '" + Str(r, "class") + "': alphaKey must be between 0 and 1 (" +
+                                           std::to_string(v) + ")");
+                    } else {
+                        const uint32_t ci = (uint32_t)rule.cls;
+                        if (out.alphaKey[ci] == 0.0f) out.alphaKey[ci] = (float)v;   // first rule of the class wins
+                    }
+                }
+            }
             if (!rule.match.empty() || !rule.texture.empty()) out.rules.push_back(std::move(rule));
         }
     }

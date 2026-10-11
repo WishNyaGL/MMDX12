@@ -9,6 +9,7 @@
 // The renderer compiles a surface pack's PSOs on first use (ScenePass) and an effect pack's PSO on first frame
 // (PackEffectPass); a model opts in with GpuModel::SetShaderPack, the effect stack is RenderSettings::packEffects.
 // The registry is used from the main thread only.
+#include "asset/ModelTraits.h"
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -147,6 +148,14 @@ struct ShaderPack {
     std::string homepage, repository;   // http/https only
     std::vector<std::string> tags;      // lower-case words ("toon", "anime", "hoyoverse", ...)
     LocalizedText recommendedFor;       // which models it is made for (free text)
+    // "suggest": model-data traits the pack fits (all given conditions must hold). The app only SUGGESTS such a pack
+    // (one-time toast, badge in the pickers); it never applies it by itself.
+    struct Suggest {
+        bool present = false;
+        int additionalUvsMin = 0;       // "additionalUvsMin"
+        int toonMapMaterialsMin = 0;    // "toonMapMaterialsMin"
+    };
+    Suggest suggest;
     std::filesystem::path preview;      // dir/preview.png (or .jpg) when present, else empty
     std::filesystem::path previewBefore; // dir/preview_before.png (or .jpg) when present, else empty
     // files
@@ -174,6 +183,11 @@ struct ShaderPack {
         std::vector<std::string> texture;   // "texture": UTF-8 substrings of the material's diffuse texture path
     };
     std::vector<Rule> rules;              // first match wins; no match: Body
+    // Per-class alpha key (pack.json class rule "alphaKey", 0..1; 0 = off), indexed by PackClass: cut out every pixel
+    // whose texture red is below the key (additive-key sprites such as MME eye highlights) in every render path.
+    // A rule's key belongs to the CLASS it assigns; when several rules of one class give different keys the FIRST
+    // rule's value wins (a later rule of the same class does not overwrite it).
+    float alphaKey[6] = {0, 0, 0, 0, 0, 0};
     std::vector<ShaderPackParam> params;  // at most kPackMaxParams
     std::vector<PackTexture> textures;    // at most kPackMaxTextures; optional extra textures (PackSampleTex)
     bool hasEdge = false;                 // surface.hlsl sets PACK_HAS_EDGE: the pack draws the outlines too (PackEdge)
@@ -182,6 +196,11 @@ struct ShaderPack {
     PackStatus status = PackStatus::Ready;
     std::string statusMessage;            // English, for the log / the pack details (compiler output may be long)
 
+    // True when pack.json declares "suggest" and `t` meets every condition; false without "suggest".
+    bool Suggests(const ModelTraits& t) const {
+        return suggest.present && t.additionalUvCount >= suggest.additionalUvsMin &&
+               t.toonMapMaterials >= suggest.toonMapMaterialsMin;
+    }
     bool Selectable() const { return status == PackStatus::Ready || status == PackStatus::Compiled; }
     // `texture` = the material's diffuse texture path as stored in the PMX (empty without one).
     PackClass Classify(const std::string& name, const std::string& nameEn, const std::string& texture) const;

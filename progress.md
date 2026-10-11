@@ -1475,3 +1475,36 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   (12 new objects) uploaded, live manifest / exe object hashes match; website deployed: /latest.json -> 1.10.0 with
   manifest fields, gallery index lists project_sekai_toon 1.0.0 (apiVersion 6, minAppVersion 1.10.0, live zip SHA-256 =
   local), the zip passes the shipped 1.10.0 `pack_check --compile`; website commit 2d362eb pushed.
+
+## 2026-10-12 (2) - 1.10.1: generic pack "suggest", pack alphaKey, Sekai eye fix, Ray-MMD survey, 2.0.0 handoff
+- Direction correction (user): the engine must not know a game or a pack id and must not silently apply a pack; the library
+  is user-filled and models of one game differ between authors. 1.10.0's `asset/SekaiLayout` / `HasSekaiLayout` /
+  hardcoded `project_sekai_toon` auto-apply were replaced by: `asset/ModelTraits` (additional UV count, toon-map material
+  count), pack.json `"suggest": { additionalUvsMin, toonMapMaterialsMin }` (`ShaderPack::Suggests`), a one-time toast per
+  (pack, character) (`characterShaderSuggested` ini, old `characterShaderAuto` ignored) and a "추천" tag in the pack picker.
+  Nothing is applied automatically. `tools/pack_suggest_test` (35 self tests + library scan + `--pack` MATCH lines) replaces
+  `tools/sekai_detect_test`: the pack's rule matches the same 49 of 191 models (26 v4 rigs + 23 PS files).
+- Black eyes found: the eye-highlight material (`ehl`, `HL`) is an additive key sprite in the original MME (`additive_alpha`:
+  discard where the texture red < 0.45) but was drawn opaque and covered the iris, in the default shading as well. New
+  generic pack.json class-rule field `alphaKey` (0..1): materials of that class cut out pixels whose texture red is below
+  it, in raster, RT, PT and offline GI (encoded in `MaterialConstants::packClass` bits 8..15, `RtGeometry::alphaKey`,
+  `CandidateAlpha`). `project_sekai_toon` 1.0.2 uses it (class `weapon`, textures matching `_ehl_`). Checked: raster and PT
+  renders of 01_9001 (iris + highlight), the 7 ps_* rigs in raster (all faces fine; Kaito and Meiko need a smaller character
+  scale to fit the song camera), nimble_toon compiles / renders (no regression), `pack_check --compile` on the pack and
+  hoyo_toon(_v2). The PS rigs share the Sekai Model Pack v4 PMX data layout (3 additional UVs, `_S` toon slot, `_H` sphere
+  slot); they differ only in names, folders, material names, `_CharacterId` and two `.emd` files per folder.
+- Note on clean room: while diagnosing the eye I read `shader.fxsub` of a Sekai rig to learn the `additive_alpha` semantics
+  (one threshold). The pack itself is still written from a description of the look; no MME shader code is included.
+- Survey of `library/by StarNoodle495` (12 characters, 16 folders): no shared proprietary look. They are plain PMX (extra
+  UV only on EthanShax) meant for Ray-MMD PBR materials (163 material `.fx` in 9 sets incl. stage/moonlit_waves). A Ray-MMD
+  material `.fx` only writes a G-buffer (`GbufferParam`, shading model ids 0..10); lighting lives in the controller.
+  Decision (user): put PBR into the engine and fill it from Ray-MMD material data (and glTF/VRM), not a shader pack. Full
+  hand-off for the Opus session: `docs/handoff/2026-10-12-pbr-raymmd-2.0.0.md`.
+- Delegation: all code by opencode (deepseek-v4.1-flash, level default, smoke review) after a first attempt with a
+  subagent was stopped at the user's request; Claude did the diagnosis, the pack fixes, the renders and the survey.
+### Not verified
+- The suggestion toast / picker tag on screen (headless runs skip toasts by design); offline GI render of the pack; the
+  worker diffs were not read line by line (smoke review: builds, self tests, `pack_check`, renders).
+- Release 1.10.1 is NOT published (no GitHub release, delta manifest, website deploy or gallery upload yet); the web repo
+  holds the 1.0.2 pack and docs as a local commit.
+- `IsFlatFaceMaterial` (GpuModel.cpp) still decides the flat-face path by the material names face / eyelash / eyebrow.

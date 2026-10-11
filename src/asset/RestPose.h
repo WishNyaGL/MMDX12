@@ -1,7 +1,7 @@
 #pragma once
 // Rest-pose normalisation for native MMD models (PMX / PMD).
 // MMD motions are authored against an A-pose rig (upper arms about 38 degrees below horizontal) and VMD rotations are
-// relative to the model's rest pose. A model that rests in a T-pose (Project Sekai rips, many game rips) would dance with
+// relative to the model's rest pose. A model that rests in a T-pose (many game rips) would dance with
 // its arms raised, so on load the arm chains are rotated down to the A-pose: bone positions, vertices (skin-weighted),
 // vertex morphs, rigid bodies and joints. Bone frames in MMD are world-aligned, so VMD / bone-morph data need no change.
 #include "asset/PmxModel.h"
