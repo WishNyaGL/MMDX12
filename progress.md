@@ -1435,3 +1435,38 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 - Verified: liar_dancer, 5 performers (Aiden, Dan Heng, Felix, Sour Miku White / CWL), `--frames 600`: the 1.9.1 exe
   got stuck (52+ s after the first frame, freed by the user's pause), the fix ran 600 frames in ~3.8 s.
 - Release 1.9.2 (also carries the smart updater), notes dist/notes_1.9.2.md; delta manifest published for 1.9.2.
+
+## 2026-10-12 - Project Sekai Toon (gallery pack), pack API v6, content-based Sekai detection, CLI guide, release 1.10.0
+- Goal: the Sekai Model Pack v4 rigs (and the PS single-character rigs) ship MME `.fx` shaders MMDX12 cannot run.
+  Decision (Antigravity investigation, reviewed by Claude): no MME runtime (D3DX9 effects, ps_3_0, no G-buffer / motion
+  vectors / RT / PT / GI; 185 other MME files in the library are all different kinds); a clean-room shader pack + engine
+  plumbing instead. All 26 v4 rigs share one byte-identical shader (`_CharacterId 8`); the PS rigs use other ids (0 / 20),
+  so skin colours are sliders, not the game table.
+- Engine (pack API v6, `kPackApiVersion` 6): PmxLoader keeps additional UV1/UV2; `GpuAddUv` side stream in slot 4
+  (stride-0 dummy without them, like SDEF) + a bindless raw buffer for RT (`RtGeometry::addUvSrv`); `PackSurface` /
+  `PtPackIn` uv1/uv2, raw `_H` sphere-slot / `_S` toon-slot sampling at mesh UV (`PackSampleSphereUv`, `PackSampleToonUv`,
+  PT mirrors), `PackEdgeUv2`; the sphere texture is now bound for toon-map materials whatever the sphere mode.
+- `project_sekai_toon` 1.0.0 (online-gallery-only, MMDX12_Web `shader-packs/`, minAppVersion 1.10.0): hard terminator
+  with `_H` B bias, `_S` shadow colour, skin ramp, face SDF at uv1 (head-plane light angle), uv2 rim mask / outline width,
+  PT / GI via `PT_PACK_HAS_LIGHTING`. Clean room: the worker never read the library `.fx` files.
+- `asset/MmeHints`: follows the model's own `.emd` (same stem, else the folder's only one) -> `.fx` -> `#include` ->
+  `ResourceName` references to find the face SDF and set a per-model default pack texture folder. User rule: the library
+  is user-filled, nothing may depend on its folder / file names (memory + CLAUDE.md).
+- Detection `asset/SekaiLayout` (>= 2 additional UVs + a non-ramp toon texture) = `GpuModel::HasSekaiLayout()`; auto-apply
+  once per character (`characterShaderAuto` ini, toast) when the pack is installed, else a one-time gallery hint (4
+  languages). `tools/sekai_detect_test`: 11 self tests + library scan: 180 models, 49 detected, all Sekai rigs (26 v4 + 23
+  PS files), no false positives (pjsk stages with 3 additional UVs, Genshin / Star Rail / ER rigs rejected).
+- CLI guide ("Running MMDX12.exe from the CLI") in CLAUDE.md and the new AGENTS.md: `--autoplay` is required to enter a
+  scene, `--seek --paused --no-physics` gives bit-identical frames (measured: 113k px run-to-run noise with `--seek` only,
+  1.2k with `--paused`, 0 with `--no-physics`), one ini per build dir.
+- Delegation: investigation by Antigravity; engine, pack, detection test by opencode (deepseek-v4.1-flash, level default,
+  smoke review); Claude fixed the .emd fallback, wrote the guide, previews, release.
+### Pitfalls
+- `pack_previews.py` connects to ANY running app with an MCP pipe (it used a `build/bin` instance started ~16 min earlier,
+  then quit it). Close other instances first.
+- `pack_check` usage is `pack_check <dir|zip> --compile` (the flag after the path).
+### Not verified
+- Auto-apply toast / gallery hint and studio auto-apply on screen (headless runs skip them by design); PT / offline GI
+  renders with the pack (compiled only).
+- Look tuning against the game: faces / skin read slightly bright; outlines use the material edge colour, not `_S`
+  (`PackEdge` has no mesh UV).

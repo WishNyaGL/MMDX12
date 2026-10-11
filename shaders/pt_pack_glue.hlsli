@@ -7,11 +7,19 @@
 static uint s_PtPackTexBase = 0;
 static uint s_PtPackTexCount = 0;
 static uint s_PtPackClampMask = 0;
+// Hit geometry of the current pack surface (set by PtPackBindRecord), for the sphere / toon helpers.
+static RtGeometry s_PtPackGeom;
+static bool s_PtPackGeomValid = false;
 
 void PtPackBindRecord(RtPtPackRecord rec) {
     s_PtPackTexBase = rec.texBase;
     s_PtPackTexCount = rec.texInfo & 0xFFu;
     s_PtPackClampMask = (rec.texInfo >> 8) & 0xFFFFu;
+}
+
+void PtPackBindGeometry(RtGeometry g) {
+    s_PtPackGeom = g;
+    s_PtPackGeomValid = true;
 }
 
 uint PtPackTexCount() {
@@ -38,6 +46,23 @@ float4 PtPackSampleTexLevel(uint i, float2 uv, float lod) {
 
 float4 PtPackSampleTex(uint i, float2 uv) {
     return PtPackSampleTexLevel(i, uv, 0.0);
+}
+
+// Sekai sphere-slot / toon-slot textures of the hit geometry (set by PtPackBindGeometry). Explicit
+// LOD 0, wrap addressing, material-morph factors applied; white when absent / no geometry.
+bool PtPackHasSphereTex() { return s_PtPackGeomValid && (s_PtPackGeom.flags & MAT_HAS_SPHERE_TEX) != 0; }
+float4 PtPackSampleSphereUv(float2 uv) {
+    if (!PtPackHasSphereTex()) return float4(1, 1, 1, 1);
+    RtGeometry g = s_PtPackGeom;
+    float4 c = gBindlessTex[NonUniformResourceIndex(g.sphereSrv)].SampleLevel(gRtWrap, uv, 0);
+    return ApplyTexFactor(c, g.sphereMul, g.sphereAdd);
+}
+bool PtPackHasToonMap() { return s_PtPackGeomValid && (s_PtPackGeom.flags & MAT_TOON_MAP) != 0; }
+float4 PtPackSampleToonUv(float2 uv) {
+    if (!PtPackHasToonMap()) return float4(1, 1, 1, 1);
+    RtGeometry g = s_PtPackGeom;
+    float4 c = gBindlessTex[NonUniformResourceIndex(g.toonSrv)].SampleLevel(gRtWrap, uv, 0);
+    return ApplyTexFactor(c, g.toonMul, g.toonAdd);
 }
 
 RtPtPackRecord LoadPtPackRecord(uint packSrv) {

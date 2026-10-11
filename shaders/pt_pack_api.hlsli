@@ -8,8 +8,10 @@
 
 // API version gates a pack can #ifdef, so a pack written for a newer contract still compiles on an
 // older app (the macro is simply absent there). PT_PACK_API_LIGHTING: PtPackLighting /
-// PackEvaluateLighting and the engine reads of it.
+// PackEvaluateLighting and the engine reads of it. PT_PACK_API_ADDUV: PtPackIn::uv1 / uv2 and the
+// sphere-slot / toon-slot helpers below.
 #define PT_PACK_API_LIGHTING 1
+#define PT_PACK_API_ADDUV 1
 
 // Material classes: pack.json "classes" rules map PMX material names to these ids.
 #ifndef PACK_BODY
@@ -29,6 +31,8 @@ struct PtPackIn {
     float3 normal;        // shading normal
     float3 V;             // towards the camera
     float2 uv;
+    float4 uv1;           // PMX additional UV1 (zero for models without additional UVs)
+    float4 uv2;           // PMX additional UV2 (zero for models without additional UVs)
     float3 L;             // towards the light
     float sunVis;         // 0..1, from the traced shadow ray
     float3 baseColor;     // linear texture * material diffuse, no lighting
@@ -68,5 +72,14 @@ float4 PtPackSampleTex(uint i, float2 uv);
 float4 PtPackSampleTexLevel(uint i, float2 uv, float lod);
 uint PtPackTexCount();
 float2 PtPackTexSize(uint i);
+
+// Sekai sphere-slot / toon-slot textures (API v6). The hit geometry's raw sphere / toon textures,
+// sampled at a mesh UV with explicit LOD 0 and wrap addressing, white when absent. The sphere slot
+// of a Sekai-layout material is the UV-space parameter mask (_H), the toon slot the shadow colour
+// (_S). Implemented in pt_pack_glue.hlsli; the material-morph factors are applied.
+bool PtPackHasSphereTex();
+float4 PtPackSampleSphereUv(float2 uv);
+bool PtPackHasToonMap();
+float4 PtPackSampleToonUv(float2 uv);
 
 #endif // PT_PACK_API_HLSLI

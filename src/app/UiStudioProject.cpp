@@ -540,6 +540,7 @@ void App::StudioPollJobs() {
                 auto sm = std::make_unique<StudioModel>();
                 sm->name = pm.name;
                 sm->libraryId = pm.libraryId;
+                sm->defaultPackTextureFolder = pm.defaultPackTextureFolder;
                 sm->kind = pm.kind;
                 sm->visible = pm.visible;
                 sm->uid = d.nextUid++;
@@ -552,6 +553,8 @@ void App::StudioPollJobs() {
                     LOG_WARN("studio: GPU upload failed: %s", pm.name.c_str());
                     continue;
                 }
+                sm->gpu->SetDefaultPackTextureFolder(pm.defaultPackTextureFolder);
+                StudioAutoApplySekaiShader(*sm);   // Sekai-layout character with no shader choice -> project_sekai_toon
                 sm->BuildRowGroups();
                 sm->inst->UpdatePose();
                 // the rest of a replacing library stage goes right after the replaced part (stage parts come first)
@@ -658,6 +661,7 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
     m.pmx = pm.pmx;
     m.inst = std::make_unique<ModelInstance>(pm.pmx);
     m.gpu = std::move(gpu);
+    m.defaultPackTextureFolder = pm.defaultPackTextureFolder;
     // keys stay keyed by name; tracks the new model lacks are kept (saved / exported as they were)
     m.motion.CanonicalizeNames(*m.pmx);
     m.motion.modelName = m.pmx->name;
@@ -693,6 +697,26 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
     LOG_INFO("studio: replaced model %d with %s (%s; unmatched tracks: %d bones, %d morphs; props without bone: %d)", index,
              pm.name.c_str(), PathToUtf8(m.path).c_str(), missingBones, missingMorphs, orphanProps);
     return true;
+}
+
+void App::StudioAutoApplySekaiShader(studio::StudioModel& m) {
+    if (m.shader.pack.empty() && m.kind == studio::ModelKind::Character && m.gpu && m.gpu->HasSekaiLayout() &&
+        !options_.shaderPackSet && !HeadlessRun()) {
+        if (ShaderPacks().Find("project_sekai_toon") != nullptr) {
+            m.shader.pack = "project_sekai_toon";
+            ++studio_->projectVersion;   // saved with the project; a later user switch is never overridden
+            toast_ = {Tr("프로젝트 세카이 모델"), Tr("세카이 툰 셰이더를 적용했습니다"), {}, false, timeSeconds_ + 6.0};
+        } else {
+            // The pack is online-gallery-only from now on: a detected Sekai model without it installed gets a one-time
+            // hint instead of silently doing nothing (remembered so it never repeats).
+            if (!m.libraryId.empty() && !settings_.CharacterShaderAuto(m.libraryId)) {
+                settings_.SetCharacterShaderAuto(m.libraryId);
+                settings_.Save(settingsPath_);
+                toast_ = {Tr("프로젝트 세카이 모델"),
+                          Tr("온라인 갤러리에서 '프로젝트 세카이 툰' 셰이더를 받을 수 있습니다"), {}, false, timeSeconds_ + 6.0};
+            }
+        }
+    }
 }
 
 void App::StudioSelectModel(int index) {

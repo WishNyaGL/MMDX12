@@ -66,6 +66,7 @@ enum MaterialShaderFlags : uint32_t {
     MatFlag_Stage         = 1u << 5,  // material belongs to a stage model (floor gloss, no rim)
     MatFlag_ToonMap       = 1u << 6,  // "toon" is a UV-mapped shadow-colour texture (Project Sekai style)
     MatFlag_FlatShade     = 1u << 7,  // no N.L modelling (faces): only cast shadows darken
+    MatFlag_HasSphereTex  = 1u << 8,  // a real sphere-slot texture is bound (not the white fallback)
 };
 
 struct MaterialConstants {            // b1, one 256-byte slot per material
@@ -130,6 +131,15 @@ struct GpuSdef {
 };
 static_assert(sizeof(GpuSdef) == 40, "GpuSdef layout");
 
+// Vertex buffer slot 4 (static): additional UV1 / UV2 per vertex (Project Sekai MME models). Models
+// without additional UVs bind one zero element with stride 0. Also exposed to ray tracing as a raw
+// (ByteAddress) SRV (GpuModel::AddUvSrv()).
+struct GpuAddUv {
+    float uv1[4];        // TEXCOORD8  additional UV1
+    float uv2[4];        // TEXCOORD9  additional UV2
+};
+static_assert(sizeof(GpuAddUv) == 32, "GpuAddUv layout");
+
 // ---- ray tracing (mirror of shaders/rt_common.hlsli) -------------------------------------
 
 // Skinned world-space vertex written by shaders/skin.hlsl, read by BLAS builds and ray
@@ -166,7 +176,7 @@ struct RtPtPackRecord {
 static_assert(sizeof(RtPtPackRecord) == 144, "RtPtPackRecord layout");
 
 // One entry per BLAS geometry. TLAS InstanceID = index of the model's first entry, so a hit's
-// entry is gGeometries[CommittedInstanceID() + CommittedGeometryIndex()]. 176 bytes.
+// entry is gGeometries[CommittedInstanceID() + CommittedGeometryIndex()]. 192 bytes.
 struct RtGeometry {
     uint32_t vertexSrv;    // SrvHeap index of a raw SRV over the model's RtVertex buffer
     uint32_t indexSrv;     // SrvHeap index of a raw SRV over the model's uint32 index buffer
@@ -179,9 +189,11 @@ struct RtGeometry {
     uint32_t sphereSrv;    // srvTable + 1
     uint32_t toonSrv;      // srvTable + 2
     uint32_t packSrv;      // SrvHeap index of raw ByteAddressBuffer holding RtPtPackRecord (when RtGeom_PtPack)
+    uint32_t addUvSrv;     // SrvHeap index of raw ByteAddressBuffer with the add-UV stream (0xFFFFFFFF = none)
+    uint32_t _padAddUv[3]; // keeps the float4 block 16-byte aligned (StructuredBuffer stride = 192)
     // material morph texture factors, as MaterialConstants::texMul..toonAdd
     DirectX::XMFLOAT4 texMul, texAdd, sphereMul, sphereAdd, toonMul, toonAdd;
 };
-static_assert(sizeof(RtGeometry) == 176, "RtGeometry layout");
+static_assert(sizeof(RtGeometry) == 192, "RtGeometry layout");
 
 } // namespace mmdx

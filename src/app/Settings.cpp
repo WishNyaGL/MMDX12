@@ -221,6 +221,10 @@ bool AppSettings::Load(const std::filesystem::path& file) {
                 i >= kMaterialPackOff && i <= (int)PackClass::Weapon)
                 characterShaders[value.substr(a + 1, b - a - 1)].materials[value.substr(b + 1)] = i;
         }
+        else if (key == "characterShaderAuto") {
+            // characterShaderAuto=<character id>: the app auto-applied a shader pack (never override the user after)
+            if (!value.empty()) characterShaderAuto.insert(value);
+        }
         else if (key == "packTextureFolder") {
             // packTextureFolder=<pack id>|<utf-8 folder>
             const size_t bar = value.find('|');
@@ -426,6 +430,7 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     }
     for (const auto& [id, dir] : packTextureFolders)
         std::fprintf(f, "packTextureFolder=%s|%s\n", id.c_str(), dir.c_str());
+    for (const std::string& id : characterShaderAuto) std::fprintf(f, "characterShaderAuto=%s\n", id.c_str());
     for (const EffectStackEntry& e : effectStack) {
         std::string list;
         for (const auto& [k, v] : e.params) {

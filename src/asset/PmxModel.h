@@ -26,6 +26,7 @@ struct PmxVertex {
     float boneWeight[4] = {0, 0, 0, 0};
     XMFLOAT3 sdefC{}, sdefR0{}, sdefR1{};  // only meaningful for SDEF
     float edgeScale = 1.0f;
+    XMFLOAT4 addUv[2]{};   // additional UV1, UV2 (zero when the file has fewer)
 };
 
 enum PmxMaterialFlag : uint8_t {
@@ -158,6 +159,7 @@ struct PmxDisplayFrame {
 struct PmxModel {
     std::filesystem::path sourcePath;  // absolute path of the loaded .pmx
     float version = 2.0f;
+    int additionalUvCount = 0;         // header's additional-UV count (0..4)
     std::string name, nameEn, comment, commentEn;
     std::vector<PmxVertex> vertices;
     std::vector<uint32_t> indices;     // triangle list, already widened to 32-bit

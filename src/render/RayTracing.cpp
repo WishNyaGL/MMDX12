@@ -495,6 +495,7 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
             e.textureSrv = m2.srvTable;
             e.sphereSrv = m2.srvTable + 1;
             e.toonSrv = m2.srvTable + 2;
+            e.addUvSrv = m->AddUvSrv();
 
             if (isPtPack && curPackRecord < packRecordCapacity_) {
                 uint32_t recordIdx = (uint32_t)slotPackBase + curPackRecord;

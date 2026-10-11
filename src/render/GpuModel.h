@@ -76,6 +76,11 @@ public:
     bool PackActive() const;
     const std::filesystem::path& ShaderTextureFolder() const { return packTextureFolder_; }
 
+    // The model's default pack texture folder: where its face SDF / light maps live (found through the model's own MME
+    // files by asset/MmeHints), used when a ShaderChoice has no explicit textureFolder. Empty when none was found.
+    void SetDefaultPackTextureFolder(const std::filesystem::path& folder) { defaultPackTextureFolder_ = folder; }
+    const std::filesystem::path& DefaultPackTextureFolder() const { return defaultPackTextureFolder_; }
+
     const std::string& Name() const { return name_; }
     ModelRole Role() const { return role_; }
     uint32_t BoneCount() const { return boneCount_; }
@@ -90,6 +95,13 @@ public:
     const D3D12_VERTEX_BUFFER_VIEW& SdefBufferView() const { return sdefVbv_; }
     bool HasSdef() const { return hasSdef_; }
     ID3D12Resource* SdefBuffer() const { return sdef_.Get(); }
+    // Slot 4: GpuAddUv per vertex (stride 0, one zero element, when the model has no additional UV).
+    const D3D12_VERTEX_BUFFER_VIEW& AddUvBufferView() const { return addUvVbv_; }
+    bool HasAdditionalUv() const { return hasAdditionalUv_; }
+    // Raw (ByteAddress) SRV heap index over the add-UV buffer; 0xFFFFFFFF when the model has none.
+    uint32_t AddUvSrv() const { return addUvSrv_; }
+    // Project Sekai layout: >= 2 additional UVs and at least one toon-map material.
+    bool HasSekaiLayout() const;
     D3D12_GPU_VIRTUAL_ADDRESS BoneBuffer(uint64_t frame) const;      // StructuredBuffer<float4x4> (t0)
     D3D12_GPU_VIRTUAL_ADDRESS PrevBoneBuffer(uint64_t frame) const;  // previous frame (t4)
     const DirectX::XMFLOAT4X4* BoneMatricesCpu(uint64_t frame) const {
@@ -136,7 +148,7 @@ private:
     Dx12Context* ctx_ = nullptr;
     std::string name_;
     uint32_t boneCount_ = 0, vertexCount_ = 0, indexCount_ = 0;
-    ComPtr<ID3D12Resource> vb_, ib_, sdef_;
+    ComPtr<ID3D12Resource> vb_, ib_, sdef_, addUv_;
     // MaterialConstants ring (UPLOAD heap, persistently mapped): kRing entries of materialCount * 256 B.
     ComPtr<ID3D12Resource> materialCb_;
     uint8_t* materialMapped_ = nullptr;
@@ -150,6 +162,10 @@ private:
     D3D12_INDEX_BUFFER_VIEW ibv_{};
     D3D12_VERTEX_BUFFER_VIEW sdefVbv_{};
     bool hasSdef_ = false;
+    D3D12_VERTEX_BUFFER_VIEW addUvVbv_{};
+    bool hasAdditionalUv_ = false;
+    uint32_t addUvSrv_ = DescriptorHeap::kInvalid;
+    int additionalUvCount_ = 0;   // PMX header count (0..4)
     ModelRole role_ = ModelRole::Character;
     DirectX::XMFLOAT3 boundsMin_{}, boundsMax_{};
     ComPtr<ID3D12Resource> boneBuf_[kRing];
@@ -171,6 +187,7 @@ private:
     std::string packId_;
     uint32_t packGeneration_ = 0;
     std::filesystem::path packTextureFolder_;
+    std::filesystem::path defaultPackTextureFolder_;   // model's own MME-derived pack texture folder (fallback)
     PackParamValues packParams_{};
     MaterialClassOverrides packOverrides_{};
 };

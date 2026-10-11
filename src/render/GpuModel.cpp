@@ -2,6 +2,7 @@
 #include "render/GpuModel.h"
 #include "asset/PmxModel.h"
 #include "asset/ImageLoader.h"
+#include "asset/SekaiLayout.h"
 #include "render/ShaderInterop.h"
 #include "core/Log.h"
 #include <directx/d3dx12.h>
@@ -18,27 +19,6 @@ DirectX::XMFLOAT4X4 Identity4x4() {
     DirectX::XMFLOAT4X4 r;
     DirectX::XMStoreFloat4x4(&r, DirectX::XMMatrixIdentity());
     return r;
-}
-
-// A toon ramp is a vertical gradient: every row is (near) one colour. Models made for the
-// Project Sekai MME shader put a UV-mapped shadow-colour texture in the toon slot instead.
-bool IsToonRamp(const ImageRGBA8& img) {
-    if (img.Empty()) return true;
-    const ImageRGBA8::Level& l = img.mips[0];
-    if (l.width <= 2) return true;
-    const uint32_t step = std::max(1u, l.height / 64);
-    uint64_t dev = 0, n = 0;
-    for (uint32_t y = 0; y < l.height; y += step) {
-        const uint8_t* row = &l.pixels[(size_t)y * l.width * 4];
-        for (int ch = 0; ch < 3; ++ch) {
-            uint32_t sum = 0;
-            for (uint32_t x = 0; x < l.width; ++x) sum += row[x * 4 + ch];
-            const int mean = (int)(sum / l.width);
-            for (uint32_t x = 0; x < l.width; ++x) dev += (uint32_t)std::abs(row[x * 4 + ch] - mean);
-            n += l.width;
-        }
-    }
-    return dev < n * 4;  // mean absolute deviation along x below ~1.5%
 }
 
 // Face-like material names of the Project Sekai rigs (their Face.fx uses an SDF face map we
@@ -70,6 +50,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     ctx_ = &ctx;
     role_ = role;
     name_ = pmx.name;
+    additionalUvCount_ = pmx.additionalUvCount;
     boneCount_ = (uint32_t)pmx.bones.size();
     vertexCount_ = (uint32_t)pmx.vertices.size();
     indexCount_ = (uint32_t)pmx.indices.size();
@@ -177,7 +158,63 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     sdefVbv_.SizeInBytes = (UINT)(sdef.size() * sizeof(GpuSdef));
     sdefVbv_.StrideInBytes = hasSdef_ ? sizeof(GpuSdef) : 0;
 
+    // Additional UVs (slot 4): uploaded only when the model has any (PMX header count > 0).
+    hasAdditionalUv_ = pmx.additionalUvCount > 0 && vertexCount_ > 0;
+    std::vector<GpuAddUv> addUvs;
+    if (hasAdditionalUv_) {
+        addUvs.resize(vertexCount_);
+        for (uint32_t v = 0; v < vertexCount_; ++v) {
+            const PmxVertex& src = pmx.vertices[v];
+            addUvs[v].uv1[0] = src.addUv[0].x; addUvs[v].uv1[1] = src.addUv[0].y;
+            addUvs[v].uv1[2] = src.addUv[0].z; addUvs[v].uv1[3] = src.addUv[0].w;
+            addUvs[v].uv2[0] = src.addUv[1].x; addUvs[v].uv2[1] = src.addUv[1].y;
+            addUvs[v].uv2[2] = src.addUv[1].z; addUvs[v].uv2[3] = src.addUv[1].w;
+        }
+    } else {
+        addUvs.assign(1, GpuAddUv{});
+    }
+    addUv_ = batch.CreateBuffer(addUvs.data(), addUvs.size() * sizeof(GpuAddUv),
+                                D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
+                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                L"model.adduv");
+    if (!addUv_) {
+        LOG_ERROR("model '%s': additional UV buffer creation failed", name_.c_str());
+        return false;
+    }
+    addUvVbv_.BufferLocation = addUv_->GetGPUVirtualAddress();
+    addUvVbv_.SizeInBytes = (UINT)(addUvs.size() * sizeof(GpuAddUv));
+    addUvVbv_.StrideInBytes = hasAdditionalUv_ ? sizeof(GpuAddUv) : 0;
+
+    // Bindless raw SRV over the add-UV buffer (ray tracing reads it as a ByteAddressBuffer).
+    addUvSrv_ = DescriptorHeap::kInvalid;
+    if (hasAdditionalUv_) {
+        const uint32_t alloc = ctx.SrvHeap().Allocate(1);
+        if (alloc == DescriptorHeap::kInvalid) {
+            LOG_ERROR("model '%s': out of SRV descriptors (additional UV)", name_.c_str());
+            return false;
+        }
+        addUvSrv_ = alloc;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;
+        srv.Buffer.NumElements = (UINT)(addUvs.size() * (sizeof(GpuAddUv) / 4));
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        ctx.Device()->CreateShaderResourceView(addUv_.Get(), &srv, ctx.SrvHeap().Cpu(alloc));
+    }
+
     // Referenced texture indices.
+    // Sekai layout: a toon slot holding a UV-mapped shadow colour (_S) makes the sphere slot a
+    // UV-space parameter mask (_H), so the sphere texture is bound whatever its PMX sphere mode.
+    auto ToonMapMaterial = [&](const PmxMaterial& m) {
+        if (m.sharedToon || m.toonIndex < 0 || (size_t)m.toonIndex >= textures.size()) return false;
+        if (textures[m.toonIndex].Empty()) return false;
+        return !IsToonRampImage(textures[m.toonIndex]);
+    };
+    auto SphereUsed = [&](const PmxMaterial& m) {
+        const bool mode = m.sphereMode == PmxSphereMode::Multiply || m.sphereMode == PmxSphereMode::Add;
+        return mode || (ToonMapMaterial(m) && m.sphereTextureIndex >= 0);
+    };
     auto CollectTextureIndex = [&](std::vector<int32_t>& out, int32_t i) {
         if (i < 0 || (size_t)i >= textures.size()) return;
         if (textures[i].Empty()) return;
@@ -186,8 +223,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     std::vector<int32_t> referenced;
     for (const PmxMaterial& m : pmx.materials) {
         CollectTextureIndex(referenced, m.textureIndex);
-        if (m.sphereMode == PmxSphereMode::Multiply || m.sphereMode == PmxSphereMode::Add)
-            CollectTextureIndex(referenced, m.sphereTextureIndex);
+        if (SphereUsed(m)) CollectTextureIndex(referenced, m.sphereTextureIndex);
         if (!m.sharedToon) CollectTextureIndex(referenced, m.toonIndex);
     }
     textures_.assign(textures.size(), {});
@@ -215,7 +251,12 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             (m.sphereMode == PmxSphereMode::Multiply || m.sphereMode == PmxSphereMode::Add) &&
             m.sphereTextureIndex >= 0 && (size_t)m.sphereTextureIndex < textures_.size() &&
             textures_[m.sphereTextureIndex];
+        // A real sphere-slot texture is bound (Mode Multiply/Add, or the Sekai toon-map layout).
+        const bool sphereBound = sphereRef || (SphereUsed(m) && m.sphereTextureIndex >= 0 &&
+                                               (size_t)m.sphereTextureIndex < textures_.size() &&
+                                               textures_[m.sphereTextureIndex]);
         if (hasTex) c.flags |= MatFlag_HasTexture;
+        if (sphereBound) c.flags |= MatFlag_HasSphereTex;
         if (sphereRef) {
             if (m.sphereMode == PmxSphereMode::Multiply) c.flags |= MatFlag_SphereMul;
             if (m.sphereMode == PmxSphereMode::Add) c.flags |= MatFlag_SphereAdd;
@@ -224,7 +265,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             c.flags |= MatFlag_HasToon;
         } else if (m.toonIndex >= 0 && (size_t)m.toonIndex < textures_.size() && textures_[m.toonIndex]) {
             c.flags |= MatFlag_HasToon;
-            if (!IsToonRamp(textures[m.toonIndex])) {
+            if (!IsToonRampImage(textures[m.toonIndex])) {
                 // Sekai layout: toon = shadow colour (_S), sphere = UV-space parameter mask (_H),
                 // which must not be added as an environment sphere.
                 c.flags |= MatFlag_ToonMap;
@@ -335,6 +376,10 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         if ((m.sphereMode == PmxSphereMode::Multiply || m.sphereMode == PmxSphereMode::Add) &&
             m.sphereTextureIndex >= 0 && (size_t)m.sphereTextureIndex < textures_.size() &&
             textures_[m.sphereTextureIndex])
+            device->CreateShaderResourceView(textures_[m.sphereTextureIndex].Get(), &srv,
+                                             ctx.SrvHeap().Cpu(alloc + 1));
+        else if ((consts[mIdx].flags & MatFlag_HasSphereTex) && m.sphereTextureIndex >= 0 &&
+                 (size_t)m.sphereTextureIndex < textures_.size() && textures_[m.sphereTextureIndex])
             device->CreateShaderResourceView(textures_[m.sphereTextureIndex].Get(), &srv,
                                              ctx.SrvHeap().Cpu(alloc + 1));
         else
@@ -507,6 +552,13 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
     for (uint64_t& v : materialEntryVersion_) v = ~0ull;
 }
 
+bool GpuModel::HasSekaiLayout() const {
+    if (!hasAdditionalUv_ || additionalUvCount_ < 2) return false;
+    for (const MaterialConstants& c : materialConsts_)
+        if (c.flags & MatFlag_ToonMap) return true;
+    return false;
+}
+
 bool GpuModel::PackActive() const {
     if (packId_.empty()) return false;
     for (const Material& m : materials_)
@@ -527,6 +579,8 @@ D3D12_GPU_VIRTUAL_ADDRESS GpuModel::PrevBoneBuffer(uint64_t frame) const {
 void GpuModel::Destroy() {
     if (!ctx_) return;
     if (rt_.srv != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(rt_.srv, 2);
+    if (addUvSrv_ != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(addUvSrv_, 1);
+    addUvSrv_ = DescriptorHeap::kInvalid;
     rt_ = RtResources{};
     materialConsts_.clear();
     baseConsts_.clear();
@@ -553,6 +607,9 @@ void GpuModel::Destroy() {
     sdef_.Reset();
     sdefVbv_ = {};
     hasSdef_ = false;
+    addUv_.Reset();
+    addUvVbv_ = {};
+    hasAdditionalUv_ = false;
     materialCb_.Reset();
     textures_.clear();
     materials_.clear();

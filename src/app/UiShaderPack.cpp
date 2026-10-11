@@ -17,6 +17,7 @@
 #include "core/I18n.h"
 #include "core/TextUtil.h"
 #include "render/ShaderPack.h"
+#include "render/GpuModel.h"
 #include "studio/StudioDoc.h"
 #include "ui_probe/UiProbe.h"
 #include "imgui.h"
@@ -88,9 +89,12 @@ void App::ApplyShaderChoice(GpuModel& gpu, const ShaderChoice& choice) {
         gpu.SetShaderPack(nullptr, PackParamValues{}, {});
         return;
     }
-    // per-character texture folder: the choice's folder, else the pack-level one (registry setting)
+    // per-character texture folder: the choice's folder, else the model's own default (found through its MME files),
+    // else the pack-level one (registry setting)
     const std::filesystem::path folder =
-        choice.textureFolder.empty() ? ShaderPacks().TextureFolder(choice.pack) : Utf8ToPath(choice.textureFolder);
+        !choice.textureFolder.empty()        ? Utf8ToPath(choice.textureFolder)
+        : !gpu.DefaultPackTextureFolder().empty() ? gpu.DefaultPackTextureFolder()
+                                             : ShaderPacks().TextureFolder(choice.pack);
     gpu.SetShaderPack(pack, pack->Resolve(choice.params), folder, choice.materials);
 }
 
@@ -235,15 +239,37 @@ bool App::DrawMaterialShaderList(const char* id, ShaderChoice& choice, const Pmx
     return changed;
 }
 
-ShaderChoice App::PlayShaderChoice() const {
+ShaderChoice App::PlayShaderChoice(const GpuModel& gpu, const std::string& characterId) {
     if (!scene_ || screen_ == Screen::BenchRun || screen_ == Screen::BenchRender) return {};  // fixed workload
-    ShaderChoice c = scene_->characterId.empty() ? ShaderChoice{} : settings_.CharacterShader(scene_->characterId);
+    ShaderChoice c = characterId.empty() ? ShaderChoice{} : settings_.CharacterShader(characterId);
     if (options_.shaderPackSet) {   // --shader-pack: this run only
         if (c.pack != options_.shaderPack) {
             c.params.clear();
             c.textureFolder.clear();
         }
         c.pack = options_.shaderPack;
+        return c;
+    }
+    // Auto-apply project_sekai_toon to a character with the Sekai data layout: only when the user has never chosen a
+    // shader for it (no saved choice and never auto-applied), and never in a scripted/headless run (deterministic).
+    if (c.pack.empty() && !characterId.empty() && !settings_.CharacterShaderAuto(characterId) && !HeadlessRun() &&
+        gpu.HasSekaiLayout()) {
+        if (ShaderPacks().Find("project_sekai_toon") != nullptr) {
+            c.pack = "project_sekai_toon";
+            // save it as an ordinary choice so a later user switch (including "default shading") sticks; the auto flag only
+            // stops the app from auto-applying again after the user cleared it.
+            settings_.SetCharacterShader(characterId, c);
+            settings_.SetCharacterShaderAuto(characterId);
+            settings_.Save(settingsPath_);
+            toast_ = {Tr("프로젝트 세카이 모델"), Tr("세카이 툰 셰이더를 적용했습니다"), {}, false, timeSeconds_ + 6.0};
+        } else {
+            // The pack is online-gallery-only from now on: a detected Sekai model without it installed gets a one-time
+            // hint instead of silently doing nothing (remembered so it never repeats).
+            settings_.SetCharacterShaderAuto(characterId);
+            settings_.Save(settingsPath_);
+            toast_ = {Tr("프로젝트 세카이 모델"), Tr("온라인 갤러리에서 '프로젝트 세카이 툰' 셰이더를 받을 수 있습니다"),
+                      {}, false, timeSeconds_ + 6.0};
+        }
     }
     return c;
 }

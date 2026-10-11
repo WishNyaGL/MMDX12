@@ -39,6 +39,7 @@ struct StudioModel {
     std::string name;              // outliner label
     std::string libraryId;         // character id in the library (saved display scale), empty for others
     std::filesystem::path path;
+    std::filesystem::path defaultPackTextureFolder;  // model's MME face texture folder (shader pack default)
     uint32_t uid = 0;              // stable id (prop parents, async loads); indices shift when a model is removed
     ModelKind kind = ModelKind::Character;  // stage: no physics, drawn first; prop: follows `attach`, no physics
     PropAttach attach;             // props: parent = uid of the parent model (-1 world)
@@ -364,6 +365,7 @@ struct StudioPackageModel {
     std::string name, libraryId;
     ModelKind kind = ModelKind::Character;
     bool visible = true;
+    std::filesystem::path defaultPackTextureFolder;  // model's MME face texture folder (shader pack default)
     PropAttach attach;                       // props: parent = index into StudioPackage::models (-1 world)
     PropAttach place;                        // characters / stages: world placement
     ShaderChoice shader;                     // characters: shader pack

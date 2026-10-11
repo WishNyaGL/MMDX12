@@ -201,6 +201,7 @@ struct Surf {
     RtGeometry g;           // undefined for the studio floor and the props
     float4 tex;
     float2 uv;
+    float4 uv1, uv2;        // additional UV1/UV2 (zero for the floor / props)
 };
 
 // Closest surface along a ray: meshes (stochastic alpha), the analytic studio floor, the glass box
@@ -266,6 +267,8 @@ bool TraceScene(float3 o, float3 d, float tMin, inout uint rng, float lod, out S
         s.g = g;
         s.tex = tex;
         s.uv = sf.uv;
+        s.uv1 = sf.uv1;
+        s.uv2 = sf.uv2;
         s.pos = sf.pos;
         s.n = sf.normal;
         s.faceN = sf.faceNormal;
@@ -1059,11 +1062,14 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
             RtPtPackRecord rec = LoadPtPackRecord(s.g.packSrv);
             if (rec.materialClass != PACK_CLASS_OFF) {
                 PtPackBindRecord(rec);
+                PtPackBindGeometry(s.g);
                 PtPackIn packIn;
                 packIn.pos = s.pos;
                 packIn.normal = s.n;
                 packIn.V = -d;
                 packIn.uv = s.uv;
+                packIn.uv1 = s.uv1;
+                packIn.uv2 = s.uv2;
                 packIn.L = -gLightDir;
                 if (!diffuseChain) {
                     float3 sv = SunVisibility(s, rng);

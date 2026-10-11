@@ -13,6 +13,13 @@
 // Must equal kPackApiVersion (render/ShaderPack.h).
 #define PACK_API_VERSION 3
 
+// API v6 (render/ShaderPack.h kPackApiVersion): PackSurface carries the PMX additional UV1/UV2
+// (float4 each, zero for models without them) and the raw sphere-slot / toon-slot textures are
+// exposed (PackHasSphereTex / PackSampleSphereUv, PackHasToonMap / PackSampleToonUv). A pack
+// feature-detects this with the macro below; PACK_API_VERSION keeps its pre-6 value so existing
+// packs are unaffected.
+#define PACK_API_ADDUV 1
+
 // Material classes: pack.json "classes" rules map PMX material names to these ids.
 #define PACK_BODY 0u
 #define PACK_SKIN 1u
@@ -28,6 +35,8 @@ struct PackSurface {
     float3 V;             // to the eye
     float3 L;             // to the key light (sun)
     float2 uv;
+    float4 uv1;           // PMX additional UV1 (zero for models without additional UVs)
+    float4 uv2;           // PMX additional UV2 (zero for models without additional UVs)
     float2 pixel;         // SV_Position.xy
     float viewZ;          // view-space depth
     float4 tex;           // base texture (gamma space) with material-morph factors; white without a texture
@@ -77,6 +86,27 @@ bool PackHasToon() { return (gFlags & MAT_HAS_TOON) != 0 && (gFlags & MAT_TOON_M
 float3 PackSampleToon(float v) {
     if (!PackHasToon()) return float3(1, 1, 1);
     return ApplyTexFactor3(gToon.Sample(gClamp, float2(0.5, v)).rgb, gToonMul, gToonAdd, 1.0);
+}
+
+// ---- Sekai sphere-slot / toon-slot textures (API v6) -------------------------------------------------
+// The Project Sekai MME layout puts a UV-space parameter mask (_H) in the PMX sphere slot and the
+// shadow colour (_S) in the toon slot, both sampled at the mesh UV (no sphere-map projection).
+// PackHasSphereTex: a real sphere-slot texture is bound (MAT_HAS_SPHERE_TEX), not the white fallback.
+// PackSampleSphereUv: the raw sphere texture at a mesh UV, wrap address, material-morph factors
+// applied like PackSampleSphere; white without a texture.
+bool PackHasSphereTex() { return (gFlags & MAT_HAS_SPHERE_TEX) != 0; }
+float4 PackSampleSphereUv(float2 uv) {
+    if (!PackHasSphereTex()) return float4(1, 1, 1, 1);
+    return ApplyTexFactor(gSphere.Sample(gWrap, uv), gSphereMul, gSphereAdd);
+}
+
+// PackHasToonMap: the material's toon slot is the Sekai shadow colour (_S), i.e. MAT_TOON_MAP.
+// PackSampleToonUv: the raw toon texture at a mesh UV, wrap address, toon morph factors applied;
+// white (rgba) when the material has no toon-map.
+bool PackHasToonMap() { return (gFlags & MAT_TOON_MAP) != 0; }
+float4 PackSampleToonUv(float2 uv) {
+    if (!PackHasToonMap()) return float4(1, 1, 1, 1);
+    return ApplyTexFactor(gToon.Sample(gWrap, uv), gToonMul, gToonAdd);
 }
 
 // ---- pack textures (pack.json "textures") ------------------------------------------------------------
@@ -167,5 +197,11 @@ struct PackEdgeResult {
     float4 color;      // outline colour, gamma space like the MMD edge colour (RGBA)
     float widthScale;  // multiplies the MMD outline width in pixels (1.0 = MMD size, 0 = no outline)
 };
+
+// API v6: the vertex stage sets PackEdgeUv2 to the edge vertex's PMX additional UV2 (zero for
+// models without additional UVs) before calling PackEdge, so a pack's PackEdge can scale the
+// outline width per vertex, e.g. `e.widthScale *= PackEdgeUv2.x;`. The existing two-argument-free
+// PackEdge signature is unchanged, so packs written before v6 compile as they are.
+static float4 PackEdgeUv2 = float4(0, 0, 0, 0);
 
 #endif

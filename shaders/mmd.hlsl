@@ -26,6 +26,7 @@ cbuffer MaterialCB : register(b1) {
 #define MAT_STAGE       32u
 #define MAT_TOON_MAP    64u
 #define MAT_FLAT        128u
+#define MAT_HAS_SPHERE_TEX 256u
 #endif
 
 // FXC ignores pack_matrix for structured-buffer elements: state row_major explicitly.
@@ -57,6 +58,7 @@ struct VSIn {
     uint4 bones : BLENDINDICES; float4 weights : BLENDWEIGHT; float edge : TEXCOORD1;
     float3 morph : TEXCOORD2; float3 prevMorph : TEXCOORD3;
     float3 sdefC : TEXCOORD4; float3 sdefR0 : TEXCOORD5; float3 sdefR1 : TEXCOORD6; float sdef : TEXCOORD7;
+    float4 uv1 : TEXCOORD8; float4 uv2 : TEXCOORD9;   // additional UV1/UV2 (zero without them)
 };
 struct VSOut {
     float4 pos : SV_Position;
@@ -66,6 +68,8 @@ struct VSOut {
     float4 curClip : TEXCOORD2;
     float4 prevClip : TEXCOORD3;
     float viewZ : TEXCOORD4;
+    float4 uv1 : TEXCOORD5;   // additional UV1 (zero without)
+    float4 uv2 : TEXCOORD6;   // additional UV2 (zero without)
 };
 struct PSOut {
     float4 color : SV_Target0;
@@ -104,6 +108,8 @@ VSOut VSMain(VSIn v) {
     o.curClip = mul(wp, gViewProjNoJitter);
     o.prevClip = mul(pwp, gPrevViewProjNoJitter);
     o.viewZ = mul(wp, gView).z;
+    o.uv1 = v.uv1;
+    o.uv2 = v.uv2;
     return o;
 }
 
@@ -597,6 +603,8 @@ PSOut PSPack(VSOut i, bool front : SV_IsFrontFace) {
     s.V = normalize(gEyePos - i.worldPos);
     s.L = -gLightDir;
     s.uv = i.uv;
+    s.uv1 = i.uv1;
+    s.uv2 = i.uv2;
     s.pixel = i.pos.xy;
     s.viewZ = i.viewZ;
     s.tex = (gFlags & MAT_HAS_TEXTURE) ? ApplyTexFactor(gTexture.Sample(gWrap, i.uv), gTexMul, gTexAdd) : float4(1, 1, 1, 1);
@@ -636,7 +644,8 @@ EdgeOut VSEdge(VSIn v) {
     float4 pwp = float4(PrevSkinPosition(v), 1.0);
     float px = gEdgeSize * v.edge * gEdgeScale;                           // outline width in pixels
 #if PACK_HAS_EDGE
-    // pack outlines (PackEdge): per-material width scale
+    // pack outlines (PackEdge): per-material width scale; PackEdgeUv2 carries this vertex's uv2
+    PackEdgeUv2 = v.uv2;
     uint edgeClass = (gPackClass == PACK_CLASS_OFF) ? PACK_BODY : gPackClass;
     px *= max(PackEdge(edgeClass, gEdgeColor, gEdgeSize).widthScale, 0.0);
 #endif
@@ -716,6 +725,8 @@ VSOut VSFloor(uint id : SV_VertexID) {
     o.curClip = mul(wp, gViewProjNoJitter);
     o.prevClip = mul(wp, gPrevViewProjNoJitter);
     o.viewZ = mul(wp, gView).z;
+    o.uv1 = 0;
+    o.uv2 = 0;
     return o;
 }
 

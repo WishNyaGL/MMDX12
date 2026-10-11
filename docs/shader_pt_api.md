@@ -75,6 +75,25 @@ PtPackLighting PackEvaluateLighting(PtPackIn i, PtPackOut o) { ... }
 Packs that do not define `PT_PACK_HAS_LIGHTING` keep the old behaviour exactly (`flatIndirect` follows `flatFace`,
 `sunShadow = 1`, no explicit `lit`).
 
+### Additional UVs and Sekai slot textures (API v6)
+
+`PtPackIn` carries the PMX additional UV1/UV2:
+
+- `float4 uv1`: additional UV1, zero for models without additional UVs
+- `float4 uv2`: additional UV2, zero for models without additional UVs
+
+A pack feature-detects these (and the helpers below) with `#ifdef PT_PACK_API_ADDUV`.
+
+The hit geometry's raw sphere-slot and toon-slot textures are sampled at a mesh UV with explicit LOD 0 and
+wrap addressing (material-morph factors applied), white when absent. For a Project Sekai MME layout material the
+sphere slot holds the UV-space parameter mask (`_H`, no sphere-map projection) and the toon slot the shadow
+colour (`_S`):
+
+- `bool PtPackHasSphereTex()`: a real sphere-slot texture is bound for this material
+- `float4 PtPackSampleSphereUv(float2 uv)`: the raw sphere-slot texture at a mesh UV
+- `bool PtPackHasToonMap()`: the material's toon slot is a UV-mapped shadow colour (`MAT_TOON_MAP`)
+- `float4 PtPackSampleToonUv(float2 uv)`: the raw toon-slot texture at a mesh UV
+
 ### Helpers
 
 Pack textures declared in `pack.json` (`"textures"`, up to 16) are accessible inside `PackEvaluate`.

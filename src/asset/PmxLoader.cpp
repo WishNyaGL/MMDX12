@@ -78,6 +78,7 @@ bool LoadPmx(const std::filesystem::path& path, PmxModel& out, std::string* erro
         const uint8_t morphIdxSize = globals[6];
         const uint8_t rigidIdxSize = globals[7];
         out.version = version;
+        out.additionalUvCount = static_cast<int>(addUv);
 
         auto readText = [&](std::string* dst) -> bool {
             int32_t len = 0;
@@ -112,8 +113,13 @@ bool LoadPmx(const std::filesystem::path& path, PmxModel& out, std::string* erro
                 if (error) *error = "vertices: unexpected end of file";
                 return false;
             }
-            if (addUv > 0) {
-                if (!r.Skip(static_cast<size_t>(addUv) * 16)) {
+            for (uint8_t k = 0; k < addUv; ++k) {
+                if (k < 2) {
+                    if (!r.Read(v.addUv[k])) {
+                        if (error) *error = "vertices: unexpected end of file";
+                        return false;
+                    }
+                } else if (!r.Skip(16)) {
                     if (error) *error = "vertices: unexpected end of file";
                     return false;
                 }

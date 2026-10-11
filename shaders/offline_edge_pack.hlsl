@@ -12,6 +12,7 @@ float4 VSEdgeOfflinePack(VSIn v) : SV_Position {
     float3 wp, wn;
     SkinAt(v, wp, wn);
     float px = gEdgeSize * v.edge * gEdgeScale;   // outline width in pixels (scaled with height / 1080)
+    PackEdgeUv2 = v.uv2;   // API v6: this vertex's additional UV2 for PackEdge width scaling
     uint edgeClass = (gPackClass == PACK_CLASS_OFF) ? PACK_BODY : gPackClass;
     px *= max(PackEdge(edgeClass, gEdgeColor, gEdgeSize).widthScale, 0.0);
     return OfflineEdgeClip(wp, wn, px);

@@ -16,6 +16,9 @@ namespace mmdx {
 struct LoadedModelCpu {
     std::shared_ptr<PmxModel> pmx;
     std::vector<ImageRGBA8> textures;  // parallel to pmx->textures; empty = missing/failed
+    // The model's default shader-pack texture folder (found through its own MME files by asset/MmeHints): the
+    // directory of the face texture the pack needs. Empty when none was found. Filled on the loader worker thread.
+    std::filesystem::path defaultPackTextureFolder;
 };
 
 struct PerformerCast {

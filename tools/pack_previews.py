@@ -50,6 +50,7 @@ SHOT_CONFIGS = {
     "starrail_face": _shot("surface", "Firefly", "terrace", 8.0,
                            texture_folder=r"library\gamerip\StarRailTextures\_sets\Firefly"),
     "nimble_toon": _shot("surface", "Felix", "terrace", 8.0),
+    "project_sekai_toon": _shot("surface", "01_9001", "terrace", 8.0),   # Sekai Model Pack v4 Ichika (face SDF via MME refs)
     # effect packs: Sour Miku on the theater stage
     "auto_luminous": _shot("effect", "sour_miku", "theater", 8.0, 2,
                            params={"threshold": 0.35, "strength": 2.0}),   # the default threshold 1.0 barely triggers in MMD scenes

@@ -3,6 +3,7 @@
 #include "studio/StudioDoc.h"
 #include "app/SceneLoader.h"
 #include "asset/AssetLibrary.h"
+#include "asset/MmeHints.h"
 #include "asset/ModelImport.h"
 #include "asset/VmdMotion.h"
 #include "core/I18n.h"
@@ -12,6 +13,15 @@
 namespace mmdx::studio {
 
 namespace {
+// The model's default shader-pack texture folder: the directory of the face texture the model's own MME files
+// reference (project_sekai_toon's face SDF). Never guesses names: only the asset's references are followed.
+std::filesystem::path ModelPackTextureFolder(const std::filesystem::path& modelPath) {
+    const MmeHints hints = ReadMmeHints(modelPath);
+    for (const MmeTexRef& t : hints.textures)
+        if (ToLowerAscii(t.variable).find("face") != std::string::npos) return t.file.parent_path();
+    return {};
+}
+
 bool LoadModel(const std::filesystem::path& path, ModelRole role, const std::string& label, LoadProgress* progress,
                float f0, float f1, StudioPackageModel& out, std::string* error) {
     LoadedModelCpu cpu;
@@ -21,6 +31,7 @@ bool LoadModel(const std::filesystem::path& path, ModelRole role, const std::str
     out.pmx = cpu.pmx;
     out.textures = std::move(cpu.textures);
     out.name = label;
+    if (role == ModelRole::Character) out.defaultPackTextureFolder = ModelPackTextureFolder(path);
     return true;
 }
 } // namespace

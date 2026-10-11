@@ -22,6 +22,9 @@
 #define MAT_TOON_MAP    64u
 #define MAT_FLAT        128u
 #endif
+#ifndef MAT_HAS_SPHERE_TEX
+#define MAT_HAS_SPHERE_TEX 256u   // a real sphere-slot texture is bound (not the white fallback)
+#endif
 #define RTG_CAST_SHADOW (1u << 16)
 #define RTG_ALPHA_TEST  (1u << 17)
 #define RTG_CHARACTER   (1u << 18)
@@ -51,6 +54,8 @@ struct RtGeometry {
     uint sphereSrv;
     uint toonSrv;
     uint packSrv;
+    uint addUvSrv;   // raw ByteAddressBuffer of the add-UV stream; 0xFFFFFFFF = none
+    uint _padAddUv[3];   // keeps the float4 block 16-byte aligned (mirror of ShaderInterop.h)
     float4 texMul, texAdd, sphereMul, sphereAdd, toonMul, toonAdd;   // material morph factors
 };
 
@@ -68,6 +73,9 @@ struct RtSurface {
     float3 normal;     // interpolated shading normal (not flipped toward the ray)
     float3 faceNormal; // geometric normal from the triangle winding (not flipped)
     float2 uv;
+    float4 uv1;        // additional UV1 (zero without them)
+    float4 uv2;        // additional UV2 (zero without them)
+    uint3 tri;         // vertex indices of the hit triangle (for LoadAddUv callers)
 };
 
 RtGeometry LoadGeometry(uint instanceId, uint geometryIndex) {
@@ -85,6 +93,24 @@ float2 LoadUv(RtGeometry g, uint3 tri, float2 bary) {
     float2 uv1 = asfloat(vb.Load2(tri.y * kRtVertexStride + 24));
     float2 uv2 = asfloat(vb.Load2(tri.z * kRtVertexStride + 24));
     return uv0 * (1.0 - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y;
+}
+
+static const uint kAddUvStride = 32;   // GpuAddUv (uv1 at 0, uv2 at 16)
+
+// Additional UV1 / UV2 at a hit (same triangle / barycentrics as FetchSurface). Zeros when the
+// model has no additional-UV stream (g.addUvSrv == 0xFFFFFFFF).
+void LoadAddUv(RtGeometry g, uint3 tri, float2 bary, out float4 uv1, out float4 uv2) {
+    uv1 = 0;
+    uv2 = 0;
+    if (g.addUvSrv == 0xFFFFFFFFu) return;
+    ByteAddressBuffer adduv = gBindlessBuf[NonUniformResourceIndex(g.addUvSrv)];
+    float3 w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    uv1 = asfloat(adduv.Load4(tri.x * kAddUvStride + 0)) * w.x +
+          asfloat(adduv.Load4(tri.y * kAddUvStride + 0)) * w.y +
+          asfloat(adduv.Load4(tri.z * kAddUvStride + 0)) * w.z;
+    uv2 = asfloat(adduv.Load4(tri.x * kAddUvStride + 16)) * w.x +
+          asfloat(adduv.Load4(tri.y * kAddUvStride + 16)) * w.y +
+          asfloat(adduv.Load4(tri.z * kAddUvStride + 16)) * w.z;
 }
 
 RtSurface FetchSurface(RtGeometry g, uint prim, float2 bary) {
@@ -106,6 +132,8 @@ RtSurface FetchSurface(RtGeometry g, uint prim, float2 bary) {
     s.faceNormal = dot(fn, fn) > 1e-20 ? normalize(fn) : float3(0, 1, 0);
     s.normal = dot(n, n) > 1e-12 ? normalize(n) : s.faceNormal;
     s.uv = t0 * w.x + t1 * w.y + t2 * w.z;
+    s.tri = tri;
+    LoadAddUv(g, tri, bary, s.uv1, s.uv2);
     return s;
 }
 

@@ -475,7 +475,8 @@ void App::DrawPlayOverlay() {
         ShaderChoice choice = settings_.CharacterShader(s->characterId);
         ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(20.0f)));
         const ImVec2 btn = ImGui::GetCursorScreenPos();
-        if (IconButton("##shader", icon::Diamond, Tr("셰이더"), !PlayShaderChoice().pack.empty(), 40.0f))
+        if (IconButton("##shader", icon::Diamond, Tr("셰이더"),
+                       !PlayShaderChoice(*scene_->characterGpu, s->characterId).pack.empty(), 40.0f))
             ImGui::OpenPopup("##shaderpopup");
         ImGui::SetNextWindowPos(ImVec2(btn.x + Dp(20.0f), btn.y - Dp(10.0f)), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
         ImGui::SetNextWindowSize(ImVec2(PackParamsPopupWidth(choice), 0));

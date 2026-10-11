@@ -460,6 +460,9 @@ private:
     bool StudioReplaceModel(int index, studio::StudioPackageModel& pm, std::string* note);
     void StudioClearEditState();                      // undo history, selection, clipboard, drags (model list changed)
     void StudioSelectModel(int index);                // -1 camera
+    // Auto-applies project_sekai_toon to a freshly added / opened character with the Sekai data layout and no shader
+    // choice yet (once, at load; a saved choice is never touched). Sets the model's shader + a toast.
+    void StudioAutoApplySekaiShader(studio::StudioModel& m);
     DirectX::XMFLOAT4X4 StudioPropRoot(const studio::StudioModel& m) const;  // world matrix of a prop's origin
     void StudioSeekAudio();                           // audio cursor <- timeline time (audio offset)
     void DrawStudioAddMenu();                         // the outliner's "+" popup (library / file)
@@ -600,7 +603,10 @@ private:
     void DrawToast();           // completion / error toast (Select, Play)
     // shader packs (UiShaderPack.cpp)
     void ApplyShaderChoice(GpuModel& gpu, const ShaderChoice& choice);   // every frame, before UpdateMaterials
-    ShaderChoice PlayShaderChoice() const;                               // play character: settings + --shader-pack
+    // Play character: the saved settings choice, the --shader-pack override, or auto-applied project_sekai_toon. When
+    // `gpu` has the Sekai data layout and the user has never chosen a shader for `characterId`, this selects the pack
+    // once (remembered as characterShaderAuto + a toast), so a later user choice is never overridden again.
+    ShaderChoice PlayShaderChoice(const GpuModel& gpu, const std::string& characterId);
     // A row showing the chosen pack; click opens a searchable pack list (+ "셰이더 관리"). True = changed.
     bool DrawShaderSelector(const char* id, ShaderChoice& choice, float width);
     bool DrawShaderPackParams(ShaderChoice& choice);                     // the chosen pack's sliders + reset

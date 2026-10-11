@@ -95,6 +95,7 @@ bool App::FinishStudioLoad() {
         auto sm = std::make_unique<StudioModel>();
         sm->name = m.name;
         sm->libraryId = m.libraryId;
+        sm->defaultPackTextureFolder = m.defaultPackTextureFolder;
         sm->kind = m.kind;
         sm->visible = m.visible;
         sm->attach = m.attach;
@@ -114,6 +115,8 @@ bool App::FinishStudioLoad() {
             }
             return false;
         }
+        sm->gpu->SetDefaultPackTextureFolder(m.defaultPackTextureFolder);
+        if (!pkg.fromProject) StudioAutoApplySekaiShader(*sm);   // added character: no saved choice -> project_sekai_toon
         sm->motion = std::move(m.motion);
         sm->BuildRowGroups();
         sm->inst->UpdatePose();

@@ -169,11 +169,14 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                         RtPtPackRecord rec = LoadPtPackRecord(g.packSrv);
                         if (rec.materialClass != PACK_CLASS_OFF) {
                             PtPackBindRecord(rec);
+                            PtPackBindGeometry(g);
                             PtPackIn packIn;
                             packIn.pos = pos;
                             packIn.normal = n;
                             packIn.V = -dir;
                             packIn.uv = sf.uv;
+                            packIn.uv1 = sf.uv1;
+                            packIn.uv2 = sf.uv2;
                             packIn.L = -gLightDir;
                             float sh = 1.0;
                             if (!diffuseChain) {

@@ -71,6 +71,8 @@ const D3D12_INPUT_ELEMENT_DESC kMmdLayout[] = {
     {"TEXCOORD", 5, DXGI_FORMAT_R32G32B32_FLOAT, 3, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     {"TEXCOORD", 6, DXGI_FORMAT_R32G32B32_FLOAT, 3, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     {"TEXCOORD", 7, DXGI_FORMAT_R32_FLOAT, 3, 36, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"TEXCOORD", 8, DXGI_FORMAT_R32G32B32A32_FLOAT, 4, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},   // GpuAddUv
+    {"TEXCOORD", 9, DXGI_FORMAT_R32G32B32A32_FLOAT, 4, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
 };
 
 bool CreateRootSignature(ID3D12Device* device, const CD3DX12_ROOT_SIGNATURE_DESC& desc,
@@ -411,9 +413,10 @@ void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, RtScene& r
                     if (texturesOk) edge = it->second.Get();
                 }
             }
-            D3D12_VERTEX_BUFFER_VIEW vbs[4] = {model->VertexBufferView(), model->MorphBufferView(frame),
-                                               model->PrevMorphBufferView(frame), model->SdefBufferView()};
-            cmd->IASetVertexBuffers(0, 4, vbs);
+            D3D12_VERTEX_BUFFER_VIEW vbs[5] = {model->VertexBufferView(), model->MorphBufferView(frame),
+                                               model->PrevMorphBufferView(frame), model->SdefBufferView(),
+                                               model->AddUvBufferView()};
+            cmd->IASetVertexBuffers(0, 5, vbs);
             cmd->IASetIndexBuffer(&model->IndexBufferView());
             cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(frame));
             cmd->SetGraphicsRootShaderResourceView(5, model->PrevBoneBuffer(frame));

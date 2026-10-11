@@ -30,6 +30,7 @@ struct VSIn {
     uint4 bones : BLENDINDICES; float4 weights : BLENDWEIGHT; float edge : TEXCOORD1;
     float3 morph : TEXCOORD2; float3 prevMorph : TEXCOORD3;
     float3 sdefC : TEXCOORD4; float3 sdefR0 : TEXCOORD5; float3 sdefR1 : TEXCOORD6; float sdef : TEXCOORD7;
+    float4 uv1 : TEXCOORD8; float4 uv2 : TEXCOORD9;   // additional UV1/UV2 (zero without them)
 };
 
 #include "offline_edge_skin.hlsli"   // EdgeCB (b2), SkinAt, ToClip, OfflineEdgeClip

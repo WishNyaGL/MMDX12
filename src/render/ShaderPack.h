@@ -20,7 +20,7 @@ namespace mmdx {
 
 // The PackShade / PackEffect contract version (pack_api.hlsli / effect_api.hlsli PACK_API_VERSION). A pack declares
 // the version it was written for; packs with a higher version are listed as incompatible and never compiled.
-inline constexpr int kPackApiVersion = 5;
+inline constexpr int kPackApiVersion = 6;
 inline constexpr uint32_t kPackMaxParams = 16;
 inline constexpr uint32_t kPackMaxTextures = 16;   // pack.json "textures" entries (one SRV each)
 inline constexpr uint32_t kPackMaxTextureSize = 4096;   // per-texture width / height cap

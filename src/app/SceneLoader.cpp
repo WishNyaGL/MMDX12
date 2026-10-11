@@ -10,6 +10,7 @@
 #include "anim/Motion.h"
 #include "asset/ImageLoader.h"
 #include "asset/ModelImport.h"
+#include "asset/MmeHints.h"
 #include "asset/VmdMotion.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
@@ -76,6 +77,15 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
                   });
 }
 
+// The model's default shader-pack texture folder: the directory of the face texture its own MME files reference (the
+// pack's face SDF / light maps). Dependency-free: only the references the asset files carry are followed.
+static std::filesystem::path ModelPackTextureFolder(const std::filesystem::path& modelPath) {
+    const MmeHints hints = ReadMmeHints(modelPath);
+    for (const MmeTexRef& t : hints.textures)
+        if (ToLowerAscii(t.variable).find("face") != std::string::npos) return t.file.parent_path();
+    return {};
+}
+
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
                       ScenePackage& out, LoadProgress* progress, std::string* error,
                       const std::vector<PerformerCast>* formation) {
@@ -119,6 +129,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
                 }
                 out.characterId = centerPerf.character.id;
                 out.characterDisplayName = centerPerf.character.displayName;
+                out.character.defaultPackTextureFolder = ModelPackTextureFolder(centerPerf.character.modelPath);
 
                 float frac0 = curUnit / totalUnits;
                 float frac1 = (curUnit + 0.8f) / totalUnits;
@@ -183,6 +194,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
                     epStorage.push_back(std::move(vmd));
                 }
                 auto epMotion = BoundMotion::Bind(*extraM.pmx, epLayers);
+                extraM.defaultPackTextureFolder = ModelPackTextureFolder(ep.character.modelPath);
                 out.extraCharacters.push_back(std::move(extraM));
                 out.extraCharacterIds.push_back(ep.character.id);
                 out.extraCharacterDisplayNames.push_back(ep.character.displayName);
@@ -258,6 +270,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
             }
             out.characterId = character.id;
             out.characterDisplayName = character.displayName;
+            out.character.defaultPackTextureFolder = ModelPackTextureFolder(character.modelPath);
         }
 
         // 2. Character textures.
@@ -367,6 +380,7 @@ bool LoadRenderBenchPackage(const std::vector<CharacterAsset>& characters, const
                 if (error) *error = Tr("캐릭터를 불러오지 못했습니다: ") + err;
                 return false;
             }
+            m.defaultPackTextureFolder = ModelPackTextureFolder(characters[i].modelPath);
 
             // 2. Character textures.
             DecodeModelTextures(m, progress, fraction, (i + 0.8f) / (float)n, characters[i].displayName.c_str());

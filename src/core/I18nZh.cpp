@@ -1011,6 +1011,10 @@ const Entry kChinese[] = {
     {"파라미터 많은 순", "参数最多"},
     {"조건에 맞는 팩이 없습니다", "没有符合条件的包"},
     {"필터 지우기", "清除筛选"},
+    {"프로젝트 세카이 모델", "Project Sekai 模型"},
+    {"세카이 툰 셰이더를 적용했습니다", "已应用 Sekai 卡通着色器"},
+    {"온라인 갤러리에서 '프로젝트 세카이 툰' 셰이더를 받을 수 있습니다",
+     "可在在线画廊获取「Project Sekai 卡通」着色器"},
 };
 const int kChineseCount = (int)(sizeof(kChinese) / sizeof(kChinese[0]));
 

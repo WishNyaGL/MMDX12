@@ -1479,12 +1479,14 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     s->characterDisplayName = !pkg.characterDisplayName.empty() ? pkg.characterDisplayName : (s->character ? s->character->Model().name : "");
     s->characterGpu = renderer_.CreateModel(batch, *pkg.character.pmx, pkg.character.textures);
     if (!s->characterGpu) return false;
+    s->characterGpu->SetDefaultPackTextureFolder(pkg.character.defaultPackTextureFolder);
 
     for (size_t i = 0; i < pkg.extraCharacters.size(); ++i) {
         SceneRuntime::Performer perf;
         perf.instance = std::make_unique<ModelInstance>(pkg.extraCharacters[i].pmx);
         perf.gpu = renderer_.CreateModel(batch, *pkg.extraCharacters[i].pmx, pkg.extraCharacters[i].textures);
         if (!perf.gpu) return false;
+        perf.gpu->SetDefaultPackTextureFolder(pkg.extraCharacters[i].defaultPackTextureFolder);
         perf.motion = i < pkg.extraMotions.size() ? pkg.extraMotions[i] : nullptr;
         if (i < pkg.extraCharacterIds.size()) perf.characterId = pkg.extraCharacterIds[i];
         if (i < pkg.extraCharacterDisplayNames.size()) perf.displayName = pkg.extraCharacterDisplayNames[i];
@@ -1573,7 +1575,7 @@ void App::UpdateScene(float frame) {
     scene_->characterGpu->UpdateSkinning(slot, scene_->character->SkinMatrices());
     scene_->characterGpu->UpdateMorphs(slot, scene_->character->VertexMorphDeltas(),
                                        scene_->character->MorphVersion());
-    ApplyShaderChoice(*scene_->characterGpu, PlayShaderChoice());
+    ApplyShaderChoice(*scene_->characterGpu, PlayShaderChoice(*scene_->characterGpu, scene_->characterId));
     scene_->characterGpu->UpdateMaterials(slot, ch.MaterialMul(), ch.MaterialAdd(), ch.MaterialVersion());
     for (size_t i = 0; i < scene_->stages.size(); ++i) {
         scene_->stageGpu[i]->UpdateSkinning(slot, scene_->stages[i]->SkinMatrices());
@@ -1603,9 +1605,11 @@ void App::UpdateScene(float frame) {
             if (screen_ == Screen::BenchRun) {
                 choice = {};
             } else if (options_.shaderPackSet) {
-                choice = PlayShaderChoice();
+                choice = PlayShaderChoice(*extra.gpu, extra.characterId);
             } else if (!extra.characterId.empty()) {
-                choice = settings_.CharacterShader(extra.characterId);
+                // render benchmark extras keep their saved choice (deterministic); play mode adds the Sekai auto-apply
+                choice = screen_ == Screen::BenchRender ? settings_.CharacterShader(extra.characterId)
+                                                        : PlayShaderChoice(*extra.gpu, extra.characterId);
             }
             ApplyShaderChoice(*extra.gpu, choice);
             extra.gpu->UpdateMaterials(slot, extra.instance->MaterialMul(), extra.instance->MaterialAdd(),

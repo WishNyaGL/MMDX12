@@ -1,5 +1,6 @@
 #include "asset/AssetLibrary.h"
 #include "asset/ImageLoader.h"
+#include "asset/MmeHints.h"
 #include "asset/ModelImport.h"
 #include "asset/PmxModel.h"
 #include "asset/VmdMotion.h"
@@ -29,14 +30,25 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
 
     std::filesystem::path libraryDir;
+    std::filesystem::path mmeModel;
     bool full = false;
     for (int i = 1; i < argc; ++i) {
         std::wstring arg = argv[i];
         if (arg == L"--full") full = true;
+        else if (arg == L"--mme" && i + 1 < argc) mmeModel = argv[++i];
         else if (libraryDir.empty()) libraryDir = arg;
     }
+    if (!mmeModel.empty()) {
+        const mmdx::MmeHints hints = mmdx::ReadMmeHints(mmeModel);
+        printf("mme %s: found=%d textures=%d defines=%d\n", mmdx::PathToUtf8(mmeModel).c_str(), hints.found ? 1 : 0,
+               (int)hints.textures.size(), (int)hints.defines.size());
+        for (const auto& t : hints.textures)
+            printf("  texture %s = %s\n", t.variable.c_str(), mmdx::PathToUtf8(t.file).c_str());
+        for (const auto& [k, v] : hints.defines) printf("  define %s = %s\n", k.c_str(), v.c_str());
+        return 0;
+    }
     if (libraryDir.empty()) {
-        fprintf(stderr, "usage: asset_probe <libraryDir> [--full]\n");
+        fprintf(stderr, "usage: asset_probe <libraryDir> [--full] | --mme <model>\n");
         return 2;
     }
 

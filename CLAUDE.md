@@ -16,7 +16,7 @@ progress.md is the session log. Read its latest entry first.
 - Upscaler runtime DLLs are git-ignored: run `tools/fetch_sdks.ps1` once (DLSS 310.9.1, XeSS 3.0.2, FidelityFX 2.3.0), then rebuild. Missing DLLs only disable that upscaler.
 - Render path / upscaler from the CLI: `--render raster|rt|pt`, `--upscaler none|dlss|fsr|xess`, `--upscale-quality native|quality|balanced|performance|ultra`.
 - No debugger is installed (no cdb). For crashes, use the dbghelp `CrashFilter` in `tools/render_smoke.cpp`.
-- Visual verification without a human: render a frame headlessly, then Read the PNG.
+- Visual verification without a human: render a frame headlessly, then Read the PNG. First read "Running MMDX12.exe from the CLI" below.
   - Play scene: `MMDX12.exe --character <s> --stage <s|none> --song <s> --autoplay --seek <sec> --frames N --capture out.png`
     Unit formation: `--formation <spec>` (one entry per part in part order, each a character name substring or `-` for empty; optional `*` suffix marks the center; skips the modal).
   - Menu screens: `--screen select|bench --frames N --capture ui.png`
@@ -77,6 +77,35 @@ progress.md is the session log. Read its latest entry first.
     for the smart updater (feed `manifest` / `manifestSha256`); `update_e2e.py`: headless updater E2E (delta + corrupt-object fallback)
   - `mcp_pipe.py` / `mcp_x.py`: talk to a running app's pipe without the bridge (`python tools/mcp_x.py "click 플레이" "wait 30" "shot out.png" "items 셰이더"`)
 - The play bar auto-hides while playing with no mouse movement, so captures usually don't show it.
+
+## Running MMDX12.exe from the CLI (read this before EVERY launch)
+Agents keep misusing the CLI and then blaming the app. These rules are verified (2026-10-12); follow them literally.
+- **No `--autoplay` = no scene.** `--character/--song` only preselect cards in the lobby. Without `--autoplay` (or when
+  either name does not resolve) the app sits in the lobby, and `--frames` never counts there (it counts only inside a
+  scene or with `--screen`), so the run never quits. Every scene capture needs `--character <s> --song <s> --autoplay`.
+- **Always wrap a run in `timeout <sec>`** and read `<build>/bin/mmdx12.log` afterwards (overwritten every run;
+  `mmdx12.previous.log` keeps the one before). Scene reached = `motion bound` + `STARTUP first frame` lines; neither =
+  it never left the lobby (bad `--character/--song`, multi-part song without `--formation`, or a cold library scan in a
+  fresh build dir: the first run of a build dir rescans the library, ~25 s). Grep `[E]`/`[W]` after every capture;
+  unknown arguments are only a `[W] unknown command line argument` line, never an error.
+- **Name matching** = case-insensitive substring of the library id (the relative path, e.g.
+  `model/Sekai Model Pack v4/LeoNeed/Ichika/01_9001.pmx`) or the display name; the FIRST match wins, so use a
+  distinctive fragment (`01_9001`, `LeoNeed/Ichika`). `--stage none` = no stage. Songs with >= 2 dance parts open the
+  formation modal: pass `--formation` (see below) or pick a one-part song. Ids: `build/bin/cache/library_result.json`.
+- **Same frame across runs (A/B comparisons): `--seek <sec> --paused --no-physics`.**
+  `--seek` alone keeps playing: the capture happens `--frames` frames later in wall-clock time, so two identical runs
+  differ (measured: 113k of 518k pixels). `--paused` holds the scene at the seek time (residual 1.2k px = physics
+  settling); adding `--no-physics` makes two runs bit-identical (measured: 0 px). Use `--frames 60` or more so TAA
+  converges. `--seek`, `--autoplay` and `--paused` are one-shot: consumed when the scene loads.
+- **Settings come from `<build dir>/bin/mmdx12.ini`, one per build dir**, and they differ (window size, lighting preset,
+  DoF, effect stack, shader packs per character). An A/B between two build dirs must either copy the same ini into both
+  (back it up and restore it) or pin everything on the command line: `--width W --height H --render raster|rt|pt
+  --upscaler none --lighting <n> --dof 0|1 --effect none --shader-pack none|<id>` (+ `--camera tx,ty,tz,yawDeg,pitchDeg,dist`
+  for a fixed free camera; it implies `--free-camera`). A HEAD baseline = `git stash`, build another dir, `git stash pop`.
+- **One window at a time.** Every run opens a visible window: never launch runs in parallel, tell the user before a
+  batch. A running exe locks its build dir (`LNK1168`): when a worker is building in `build/`, run another build dir.
+- Canonical A/B capture (run once per build, then diff the PNGs):
+  `timeout 120 <build>/bin/MMDX12.exe --character 01_9001 --stage none --song Evergreen --autoplay --seek 20 --paused --no-physics --frames 60 --effect none --shader-pack none --capture out.png`
 
 ## Architecture (src/)
 - `core`: logging, text encodings (Shift-JIS/UTF-16/UTF-8).
@@ -218,6 +247,19 @@ progress.md is the session log. Read its latest entry first.
   writes the class, or `kPackClassOff` (0xFF) = that material takes the no-pack path everywhere (raster PSO / edge,
   RT, PT, offline GI; pack code never sees 0xFF). UI: `App::DrawMaterialShaderList` (studio inspector "재질" popup,
   play bar shader popup, library shader tab via `LoadCharacterModelOnly`).
+  API v6 (`kPackApiVersion` 6; apiVersion 1..5 packs still load): `PackSurface` / `PtPackIn` carry the PMX additional
+  UV1/UV2 (zero without them, feature macro `PACK_API_ADDUV` / `PT_PACK_API_ADDUV`), the raw sphere-slot (`_H`) and
+  toon-slot (`_S`) textures are exposed (`PackHasSphereTex` / `PackSampleSphereUv`, `PackHasToonMap` / `PackSampleToonUv`,
+  PT mirrors; a real sphere texture bound = `MAT_HAS_SPHERE_TEX`), and `PackEdge` sees the vertex's uv2 (`PackEdgeUv2`).
+  Online-gallery-only `project_sekai_toon` ("프로젝트 세카이 툰", sources in the website repo `shader-packs/`, not bundled;
+  `tools/pack_previews.py` has its shot): the Project Sekai MME look (hard terminator with the `_H` shadow bias, the `_S`
+  shadow colour, the skin ramp, the uv1 face SDF and uv2 masks) from the model's own data only; `asset/MmeHints` follows the
+  model's own `.emd` / `.fx` references (same-stem .emd, else the folder's only .emd; never folder / file-name guesses) to
+  find its face SDF and set a per-model default pack texture folder. Detection = `asset/SekaiLayout` `DetectSekaiLayout`
+  (>= 2 additional UVs + a non-ramp UV-mapped toon texture; `GpuModel::HasSekaiLayout()`), checked over the whole library by
+  `tools/sekai_detect_test` (self test + scan; 2026-10-12: 49 of 180 models, all Sekai rigs, no false positives). A detected
+  character with no saved choice gets the pack once (`characterShaderAuto` ini, toast) when it is installed, else a one-time
+  toast pointing at the gallery. Users fill their library their own way: nothing may depend on its layout or names.
   API v2 (`kPackApiVersion` 2; apiVersion 1 packs still load): a pack may declare `"textures"` in pack.json (at most 16:
   `{ "file": "textures/x.png", "address": "wrap"|"clamp", "srgb": true }`, png/jpg/jpeg, paths inside the pack), uploaded
   once per pack (DEFAULT heap, `ScenePass::EnsurePackTextures`) and shared by every model using it; sampled with
