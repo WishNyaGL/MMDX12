@@ -4,97 +4,25 @@
 
 #include <algorithm>
 #include <cctype>
-#include <fstream>
+#include <cwctype>
 #include <set>
-#include <sstream>
 
+#include "asset/MmeText.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
 
 namespace mmdx {
 namespace {
 
+using mmetext::IsIdentChar;
+using mmetext::IsIdentStart;
+using mmetext::Lower;
+using mmetext::ReadTextFile;
+using mmetext::ResolveRel;
+using mmetext::SplitLines;
+using mmetext::Trim;
+
 constexpr int kMaxIncludeDepth = 8;
-
-std::string Trim(const std::string& s) {
-    size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return {};
-    size_t e = s.find_last_not_of(" \t\r\n");
-    return s.substr(b, e - b + 1);
-}
-
-std::string Lower(std::string s) {
-    for (char& c : s) c = (char)std::tolower((unsigned char)c);
-    return s;
-}
-
-bool IsIdentStart(char c) { return std::isalpha((unsigned char)c) || c == '_'; }
-bool IsIdentChar(char c) { return std::isalnum((unsigned char)c) || c == '_'; }
-
-bool ReadTextFile(const std::filesystem::path& p, std::string& out) {
-    std::ifstream in(p, std::ios::binary);
-    if (!in) return false;
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    out = ss.str();
-    // UTF-8 BOM: paths in .fx are ASCII in practice; the BOM only confuses the first token.
-    if (out.size() >= 3 && (unsigned char)out[0] == 0xEF && (unsigned char)out[1] == 0xBB &&
-        (unsigned char)out[2] == 0xBF)
-        out.erase(0, 3);
-    return true;
-}
-
-std::vector<std::string> SplitLines(const std::string& s) {
-    std::vector<std::string> lines;
-    std::string cur;
-    for (char c : s) {
-        if (c == '\n') { if (!cur.empty() && cur.back() == '\r') cur.pop_back(); lines.push_back(cur); cur.clear(); }
-        else cur += c;
-    }
-    if (!cur.empty()) lines.push_back(cur);
-    return lines;
-}
-
-// Case-insensitive path resolution (`rel` relative to `base`): exact first, then directory scanning per component.
-bool ResolveRel(const std::filesystem::path& base, const std::string& relIn, std::filesystem::path& out) {
-    std::string rel = relIn;
-    for (char& c : rel) if (c == '\\') c = '/';
-    if (rel.empty()) return false;
-    if (rel.size() >= 2 && rel[1] == ':') {   // absolute (drive)
-        std::error_code ec;
-        if (std::filesystem::exists(std::filesystem::path(rel), ec)) { out = std::filesystem::path(rel); return true; }
-        return false;
-    }
-    std::filesystem::path cur = base;
-    std::string comp;
-    auto flush = [&](const std::string& c) -> bool {
-        if (c.empty() || c == ".") return true;
-        if (c == "..") { cur = cur.parent_path(); return true; }
-        std::error_code ec;
-        std::filesystem::path cand = cur / Utf8ToPath(c);
-        if (std::filesystem::exists(cand, ec)) { cur = cand; return true; }
-        const std::string want = Lower(c);
-        if (std::filesystem::is_directory(cur, ec)) {
-            for (auto it = std::filesystem::directory_iterator(cur, std::filesystem::directory_options::skip_permission_denied, ec);
-                 it != std::filesystem::directory_iterator(); it.increment(ec)) {
-                if (ec) break;
-                if (Lower(PathToUtf8(it->path().filename())) == want) { cur = it->path(); return true; }
-            }
-        }
-        return false;
-    };
-    for (size_t i = 0; i <= rel.size(); ++i) {
-        if (i == rel.size() || rel[i] == '/' || rel[i] == '\\') {
-            if (!flush(comp)) return false;
-            comp.clear();
-        } else {
-            comp += rel[i];
-        }
-    }
-    std::error_code ec;
-    if (std::filesystem::exists(cur, ec) && !std::filesystem::is_directory(cur, ec)) { out = cur; return true; }
-    return false;
-}
 
 // Resolve an MME expression to a plain string: string literals, identifier defines and merge_strings(...) (arg
 // concatenation) collapse to their text; numbers and unknown tokens contribute nothing.

@@ -1508,3 +1508,14 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 - Release 1.10.1 is NOT published (no GitHub release, delta manifest, website deploy or gallery upload yet); the web repo
   holds the 1.0.2 pack and docs as a local commit.
 - `IsFlatFaceMaterial` (GpuModel.cpp) still decides the flat-face path by the material names face / eyelash / eyebrow.
+
+## 2026-10-12 (3) - 2.0.0 P0/P1: Ray-MMD semantics (fact-checked) + material parser and library probe
+- `docs/raymmd_semantics.md`: Ray-MMD material slot / FROM / TYPE / swizzle / sub-map / emissive-morph semantics, shading models
+  0..10 with controller-side formulas, G-buffer, GGX specular, tangents (screen derivatives), proposed internal PBR fields.
+  Written by a worker, fact-checked claim by claim by a second worker against ray-cast/ray-mmd master + the local library,
+  corrected (SPECULAR_MAP_TYPE 4 = saturate(specular); GetAlpha FROM 7/8 = PMX colours; several material_common variants exist).
+- `asset/RayMaterial` (shallow preprocessor, .emd mapping, content-based Ray detection, candidate ranking) + `asset/MmeText`
+  (helpers shared with MmeHints, behaviour unchanged); `tools/raymat_test` (33 pass), `tools/raymat_probe`: 22 models / 612
+  Ray materials / 165 Ray .fx, 0 parse failures, 2.3 s; all 9 sets pick their Ray .emd.
+- Look policy for 2.0.0 (user): PBR may change clothes / accessories / stages; anime skin and faces must never turn glossy or
+  realistic. Handoff `docs/handoff/2026-10-12-pbr-raymmd-2.0.0.md` section 10 has the state and next steps (P2 design next).
