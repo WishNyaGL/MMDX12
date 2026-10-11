@@ -16,6 +16,9 @@ $script = Join-Path ([IO.Path]::GetTempPath()) 'mmdx12_release_build.cmd'
 call "$vsDevCmd" -arch=x64 -host_arch=x64 >nul || exit /b 1
 set PATH=$pip;%PATH%
 if exist "$build\CMakeCache.txt" del "$build\CMakeCache.txt"
+rem copy_shaders / copy_assets never delete: start from fresh copies so removed files (an old preview.png) don't ship
+if exist "$build\bin\shaders" rmdir /s /q "$build\bin\shaders"
+if exist "$build\bin\assets" rmdir /s /q "$build\bin\assets"
 cmake -S "$root" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release >nul || exit /b 1
 cmake --build "$build" --target MMDX12 pack_check mmdx12_mcp || exit /b 1
 echo VCREDIST=%VCToolsRedistDir%

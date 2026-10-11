@@ -647,21 +647,17 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
             problems.push_back("replaces needs an effect pack with \"stage\": \"pre-bloom\"");
     }
 
-    // optional preview
+    // optional previews (AFTER = preview.*, BEFORE = preview_before.*); with both a .png and a .jpg the newer wins:
+    // a folder unzipped over an older pack keeps the old preview.png next to a new preview.jpg
     std::error_code ec;
-    const fs::path previewPng = dir / L"preview.png";
-    const fs::path previewJpg = dir / L"preview.jpg";
-    if (fs::is_regular_file(previewPng, ec))
-        out.preview = previewPng;
-    else if (fs::is_regular_file(previewJpg, ec))
-        out.preview = previewJpg;
-
-    const fs::path previewBeforePng = dir / L"preview_before.png";
-    const fs::path previewBeforeJpg = dir / L"preview_before.jpg";
-    if (fs::is_regular_file(previewBeforePng, ec))
-        out.previewBefore = previewBeforePng;
-    else if (fs::is_regular_file(previewBeforeJpg, ec))
-        out.previewBefore = previewBeforeJpg;
+    const auto pickPreview = [&](const wchar_t* stem) {
+        const fs::path png = dir / (std::wstring(stem) + L".png"), jpg = dir / (std::wstring(stem) + L".jpg");
+        const bool hasPng = fs::is_regular_file(png, ec), hasJpg = fs::is_regular_file(jpg, ec);
+        if (hasPng && hasJpg) return fs::last_write_time(jpg, ec) > fs::last_write_time(png, ec) ? jpg : png;
+        return hasPng ? png : hasJpg ? jpg : fs::path();
+    };
+    out.preview = pickPreview(L"preview");
+    out.previewBefore = pickPreview(L"preview_before");
 
     // the pack's shader file must match its type (an effect pack implements PackEffect in effect.hlsl)
     if (out.type == PackType::Effect) {

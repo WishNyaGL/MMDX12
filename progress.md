@@ -1358,3 +1358,9 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   started by a worker, then finished by hand (8 of its pairs kept).
 ### Notes
 - The website is not deployed yet; the app's online tab reads previewBefore only after the deploy.
+- Release 1.9.0 (unit dances, camera picker, studio frame aspect, play-mode autofocus, before / after pack previews, shader
+  tab sort / filter, import fixes). Packaging found a stale `preview.png` in build_release/bin/shaders (copy_shaders never
+  deletes) shipping the old hoyo_toon image: `package_release.ps1` now starts from fresh shaders/assets copies, and the
+  pack loader picks the newer of preview.png / preview.jpg (folders unzipped over an older pack). The auto-updater swaps
+  whole top-level folders and pack installs replace the pack folder, so updated users never had the stale file.
+  Cover `docs/media/compare-1.9.0.jpg`, notes in dist/notes_1.9.0.md.
