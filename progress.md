@@ -1519,3 +1519,15 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   Ray materials / 165 Ray .fx, 0 parse failures, 2.3 s; all 9 sets pick their Ray .emd.
 - Look policy for 2.0.0 (user): PBR may change clothes / accessories / stages; anime skin and faces must never turn glossy or
   realistic. Handoff `docs/handoff/2026-10-12-pbr-raymmd-2.0.0.md` section 10 has the state and next steps (P2 design next).
+
+## 2026-10-12 (4) - 2.0.0 P2: per-material PBR data reaches the GPU (raster + RT), debug view
+- Delegated to DeepSeek (opencode, level high), smoke-reviewed and render-checked by the architect.
+- `asset/PbrMaterial` (engine-neutral `PbrMaterial`, `RayToPbr` with FROM 0..9, per-model texture dedup, single-channel maps
+  uploaded as R8, `PBR model=` measurement line), `GpuPbrMaterial` record (ShaderInterop.h / `shaders/pbr_common.hlsli`, one
+  raw buffer per model, absolute SRV-heap texture indices), scene root param 14 (b3 `PbrRoot`), `RtGeometry` pad ->
+  `pbrSrv` / `pbrIndex` (still 192 B). `MaterialConstants` / `GpuVertex` / `RtVertex` unchanged. Pack wins over PBR.
+- Temporary CLI until the P5 UI: `--material-source default|ray`, `--pbr-debug none|albedo|normal|roughness|metalness|ao|emissive|model`.
+- Architect fix: `.emd` candidate ranking preferred a plain one-.fx Ray .emd (`RayMain.emd`, every slot FROM 0) over the
+  mapped one; now mostly-Ray first, then distinct Ray .fx count. All 22 models now pick their MaterialMap .emd.
+- Verified: default path vs HEAD build = 59 px at +-1 LSB (FXC codegen; not bit-identical), Alcander normal / roughness
+  debug views show the maps, RT and PT runs clean (no `[E]`). Alcander: 44/52 records, 37 textures, 281 MB VRAM, 171 ms load.

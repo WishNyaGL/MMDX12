@@ -276,7 +276,7 @@ void ShadowPass::Execute(PassContext& pc) {
 
 bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) {
     ID3D12Device* device = ctx.Device();
-    CD3DX12_ROOT_PARAMETER params[14];
+    CD3DX12_ROOT_PARAMETER params[15];
     params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);   // SceneConstants
     params[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);   // MaterialConstants
     params[2].InitAsShaderResourceView(0, 0, D3D12_SHADER_VISIBILITY_ALL);    // bones (shader packs read the head)
@@ -306,6 +306,9 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     CD3DX12_DESCRIPTOR_RANGE pointTable;
     pointTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 8);
     params[13].InitAsDescriptorTable(1, &pointTable, D3D12_SHADER_VISIBILITY_PIXEL); // point shadow maps
+    // Per-material PBR record selection (work unit P2): model record-buffer SRV index + material index +
+    // --pbr-debug channel + active flag, as root constants (b3).
+    params[14].InitAsConstants(4, 3, 0, D3D12_SHADER_VISIBILITY_ALL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[4];
     samplers[0].Init(0, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_WRAP,
@@ -325,7 +328,7 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
                      D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_ROOT_SIGNATURE_DESC rs;
-    rs.Init(14, params, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    rs.Init(15, params, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
     if (!CreateRootSignature(device, rs, rootSig_, "ScenePass: CreateRootSignature")) return false;
 
     const std::filesystem::path file = shaderDir / L"mmd.hlsl";
@@ -734,9 +737,14 @@ void ScenePass::Execute(PassContext& pc) {
     if (rt) {
         cmd->SetGraphicsRootShaderResourceView(7, pc.rt->Tlas());
         cmd->SetGraphicsRootShaderResourceView(8, pc.rt->Geometries());
-        cmd->SetGraphicsRootDescriptorTable(9, ctx.SrvHeap().Gpu(0));
-        cmd->SetGraphicsRootDescriptorTable(10, ctx.SrvHeap().Gpu(0));
     }
+    // Bindless tables (t0 space2 textures / space3 buffers): the PBR debug view samples the model's PBR textures
+    // through them on the plain raster path too, so bind the heap segments every frame (not only under RT).
+    cmd->SetGraphicsRootDescriptorTable(9, ctx.SrvHeap().Gpu(0));
+    cmd->SetGraphicsRootDescriptorTable(10, ctx.SrvHeap().Gpu(0));
+    // PBR record selection (b3) is per material; the debug channel / active flag are frame-wide (bound per draw).
+    const bool pbrDebug = pc.settings.materialSource == MaterialSource::Ray && pc.settings.pbrDebug != PbrDebug::None;
+    const uint32_t pbrDebugChannel = (uint32_t)pc.settings.pbrDebug;
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     // The camera view, plus (Studio quad view) the orthographic extra views: the same scene drawn again into other
@@ -812,6 +820,14 @@ void ScenePass::Execute(PassContext& pc) {
                 }
                 cmd->SetGraphicsRootConstantBufferView(1, m.constants);
                 cmd->SetGraphicsRootDescriptorTable(3, ctx.SrvHeap().Gpu(m.srvTable));
+                if (pbrDebug && !(pack && !m.packOff) && model->HasPbr() &&
+                    model->PbrIndex(&m - model->Materials().data()) != DescriptorHeap::kInvalid) {
+                    const uint32_t c[4] = {model->PbrSrv(), model->PbrIndex(&m - model->Materials().data()), pbrDebugChannel, 1u};
+                    cmd->SetGraphicsRoot32BitConstants(14, 4, c, 0);
+                } else {
+                    const uint32_t c[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, pbrDebugChannel, 0u};
+                    cmd->SetGraphicsRoot32BitConstants(14, 4, c, 0);
+                }
                 cmd->DrawIndexedInstanced(m.indexCount, 1, m.indexStart, 0, 0);
                 pc.stats.drawCalls++;
                 pc.stats.triangles += m.indexCount / 3;

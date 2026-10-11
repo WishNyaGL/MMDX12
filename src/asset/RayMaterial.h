@@ -80,11 +80,13 @@ struct RayEmdCandidate {
     int rayEntries = 0;        // entries whose .fx is a Ray material (content rule)
     int inRangeEntries = 0;    // indexed entries whose material index < pmxMaterialCount
     int raySharePct = 0;       // rayEntries * 100 / objCount
+    int rayFxDistinct = 0;     // distinct Ray material .fx the entries reach
     bool readFailed = false;
 };
 
 // Every ".emd" in the model's folder and its subfolders (bounded depth, default 3) whose Obj entries are readable.
-// Sorted best-first: Ray-material share, then in-range Obj indices, then path (stable tie-break).
+// Sorted best-first: mostly-Ray (share >= 50 %) first, then distinct Ray .fx, Ray share, Ray entries, in-range Obj
+// indices, then path (stable tie-break).
 std::vector<RayEmdCandidate> FindRayEmdCandidates(const std::filesystem::path& modelFile, int pmxMaterialCount,
                                                   int maxDepth = 3);
 

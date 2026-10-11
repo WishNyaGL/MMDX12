@@ -102,6 +102,10 @@ namespace mmdx {
 //                                whole project; motion camera; project audio) and quits; --offline-still renders the
 //                                --seek frame (GI).
 //   --theme <auto|light|dark>    colour theme for this run instead of the saved one (auto = follow Windows)
+//   --material-source <default|ray>  per-material PBR data source (work unit P2); default renders as before and
+//                                never reads Ray .md/.fx data
+//   --pbr-debug <ch>             with --material-source ray: output one PBR channel (none|albedo|normal|roughness|
+//                                metalness|ao|emissive|model) in the lit raster view
 //   --ui-scale <f>              UI scale for this run instead of the monitor's DPI scale (1.5 = 144 dpi; captures)
 //   --update-feed <url-or-file>  auto-update feed override: an https URL, a file: URL or a local
 //                                latest.json path (testing); the zip url may also be file:/local
@@ -135,6 +139,8 @@ struct AppOptions {
     bool noPhysics = false;    // --no-physics: override settings for this run
     std::string shaderPack;    // --shader-pack <id|none>: the character's shader pack for this run (play and studio)
     bool shaderPackSet = false;
+    int materialSource = 0;    // --material-source <default|ray>: per-material PBR source for this run (0 default, 1 ray)
+    int pbrDebug = 0;          // --pbr-debug <none|albedo|...>: PBR debug channel for this run (0 none .. 7 model)
     std::string packIndex;     // --pack-index <url|path>: the online shader pack gallery index (testing)
     std::vector<EffectStackEntry> effectStack;  // --effect <id>[,<id>...] / none: the effect stack, this run
     bool effectSet = false;

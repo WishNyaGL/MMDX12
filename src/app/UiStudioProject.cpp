@@ -98,7 +98,8 @@ void App::StartStudioProjectLoad(const std::filesystem::path& file, bool recover
     studioLoadTitle_ = recovery ? std::string(Tr("자동 저장에서 복구")) : StemUtf8(file);
     studioPackage_ = std::make_unique<StudioPackage>();
     loadFuture_ = std::async(std::launch::async, [=, pkg = studioPackage_.get(), this] {
-        return LoadStudioProjectPackage(file, recovery, *pkg, &loadProgress_, &loadError_);
+        return LoadStudioProjectPackage(file, recovery, *pkg, &loadProgress_, &loadError_,
+                                        options_.materialSource == 1);
     });
 }
 
@@ -363,8 +364,9 @@ void App::StudioAddModelFile(ModelKind kind, const std::filesystem::path& file, 
     job->models.resize(1);
     StudioJob* j = job.get();
     const std::string label = job->label;
-    job->future = std::async(std::launch::async, [j, kind, file, label] {
-        return LoadStudioModel(file, kind, label, j->models[0], &j->progress, &j->error);
+    const bool ray = options_.materialSource == 1;
+    job->future = std::async(std::launch::async, [j, kind, file, label, ray] {
+        return LoadStudioModel(file, kind, label, j->models[0], &j->progress, &j->error, ray);
     });
     studioJobs_.push_back(std::move(job));
 }
@@ -382,8 +384,9 @@ void App::StudioAddLibraryCharacter(int index, uint32_t replaceUid) {
     job->replaceUid = replaceUid;
     job->models.resize(1);
     StudioJob* j = job.get();
-    job->future = std::async(std::launch::async, [j, c] {
-        const bool ok = LoadStudioModel(c.modelPath, ModelKind::Character, c.displayName, j->models[0], &j->progress, &j->error);
+    const bool ray = options_.materialSource == 1;
+    job->future = std::async(std::launch::async, [j, c, ray] {
+        const bool ok = LoadStudioModel(c.modelPath, ModelKind::Character, c.displayName, j->models[0], &j->progress, &j->error, ray);
         j->models[0].libraryId = c.id;
         return ok;
     });
@@ -397,7 +400,8 @@ void App::StudioAddLibraryStage(int index, uint32_t replaceUid) {
     job->label = s.displayName;
     job->replaceUid = replaceUid;
     StudioJob* j = job.get();
-    job->future = std::async(std::launch::async, [j, s] { return LoadStudioStage(s, j->models, &j->progress, &j->error); });
+    const bool ray = options_.materialSource == 1;
+    job->future = std::async(std::launch::async, [j, s, ray] { return LoadStudioStage(s, j->models, &j->progress, &j->error, ray); });
     studioJobs_.push_back(std::move(job));
 }
 
@@ -548,7 +552,8 @@ void App::StudioPollJobs() {
                 sm->pmx = pm.pmx;
                 sm->inst = std::make_unique<ModelInstance>(pm.pmx);
                 sm->gpu = renderer_.CreateModel(batch, *pm.pmx, pm.textures,
-                                                pm.kind == ModelKind::Stage ? ModelRole::Stage : ModelRole::Character);
+                                                pm.kind == ModelKind::Stage ? ModelRole::Stage : ModelRole::Character,
+                                                &pm.pbr);
                 if (!sm->gpu) {
                     LOG_WARN("studio: GPU upload failed: %s", pm.name.c_str());
                     continue;
@@ -634,7 +639,8 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
     StudioModel& m = *d.models[(size_t)index];
     UploadBatch batch(ctx_);
     std::unique_ptr<GpuModel> gpu =
-        renderer_.CreateModel(batch, *pm.pmx, pm.textures, m.IsStage() ? ModelRole::Stage : ModelRole::Character);
+        renderer_.CreateModel(batch, *pm.pmx, pm.textures, m.IsStage() ? ModelRole::Stage : ModelRole::Character,
+                              &pm.pbr);
     batch.Submit();
     if (!gpu) {
         LOG_WARN("studio: GPU upload failed: %s", pm.name.c_str());

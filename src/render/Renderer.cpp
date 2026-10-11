@@ -228,9 +228,11 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
 }
 
 std::unique_ptr<GpuModel> Renderer::CreateModel(UploadBatch& batch, const PmxModel& pmx,
-                                                const std::vector<ImageRGBA8>& textures, ModelRole role) {
+                                                const std::vector<ImageRGBA8>& textures, ModelRole role,
+                                                const PbrModelData* pbr) {
     auto model = std::make_unique<GpuModel>();
-    if (!model->Create(*ctx_, batch, pmx, textures, builtin_, role)) return nullptr;
+    static const PbrModelData kEmptyPbr;
+    if (!model->Create(*ctx_, batch, pmx, textures, builtin_, role, pbr ? *pbr : kEmptyPbr)) return nullptr;
     return model;
 }
 

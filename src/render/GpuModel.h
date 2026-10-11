@@ -7,6 +7,7 @@
 #include "render/ShaderInterop.h"
 #include "render/ShaderPack.h"
 #include "asset/ModelTraits.h"
+#include "asset/PbrMaterial.h"
 #include "asset/PmxModel.h"
 #include <DirectXMath.h>
 #include <string>
@@ -23,6 +24,9 @@ struct BuiltinTextures {
 };
 
 enum class ModelRole : uint8_t { Character = 0, Stage = 1 };
+
+// Per-material PBR source (MaterialSource) and the PBR debug channel (PbrDebug) live in render/RenderTypes.h
+// (with the rest of the render settings); GpuModel reads them through RenderSettings.
 
 class GpuModel {
 public:
@@ -51,6 +55,11 @@ public:
     // Creates GPU textures only for indices actually referenced by materials.
     bool Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
                 const std::vector<ImageRGBA8>& textures, const BuiltinTextures& builtin, ModelRole role);
+    // `pbr` is the model's decoded Ray PBR payload (PbrModelData, may be empty / all-invalid). Creates the
+    // per-material StructuredBuffer<GpuPbrMaterial> and its SRV when at least one material has a record.
+    bool Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
+                const std::vector<ImageRGBA8>& textures, const BuiltinTextures& builtin, ModelRole role,
+                const PbrModelData& pbr);
     // Frees descriptors. Caller must ensure the GPU no longer uses the model (WaitForGpu).
     void Destroy();
 
@@ -101,6 +110,13 @@ public:
     bool HasAdditionalUv() const { return hasAdditionalUv_; }
     // Raw (ByteAddress) SRV heap index over the add-UV buffer; 0xFFFFFFFF when the model has none.
     uint32_t AddUvSrv() const { return addUvSrv_; }
+    // Per-material PBR record buffer (StructuredBuffer<GpuPbrMaterial>, absolute SRV heap index; 0xFFFFFFFF when
+    // the model has none, e.g. with --material-source default). pbrIndexOfMaterial = material index or 0xFFFFFFFF.
+    uint32_t PbrSrv() const { return pbrSrv_; }
+    bool HasPbr() const { return pbrSrv_ != DescriptorHeap::kInvalid; }
+    uint32_t PbrIndex(size_t material) const {
+        return material < pbrIndex_.size() ? pbrIndex_[material] : DescriptorHeap::kInvalid;
+    }
     // Generic data traits of the model (additional UVs, toon-map materials) for ShaderPack::Suggests.
     ModelTraits Traits() const;
     D3D12_GPU_VIRTUAL_ADDRESS BoneBuffer(uint64_t frame) const;      // StructuredBuffer<float4x4> (t0)
@@ -167,6 +183,13 @@ private:
     bool hasAdditionalUv_ = false;
     uint32_t addUvSrv_ = DescriptorHeap::kInvalid;
     int additionalUvCount_ = 0;   // PMX header count (0..4)
+    // Per-material PBR records (work unit P2): one SRV heap descriptor over a raw GpuPbrMaterial buffer, plus a
+    // map material -> record index (kInvalid when the material has no record). Empty when the model has none.
+    ComPtr<ID3D12Resource> pbrBuf_;
+    std::vector<ComPtr<ID3D12Resource>> pbrTextures_;   // decoded map textures referenced by the records
+    std::vector<uint32_t> pbrTextureSrvs_;              // SRV heap index per pbrTextures_ entry
+    uint32_t pbrSrv_ = DescriptorHeap::kInvalid;
+    std::vector<uint32_t> pbrIndex_;
     ModelRole role_ = ModelRole::Character;
     DirectX::XMFLOAT3 boundsMin_{}, boundsMax_{};
     ComPtr<ID3D12Resource> boneBuf_[kRing];

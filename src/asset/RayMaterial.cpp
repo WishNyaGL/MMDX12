@@ -688,16 +688,26 @@ std::vector<RayEmdCandidate> FindRayEmdCandidates(const std::filesystem::path& m
             result.push_back(cand);
             continue;
         }
+        std::set<std::wstring> rayFx;
         for (const EmdEntry& e : entries) {
             ++cand.objCount;
             if (e.index >= 0 && pmxMaterialCount > 0 && e.index < pmxMaterialCount) ++cand.inRangeEntries;
             std::filesystem::path fx;
-            if (ResolveRel(cand.path.parent_path(), e.value, fx) && IsRayMaterialFx(fx)) ++cand.rayEntries;
+            if (ResolveRel(cand.path.parent_path(), e.value, fx) && IsRayMaterialFx(fx)) {
+                ++cand.rayEntries;
+                rayFx.insert(fx.lexically_normal().wstring());
+            }
         }
+        cand.rayFxDistinct = (int)rayFx.size();
         cand.raySharePct = cand.objCount ? cand.rayEntries * 100 / cand.objCount : 0;
         result.push_back(cand);
     }
     std::sort(result.begin(), result.end(), [](const RayEmdCandidate& a, const RayEmdCandidate& b) {
+        // A mostly-Ray .emd first; among those, the one with more distinct material .fx carries more authored
+        // per-material data (a model often ships a plain one-.fx-for-all Ray .emd next to its mapped one).
+        const bool aRay = a.raySharePct >= 50, bRay = b.raySharePct >= 50;
+        if (aRay != bRay) return aRay;
+        if (a.rayFxDistinct != b.rayFxDistinct) return a.rayFxDistinct > b.rayFxDistinct;
         if (a.raySharePct != b.raySharePct) return a.raySharePct > b.raySharePct;
         if (a.rayEntries != b.rayEntries) return a.rayEntries > b.rayEntries;
         if (a.inRangeEntries != b.inRangeEntries) return a.inRangeEntries > b.inRangeEntries;

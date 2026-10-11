@@ -4,6 +4,7 @@
 #include "anim/Motion.h"
 #include "asset/AssetLibrary.h"
 #include "asset/ImageLoader.h"
+#include "asset/PbrMaterial.h"
 #include "asset/PmxModel.h"
 #include <atomic>
 #include <memory>
@@ -19,6 +20,8 @@ struct LoadedModelCpu {
     // The model's default shader-pack texture folder (found through its own MME files by asset/MmeHints): the
     // directory of the face texture the pack needs. Empty when none was found. Filled on the loader worker thread.
     std::filesystem::path defaultPackTextureFolder;
+    // Per-material Ray-MMD PBR records + decoded map textures (work unit P2); empty when the model has none.
+    PbrModelData pbr;
 };
 
 struct PerformerCast {
@@ -55,9 +58,10 @@ struct LoadProgress {
 };
 
 // Decodes every texture referenced by m.pmx's materials into m.textures (parallel).
-// `progress` may be null.
+// `progress` may be null. When `rayMaterials` is set, the model's Ray-MMD PBR data is parsed and decoded too
+// (asset/PbrMaterial.h) and stored in m.pbr.
 void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBegin, float fracEnd,
-                         const char* label);
+                         const char* label, bool rayMaterials = false);
 
 // The character's model without textures (material names for the library's per-material shader list); null on failure.
 std::shared_ptr<PmxModel> LoadCharacterModelOnly(const std::filesystem::path& path);
@@ -68,7 +72,7 @@ std::shared_ptr<PmxModel> LoadCharacterModelOnly(const std::filesystem::path& pa
 // If `formation` is provided and non-empty, loads the cast performers into character (center) and extraCharacters.
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
                       ScenePackage& out, LoadProgress* progress, std::string* error,
-                      const std::vector<PerformerCast>* formation = nullptr);
+                      const std::vector<PerformerCast>* formation = nullptr, bool rayMaterials = false);
 
 // Render benchmark scene: characters[i] posed by the dance of songs[i] (sizes equal, >= 1).
 // out.character / out.motion = index 0, out.extraCharacters / out.extraMotions = the rest.

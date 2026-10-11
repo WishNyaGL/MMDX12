@@ -19,7 +19,7 @@ namespace mmdx {
 
 // Decodes all textures referenced by the model's materials in parallel.
 void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBegin, float fracEnd,
-                         const char* label) {
+                         const char* label, bool rayMaterials) {
     m.textures.resize(m.pmx->textures.size());
 
     // Referenced texture indices; only indices within range.
@@ -75,6 +75,8 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
                           progress->fraction.store(fracBegin + (fracEnd - fracBegin) * (float)d / (float)total,
                                                    std::memory_order_relaxed);
                   });
+    if (rayMaterials)
+        BuildPbrModelData(m.pmx->sourcePath, m.pmx->materials, m.pmx->name, m.pbr);
 }
 
 // The model's default shader-pack texture folder: the directory of the face texture its own MME files reference (the
@@ -88,7 +90,7 @@ static std::filesystem::path ModelPackTextureFolder(const std::filesystem::path&
 
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
                       ScenePackage& out, LoadProgress* progress, std::string* error,
-                      const std::vector<PerformerCast>* formation) {
+                      const std::vector<PerformerCast>* formation, bool rayMaterials) {
     try {
         out = ScenePackage{};
 
@@ -133,7 +135,8 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
 
                 float frac0 = curUnit / totalUnits;
                 float frac1 = (curUnit + 0.8f) / totalUnits;
-                DecodeModelTextures(out.character, progress, frac0, frac1, centerPerf.character.displayName.c_str());
+                DecodeModelTextures(out.character, progress, frac0, frac1, centerPerf.character.displayName.c_str(),
+                                    rayMaterials);
 
                 if (progress) progress->SetStatus(Tr("모션 로드: ") + centerPerf.character.displayName);
                 VmdMotion dance;
@@ -173,7 +176,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
 
                 float frac0 = curUnit / totalUnits;
                 float frac1 = (curUnit + 0.8f) / totalUnits;
-                DecodeModelTextures(extraM, progress, frac0, frac1, ep.character.displayName.c_str());
+                DecodeModelTextures(extraM, progress, frac0, frac1, ep.character.displayName.c_str(), rayMaterials);
 
                 if (progress) progress->SetStatus(Tr("모션 로드: ") + ep.character.displayName);
                 VmdMotion extraDance;
@@ -220,7 +223,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
                     }
                     float begin = (curUnit + (float)k / (float)std::max<size_t>(n, 1)) / totalUnits;
                     float end = (curUnit + (float)(k + 1) / (float)std::max<size_t>(n, 1)) / totalUnits;
-                    DecodeModelTextures(part, progress, begin, end, label.c_str());
+                    DecodeModelTextures(part, progress, begin, end, label.c_str(), rayMaterials);
                     out.stageParts.push_back(std::move(part));
                 }
             }
@@ -274,7 +277,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
         }
 
         // 2. Character textures.
-        DecodeModelTextures(out.character, progress, 0.05f, 0.45f, character.displayName.c_str());
+        DecodeModelTextures(out.character, progress, 0.05f, 0.45f, character.displayName.c_str(), rayMaterials);
 
         // 3. Stage parts.
         if (stage) {
@@ -294,7 +297,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
                 }
                 float begin = 0.45f + 0.35f * (float)k / (float)std::max<size_t>(n, 1);
                 float end = 0.45f + 0.35f * (float)(k + 1) / (float)std::max<size_t>(n, 1);
-                DecodeModelTextures(part, progress, begin, end, label.c_str());
+                DecodeModelTextures(part, progress, begin, end, label.c_str(), rayMaterials);
                 out.stageParts.push_back(std::move(part));
             }
         }

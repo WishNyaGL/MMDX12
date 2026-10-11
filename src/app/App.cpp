@@ -138,6 +138,22 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.shaderPack = WideToUtf8(next());
             if (opt.shaderPack == "none") opt.shaderPack.clear();
             opt.shaderPackSet = true;
+        } else if (arg == L"--material-source") {
+            const std::string v = ToLowerAscii(WideToUtf8(next()));
+            if (v == "default") opt.materialSource = 0;
+            else if (v == "ray") opt.materialSource = 1;
+            else LOG_WARN("unknown --material-source value: %s (want default|ray)", v.c_str());
+        } else if (arg == L"--pbr-debug") {
+            const std::string v = ToLowerAscii(WideToUtf8(next()));
+            if (v == "none") opt.pbrDebug = 0;
+            else if (v == "albedo") opt.pbrDebug = 1;
+            else if (v == "normal") opt.pbrDebug = 2;
+            else if (v == "roughness") opt.pbrDebug = 3;
+            else if (v == "metalness") opt.pbrDebug = 4;
+            else if (v == "ao") opt.pbrDebug = 5;
+            else if (v == "emissive") opt.pbrDebug = 6;
+            else if (v == "model") opt.pbrDebug = 7;
+            else LOG_WARN("unknown --pbr-debug value: %s (want none|albedo|normal|roughness|metalness|ao|emissive|model)", v.c_str());
         } else if (arg == L"--effect") {
             // --effect <id>[,<id>...] / --effect none: the effect stack for this run (overrides the settings)
             const std::string v = WideToUtf8(next());
@@ -1243,6 +1259,8 @@ void App::ApplyRenderSettings() {
     rs.taa = settings_.taa;
     rs.exposure = settings_.exposure;
     rs.renderPath = (RenderPath)settings_.renderPath;
+    rs.materialSource = options_.materialSource == 1 ? MaterialSource::Ray : MaterialSource::Default;
+    rs.pbrDebug = (PbrDebug)std::clamp(options_.pbrDebug, 0, 7);
     if (shadingOverride_ >= 0) rs.shading = (ViewShading)std::clamp(shadingOverride_, 0, 2);
     rs.upscaler = (UpscalerKind)settings_.upscaler;
     rs.upscalerQuality = (UpscalerQuality)settings_.upscalerQuality;
@@ -1338,7 +1356,7 @@ void App::StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsse
     const std::vector<PerformerCast> form = hasFormation ? *formation : std::vector<PerformerCast>{};
     loadFuture_ = std::async(std::launch::async, [=, pkg = loadPackage_.get(), this] {
         return LoadScenePackage(c, hasStage ? &s : nullptr, so, *pkg, &loadProgress_, &loadError_,
-                                hasFormation ? &form : nullptr);
+                                hasFormation ? &form : nullptr, options_.materialSource == 1);
     });
 }
 
@@ -1477,14 +1495,16 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         s->characterId = library_.characters[(size_t)selCharacter_].id;
     }
     s->characterDisplayName = !pkg.characterDisplayName.empty() ? pkg.characterDisplayName : (s->character ? s->character->Model().name : "");
-    s->characterGpu = renderer_.CreateModel(batch, *pkg.character.pmx, pkg.character.textures);
+    s->characterGpu = renderer_.CreateModel(batch, *pkg.character.pmx, pkg.character.textures,
+                                            ModelRole::Character, &pkg.character.pbr);
     if (!s->characterGpu) return false;
     s->characterGpu->SetDefaultPackTextureFolder(pkg.character.defaultPackTextureFolder);
 
     for (size_t i = 0; i < pkg.extraCharacters.size(); ++i) {
         SceneRuntime::Performer perf;
         perf.instance = std::make_unique<ModelInstance>(pkg.extraCharacters[i].pmx);
-        perf.gpu = renderer_.CreateModel(batch, *pkg.extraCharacters[i].pmx, pkg.extraCharacters[i].textures);
+        perf.gpu = renderer_.CreateModel(batch, *pkg.extraCharacters[i].pmx, pkg.extraCharacters[i].textures,
+                                         ModelRole::Character, &pkg.extraCharacters[i].pbr);
         if (!perf.gpu) return false;
         perf.gpu->SetDefaultPackTextureFolder(pkg.extraCharacters[i].defaultPackTextureFolder);
         perf.motion = i < pkg.extraMotions.size() ? pkg.extraMotions[i] : nullptr;
@@ -1496,7 +1516,7 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     for (LoadedModelCpu& part : pkg.stageParts) {
         auto inst = std::make_unique<ModelInstance>(part.pmx);
         inst->UpdatePose();
-        auto gpu = renderer_.CreateModel(batch, *part.pmx, part.textures, ModelRole::Stage);
+        auto gpu = renderer_.CreateModel(batch, *part.pmx, part.textures, ModelRole::Stage, &part.pbr);
         if (!gpu) {
             LOG_WARN("stage part GPU upload failed: %s", part.pmx->name.c_str());
             continue;

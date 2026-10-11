@@ -105,7 +105,7 @@ static ComPtr<ID3DBlob> CompileShaderDxcUncached(const std::filesystem::path& fi
 
 static ComPtr<ID3DBlob> CompileShaderUncached(const std::filesystem::path& file, const char* entry, const char* target,
                                               const ShaderDefines& defines, std::string* errors) {
-    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
+    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_ENABLE_UNBOUNDED_DESCRIPTOR_TABLES;
 #ifdef _DEBUG
     flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #else

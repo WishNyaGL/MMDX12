@@ -19,6 +19,7 @@ namespace mmdx {
 
 struct PmxModel;
 struct ImageRGBA8;
+struct PbrModelData;
 
 struct RenderInitProgress {
     std::atomic<float> fraction{0.0f};  // 0..1
@@ -42,7 +43,8 @@ public:
 
     std::unique_ptr<GpuModel> CreateModel(UploadBatch& batch, const PmxModel& pmx,
                                           const std::vector<ImageRGBA8>& textures,
-                                          ModelRole role = ModelRole::Character);
+                                          ModelRole role = ModelRole::Character,
+                                          const PbrModelData* pbr = nullptr);
 
     void SetSettings(const RenderSettings& s) { settings_ = s; }
     // Colour LUT for PostPass (strip layout in render/ColorLut.h); null or empty clears it.

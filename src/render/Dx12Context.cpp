@@ -553,6 +553,66 @@ ComPtr<ID3D12Resource> UploadBatch::CreateTextureTyped(const ImageRGBA8& image, 
     return res;
 }
 
+// One RGBA8 image channel -> an R8_UNORM texture. A channel < 0 uses the red channel (the caller only picks
+// single-channel slots through their swizzle, and swizzle 0 is R).
+ComPtr<ID3D12Resource> UploadBatch::CreateTextureChannel8(const ImageRGBA8& image, int channel,
+                                                          const wchar_t* debugName) {
+    if (!ctx_.Device() || !list_ || image.Empty() || image.mips[0].pixels.empty()) return {};
+    if (channel < 0 || channel > 3) channel = 0;
+    const UINT mipCount = (UINT)image.mips.size();
+    CD3DX12_RESOURCE_DESC desc =
+        CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8_UNORM, image.Width(), image.Height(), 1, (UINT16)mipCount, 1, 0,
+                                     D3D12_RESOURCE_FLAG_NONE);
+    D3D12_HEAP_PROPERTIES def{D3D12_HEAP_TYPE_DEFAULT};
+    ComPtr<ID3D12Resource> res;
+    if (!CheckHr(ctx_.Device()->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &desc,
+                                                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&res)),
+                 "CreateCommittedResource(r8 texture)"))
+        return {};
+    if (debugName) res->SetName(debugName);
+
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(mipCount);
+    std::vector<UINT> rowCounts(mipCount);
+    std::vector<UINT64> rowSizes(mipCount);
+    UINT64 total = 0;
+    ctx_.Device()->GetCopyableFootprints(&desc, 0, mipCount, 0, footprints.data(), rowCounts.data(), rowSizes.data(),
+                                         &total);
+
+    D3D12_HEAP_PROPERTIES upload{D3D12_HEAP_TYPE_UPLOAD};
+    D3D12_RESOURCE_DESC stagingDesc = CD3DX12_RESOURCE_DESC::Buffer(total);
+    ComPtr<ID3D12Resource> staging;
+    if (!CheckHr(ctx_.Device()->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &stagingDesc,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                        IID_PPV_ARGS(&staging)),
+                 "CreateCommittedResource(r8 staging)"))
+        return {};
+    void* mapped = nullptr;
+    if (FAILED(staging->Map(0, nullptr, &mapped))) {
+        LOG_ERROR("failed to map r8 texture upload staging buffer");
+        return {};
+    }
+    uint8_t* base = (uint8_t*)mapped;
+    for (UINT mip = 0; mip < mipCount; ++mip) {
+        const ImageRGBA8::Level& level = image.mips[mip];
+        const D3D12_SUBRESOURCE_FOOTPRINT& fp = footprints[mip].Footprint;
+        for (UINT y = 0; y < level.height; ++y) {
+            uint8_t* dst = base + footprints[mip].Offset + (size_t)y * fp.RowPitch;
+            const uint8_t* src = level.pixels.data() + (size_t)y * level.width * 4 + (size_t)channel;
+            for (UINT x = 0; x < level.width; ++x) dst[x] = src[(size_t)x * 4];
+        }
+        CD3DX12_TEXTURE_COPY_LOCATION dst(res.Get(), mip);
+        CD3DX12_TEXTURE_COPY_LOCATION src(staging.Get(), footprints[mip]);
+        list_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+    staging->Unmap(0, nullptr);
+    staging_.push_back(std::move(staging));
+
+    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    list_->ResourceBarrier(1, &barrier);
+    return res;
+}
+
 void UploadBatch::Submit() {
     if (submitted_) return;
     submitted_ = true;

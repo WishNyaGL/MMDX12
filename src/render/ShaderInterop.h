@@ -212,10 +212,39 @@ struct RtGeometry {
     uint32_t packSrv;      // SrvHeap index of raw ByteAddressBuffer holding RtPtPackRecord (when RtGeom_PtPack)
     uint32_t addUvSrv;     // SrvHeap index of raw ByteAddressBuffer with the add-UV stream (0xFFFFFFFF = none)
     float alphaKey;        // pack alpha key (0 = off): cut pixels whose texture red < alphaKey at alpha evaluation
-    uint32_t _padAddUv[2]; // keeps the float4 block 16-byte aligned (StructuredBuffer stride = 192)
+    uint32_t pbrSrv;       // SrvHeap index of the model's GpuPbrMaterial StructuredBuffer (0xFFFFFFFF = none)
+    uint32_t pbrIndex;     // material index into that buffer (0xFFFFFFFF = no PBR record)
     // material morph texture factors, as MaterialConstants::texMul..toonAdd
     DirectX::XMFLOAT4 texMul, texAdd, sphereMul, sphereAdd, toonMul, toonAdd;
 };
 static_assert(sizeof(RtGeometry) == 192, "RtGeometry layout");
+
+// ---- per-material PBR record (work unit P2) ---------------------------------------
+// Mirrors shaders/pbr_common.hlsli. One StructuredBuffer<GpuPbrMaterial> per model that has Ray maps; the raster
+// PS reads it through its model SRV index (bound as root param 14) + material index, the ray paths through
+// RtGeometry::pbrSrv / pbrIndex. From 0..9 and the UV hints are engine-neutral asset/PbrMaterial.h values.
+inline constexpr uint32_t kGpuPbrSlotCount = 12;   // mirror of kPbrSlotCount (asset/PbrMaterial.h)
+struct GpuPbrSlot {
+    uint32_t type;         // Ray <PREFIX>_MAP_TYPE
+    uint32_t swizzle;      // 0 R, 1 G, 2 B, 3 A
+    uint32_t uvFlip;       // 0 none, 1 X, 2 Y, 3 both; NORMAL 4 = flip the shading normal X
+    uint32_t applyScale;   // 0 none, 1 map * value, 2 map ^ value
+    uint32_t colorFlip;    // CUSTOM_A/B: 1 inverts the value
+    int32_t textureSrv;    // absolute SrvHeap index of the slot texture (None falls back to the constant)
+    float loopU, loopV;    // <slot>MapLoopNum
+    DirectX::XMFLOAT4 value;    // xyz = constant value, w = scale (normalMapScale / parallaxMapScale)
+    DirectX::XMFLOAT4 uvScale;  // xy = <PREFIX>_MAP_UV_SCALE, zw unused
+};
+static_assert(sizeof(GpuPbrSlot) == 64, "GpuPbrSlot layout");
+
+struct GpuPbrMaterial {
+    uint32_t flags;        // GpuPbrFlags: bit 0 valid, bit 1 cutout alpha, bit 2 emissive
+    uint32_t shadingModel; // CUSTOM_ENABLE (0..9)
+    float alphaThreshold;  // material_common ALPHA_THRESHOLD
+    float diffuseAlpha;    // PMX material diffuse alpha (coverage / blend)
+    DirectX::XMFLOAT4 params;   // x = ALBEDO_SUB_ENABLE blend mode (0 none)
+    GpuPbrSlot slots[kGpuPbrSlotCount];
+};
+static_assert(sizeof(GpuPbrMaterial) == 800, "GpuPbrMaterial layout");
 
 } // namespace mmdx

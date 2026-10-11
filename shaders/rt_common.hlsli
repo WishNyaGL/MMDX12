@@ -56,7 +56,8 @@ struct RtGeometry {
     uint packSrv;
     uint addUvSrv;   // raw ByteAddressBuffer of the add-UV stream; 0xFFFFFFFF = none
     float alphaKey;  // pack alpha key (0 = off): cut pixels whose texture red < alphaKey at alpha evaluation
-    uint _padAddUv[2];   // keeps the float4 block 16-byte aligned (mirror of ShaderInterop.h)
+    uint pbrSrv;     // SrvHeap index of the model's GpuPbrMaterial StructuredBuffer (0xFFFFFFFF = none)
+    uint pbrIndex;   // material index into that buffer (0xFFFFFFFF = no PBR record)
     float4 texMul, texAdd, sphereMul, sphereAdd, toonMul, toonAdd;   // material morph factors
 };
 

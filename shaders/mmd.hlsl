@@ -7,6 +7,7 @@
 #ifdef RT_SHADOWS
 #include "rt_common.hlsli"
 #endif
+#include "pbr_common.hlsli"
 
 cbuffer MaterialCB : register(b1) {
     float4 gDiffuse; float3 gSpecular; float gSpecularPower; float3 gAmbient; float gEdgeSize;
@@ -16,6 +17,16 @@ cbuffer MaterialCB : register(b1) {
     float4 gTexMul; float4 gTexAdd; float4 gSphereMul; float4 gSphereAdd; float4 gToonMul; float4 gToonAdd;
     float4 gPackHead;        // xyz = head bone bind position (model space), w = 1 when the model has a head bone
     float4 gPackParams[4];   // the pack's 16 parameters (pack.json order)
+};
+
+// Per-material PBR root constants (b3, root param 14 in ScenePass). Set every draw; gPbrActive is 0 unless the run
+// uses --material-source ray, so the default raster stays byte-identical (the branch is not taken and the buffer
+// reads dead-code eliminate). A shader pack shades from its own path and ignores these.
+cbuffer PbrRoot : register(b3) {
+    uint gPbrSrv;      // SrvHeap index of the model's GpuPbrMaterial buffer (0xFFFFFFFF = none)
+    uint gPbrIndex;    // material index into that buffer (0xFFFFFFFF = no record)
+    uint gPbrDebug;    // PbrDebug channel 0..7
+    uint gPbrActive;   // 0 = no PBR record for this draw
 };
 #ifndef MAT_HAS_TEXTURE
 #define MAT_HAS_TEXTURE 1u
@@ -500,6 +511,32 @@ PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivi
 
 // ---- MMD material -----------------------------------------------------------------
 
+// ---- per-material PBR debug view (work unit P2) ---------------------------------------------
+// A material with a PBR record outputs one channel (CLI --pbr-debug); materials without one render as before.
+// The buffer is read through the model's SRV (absolute SrvHeap index), as the ray paths do.
+PSOut PbrDebugOutput(in VSOut i, in GpuPbrMaterial m, float3 n, float alpha) {
+    float2 uv = i.uv;
+    float3 outColor;
+    if (gPbrDebug == 1u) {          // albedo (sRGB source -> linear)
+        outColor = SrgbToLinear(saturate(PbrSlotRgb(m.slots[PBR_SLOT_ALBEDO], uv)));
+    } else if (gPbrDebug == 2u) {   // normal: tangent-space normal into the world
+        float3 nt = PbrDecodeNormal(m.slots[PBR_SLOT_NORMAL], uv);
+        float3 w = PbrTangentToWorld(n, i.worldPos, uv, nt);
+        outColor = w * 0.5 + 0.5;
+    } else if (gPbrDebug == 3u) {   // roughness = SmoothnessToRoughness(smoothness)
+        outColor = PbrSlotRoughness(m.slots[PBR_SLOT_SMOOTHNESS], uv).xxx;
+    } else if (gPbrDebug == 4u) {   // metalness
+        outColor = PbrSlotMetalness(m.slots[PBR_SLOT_METALNESS], uv).xxx;
+    } else if (gPbrDebug == 5u) {   // ambient occlusion
+        outColor = PbrSlotAo(m.slots[PBR_SLOT_OCCLUSION], uv).xxx;
+    } else if (gPbrDebug == 6u) {   // emissive
+        outColor = SrgbToLinear(saturate(PbrSlotRgb(m.slots[PBR_SLOT_EMISSIVE], uv)));
+    } else {                        // shading model as a distinct hue
+        outColor = PbrModelHue(m.shadingModel);
+    }
+    return PackOutput(outColor, alpha, n, gReflectivity, i.curClip, i.prevClip);
+}
+
 PSOut PSMain(VSOut i, bool front : SV_IsFrontFace) {
     float3 n = normalize(i.nrm);
     if (!front) n = -n;
@@ -510,6 +547,11 @@ PSOut PSMain(VSOut i, bool front : SV_IsFrontFace) {
                                             : float4(1, 1, 1, 1);
     float alpha = gDiffuse.a * tex.a;
     if (alpha < 0.004) discard;
+
+    // Per-material PBR (gPbrActive is a runtime value; in the default run it is always 0, so the branch is a
+    // no-op and the frame is identical). The lit raster path only, as the plan requires.
+    if (gPbrActive != 0u && gShading < 0.5)
+        return PbrDebugOutput(i, PbrLoadMaterial(gPbrSrv, gPbrIndex), n, alpha);
 
     // Unlit (gShading 1): texture * material diffuse colour only, still alpha-tested/blended.
     // The lit path below is untouched when gShading == 0.

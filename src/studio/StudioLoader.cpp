@@ -23,13 +23,14 @@ std::filesystem::path ModelPackTextureFolder(const std::filesystem::path& modelP
 }
 
 bool LoadModel(const std::filesystem::path& path, ModelRole role, const std::string& label, LoadProgress* progress,
-               float f0, float f1, StudioPackageModel& out, std::string* error) {
+               float f0, float f1, StudioPackageModel& out, std::string* error, bool rayMaterials = false) {
     LoadedModelCpu cpu;
     cpu.pmx = std::make_shared<PmxModel>();
     if (!LoadModelFile(path, role, *cpu.pmx, error)) return false;
-    DecodeModelTextures(cpu, progress, f0, f1, label.c_str());
+    DecodeModelTextures(cpu, progress, f0, f1, label.c_str(), rayMaterials);
     out.pmx = cpu.pmx;
     out.textures = std::move(cpu.textures);
+    out.pbr = std::move(cpu.pbr);
     out.name = label;
     if (role == ModelRole::Character) out.defaultPackTextureFolder = ModelPackTextureFolder(path);
     return true;
@@ -37,7 +38,7 @@ bool LoadModel(const std::filesystem::path& path, ModelRole role, const std::str
 } // namespace
 
 bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset* song,
-                       StudioPackage& out, LoadProgress* progress, std::string* error) {
+                       StudioPackage& out, LoadProgress* progress, std::string* error, bool rayMaterials) {
     try {
         out = StudioPackage{};
         if (progress) progress->fraction.store(0.0f, std::memory_order_relaxed);
@@ -52,7 +53,7 @@ bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage,
                 part.kind = ModelKind::Stage;
                 std::string err;
                 const float f0 = 0.05f + 0.35f * (float)k / (float)n, f1 = 0.05f + 0.35f * (float)(k + 1) / (float)n;
-                if (!LoadModel(stage->parts[k], ModelRole::Stage, label, progress, f0, f1, part, &err)) {
+                if (!LoadModel(stage->parts[k], ModelRole::Stage, label, progress, f0, f1, part, &err, rayMaterials)) {
                     LOG_WARN("studio: stage part load failed: %s: %s", PathToUtf8(stage->parts[k]).c_str(), err.c_str());
                     continue;
                 }
@@ -64,7 +65,7 @@ bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage,
         StudioPackageModel ch;
         ch.libraryId = character.id;
         std::string err;
-        if (!LoadModel(character.modelPath, ModelRole::Character, character.displayName, progress, 0.4f, 0.85f, ch, &err)) {
+        if (!LoadModel(character.modelPath, ModelRole::Character, character.displayName, progress, 0.4f, 0.85f, ch, &err, rayMaterials)) {
             if (error) *error = Tr("캐릭터를 불러오지 못했습니다: ") + err;
             return false;
         }
@@ -96,7 +97,7 @@ bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage,
 
 
 bool LoadStudioModel(const std::filesystem::path& path, ModelKind kind, const std::string& label,
-                     StudioPackageModel& out, LoadProgress* progress, std::string* error) {
+                     StudioPackageModel& out, LoadProgress* progress, std::string* error, bool rayMaterials) {
     try {
         out = StudioPackageModel{};
         if (progress) progress->SetStatus(Tr("모델 로드: ") + label);
@@ -108,7 +109,7 @@ bool LoadStudioModel(const std::filesystem::path& path, ModelKind kind, const st
                                : kind == ModelKind::Prop    ? ModelRole::Prop
                                                             : ModelRole::Stage;
         std::string err;
-        if (!LoadModel(path, role, label, progress, 0.05f, 0.95f, out, &err)) {
+        if (!LoadModel(path, role, label, progress, 0.05f, 0.95f, out, &err, rayMaterials)) {
             if (error) *error = Tr("모델을 불러오지 못했습니다: ") + err;
             return false;
         }
@@ -123,7 +124,7 @@ bool LoadStudioModel(const std::filesystem::path& path, ModelKind kind, const st
 }
 
 bool LoadStudioStage(const StageAsset& stage, std::vector<StudioPackageModel>& out, LoadProgress* progress,
-                     std::string* error) {
+                     std::string* error, bool rayMaterials) {
     try {
         out.clear();
         const size_t n = stage.parts.size();
@@ -137,7 +138,7 @@ bool LoadStudioStage(const StageAsset& stage, std::vector<StudioPackageModel>& o
             std::string err;
             const float f0 = 0.05f + 0.9f * (float)k / (float)n;
             const float f1 = 0.05f + 0.9f * (float)(k + 1) / (float)n;
-            if (!LoadModel(stage.parts[k], ModelRole::Stage, label, progress, f0, f1, part, &err)) {
+            if (!LoadModel(stage.parts[k], ModelRole::Stage, label, progress, f0, f1, part, &err, rayMaterials)) {
                 LOG_WARN("studio: stage part load failed: %s: %s", PathToUtf8(stage.parts[k]).c_str(), err.c_str());
                 lastErr = err;
                 continue;
@@ -212,7 +213,7 @@ bool LoadStudioSong(const SongAsset& song, MotionData& dance, MotionData& camera
 }
 
 bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, StudioPackage& out,
-                              LoadProgress* progress, std::string* error) {
+                              LoadProgress* progress, std::string* error, bool rayMaterials) {
     try {
         out = StudioPackage{};
         if (progress) progress->SetStatus(Tr("프로젝트 로드"));
@@ -245,7 +246,7 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
                                   : pm.kind == ModelKind::Prop    ? ModelRole::Prop
                                                                   : ModelRole::Stage;
             std::string merr;
-            if (!LoadModel(pm.path, role, pm.name, progress, f0, f1, m, &merr)) {
+            if (!LoadModel(pm.path, role, pm.name, progress, f0, f1, m, &merr, rayMaterials)) {
                 out.warnings.push_back(Tr("모델을 불러오지 못했습니다: ") + pm.name + " (" + PathToUtf8(pm.path) + ")");
                 continue;
             }

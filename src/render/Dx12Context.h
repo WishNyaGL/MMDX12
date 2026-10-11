@@ -152,6 +152,10 @@ public:
     // sRGB and UNORM SRVs on one texture).
     ComPtr<ID3D12Resource> CreateTextureTyped(const ImageRGBA8& image, DXGI_FORMAT format,
                                               const wchar_t* debugName = nullptr);
+    // DEFAULT-heap R8_UNORM texture from one RGBA8 image channel (0..3), all mips; final state
+    // PIXEL_SHADER_RESOURCE. Used for the single-channel PBR maps (work unit P2).
+    ComPtr<ID3D12Resource> CreateTextureChannel8(const ImageRGBA8& image, int channel,
+                                                 const wchar_t* debugName = nullptr);
     // Closes, executes on ctx.Queue(), waits for completion, frees staging buffers.
     void Submit();
 

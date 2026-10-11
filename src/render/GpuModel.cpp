@@ -3,6 +3,7 @@
 #include "asset/PmxModel.h"
 #include "asset/ImageLoader.h"
 #include "asset/ModelTraits.h"
+#include "asset/PbrMaterial.h"
 #include "render/ShaderInterop.h"
 #include "core/Log.h"
 #include <directx/d3dx12.h>
@@ -47,6 +48,13 @@ static ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device* device, uint32_t 
 bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
                       const std::vector<ImageRGBA8>& textures, const BuiltinTextures& builtin,
                       ModelRole role) {
+    static const PbrModelData kNoPbr;
+    return Create(ctx, batch, pmx, textures, builtin, role, kNoPbr);
+}
+
+bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
+                      const std::vector<ImageRGBA8>& textures, const BuiltinTextures& builtin,
+                      ModelRole role, const PbrModelData& pbr) {
     ctx_ = &ctx;
     role_ = role;
     name_ = pmx.name;
@@ -226,6 +234,19 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         if (SphereUsed(m)) CollectTextureIndex(referenced, m.sphereTextureIndex);
         if (!m.sharedToon) CollectTextureIndex(referenced, m.toonIndex);
     }
+    // PBR file maps (work unit P2): texture indices the Ray records reference through a decoded file.
+    std::vector<int32_t> pbrFileUsed;
+    for (size_t mi = 0; mi < pbr.materials.size() && mi < pmx.materials.size(); ++mi) {
+        if (!pbr.materials[mi].valid) continue;
+        for (int si = 0; si < kPbrSlotCount; ++si) {
+            const PbrSlot& s = pbr.materials[mi].slots[si];
+            if (s.tex.kind != PbrTexKind::File || s.tex.fileIndex < 0 ||
+                (size_t)s.tex.fileIndex >= pbr.textures.size() || pbr.textures[(size_t)s.tex.fileIndex].Empty())
+                continue;
+            if (std::find(pbrFileUsed.begin(), pbrFileUsed.end(), s.tex.fileIndex) == pbrFileUsed.end())
+                pbrFileUsed.push_back(s.tex.fileIndex);
+        }
+    }
     textures_.assign(textures.size(), {});
     for (int32_t i : referenced) {
         textures_[i] = batch.CreateTexture(textures[i], L"model.texture");
@@ -233,6 +254,16 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             LOG_ERROR("model '%s': texture creation failed", name_.c_str());
             return false;
         }
+    }
+    // PBR file map textures (R8 for single-channel slots, RGBA8 otherwise).
+    pbrIndex_.assign(pmx.materials.size(), DescriptorHeap::kInvalid);
+    pbrTextures_.assign(pbr.textures.size(), {});
+    for (int32_t i : pbrFileUsed) {
+        const int channel = i < (int)pbr.textureChannels.size() ? pbr.textureChannels[(size_t)i] : -1;
+        pbrTextures_[(size_t)i] = channel >= 0 ? batch.CreateTextureChannel8(pbr.textures[(size_t)i], channel,
+                                                                             L"model.pbrTex")
+                                               : batch.CreateTexture(pbr.textures[(size_t)i], L"model.pbrTex");
+        if (!pbrTextures_[(size_t)i]) LOG_WARN("model '%s': a PBR map texture upload failed", name_.c_str());
     }
 
     // Material constants.
@@ -394,6 +425,101 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             device->CreateShaderResourceView(builtin.white.Get(), &srv, ctx.SrvHeap().Cpu(alloc + 2));
         }
         materials_.push_back(mat);
+    }
+
+    // PBR records and their SRVs (work unit P2): one GpuPbrMaterial per material with a valid Ray record. The
+    // file-map SRVs are allocated first, so the record can store their absolute heap index (one field read by the
+    // raster bindless table and the RT table alike).
+    const bool anyPbr = !pbr.materials.empty() &&
+                        std::any_of(pbr.materials.begin(), pbr.materials.end(),
+                                    [](const PbrMaterial& m) { return m.valid; });
+    if (anyPbr) {
+        pbrTextureSrvs_.assign(pbrTextures_.size(), DescriptorHeap::kInvalid);
+        bool outOfDescriptors = false;
+        for (size_t i = 0; i < pbrTextures_.size(); ++i) {
+            if (!pbrTextures_[i]) continue;
+            const uint32_t ta = ctx.SrvHeap().Allocate(1);
+            if (ta == DescriptorHeap::kInvalid) {
+                outOfDescriptors = true;
+                pbrTextures_[i].Reset();
+                continue;
+            }
+            pbrTextureSrvs_[i] = ta;
+            D3D12_SHADER_RESOURCE_VIEW_DESC ts{};
+            ts.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            ts.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            ts.Format = i < pbr.textureChannels.size() && pbr.textureChannels[i] >= 0 ? DXGI_FORMAT_R8_UNORM
+                                                                                       : DXGI_FORMAT_R8G8B8A8_UNORM;
+            ts.Texture2D.MipLevels = UINT(-1);
+            ctx.Device()->CreateShaderResourceView(pbrTextures_[i].Get(), &ts, ctx.SrvHeap().Cpu(ta));
+        }
+        if (outOfDescriptors) LOG_WARN("model '%s': ran out of SRV descriptors for PBR maps", name_.c_str());
+
+        std::vector<GpuPbrMaterial> records;
+        for (size_t mi = 0; mi < pmx.materials.size(); ++mi) {
+            if (mi >= pbr.materials.size() || !pbr.materials[mi].valid) continue;
+            const PbrMaterial& src = pbr.materials[mi];
+            const PmxMaterial& pm = pmx.materials[mi];
+            GpuPbrMaterial r{};
+            r.flags = 1u | (src.alphaThreshold > 0.0f && src.alphaThreshold < 0.999f ? 2u : 0u) |
+                      (src.emissiveEnable ? 4u : 0u);
+            r.shadingModel = (uint32_t)std::max(0, src.shadingModel);
+            r.alphaThreshold = src.alphaThreshold;
+            r.diffuseAlpha = pm.diffuse.w;
+            r.params.x = (float)src.albedoSubEnable;
+            for (int si = 0; si < kPbrSlotCount; ++si) {
+                const PbrSlot& s = src.slots[si];
+                GpuPbrSlot& d = r.slots[si];
+                d.type = (uint32_t)std::max(0, s.type);
+                d.swizzle = (uint32_t)std::clamp(s.swizzle, 0, 3);
+                d.uvFlip = (uint32_t)std::max(0, s.uvFlip);
+                d.applyScale = (uint32_t)std::max(0, s.applyScale);
+                d.colorFlip = (uint32_t)std::max(0, s.colorFlip);
+                d.loopU = s.loopU;
+                d.loopV = s.loopV;
+                d.value = {s.value[0], s.value[1], s.value[2], s.hasScale ? s.scale : 0.0f};
+                d.uvScale = {s.uvScaleU, s.uvScaleV, 0.0f, 0.0f};
+                if (s.tex.kind == PbrTexKind::File) {
+                    d.textureSrv = (s.tex.fileIndex >= 0 && (size_t)s.tex.fileIndex < pbrTextureSrvs_.size() &&
+                                    pbrTextureSrvs_[(size_t)s.tex.fileIndex] != DescriptorHeap::kInvalid)
+                                       ? (int)pbrTextureSrvs_[(size_t)s.tex.fileIndex]
+                                       : -1;
+                } else if (s.tex.kind == PbrTexKind::PmxDiffuse) {
+                    d.textureSrv = (int)materials_[mi].srvTable + 0;
+                } else if (s.tex.kind == PbrTexKind::PmxSphere) {
+                    d.textureSrv = (int)materials_[mi].srvTable + 1;
+                } else if (s.tex.kind == PbrTexKind::PmxToon) {
+                    d.textureSrv = (int)materials_[mi].srvTable + 2;
+                } else {
+                    d.textureSrv = -1;
+                }
+            }
+            pbrIndex_[mi] = (uint32_t)records.size();
+            records.push_back(r);
+        }
+        pbrBuf_ = batch.CreateBuffer(records.data(), records.size() * sizeof(GpuPbrMaterial),
+                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                     L"model.pbr");
+        if (!pbrBuf_) {
+            LOG_WARN("model '%s': PBR record buffer creation failed", name_.c_str());
+            pbrIndex_.assign(pmx.materials.size(), DescriptorHeap::kInvalid);
+        } else {
+            const uint32_t alloc = ctx.SrvHeap().Allocate(1);
+            if (alloc != DescriptorHeap::kInvalid) {
+                pbrSrv_ = alloc;
+                D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+                srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                srv.Format = DXGI_FORMAT_R32_TYPELESS;
+                srv.Buffer.NumElements = (UINT)(records.size() * sizeof(GpuPbrMaterial) / 4);
+                srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                ctx.Device()->CreateShaderResourceView(pbrBuf_.Get(), &srv, ctx.SrvHeap().Cpu(alloc));
+            } else {
+                pbrBuf_.Reset();
+                pbrIndex_.assign(pmx.materials.size(), DescriptorHeap::kInvalid);
+            }
+        }
     }
 
     // Per frame slot dynamic buffers.
@@ -592,6 +718,14 @@ void GpuModel::Destroy() {
     if (rt_.srv != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(rt_.srv, 2);
     if (addUvSrv_ != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(addUvSrv_, 1);
     addUvSrv_ = DescriptorHeap::kInvalid;
+    if (pbrSrv_ != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(pbrSrv_, 1);
+    pbrSrv_ = DescriptorHeap::kInvalid;
+    for (uint32_t s : pbrTextureSrvs_)
+        if (s != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(s, 1);
+    pbrTextureSrvs_.clear();
+    pbrTextures_.clear();
+    pbrIndex_.clear();
+    pbrBuf_.Reset();
     rt_ = RtResources{};
     materialConsts_.clear();
     baseConsts_.clear();

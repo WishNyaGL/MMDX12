@@ -81,7 +81,8 @@ void App::StartStudioLoad(const CharacterAsset* ch, const StageAsset* st, const 
     const StageAsset s = hasStage ? *st : StageAsset{};
     const SongAsset so = hasSong ? SongAsChosen(*song) : SongAsset{};
     loadFuture_ = std::async(std::launch::async, [=, pkg = studioPackage_.get(), this] {
-        return LoadStudioPackage(c, hasStage ? &s : nullptr, hasSong ? &so : nullptr, *pkg, &loadProgress_, &loadError_);
+        return LoadStudioPackage(c, hasStage ? &s : nullptr, hasSong ? &so : nullptr, *pkg, &loadProgress_,
+                                 &loadError_, options_.materialSource == 1);
     });
 }
 
@@ -107,7 +108,7 @@ bool App::FinishStudioLoad() {
         sm->inst = std::make_unique<ModelInstance>(m.pmx);
         // props follow bones every frame: they need the per-frame (character) RT path, not the static stage BLAS
         sm->gpu = renderer_.CreateModel(batch, *m.pmx, m.textures,
-                                        m.kind == ModelKind::Stage ? ModelRole::Stage : ModelRole::Character);
+                                        m.kind == ModelKind::Stage ? ModelRole::Stage : ModelRole::Character, &m.pbr);
         if (!sm->gpu) {
             if (m.kind != ModelKind::Character || pkg.fromProject) {
                 LOG_WARN("studio: GPU upload failed: %s", m.name.c_str());

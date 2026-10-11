@@ -4,7 +4,10 @@
 // slots and the content rule. Exit code 0 = pass. No model file is needed (the candidate scan only looks at the
 // folder). Style: like tools/pack_suggest_test.cpp / rest_pose_test.cpp.
 #include "asset/RayMaterial.h"
+#include "asset/PbrMaterial.h"
+#include "asset/PmxModel.h"
 
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -188,6 +191,72 @@ int wmain() {
         fs::path c;
         const bool ok = FindAndParseRayMaterials(d2 / L"p.pmx", 1, d, &c);
         Expect(!ok && c.empty(), "a non-Ray .emd is not chosen");
+    }
+
+    // RayToPbr: FROM 7/8/9 constants, swizzle/channel, missing file fallback, and the slot order (no Parallax).
+    {
+        const fs::path d3 = dir / L"pbr";
+        fs::create_directories(d3, ec);
+        Write(d3 / L"pbr.fx", R"(
+#define ALBEDO_MAP_FROM 7
+#define ALBEDO_MAP_TYPE 0
+#define NORMAL_MAP_FROM 0
+#define SMOOTHNESS_MAP_FROM 9
+#define METALNESS_MAP_FROM 8
+#define ALPHA_MAP_FROM 1
+#define ALPHA_MAP_FILE "alpha.png"
+#define ALPHA_MAP_SWIZZLE 3
+#define EMISSIVE_MAP_FROM 1
+#define EMISSIVE_MAP_FILE "gone.png"
+#define CUSTOM_ENABLE 1
+const float3 albedo = float3(0.1, 0.2, 0.3);
+const float smoothness = 0.7;
+)");
+        Write(d3 / L"alpha.png", "not an image");
+        Write(d3 / L"pbr.emd", "[Effect]\nObj[0] = pbr.fx\n");
+        std::vector<RayMaterialDesc> descs;
+        fs::path chosen;
+        Expect(FindAndParseRayMaterials(d3 / L"model.pmx", 1, descs, &chosen), "pbr model: Ray .emd found");
+
+        PmxMaterial pm;
+        pm.ambient = {0.4f, 0.5f, 0.6f};
+        pm.specular = {0.7f, 0.8f, 0.9f};
+        pm.specularPower = 40.0f;
+        pm.textureIndex = 5;
+        const PbrMaterial m = RayToPbr(descs[0], pm);
+        Expect(m.valid && m.shadingModel == 1, "RayToPbr: valid, CUSTOM_ENABLE 1");
+        Expect(m.slots[(int)PbrSlotId::Albedo].from == 7 && m.slots[(int)PbrSlotId::Albedo].value[0] > 0.39f &&
+                   m.slots[(int)PbrSlotId::Albedo].value[2] > 0.59f,
+               "RayToPbr: ALBEDO FROM 7 = PMX ambient colour");
+        Expect(m.slots[(int)PbrSlotId::Metalness].from == 8 &&
+                   m.slots[(int)PbrSlotId::Metalness].value[1] > 0.79f,
+               "RayToPbr: METALNESS FROM 8 = PMX specular colour");
+        Expect(m.slots[(int)PbrSlotId::Smoothness].from == 9 &&
+                   m.slots[(int)PbrSlotId::Smoothness].value[0] > 0.31f &&
+                   m.slots[(int)PbrSlotId::Smoothness].value[0] < 0.32f,
+               "RayToPbr: SMOOTHNESS FROM 9 = ShininessToSmoothness(40)");
+        // Smoothness round trip: 1 - (2/(40+2))^0.125.
+        const float want = 1.0f - std::pow(2.0f / 42.0f, 0.125f);
+        Expect(std::abs(m.slots[(int)PbrSlotId::Smoothness].value[0] - want) < 1e-4f,
+               "RayToPbr: FROM 9 matches ShininessToSmoothness");
+        Expect(m.slots[(int)PbrSlotId::Alpha].tex.kind == PbrTexKind::File &&
+                   m.slots[(int)PbrSlotId::Alpha].swizzle == 3,
+               "RayToPbr: ALPHA FROM 1 file, swizzle A");
+        Expect(m.slots[(int)PbrSlotId::Emissive].from == 1 && m.slots[(int)PbrSlotId::Emissive].tex.kind == PbrTexKind::None,
+               "RayToPbr: missing EMISSIVE file falls back to the constant");
+        // Slot order: PBR Occlusion is Ray Occlusion, PBR Emissive is Ray Emissive (no Parallax shift).
+        Expect(m.slots[(int)PbrSlotId::Occlusion].from == 0 && m.slots[(int)PbrSlotId::CustomA].from == 0,
+               "RayToPbr: slot order (Occlusion/Emissive, Parallax dropped)");
+
+        // Decode: the alpha file is undecodable -> a missing count; emissive already fell back.
+        PbrModelData data;
+        data.materials.resize(1);
+        data.materials[0] = m;
+        DecodePbrTextures(data, "test");
+        Expect(data.materialsWithRecord == 1, "DecodePbrTextures: one material with a record");
+        Expect(data.filesMissing >= 1, "DecodePbrTextures: the undecodable alpha file is counted missing");
+        Expect(data.materials[0].slots[(int)PbrSlotId::Alpha].tex.kind == PbrTexKind::None,
+               "DecodePbrTextures: a missing file falls the slot back to its constant");
     }
 
     fs::remove_all(dir, ec);
