@@ -1,8 +1,15 @@
 // Path tracer / offline GI shader pack API (docs/shader_pt_api.md). Included by offline_gi.hlsl and pathtrace.hlsl under MMDX_PT_PACK.
 // Authors implement:
 //     PtPackOut PackEvaluate(PtPackIn i);
+// Optional, opted in by defining PT_PACK_HAS_LIGHTING before this file includes the pack:
+//     PtPackLighting PackEvaluateLighting(PtPackIn i, PtPackOut o);
 #ifndef PT_PACK_API_HLSLI
 #define PT_PACK_API_HLSLI
+
+// API version gates a pack can #ifdef, so a pack written for a newer contract still compiles on an
+// older app (the macro is simply absent there). PT_PACK_API_LIGHTING: PtPackLighting /
+// PackEvaluateLighting and the engine reads of it.
+#define PT_PACK_API_LIGHTING 1
 
 // Material classes: pack.json "classes" rules map PMX material names to these ids.
 #ifndef PACK_BODY
@@ -43,6 +50,15 @@ struct PtPackOut {
     float3 specular;      // additive linear radiance, already includes any rim / matcap the author wants
     float2 terminator;    // N.L edges (lo, hi) of the shadow terminator smoothstep; hi <= lo = engine default (-0.12, 0.22)
     bool flatFace;        // bool: use the engine's existing flat-face handling = no GI gradient on this surface
+};
+
+// Optional second return, opted in with PT_PACK_HAS_LIGHTING + PackEvaluateLighting. It separates the
+// two things flatFace bundles: the indirect gather (flatIndirect) from the pack's own terminator, and
+// it weakens the traced sun without touching the terminator. Fields default to the old engine behaviour.
+struct PtPackLighting {
+    float flatIndirect;   // 0..1: indirect light gathered flat (around the view direction), like flatFace
+    float sunShadow;      // 0..1 weight of the traced sun visibility: 0 = ignore cast shadows, 1 = old
+    float lit;            // 0..1 direct lit value (-1 = unused, packs keep terminator / shadowBias)
 };
 
 // Pack texture helpers (docs/shader_pt_api.md). Implemented in pt_pack_glue.hlsli.

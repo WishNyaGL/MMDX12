@@ -143,6 +143,9 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
             bool receive;
             bool toon = false;    // character material: raster toon sun, no Lambert NEE
             float flat = 0.0;     // MAT_FLAT (faces): even fill instead of traced indirect
+#ifdef PT_PACK_HAS_LIGHTING
+            float flatIndirect = 0.0;   // pack's flat indirect requesting (falls back to flat)
+#endif
             if (hitMesh) {
                 RtGeometry g = LoadGeometry(hit.instanceId, hit.geometryIndex);
                 RtSurface sf = FetchSurface(g, hit.prim, hit.bary);
@@ -197,7 +200,22 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                             albedo = ptPackOut.albedo;
                             // the pack decides: MAT_FLAT (a material without toon) would drop its terminator
                             flat = ptPackOut.flatFace ? 1.0 : 0.0;
+#ifdef PT_PACK_HAS_LIGHTING
+                            PtPackLighting ptLgt = PackEvaluateLighting(packIn, ptPackOut);
+                            flatIndirect = (ptLgt.flatIndirect > 0.5) ? 1.0 : flat;   // keep the MAT_FLAT bounce stop for flat packs
 
+                            if (!diffuseChain) {
+                                toon = true;
+                                radiance += throughput * PtPackComposeSunDirect(ptPackOut, ptLgt, n, sh, flat);
+                                if (ptLgt.flatIndirect > 0.5) {
+                                    // raster flat fill: no sky/ground gradient and no occlusion modelling the face
+                                    float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
+                                    radiance += throughput * albedo * fill;
+                                }
+                            } else {
+                                toon = false;
+                            }
+#else
                             if (!diffuseChain) {
                                 toon = true;
                                 radiance += throughput * PtPackComposeSunDirect(ptPackOut, n, sh, flat > 0.5);
@@ -209,6 +227,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                             } else {
                                 toon = false;
                             }
+#endif
                         } else {
                             isPtPackHit = false;
                         }
@@ -218,6 +237,9 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     {
                         toon = true;
                         flat = (g.flags & MAT_FLAT) ? 1.0 : 0.0;
+#ifdef PT_PACK_HAS_LIGHTING
+                        flatIndirect = flat;
+#endif
                         float sh = 1.0;
                         if (receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5) {
                             float cosMax = SunShadowConeCos(kSunCosMax);
@@ -225,7 +247,11 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                             sh = TraceShadowRay(OffsetRayOrigin(pos, faceN), sd, 1e5);
                         }
                         radiance += throughput * ToonSun(g, tex, sf.uv, n, -dir, sh);
+#ifdef PT_PACK_HAS_LIGHTING
+                        if (flatIndirect > 0.5) {
+#else
                         if (flat > 0.5) {
+#endif
                             // raster flat fill: no sky/ground gradient and no occlusion modelling the face
                             float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
                             radiance += throughput * albedo * fill;
@@ -331,7 +357,11 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 }
             }
 
+#ifdef PT_PACK_HAS_LIGHTING
+            if (bounce == bounces || flatIndirect > 0.5) break;
+#else
             if (bounce == bounces || flat > 0.5) break;
+#endif
 
             // next direction: Fresnel-weighted specular vs cosine diffuse
             float3 nextDir;

@@ -68,6 +68,20 @@ float3 PtPackComposeSunDirect(PtPackOut ptPackOut, float3 n, float sunVis, float
     return lerp(ptPackOut.albedo * ptPackOut.shadowTint, ptPackOut.albedo, term) * gSunIntensity + ptPackOut.specular * sunVis;
 }
 
+// Composes the sun direct term with the pack's optional lighting controls (`lgt.flatIndirect`,
+// `lgt.sunShadow`, `lgt.lit`; see pt_pack_api.hlsli). Used only by packs that define
+// PT_PACK_HAS_LIGHTING; it is never called otherwise, so the legacy codegen is untouched.
+float3 PtPackComposeSunDirect(PtPackOut ptPackOut, PtPackLighting lgt, float3 n, float sunVis, float flatVal) {
+    float ndl = dot(n, -gLightDir);
+    float2 edge = ptPackOut.terminator.y > ptPackOut.terminator.x ? ptPackOut.terminator : float2(-0.12, 0.22);
+    float terminator = smoothstep(edge.x, edge.y, ndl + ptPackOut.shadowBias);
+    float vis = lgt.sunShadow >= 1.0 ? sunVis : lerp(1.0, sunVis, lgt.sunShadow);   // sunShadow 1 = old (full traced visibility)
+    float term = lerp(terminator * vis, lerp(1.0, sunVis, 0.8), flatVal);
+    // a pack that supplies a direct lit value skips the terminator / shadowBias composition
+    if (lgt.lit >= 0.0) term = lerp(lgt.lit * vis, lerp(1.0, sunVis, 0.8), flatVal);
+    return lerp(ptPackOut.albedo * ptPackOut.shadowTint, ptPackOut.albedo, term) * gSunIntensity + ptPackOut.specular * vis;
+}
+
 float3 PtPackComposeSunDirect(PtPackOut ptPackOut, float3 n, float sunVis, bool flatSurface) {
     return PtPackComposeSunDirect(ptPackOut, n, sunVis, flatSurface ? 1.0 : 0.0);
 }

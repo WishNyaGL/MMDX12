@@ -45,6 +45,36 @@ PtPackOut PackEvaluate(PtPackIn i);
 
 **Assign every field of `PtPackOut`**: an unassigned field is undefined (`tools/pack_check` warns).
 
+### Lighting controls (opt-in, API 1.9.1)
+
+A pack can split the two meanings of `flatFace` and weaken the traced sun, for example to match a raster
+face that uses an SDF terminator with no cast shadow and a flat fill. Guard the new code with
+`PT_PACK_API_LIGHTING` so the pack still compiles on older apps (the macro is absent there):
+
+```hlsl
+#ifdef PT_PACK_API_LIGHTING
+#define PT_PACK_HAS_LIGHTING 1
+#endif
+...
+#ifdef PT_PACK_HAS_LIGHTING
+PtPackLighting PackEvaluateLighting(PtPackIn i, PtPackOut o) { ... }
+#endif
+```
+
+`PackEvaluateLighting` returns a `PtPackLighting`:
+
+- `float flatIndirect`: 0..1, when > 0.5 the indirect light is gathered flat (around the view direction, nearby
+  geometry skipped) while the pack keeps its own `terminator` / `shadowBias`. Without it `flatFace = true` is what
+  requests the flat gather. Assign every field (`pack_check` warns when the file defines `PT_PACK_HAS_LIGHTING`).
+- `float sunShadow`: 0..1 weight of the traced sun visibility (`sunVis`) in the direct terminator and the specular.
+  `0` ignores cast shadows on this surface, `1` is the old behaviour.
+- `float lit`: an optional direct 0..1 lit value (the SDF / ramp result). When >= 0 it replaces the `terminator` /
+  `shadowBias` composition (`-1` = unused). With the default `sunShadow = 1` it matches the old
+  `term = smoothstep(edge, N.L + shadowBias) * sunVis`; `lit` lets a pack skip the bias round-trip.
+
+Packs that do not define `PT_PACK_HAS_LIGHTING` keep the old behaviour exactly (`flatIndirect` follows `flatFace`,
+`sunShadow = 1`, no explicit `lit`).
+
 ### Helpers
 
 Pack textures declared in `pack.json` (`"textures"`, up to 16) are accessible inside `PackEvaluate`.
@@ -61,7 +91,7 @@ Note: `ScenePass` (raster/RT) and the ray-tracing / path-tracer scene cache (`re
 
 - **Camera / specular chain (`!diffuseChain`)**: The sun direct term is evaluated as:
   `lerp(albedo * shadowTint, albedo, terminator * sunVis) * sunIntensity + specular * sunVis`
-  where `terminator` is the engine's smoothstep shape shifted by `shadowBias`, and `flatFace` reuses the engine's `s.flat` path.
+  where `terminator` is the engine's smoothstep shape shifted by `shadowBias`, and `flatFace` reuses the engine's `s.flat` path. With `PT_PACK_HAS_LIGHTING` the pack can instead supply `lit` (replacing the terminator / shadowBias), scale `sunVis` with `sunShadow`, and request the flat indirect gather with `flatIndirect` without dropping its own terminator.
 - **Diffuse bounces (`diffuseChain`)**: Uses `PtPackOut.albedo` as the surface albedo. Toon terms do not run on GI gather rays.
 - **Cache prepass**: The irradiance cache prepass keeps default albedo.
 - **Denoiser note**: In real-time path tracing, the pack's stylized direct light goes through the same temporal / a-trous filtering as the default toon light (`radiance / a` demodulation, temporal accumulation, a-trous filter, modulation). A test pack with a hard `step()` highlight band kept crisp edges in a still capture, but fast motion was not checked; a later phase may split the stylized term out of the denoiser if ghosting shows up.

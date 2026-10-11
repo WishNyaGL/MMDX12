@@ -1364,3 +1364,29 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   pack loader picks the newer of preview.png / preview.jpg (folders unzipped over an older pack). The auto-updater swaps
   whole top-level folders and pack installs replace the pack folder, so updated users never had the stale file.
   Cover `docs/media/compare-1.9.0.jpg`, notes in dist/notes_1.9.0.md.
+
+## 2026-10-11 (evening) - PT / GI pack lighting controls (face relief in GI), starrail_face 1.1.0, release 1.9.1
+- Problem (user screenshots, Ruan Mei + starrail_face + game textures): the offline GI face showed its own relief (nose
+  and hair cast shadows on the cheek, occluded / normal-graded indirect light making the lips look puffy) that raster
+  never shows (raster pack: `noAo`, received shadows scaled by `P_FACE_CAST`). The PT contract could not express that:
+  `PtPackComposeSunDirect` always multiplied the traced `sunVis`, and `flatFace` bundled the flat indirect gather with
+  replacing the pack's terminator (`lerp(1, sunVis, 0.8)`), so an SDF face had to stay non-flat.
+- Contract (`pt_pack_api.hlsli`, `PT_PACK_API_LIGHTING 1`): opt-in `PT_PACK_HAS_LIGHTING` + `PtPackLighting
+  PackEvaluateLighting(PtPackIn, PtPackOut)` = `flatIndirect` (the flat indirect path only, terminator kept), `sunShadow`
+  (0..1 weight of the traced sun visibility in the direct term and specular), `lit` (0..1 direct value, -1 = unused).
+  New engine code in offline_gi.hlsl / pathtrace.hlsl / pt_pack_glue.hlsli sits behind `#ifdef PT_PACK_HAS_LIGHTING`:
+  CSRender / CSPathTrace DXIL of hoyo_toon, hoyo_toon_v2, nimble_toon and no-pack builds is binary-identical to 1.9.0
+  (worker's disassembly diff). pack_check checks the new fields; docs/shader_pt_api.md "Lighting controls"; template
+  comment.
+- starrail_face 1.1.0 (website repo): faces / eyes opt in (flat indirect, sunShadow = faceCast, the raster slider); the
+  `#ifdef PT_PACK_API_LIGHTING` guard keeps it compiling on older apps (checked with the 1.9.0 pack_check), so
+  minAppVersion stays 1.5.0.
+- Verified by Claude against a HEAD baseline build (worktree, same projects `captures/pt_face_claude/face*.mmdxproj`:
+  Ruan Mei close-up, side sun; and open mouth (VPD あ) + theater stage): baseline GI had hair / nose cast patches, a hard
+  shadow beside the lips and lip relief; 1.9.1 GI shows the raster-like flat face with only the SDF shading. No `[E]`.
+  Real-time PT with the pack is compiled (pack_check) but was not seen on screen.
+- Implementation delegated (opencode, deepseek-v4.1-flash, level high, smoke review); version 1.9.1.
+### Notes
+- Studio stills ignore `--offline-renderer raster` (both "raster" and "gi" stills came out as GI); use the viewport
+  capture for raster references. `--offline-renderer` persists into the ini.
+- Play-mode song cameras rarely frame Ruan Mei's face (senbonzakura / envy_baby seeks showed empty frames).

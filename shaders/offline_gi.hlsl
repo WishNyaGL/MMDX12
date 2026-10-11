@@ -1047,6 +1047,12 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
         const bool viaGlass = specChain && depth > 0u;
 #ifdef MMDX_PT_PACK
         PtPackOut ptPackOut = (PtPackOut)0;
+#ifdef PT_PACK_HAS_LIGHTING
+        PtPackLighting ptPackLgt;
+        ptPackLgt.flatIndirect = 0.0;    // non-pack surfaces: follow s.flat
+        ptPackLgt.sunShadow = 1.0;
+        ptPackLgt.lit = -1.0;
+#endif
         bool isPtPackHit = (s.g.flags & RTG_PT_PACK) != 0;
         float ptSunVis = 0.0;
         if (isPtPackHit) {
@@ -1078,6 +1084,9 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
                 ptPackOut = PackEvaluate(packIn);
                 s.albedo = ptPackOut.albedo;
                 s.flat = ptPackOut.flatFace;   // the pack decides, not MAT_FLAT (as in pathtrace.hlsl)
+#ifdef PT_PACK_HAS_LIGHTING
+                ptPackLgt = PackEvaluateLighting(packIn, ptPackOut);
+#endif
             } else {
                 isPtPackHit = false;
             }
@@ -1099,7 +1108,11 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
         if (!diffuseChain) {
 #ifdef MMDX_PT_PACK
             if (isPtPackHit) {
+#ifdef PT_PACK_HAS_LIGHTING
+                float3 sunDirect = PtPackComposeSunDirect(ptPackOut, ptPackLgt, s.n, ptSunVis, s.flat);
+#else
                 float3 sunDirect = PtPackComposeSunDirect(ptPackOut, s.n, ptSunVis, s.flat);
+#endif
                 if (gNumLights >= 1.0)
                     sunDirect += (1.0 - pSpec) * s.albedo / PI * PunctualIrradiance(s, s.character, rng);
                 radiance += T * (s.emission + sunDirect);
@@ -1124,7 +1137,11 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
         if ((depth == 0u || viaGlass) && gP2.w > 0.5) {
             float3 Eic;
             if (IcLookup(s, Eic)) {
+#ifdef PT_PACK_HAS_LIGHTING
+                if (s.character && (s.flat || ptPackLgt.flatIndirect > 0.5)) {
+#else
                 if (s.character && s.flat) {
+#endif
                     radiance += T * s.albedo * kToonIndirect * Eic / PI;
                     break;
                 }
@@ -1141,7 +1158,11 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
 
         float3 nd;
         tMinNext = 0.0;
+#ifdef PT_PACK_HAS_LIGHTING
+        if (s.character && (s.flat || ptPackLgt.flatIndirect > 0.5) && !diffuseChain) {
+#else
         if (s.character && s.flat && !diffuseChain) {
+#endif
             // faces: even fill around the view direction, skipping nearby geometry (nose, fringe)
             nd = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), V);
             T *= s.albedo * kToonIndirect;

@@ -291,6 +291,21 @@ void CheckTextureIndices(const ShaderPack& pack, const fs::path& dir, bool& ok) 
                 }
                 if (!assigned) printf("  [warn] pt_surface.hlsl never assigns PtPackOut.%s (it would be undefined)\n", field);
             }
+            // PT_PACK_HAS_LIGHTING: PackEvaluateLighting returns a PtPackLighting, whose fields must be assigned too
+            // (only relevant to packs that opt in, so this is checked only when the file defines the macro)
+            if (hlsl.find("PT_PACK_HAS_LIGHTING") != std::string::npos) {
+                for (const char* field : {"flatIndirect", "sunShadow", "lit"}) {
+                    const std::string key = std::string(".") + field;
+                    bool assigned = false;
+                    for (size_t pos = hlsl.find(key); pos != std::string::npos && !assigned; pos = hlsl.find(key, pos + 1)) {
+                        size_t i = pos + key.size();
+                        if (i < hlsl.size() && (isalnum((unsigned char)hlsl[i]) || hlsl[i] == '_')) continue;   // longer name
+                        while (i < hlsl.size() && (hlsl[i] == ' ' || hlsl[i] == '\t')) ++i;
+                        if (i + 1 < hlsl.size() && hlsl[i] == '=' && hlsl[i + 1] != '=') assigned = true;
+                    }
+                    if (!assigned) printf("  [warn] pt_surface.hlsl never assigns PtPackLighting.%s (it would be undefined)\n", field);
+                }
+            }
             for (const char* fn : {"PtPackSampleTex(", "PtPackSampleTexLevel("}) {
                 for (size_t pos = hlsl.find(fn); pos != std::string::npos; pos = hlsl.find(fn, pos + 1)) {
                     size_t i = pos + strlen(fn);
