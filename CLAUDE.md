@@ -70,6 +70,9 @@ progress.md is the session log. Read its latest entry first.
   - `studio_focus_test`: DoF focus track evaluation, automatic focus (score, hysteresis, rack), focus keys in projects
   - `mmdx12_mcp [--pipe <name>] [--pid <pid>] [--launch] [--timeout <ms>]`: Model Context Protocol stdio bridge
   - `mcp_smoke.py [--handshake-only] [--scenario]`: MCP test client (protocol handshake & end-to-end scenario)
+  - `pack_previews.py [--only ids] [--out-dir d] [--bump]`: re-shoots every public pack's before/after preview over the pipe
+    (shot table in the script; scene-only `screenshot`, `set_render_settings shader_texture_folder`; writes the website
+    repo's `shader-packs/<id>/` and the built-in packs, contact sheet in `captures/pack_previews`)
   - `mcp_pipe.py` / `mcp_x.py`: talk to a running app's pipe without the bridge (`python tools/mcp_x.py "click 플레이" "wait 30" "shot out.png" "items 셰이더"`)
 - The play bar auto-hides while playing with no mouse movement, so captures usually don't show it.
 
@@ -194,11 +197,14 @@ progress.md is the session log. Read its latest entry first.
 - Shader packs (an ecosystem: anyone can make one; docs + gallery on mmdx.codingbot.kr `/<lang>/docs/shader-packs/`, sources
   in the website repo): opt-in per-character replacements of the scene pass's material shading. A pack = `pack.json`
   (metadata, localized names, authors, license, tags, `apiVersion`, material class rules, <= 16 params) + `surface.hlsl`
-  implementing `PackShade` (contract: `shaders/pack_api.hlsli`, `kPackApiVersion`) + optional `preview.png`; built-in in
+  implementing `PackShade` (contract: `shaders/pack_api.hlsli`, `kPackApiVersion`) + optional `preview.png|jpg` (AFTER) and
+  `preview_before.png|jpg` (same frame without the pack; index.json `previewBefore`); with both, the manager's detail panes
+  draw a draggable split (`App::DrawPackCompare`, Drag mode, uiprobe id `compare:<id>`; cards scrub on hover). Built-in in
   `shaders/packs/<id>`, installed in `<exe>/shader_packs/<id>`; template `shaders/pack_template`; `tools/pack_check`.
   Registry `render/ShaderPack.*` (status per pack, hot reload `PollChanges`, install / uninstall / template); online gallery
   `app/ShaderPackStore.*` (index.json, SHA-256 checked zips); manager screen `app/UiShaders.cpp` (Screen::Shaders, top tab
-  "셰이더", `--screen shaders|shaders-online`), shared picker `app/UiShaderPack.cpp`. Networking / zip / version helpers live
+  "셰이더", `--screen shaders|shaders-online`; per-tab type filter + sort `shaderType=` / `shaderSort=` ini, index.json
+  `type` / `updated`), shared picker `app/UiShaderPack.cpp`. Networking / zip / version helpers live
   in `core/NetUtil.*` (shared with the updater).
   `GpuModel::SetShaderPack` writes class / head bone / params into `MaterialConstants`; `ScenePass::PackPsos` compiles
   mmd.hlsl's `PSPack` with DXC (FXC cannot `#include` a macro: `MMDX_PACK` = the quoted surface path) on first use and

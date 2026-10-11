@@ -18,6 +18,7 @@
 #include "core/TextUtil.h"
 #include "render/ShaderPack.h"
 #include "studio/StudioDoc.h"
+#include "ui_probe/UiProbe.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -267,29 +268,12 @@ static std::string PackThumbKey(const ShaderPack& pack) {
     return "p:" + pack.id + ":" + std::to_string(ShaderPacks().Generation());
 }
 
-uint64_t App::PackThumb(const ShaderPack& pack) {
-    if (pack.preview.empty()) return 0;
-    return thumbs_.Get(PackThumbKey(pack), ThumbnailKind::Image, {pack.preview});
-}
-
-uint64_t App::RemotePackThumb(const RemotePack& pack) {
-    if (pack.previewFile.empty()) return 0;
-    return thumbs_.Get("r:" + pack.id + ":" + pack.version, ThumbnailKind::Image, {pack.previewFile});
-}
-
-void App::DrawPackImage(ImDrawList* dl, uint64_t tex, const std::string& key, ImVec2 a, ImVec2 b, float rounding,
-                        ImDrawFlags flags) {
-    const Palette& p = P();
-    if (!tex) {   // placeholder: a soft mint field with the pack glyph
-        dl->AddRectFilled(a, b, Mix(p.surface, p.accentSoft, 0.7f), rounding, flags);
-        Icon(dl, icon::Diamond, std::clamp((b.y - a.y) / Dpi() * 0.35f, 12.0f, 30.0f),
-             ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), WithAlpha(p.accentInk, 0.55f));
-        return;
-    }
+static void CoverUv(const ThumbnailCache& thumbs, const std::string& key, ImVec2 a, ImVec2 b, ImVec2& uv0, ImVec2& uv1) {
     uint32_t w = 0, h = 0;
-    thumbs_.Size(key, w, h);
-    ImVec2 uv0(0, 0), uv1(1, 1);
-    if (w && h) {   // cover-fit: crop the longer side
+    thumbs.Size(key, w, h);
+    uv0 = ImVec2(0, 0);
+    uv1 = ImVec2(1, 1);
+    if (w && h) {
         const float ra = (b.x - a.x) / std::max(1.0f, b.y - a.y), ri = (float)w / (float)h;
         if (ri > ra) {
             const float k = ra / ri;
@@ -301,7 +285,177 @@ void App::DrawPackImage(ImDrawList* dl, uint64_t tex, const std::string& key, Im
             uv1.y = 1 - uv0.y;
         }
     }
+}
+
+uint64_t App::PackThumb(const ShaderPack& pack) {
+    if (pack.preview.empty()) return 0;
+    return thumbs_.Get(PackThumbKey(pack), ThumbnailKind::Image, {pack.preview});
+}
+
+uint64_t App::PackThumbBefore(const ShaderPack& pack) {
+    if (pack.previewBefore.empty()) return 0;
+    return thumbs_.Get("pb:" + pack.id + ":" + std::to_string(ShaderPacks().Generation()), ThumbnailKind::Image,
+                       {pack.previewBefore});
+}
+
+uint64_t App::RemotePackThumb(const RemotePack& pack) {
+    if (pack.previewFile.empty()) return 0;
+    return thumbs_.Get("r:" + pack.id + ":" + pack.version, ThumbnailKind::Image, {pack.previewFile});
+}
+
+uint64_t App::RemotePackThumbBefore(const RemotePack& pack) {
+    if (pack.previewBeforeFile.empty()) return 0;
+    return thumbs_.Get("rb:" + pack.id + ":" + pack.version, ThumbnailKind::Image, {pack.previewBeforeFile});
+}
+
+void App::DrawPackImage(ImDrawList* dl, uint64_t tex, const std::string& key, ImVec2 a, ImVec2 b, float rounding,
+                        ImDrawFlags flags) {
+    const Palette& p = P();
+    if (!tex) {   // placeholder: a soft mint field with the pack glyph
+        dl->AddRectFilled(a, b, Mix(p.surface, p.accentSoft, 0.7f), rounding, flags);
+        Icon(dl, icon::Diamond, std::clamp((b.y - a.y) / Dpi() * 0.35f, 12.0f, 30.0f),
+             ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), WithAlpha(p.accentInk, 0.55f));
+        return;
+    }
+    ImVec2 uv0, uv1;
+    CoverUv(thumbs_, key, a, b, uv0, uv1);
     dl->AddImageRounded((ImTextureID)tex, a, b, uv0, uv1, IM_COL32_WHITE, rounding, flags);
+}
+
+void App::DrawPackCompare(const char* id, ImDrawList* dl, uint64_t before, const std::string& beforeKey, uint64_t after,
+                         const std::string& afterKey, ImVec2 a, ImVec2 b, float rounding, ImDrawFlags flags,
+                         PackCompareMode mode) {
+    if (!before || !after) {
+        DrawPackImage(dl, after, afterKey, a, b, rounding, flags);
+        return;
+    }
+
+    const Palette& p = P();
+    const float width = std::max(1.0f, b.x - a.x);
+    const float height = std::max(1.0f, b.y - a.y);
+    float& t = *ImGui::GetStateStorage()->GetFloatRef(ImGui::GetID(id), 0.5f);
+
+    bool hovered = false;
+    bool active = false;
+
+    if (mode == PackCompareMode::Drag) {
+        const ImVec2 savedPos = ImGui::GetCursorScreenPos();
+        ImGui::SetCursorScreenPos(a);
+        ImGui::InvisibleButton(id, ImVec2(width, height));
+        hovered = ImGui::IsItemHovered();
+        active = ImGui::IsItemActive();
+        ImGui::SetCursorScreenPos(savedPos);
+
+        std::string packId;
+        const size_t c1 = afterKey.find(':');
+        if (c1 != std::string::npos) {
+            const size_t c2 = afterKey.find(':', c1 + 1);
+            if (c2 != std::string::npos) packId = afterKey.substr(c1 + 1, c2 - (c1 + 1));
+            else packId = afterKey.substr(c1 + 1);
+        } else {
+            packId = afterKey;
+        }
+        uiprobe::Info(ImGui::GetItemID(), ("compare:" + packId).c_str(), nullptr);
+
+        if (hovered || active) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        }
+
+        if (active) {
+            t = 1.0f - std::clamp((ImGui::GetIO().MousePos.x - a.x) / width, 0.0f, 1.0f);
+        }
+        if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            t = 0.5f;
+        }
+    } else { // Hover mode
+        const bool hovering = ImGui::IsMouseHoveringRect(a, b) && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+        const float target = hovering ? 1.0f - std::clamp((ImGui::GetIO().MousePos.x - a.x) / width, 0.0f, 1.0f) : 1.0f;
+        t += (target - t) * std::min(1.0f, ImGui::GetIO().DeltaTime * 14.0f);
+        if (std::abs(1.0f - t) < 0.002f && !hovering) t = 1.0f;
+    }
+
+    t = std::clamp(t, 0.0f, 1.0f);
+    const float splitX = std::clamp(a.x + width * (1.0f - t), a.x, b.x);
+
+    ImVec2 uv0, uv1;
+    CoverUv(thumbs_, afterKey, a, b, uv0, uv1);
+
+    const float splitU = uv0.x + (uv1.x - uv0.x) * ((splitX - a.x) / width);
+
+    const ImDrawFlags effFlags = (flags & ImDrawFlags_RoundCornersMask_) == 0 ? ImDrawFlags_RoundCornersAll : flags;
+    const ImDrawFlags flagsLeft = (effFlags & (ImDrawFlags_RoundCornersTopLeft | ImDrawFlags_RoundCornersBottomLeft)) |
+                                 (flags & ~ImDrawFlags_RoundCornersMask_);
+    const ImDrawFlags flagsRight = (effFlags & (ImDrawFlags_RoundCornersTopRight | ImDrawFlags_RoundCornersBottomRight)) |
+                                  (flags & ~ImDrawFlags_RoundCornersMask_);
+
+    if (splitX > a.x) {
+        dl->AddImageRounded((ImTextureID)before, a, ImVec2(splitX, b.y), uv0, ImVec2(splitU, uv1.y),
+                            IM_COL32_WHITE, rounding, flagsLeft);
+    }
+    if (splitX < b.x) {
+        dl->AddImageRounded((ImTextureID)after, ImVec2(splitX, a.y), b, ImVec2(splitU, uv0.y), uv1,
+                            IM_COL32_WHITE, rounding, flagsRight);
+    }
+
+    // Divider
+    const bool showDivider = (mode == PackCompareMode::Drag) || (splitX > a.x + 1.0f && splitX < b.x - 1.0f);
+    if (showDivider) {
+        const float lineW = Dp(2.0f);
+        dl->AddRectFilled(ImVec2(splitX - lineW * 0.5f - Dp(1.5f), a.y),
+                          ImVec2(splitX + lineW * 0.5f + Dp(1.5f), b.y),
+                          IM_COL32(0, 0, 0, 45));
+        dl->AddRectFilled(ImVec2(splitX - lineW * 0.5f - Dp(0.5f), a.y),
+                          ImVec2(splitX + lineW * 0.5f + Dp(0.5f), b.y),
+                          IM_COL32(0, 0, 0, 70));
+        dl->AddLine(ImVec2(splitX, a.y), ImVec2(splitX, b.y), IM_COL32(255, 255, 255, 240), lineW);
+
+        if (mode == PackCompareMode::Drag) {
+            const ImVec2 knobCenter(splitX, (a.y + b.y) * 0.5f);
+            const float grow = Anim(ImGui::GetItemID(), hovered || active);
+            const float knobR = Dp(14.0f + 2.0f * grow);
+            SoftShadow(dl, ImVec2(knobCenter.x - knobR, knobCenter.y - knobR),
+                       ImVec2(knobCenter.x + knobR, knobCenter.y + knobR), knobR, Dp(6.0f), 0.20f,
+                       ImVec2(0, Dp(1.0f)));
+            dl->AddCircleFilled(knobCenter, knobR, p.surface);
+            dl->AddCircle(knobCenter, knobR, p.lineStrong, 0, Dp(1.0f));
+            Icon(dl, icon::CaretLeft, Dp(12.0f), ImVec2(knobCenter.x - Dp(4.5f), knobCenter.y), p.ink2);
+            Icon(dl, icon::CaretRight, Dp(12.0f), ImVec2(knobCenter.x + Dp(4.5f), knobCenter.y), p.ink2);
+        }
+    }
+
+    // Labels (Drag mode only)
+    if (mode == PackCompareMode::Drag) {
+        const char* leftText = Tr("적용 전");
+        const char* rightText = Tr("적용 후");
+        const ImVec2 leftTs = TextSize(Font::Semibold, size::Caption, leftText);
+        const ImVec2 rightTs = TextSize(Font::Semibold, size::Caption, rightText);
+        const float margin = Dp(10.0f);
+        const float padX = Dp(8.0f), padY = Dp(4.0f);
+
+        const float pillLeftW = leftTs.x + padX * 2.0f;
+        const float pillLeftH = leftTs.y + padY * 2.0f;
+        const float leftWidth = splitX - a.x;
+        const float leftFade = std::clamp((leftWidth - margin) / pillLeftW, 0.0f, 1.0f);
+        if (leftFade > 0.01f) {
+            const ImVec2 p0(a.x + margin, b.y - margin - pillLeftH);
+            const ImVec2 p1(p0.x + pillLeftW, p0.y + pillLeftH);
+            dl->AddRectFilled(p0, p1, WithAlpha(IM_COL32(0, 0, 0, 255), 0.65f * leftFade), pillLeftH * 0.5f);
+            Text(dl, Font::Semibold, size::Caption, ImVec2(p0.x + padX, p0.y + padY),
+                 WithAlpha(IM_COL32(255, 255, 255, 255), leftFade), leftText);
+        }
+
+        const float pillRightW = rightTs.x + padX * 2.0f;
+        const float pillRightH = rightTs.y + padY * 2.0f;
+        const float rightWidth = b.x - splitX;
+        const float rightFade = std::clamp((rightWidth - margin) / pillRightW, 0.0f, 1.0f);
+        if (rightFade > 0.01f) {
+            const ImVec2 p0(b.x - margin - pillRightW, b.y - margin - pillRightH);
+            const ImVec2 p1(p0.x + pillRightW, p0.y + pillRightH);
+            dl->AddRectFilled(p0, p1, WithAlpha(IM_COL32(0, 0, 0, 255), 0.65f * rightFade), pillRightH * 0.5f);
+            Text(dl, Font::Semibold, size::Caption, ImVec2(p0.x + padX, p0.y + padY),
+                 WithAlpha(IM_COL32(255, 255, 255, 255), rightFade), rightText);
+        }
+    }
 }
 
 // ---- picker ---------------------------------------------------------------------------------------------------------

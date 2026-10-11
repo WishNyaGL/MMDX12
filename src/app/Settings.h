@@ -62,6 +62,8 @@ struct AppSettings {
     // video / still renders (the real-time renderers; GI / PT output skips it). Persisted as
     // "effect=<pack id>|<enabled>|<key>:<value>,...|<texture folder or ->|" ini lines, oldest first.
     std::vector<EffectStackEntry> effectStack;
+    int shaderSort[2] = {0, 0};   // 0 recommended, 1 name, 2 updated, 3 params
+    int shaderType[2] = {0, 0};   // 0 all, 1 surface, 2 effect
     int windowWidth = 1600, windowHeight = 900;
     std::vector<std::string> recentProjects;         // studio projects (UTF-8 absolute paths), newest first, max 8
     void AddRecentProject(const std::string& path);  // moves it to the front (case-insensitive match)

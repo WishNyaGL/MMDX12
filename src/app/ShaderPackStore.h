@@ -15,17 +15,21 @@ namespace mmdx {
 
 struct RemotePack {
     std::string id, version, minAppVersion, license, homepage, repository;
+    std::string type = "surface";
+    std::string updated;
     int apiVersion = 1;
     LocalizedText name, description, recommendedFor;
     std::vector<PackAuthor> authors;
     std::vector<std::string> tags;
     bool builtIn = false;          // also shipped with the app
     std::string previewUrl;        // absolute (resolved against the index URL); empty = none
+    std::string previewBeforeUrl;  // absolute (resolved against the index URL); empty = none
     std::string downloadUrl;       // absolute
     std::string sha256;            // lower-case hex of the zip
     uint64_t size = 0;             // zip bytes
     int paramCount = 0;
-    std::filesystem::path previewFile;   // local copy once downloaded (empty until then)
+    std::filesystem::path previewFile;         // local copy once downloaded (empty until then)
+    std::filesystem::path previewBeforeFile;   // local copy once downloaded (empty until then)
 
     bool Compatible() const;       // apiVersion <= kPackApiVersion and minAppVersion <= this build
 };

@@ -998,6 +998,17 @@ const Entry kEnglish[] = {
     {"센터 지정", "Set Center"},
     {" 외 %d명", " and %d others"},
     {"비어 있음", "Empty"},
+    {"적용 전", "Before"},
+    {"적용 후", "After"},
+    {"가운데 선을 끌어 적용 전후를 비교하세요", "Drag the line to compare before and after"},
+    {"전/후 비교", "Before / after"},
+    {"전체", "All"},
+    {"추천순", "Recommended"},
+    {"이름순", "Name"},
+    {"최근 업데이트", "Recently updated"},
+    {"파라미터 많은 순", "Most parameters"},
+    {"조건에 맞는 팩이 없습니다", "No packs match"},
+    {"필터 지우기", "Clear filters"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

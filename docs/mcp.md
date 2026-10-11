@@ -118,7 +118,7 @@ Add to your project or user MCP settings:
 6. `list_library`: Lists available characters, stages, and songs with filtering (`kind`: `all|character|stage|song`, optional search `query`).
 
 ### Screen Control & Capture
-7. `screenshot`: Reads back the Direct3D 12 backbuffer (scene + UI, no mouse cursor). Inline: downscaled to `max_width` (default 1280, 0 = full size) and returned as an MCP image block plus a short text block (size, screen). With `path`: written there as a full-size PNG (folders are created; `max_width` still applies when given) and returned inline only with `return_image: true`. `region: [x, y, w, h]` crops first (window pixels).
+7. `screenshot`: Reads back the Direct3D 12 backbuffer (scene + UI, no mouse cursor), or with `scene_only: true` the renderer's last finished frame without any UI (requires a play or studio scene). Inline: downscaled to `max_width` (default 1280, 0 = full size) and returned as an MCP image block plus a short text block (size, screen). With `path`: written there as a full-size PNG (folders are created; `max_width` still applies when given) and returned inline only with `return_image: true`. `region: [x, y, w, h]` crops first (window pixels).
 8. `wait_frames`: Advances the simulation by $N$ frames before completing.
 9. `set_screen`: Changes the active screen (`select`, `studio` = a new empty project, `shaders`, `bench`).
 
@@ -130,8 +130,8 @@ Add to your project or user MCP settings:
 14. `seek`: Jumps playback or the timeline cursor to `seconds` (clamped; the result gives the actual time).
 
 ### Graphics & Render Settings
-15. `get_render_settings`: Queries active graphics preset, render path (`raster`, `rt`, `pt`), upscaler (`none`, `dlss`, `fsr`, `xess`), post-processing toggles (DoF, volumetric, bloom, LUT).
-16. `set_render_settings`: Updates render path, upscaler, quality preset, lighting preset, DoF / volumetric / FFT bloom, the loaded character's shader pack, or `effects` (the whole effect stack: comma-separated effect pack ids, `none` clears it). Every value is checked first: an invalid one fails the call and changes nothing. Saved to the settings like the lobby's controls; the answer is the settings now in effect.
+15. `get_render_settings`: Queries active graphics preset, render path (`raster`, `rt`, `pt`), upscaler (`none`, `dlss`, `fsr`, `xess`), post-processing toggles (DoF, volumetric, bloom, LUT), and in play mode the character's `shader_pack` and `shader_texture_folder`.
+16. `set_render_settings`: Updates render path, upscaler, quality preset, lighting preset, DoF / volumetric / FFT bloom, the loaded character's shader pack (`shader_pack`), the per-character pack texture folder (`shader_texture_folder`, empty string clears), or `effects` (the whole effect stack: comma-separated effect pack ids, `none` clears it). Every value is checked first: an invalid one fails the call and changes nothing. Saved to the settings like the lobby's controls; the answer is the settings now in effect.
 
 ### Studio Control & Inspection
 17. `studio_get_state`: Full dump of Studio document state, playhead position, selection, camera mode, dirty flag, undo/redo stack, and list of models with keyframe counts.

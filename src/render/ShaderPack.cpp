@@ -339,6 +339,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     // reset what the manifest owns (dir / source / installedFrom stay the caller's)
     out.dir = dir;
     out.preview.clear();
+    out.previewBefore.clear();
     out.version.clear();
     out.apiVersion = 1;
     out.minAppVersion.clear();
@@ -654,6 +655,13 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
         out.preview = previewPng;
     else if (fs::is_regular_file(previewJpg, ec))
         out.preview = previewJpg;
+
+    const fs::path previewBeforePng = dir / L"preview_before.png";
+    const fs::path previewBeforeJpg = dir / L"preview_before.jpg";
+    if (fs::is_regular_file(previewBeforePng, ec))
+        out.previewBefore = previewBeforePng;
+    else if (fs::is_regular_file(previewBeforeJpg, ec))
+        out.previewBefore = previewBeforeJpg;
 
     // the pack's shader file must match its type (an effect pack implements PackEffect in effect.hlsl)
     if (out.type == PackType::Effect) {

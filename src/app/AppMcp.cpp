@@ -325,6 +325,7 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
     }
 
     if (tool == "screenshot") {
+        const bool sceneOnly = args.value("scene_only", false);
         const std::string path = args.value("path", "");
         const bool returnImage = path.empty() || args.value("return_image", false);
         // inline images default to 1280 wide; a saved file keeps the full size unless max_width says otherwise
@@ -337,8 +338,8 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             }
             for (int k = 0; k < 4; ++k) region[k] = args["region"][k].get<float>();
         }
-        ctx_.RequestCaptureMemory([this, promise, maxWidth, path, returnImage, region](uint32_t w, uint32_t h,
-                                                                                         std::vector<uint8_t> rgba) {
+        auto finish = [this, promise, maxWidth, path, returnImage, region](uint32_t w, uint32_t h,
+                                                                           std::vector<uint8_t> rgba) {
             if (region[2] > 0 && region[3] > 0) {   // crop (clamped to the image)
                 const uint32_t x0 = (uint32_t)std::clamp(region[0], 0.0f, (float)w - 1);
                 const uint32_t y0 = (uint32_t)std::clamp(region[1], 0.0f, (float)h - 1);
@@ -381,7 +382,17 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             res["height"] = outH;
             res["screen"] = ScreenName(screen_);
             promise->Resolve(res);
-        });
+        };
+        if (sceneOnly) {
+            ImageRGBA8 img;
+            if (!renderer_.ReadFinalImage(img) || img.mips.empty() || img.mips[0].pixels.empty()) {
+                promise->Reject("no scene image (scene_only needs a play / studio scene)");
+                return;
+            }
+            finish(img.mips[0].width, img.mips[0].height, std::move(img.mips[0].pixels));
+            return;
+        }
+        ctx_.RequestCaptureMemory(std::move(finish));
         return;
     }
 
@@ -627,7 +638,11 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             fx.push_back(entry);
         }
         r["effects"] = fx;
-        if (screen_ == Screen::Play && scene_) r["shader_pack"] = settings_.CharacterShader(scene_->characterId).pack;
+        if (screen_ == Screen::Play && scene_) {
+            const ShaderChoice sc = settings_.CharacterShader(scene_->characterId);
+            r["shader_pack"] = sc.pack;
+            r["shader_texture_folder"] = sc.textureFolder;
+        }
         promise->Resolve(r);
         return;
     }
@@ -673,6 +688,18 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
                 promise->Reject("Unknown surface shader pack: " + shaderPack);
                 return;
             }
+        }
+        std::string shaderTextureFolder;
+        if (args.contains("shader_texture_folder")) {
+            if (!(screen_ == Screen::Play && scene_)) {
+                promise->Reject("shader_texture_folder applies to the character in play mode (load_scene first)");
+                return;
+            }
+            if (!args["shader_texture_folder"].is_string()) {
+                promise->Reject("shader_texture_folder must be a string");
+                return;
+            }
+            shaderTextureFolder = args["shader_texture_folder"].get<std::string>();
         }
         std::vector<EffectStackEntry> effects;
         if (args.contains("effects")) {  // the whole stack, in order ("none" / "" clears it)
@@ -769,10 +796,15 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         if (args.contains("dof")) settings_.dof = args["dof"].get<bool>();
         if (args.contains("volumetric")) settings_.volumetric = args["volumetric"].get<bool>();
         if (args.contains("bloom_conv")) settings_.bloomConvolution = args["bloom_conv"].get<bool>();
-        if (args.contains("shader_pack")) {
+        if (args.contains("shader_pack") || args.contains("shader_texture_folder")) {
             ShaderChoice sc = settings_.CharacterShader(scene_->characterId);  // keeps the pack's other choices
-            if (sc.pack != shaderPack) sc = ShaderChoice{};
-            sc.pack = shaderPack;
+            if (args.contains("shader_pack")) {
+                if (sc.pack != shaderPack) sc = ShaderChoice{};
+                sc.pack = shaderPack;
+            }
+            if (args.contains("shader_texture_folder")) {
+                sc.textureFolder = shaderTextureFolder;
+            }
             settings_.SetCharacterShader(scene_->characterId, sc);
         }
         if (args.contains("effects") || args.contains("effect_stack")) settings_.effectStack = std::move(effects);

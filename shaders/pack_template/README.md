@@ -8,6 +8,7 @@ A starting point for your own shader pack (created with the app's "새 팩 만�
 - `surface.hlsl` — the shader. It implements `PackShade(PackSurface)`, the contract in
   `shaders/pack_api.hlsli` (`PackSurface` in, `PackResult` out).
 - `preview.png` (optional, add it yourself) — the card image in the shader tab.
+- `preview_before.png` (optional) — same size and framing as `preview.png`, rendered with the pack off; with both, the shader screen and online gallery show a draggable before/after compare.
 
 Edit the files and press the app's reload button (or just save — the app re-reads changed packs automatically);
 the pack recompiles on its next draw.

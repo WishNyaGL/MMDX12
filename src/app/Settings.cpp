@@ -255,6 +255,24 @@ bool AppSettings::Load(const std::filesystem::path& file) {
                 effectStack.push_back(std::move(e));
             }
         }
+        else if (key == "shaderSort") {
+            const size_t sep = value.find_first_of(",|");
+            if (sep != std::string::npos) {
+                if (ParseInt(value.substr(0, sep), i)) shaderSort[0] = std::clamp(i, 0, 3);
+                if (ParseInt(value.substr(sep + 1), i)) shaderSort[1] = std::clamp(i, 0, 3);
+            } else if (ParseInt(value, i)) {
+                shaderSort[0] = std::clamp(i, 0, 3);
+            }
+        }
+        else if (key == "shaderType") {
+            const size_t sep = value.find_first_of(",|");
+            if (sep != std::string::npos) {
+                if (ParseInt(value.substr(0, sep), i)) shaderType[0] = std::clamp(i, 0, 2);
+                if (ParseInt(value.substr(sep + 1), i)) shaderType[1] = std::clamp(i, 0, 2);
+            } else if (ParseInt(value, i)) {
+                shaderType[0] = std::clamp(i, 0, 2);
+            }
+        }
         else if (key == "lastCharacter") lastCharacter = value;
         else if (key == "lastStage") lastStage = value;
         else if (key == "lastSong") lastSong = value;
@@ -418,6 +436,8 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
         std::fprintf(f, "effect=%s|%d|%s|%s\n", e.pack.c_str(), e.enabled ? 1 : 0, list.c_str(),
                      e.textureFolder.empty() ? "-" : e.textureFolder.c_str());
     }
+    std::fprintf(f, "shaderSort=%d,%d\n", shaderSort[0], shaderSort[1]);
+    std::fprintf(f, "shaderType=%d,%d\n", shaderType[0], shaderType[1]);
     std::fprintf(f, "lastCharacter=%s\n", lastCharacter.c_str());
     std::fprintf(f, "lastStage=%s\n", lastStage.c_str());
     std::fprintf(f, "lastSong=%s\n", lastSong.c_str());

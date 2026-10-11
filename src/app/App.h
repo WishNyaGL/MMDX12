@@ -30,6 +30,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace mmdx {
@@ -610,10 +611,16 @@ private:
     std::string lobbyMatId_;                       // character whose model the list below was loaded for
     std::future<std::shared_ptr<PmxModel>> lobbyMatFuture_;
     std::shared_ptr<PmxModel> lobbyMatPmx_;
+    enum class PackCompareMode { Drag, Hover };
     uint64_t PackThumb(const ShaderPack& pack);                          // preview texture, 0 = none / loading
+    uint64_t PackThumbBefore(const ShaderPack& pack);
     uint64_t RemotePackThumb(const RemotePack& pack);
+    uint64_t RemotePackThumbBefore(const RemotePack& pack);
     void DrawPackImage(ImDrawList* dl, uint64_t tex, const std::string& key, ImVec2 a, ImVec2 b, float rounding,
                        ImDrawFlags flags = 0);                           // cover-fit, placeholder when tex == 0
+    void DrawPackCompare(const char* id, ImDrawList* dl, uint64_t before, const std::string& beforeKey, uint64_t after,
+                         const std::string& afterKey, ImVec2 a, ImVec2 b, float rounding, ImDrawFlags flags,
+                         PackCompareMode mode);
     // shader pack manager (UiShaders.cpp)
     void DrawShaders();
     void DrawShaderPackDetail(float x0, float y0, float x1, float y1);
@@ -630,6 +637,8 @@ private:
     ShaderPackStore shaderStore_;
     int shaderTab_ = 0;                                                  // 0 installed, 1 online
     char shaderFilter_[128] = {};
+    uint32_t shaderPackWriteTimesGen_ = 0;
+    std::unordered_map<std::string, std::filesystem::file_time_type> shaderPackWriteTimes_;
     std::string shaderSelInstalled_, shaderSelRemote_;
     bool newPackOpen_ = false, newPackEffect_ = false;
     char newPackId_[64] = {}, newPackName_[96] = {}, newPackAuthor_[96] = {};

@@ -180,6 +180,16 @@ void App::DrawShaders() {
 
     // ---- header: tabs, search, actions
     {
+        if (shaderPackWriteTimesGen_ != reg.Generation()) {
+            shaderPackWriteTimesGen_ = reg.Generation();
+            shaderPackWriteTimes_.clear();
+            for (const ShaderPack& pk : reg.Packs()) {
+                std::error_code ec;
+                const auto t = std::filesystem::last_write_time(pk.dir / L"pack.json", ec);
+                shaderPackWriteTimes_[pk.id] = !ec ? t : std::filesystem::file_time_type::min();
+            }
+        }
+
         int installedCount = 0;
         for (const ShaderPack& pk : reg.Packs()) installedCount += pk.status != PackStatus::Duplicate;
         const std::string l0 = Tr("설치됨  ") + std::to_string(installedCount);
@@ -230,9 +240,77 @@ void App::DrawShaders() {
             if (rightButton("##storesite", Tr("갤러리 웹사이트"), icon::Globe, ButtonKind::Ghost))
                 OpenUrl("https://mmdx.codingbot.kr/" + lang + "/shader-packs/");
         }
-        const float sw = std::min(260.0f, std::max(120.0f, (x - tabsR - Dp(16.0f)) / Dpi()));
-        if (x - tabsR > Dp(140.0f)) {
-            ImGui::SetCursorScreenPos(ImVec2(x - Dp(sw), top + Dp(1.0f)));
+
+        float curX = tabsR + Dp(12.0f);
+
+        // type filter: Segmented (전체 / 셰이더 / 효과)
+        const char* typeLabels[] = {Tr("전체"), Tr("셰이더"), Tr("효과")};
+        int curType = std::clamp(settings_.shaderType[shaderTab_], 0, 2);
+        ImGui::SetCursorScreenPos(ImVec2(curX, top + Dp(2.0f)));
+        if (Segmented("##packtype", typeLabels, 3, &curType, 0.0f, 36.0f)) {
+            settings_.shaderType[shaderTab_] = curType;
+            settings_.Save(settingsPath_);
+        }
+        curX = ImGui::GetItemRectMax().x + Dp(8.0f);
+
+        // sort combo: compact combo (추천순 / 이름순 / 최근 업데이트 / 파라미터 많은 순)
+        const char* sortLabels[] = {Tr("추천순"), Tr("이름순"), Tr("최근 업데이트"), Tr("파라미터 많은 순")};
+        const float comboW = Dp(120.0f);
+        const char* sortPreview = sortLabels[std::clamp(settings_.shaderSort[shaderTab_], 0, 3)];
+        ImGui::SetCursorScreenPos(ImVec2(curX, top + Dp(2.0f)));
+        ImGui::SetNextItemWidth(comboW);
+        PushFont(Font::Regular, size::Small);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink));
+        const bool openSort = ImGui::BeginCombo("##packsort", sortPreview, ImGuiComboFlags_HeightLarge | ImGuiComboFlags_NoArrowButton);
+        ImGui::PopStyleColor();
+        {
+            const ImVec2 cmax = ImGui::GetItemRectMax(), cmin = ImGui::GetItemRectMin();
+            Icon(ImGui::GetWindowDrawList(), icon::CaretDown, 12.0f, ImVec2(cmax.x - Dp(12.0f), (cmin.y + cmax.y) * 0.5f), p.ink3);
+        }
+        if (openSort) {
+            for (int k = 0; k < 4; ++k) {
+                const bool sel = settings_.shaderSort[shaderTab_] == k;
+                if (ImGui::Selectable(sortLabels[k], sel)) {
+                    settings_.shaderSort[shaderTab_] = k;
+                    settings_.Save(settingsPath_);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        PopFont();
+        curX = ImGui::GetItemRectMax().x + Dp(12.0f);
+
+        // Compute match count for result count and search field layout
+        const std::string needle = ToLowerAscii(shaderFilter_);
+        int matchCount = 0;
+        if (shaderTab_ == 0) {
+            for (const ShaderPack& pk : reg.Packs()) {
+                if (curType == 1 && pk.type != PackType::Surface) continue;
+                if (curType == 2 && pk.type != PackType::Effect) continue;
+                if (!PackMatches(needle, pk.id, pk.name, pk.authors, pk.tags)) continue;
+                ++matchCount;
+            }
+        } else {
+            for (const RemotePack& rp : shaderStore_.Packs()) {
+                if (curType == 1 && rp.type != "surface") continue;
+                if (curType == 2 && rp.type != "effect") continue;
+                if (!PackMatches(needle, rp.id, rp.name, rp.authors, rp.tags)) continue;
+                ++matchCount;
+            }
+        }
+
+        // Result count on the right of the toolbar ("N개", caption, ink3)
+        const std::string countStr = std::to_string(matchCount) + Tr("개");
+        const ImVec2 countSz = TextSize(Font::Regular, size::Caption, countStr.c_str());
+        const float countX = x - countSz.x - Dp(4.0f);
+        Text(ImGui::GetWindowDrawList(), Font::Regular, size::Caption, ImVec2(countX, top + Dp(12.0f)), p.ink3, countStr.c_str());
+
+        // Search field shrinks to make room
+        const float searchRight = countX - Dp(12.0f);
+        const float availSearch = (searchRight - curX) / Dpi();
+        if (availSearch > 50.0f) {
+            const float sw = std::min(240.0f, availSearch);
+            ImGui::SetCursorScreenPos(ImVec2(searchRight - Dp(sw), top + Dp(1.0f)));
             SearchField("##packfilter", shaderFilter_, sizeof(shaderFilter_), Tr("이름, 작성자, 태그"), sw);
         }
     }
@@ -253,11 +331,13 @@ void App::DrawShaders() {
         const float cw = (availW - cgap * (cols - 1)) / cols;
         const float imgH = cw * 9.0f / 16.0f, chH = imgH + Dp(92.0f);
         const std::string needle = ToLowerAscii(shaderFilter_);
+        const int curType = std::clamp(settings_.shaderType[shaderTab_], 0, 2);
         float contentH = 0;
         int n = 0;
 
         // one card; returns true when clicked
-        const auto card = [&](const char* id, bool selected, uint64_t tex, const std::string& key, const std::string& name,
+        const auto card = [&](const char* id, bool selected, uint64_t beforeTex, const std::string& beforeKey,
+                              uint64_t tex, const std::string& key, const std::string& name,
                               const std::string& sub, const std::vector<std::pair<std::string, std::pair<ImU32, ImU32>>>& badges,
                               float progress) {
             const int col = n % cols, row = n / cols;
@@ -276,7 +356,8 @@ void App::DrawShaders() {
             const float r = Dp(14.0f);
             SoftShadow(dl, a0, b0, r, Dp(10.0f + 8.0f * hv), 0.07f + 0.07f * hv, ImVec2(0, Dp(3.0f + 3.0f * hv)));
             dl->AddRectFilled(a0, b0, p.surface, r);
-            DrawPackImage(dl, tex, key, a0, ImVec2(b0.x, a0.y + imgH), r, ImDrawFlags_RoundCornersTop);
+            DrawPackCompare(id, dl, beforeTex, beforeKey, tex, key, a0, ImVec2(b0.x, a0.y + imgH), r,
+                            ImDrawFlags_RoundCornersTop, PackCompareMode::Hover);
             if (sv > 0.01f) dl->AddRect(a0, b0, WithAlpha(p.accent, sv), r, 0, Dp(2.0f));
             const float tx = a0.x + Dp(14.0f), tr = b0.x - Dp(14.0f);
             float ty = a0.y + imgH + Dp(12.0f);
@@ -295,25 +376,77 @@ void App::DrawShaders() {
         };
 
         if (shaderTab_ == 0) {
+            std::vector<const ShaderPack*> installedList;
             for (const ShaderPack& pk : reg.Packs()) {
+                if (curType == 1 && pk.type != PackType::Surface) continue;
+                if (curType == 2 && pk.type != PackType::Effect) continue;
                 if (!PackMatches(needle, pk.id, pk.name, pk.authors, pk.tags)) continue;
+                installedList.push_back(&pk);
+            }
+            const int sortMode = std::clamp(settings_.shaderSort[0], 0, 3);
+            std::stable_sort(installedList.begin(), installedList.end(), [&](const ShaderPack* a, const ShaderPack* b) {
+                if (sortMode == 0) {
+                    const bool aBuiltIn = a->source == PackSource::BuiltIn;
+                    const bool bBuiltIn = b->source == PackSource::BuiltIn;
+                    if (aBuiltIn != bBuiltIn) return aBuiltIn > bBuiltIn;
+                    return false;
+                }
+                if (sortMode == 1) {
+                    const std::string na = ToLowerAscii(a->name.Get(lang));
+                    const std::string nb = ToLowerAscii(b->name.Get(lang));
+                    if (na != nb) return na < nb;
+                    return false;
+                }
+                if (sortMode == 2) {
+                    const auto itA = shaderPackWriteTimes_.find(a->id);
+                    const auto itB = shaderPackWriteTimes_.find(b->id);
+                    const auto tA = itA != shaderPackWriteTimes_.end() ? itA->second : std::filesystem::file_time_type::min();
+                    const auto tB = itB != shaderPackWriteTimes_.end() ? itB->second : std::filesystem::file_time_type::min();
+                    if (tA != tB) return tA > tB;
+                    return false;
+                }
+                if (sortMode == 3) {
+                    if (a->params.size() != b->params.size()) return a->params.size() > b->params.size();
+                    return false;
+                }
+                return false;
+            });
+
+            for (const ShaderPack* pk : installedList) {
                 std::vector<std::pair<std::string, std::pair<ImU32, ImU32>>> badges;
-                badges.push_back({SourceLabel(pk.source), {WithAlpha(p.ink, 0.06f), p.ink2}});
-                if (pk.type == PackType::Effect)   // surface is the default: badge the effects only
-                    badges.push_back({TypeLabel(pk.type), {p.accentSoft, p.accentInk}});
+                const bool isEffect = pk->type == PackType::Effect;
+                const char* typeText = isEffect ? Tr("효과") : Tr("셰이더");
+                const std::pair<ImU32, ImU32> typeCol = isEffect ? std::make_pair(WithAlpha(p.ink, 0.12f), p.ink)
+                                                                 : std::make_pair(WithAlpha(p.ink, 0.05f), p.ink2);
+                badges.push_back({typeText, typeCol});
+                badges.push_back({SourceLabel(pk->source), {WithAlpha(p.ink, 0.06f), p.ink2}});
                 ImU32 bg = 0, fg = 0;
-                if (const char* st = StatusLabel(pk.status, bg, fg)) badges.push_back({st, {bg, fg}});
-                const std::string sub = "v" + pk.version + (pk.authors.empty() ? "" : "  ·  " + PackAuthorLine(pk.authors));
-                ImGui::PushID(PathToUtf8(pk.dir).c_str());
-                if (card("##pc", shaderSelInstalled_ == pk.id, PackThumb(pk),
-                         "p:" + pk.id + ":" + std::to_string(reg.Generation()), pk.name.Get(lang), sub, badges, -1.0f))
-                    shaderSelInstalled_ = pk.id;
+                if (const char* st = StatusLabel(pk->status, bg, fg)) badges.push_back({st, {bg, fg}});
+                if (!pk->previewBefore.empty())
+                    badges.push_back({Tr("전/후 비교"), {WithAlpha(p.ink, 0.06f), p.ink2}});
+                const std::string sub = "v" + pk->version + (pk->authors.empty() ? "" : "  ·  " + PackAuthorLine(pk->authors));
+                ImGui::PushID(PathToUtf8(pk->dir).c_str());
+                if (card("##pc", shaderSelInstalled_ == pk->id, PackThumbBefore(*pk),
+                         "pb:" + pk->id + ":" + std::to_string(reg.Generation()), PackThumb(*pk),
+                         "p:" + pk->id + ":" + std::to_string(reg.Generation()), pk->name.Get(lang), sub, badges, -1.0f))
+                    shaderSelInstalled_ = pk->id;
                 ImGui::PopID();
             }
             if (n == 0) {
-                const char* msg = reg.Packs().empty() ? Tr("설치된 셰이더 팩이 없습니다. 온라인 탭에서 받거나 zip을 창에 끌어 놓으세요")
-                                                      : Tr("검색 결과가 없습니다");
-                Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3, msg);
+                if (reg.Packs().empty()) {
+                    Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3,
+                         Tr("설치된 셰이더 팩이 없습니다. 온라인 탭에서 받거나 zip을 창에 끌어 놓으세요"));
+                } else {
+                    Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3,
+                         Tr("조건에 맞는 팩이 없습니다"));
+                    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + Dp(38.0f)));
+                    if (Button("##packclear", Tr("필터 지우기"), nullptr, ButtonKind::Ghost)) {
+                        shaderFilter_[0] = '\0';
+                        settings_.shaderType[0] = 0;
+                        settings_.Save(settingsPath_);
+                    }
+                    contentH = std::max(contentH, Dp(80.0f));
+                }
             }
         } else {
             const auto st = shaderStore_.State();
@@ -324,25 +457,76 @@ void App::DrawShaders() {
                 ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + Dp(40.0f)));
                 if (Button("##storeretry", Tr("다시 시도"), icon::Refresh)) shaderStore_.Refresh(options_.packIndex.empty() ? ShaderPackStore::kDefaultIndexUrl : options_.packIndex);
             } else {
+                std::vector<const RemotePack*> onlineList;
                 for (const RemotePack& rp : shaderStore_.Packs()) {
+                    if (curType == 1 && rp.type != "surface") continue;
+                    if (curType == 2 && rp.type != "effect") continue;
                     if (!PackMatches(needle, rp.id, rp.name, rp.authors, rp.tags)) continue;
+                    onlineList.push_back(&rp);
+                }
+                const int sortMode = std::clamp(settings_.shaderSort[1], 0, 3);
+                std::stable_sort(onlineList.begin(), onlineList.end(), [&](const RemotePack* a, const RemotePack* b) {
+                    if (sortMode == 0) {
+                        if (a->builtIn != b->builtIn) return a->builtIn > b->builtIn;
+                        if (a->updated != b->updated) return a->updated > b->updated;
+                        return false;
+                    }
+                    if (sortMode == 1) {
+                        const std::string na = ToLowerAscii(a->name.Get(lang));
+                        const std::string nb = ToLowerAscii(b->name.Get(lang));
+                        if (na != nb) return na < nb;
+                        return false;
+                    }
+                    if (sortMode == 2) {
+                        if (a->updated != b->updated) return a->updated > b->updated;
+                        return false;
+                    }
+                    if (sortMode == 3) {
+                        if (a->paramCount != b->paramCount) return a->paramCount > b->paramCount;
+                        return false;
+                    }
+                    return false;
+                });
+
+                for (const RemotePack* rp : onlineList) {
                     std::vector<std::pair<std::string, std::pair<ImU32, ImU32>>> badges;
-                    const ShaderPack* inst = InstalledVersionOf(rp.id);
-                    if (!rp.Compatible()) badges.push_back({Tr("호환되지 않음"), {p.warnSoft, p.warn}});
-                    else if (inst && net::CompareVersions(rp.version, inst->version) > 0)
+                    const bool isEffect = rp->type == "effect";
+                    const char* typeText = isEffect ? Tr("효과") : Tr("셰이더");
+                    const std::pair<ImU32, ImU32> typeCol = isEffect ? std::make_pair(WithAlpha(p.ink, 0.12f), p.ink)
+                                                                     : std::make_pair(WithAlpha(p.ink, 0.05f), p.ink2);
+                    badges.push_back({typeText, typeCol});
+                    const ShaderPack* inst = InstalledVersionOf(rp->id);
+                    if (!rp->Compatible()) badges.push_back({Tr("호환되지 않음"), {p.warnSoft, p.warn}});
+                    else if (inst && net::CompareVersions(rp->version, inst->version) > 0)
                         badges.push_back({Tr("업데이트 있음"), {p.accentSoft, p.accentInk}});
                     else if (inst) badges.push_back({Tr("설치됨"), {WithAlpha(p.ink, 0.06f), p.ink2}});
-                    if (rp.builtIn) badges.push_back({Tr("앱에 포함"), {WithAlpha(p.ink, 0.06f), p.ink2}});
-                    const std::string sub = "v" + rp.version + (rp.authors.empty() ? "" : "  ·  " + PackAuthorLine(rp.authors));
-                    ImGui::PushID(rp.id.c_str());
-                    if (card("##rc", shaderSelRemote_ == rp.id, RemotePackThumb(rp), "r:" + rp.id + ":" + rp.version,
-                             rp.name.Get(lang), sub, badges, shaderStore_.Installing(rp.id) ? shaderStore_.Progress(rp.id) : -1.0f))
-                        shaderSelRemote_ = rp.id;
+                    if (rp->builtIn) badges.push_back({Tr("앱에 포함"), {WithAlpha(p.ink, 0.06f), p.ink2}});
+                    if (!rp->previewBeforeUrl.empty())
+                        badges.push_back({Tr("전/후 비교"), {WithAlpha(p.ink, 0.06f), p.ink2}});
+                    const std::string sub = "v" + rp->version + (rp->authors.empty() ? "" : "  ·  " + PackAuthorLine(rp->authors));
+                    ImGui::PushID(rp->id.c_str());
+                    if (card("##rc", shaderSelRemote_ == rp->id, RemotePackThumbBefore(*rp),
+                             "rb:" + rp->id + ":" + rp->version, RemotePackThumb(*rp), "r:" + rp->id + ":" + rp->version,
+                             rp->name.Get(lang), sub, badges, shaderStore_.Installing(rp->id) ? shaderStore_.Progress(rp->id) : -1.0f))
+                        shaderSelRemote_ = rp->id;
                     ImGui::PopID();
                 }
-                if (n == 0)
-                    Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3,
-                         shaderStore_.Packs().empty() ? Tr("아직 갤러리에 팩이 없습니다") : Tr("검색 결과가 없습니다"));
+                if (n == 0) {
+                    if (shaderStore_.Packs().empty()) {
+                        Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3,
+                             Tr("아직 갤러리에 팩이 없습니다"));
+                    } else {
+                        Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3,
+                             Tr("조건에 맞는 팩이 없습니다"));
+                        ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + Dp(38.0f)));
+                        if (Button("##packclear", Tr("필터 지우기"), nullptr, ButtonKind::Ghost)) {
+                            shaderFilter_[0] = '\0';
+                            settings_.shaderType[1] = 0;
+                            settings_.Save(settingsPath_);
+                        }
+                        contentH = std::max(contentH, Dp(80.0f));
+                    }
+                }
             }
         }
         ImGui::SetCursorScreenPos(origin);
@@ -389,8 +573,17 @@ void App::DrawShaderPackDetail(float x0, float y0, float x1, float y1) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     {
         const ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + w, a.y + w * 9.0f / 16.0f);
-        DrawPackImage(dl, PackThumb(*pk), "p:" + pk->id + ":" + std::to_string(reg.Generation()), a, b, Dp(12.0f));
+        const std::string afterKey = "p:" + pk->id + ":" + std::to_string(reg.Generation());
+        const std::string beforeKey = "pb:" + pk->id + ":" + std::to_string(reg.Generation());
+        DrawPackCompare("##cmp_installed", dl, PackThumbBefore(*pk), beforeKey, PackThumb(*pk), afterKey, a, b,
+                        Dp(12.0f), 0, PackCompareMode::Drag);
         ImGui::Dummy(ImVec2(w, b.y - a.y));
+        if (!pk->previewBefore.empty()) {
+            Gap(6.0f);
+            Text(dl, Font::Regular, size::Caption, ImGui::GetCursorScreenPos(), p.ink3,
+                 Tr("가운데 선을 끌어 적용 전후를 비교하세요"));
+            ImGui::Dummy(ImVec2(w, Dp(16.0f)));
+        }
     }
     Gap(14.0f);
     Para(pk->name.Get(lang), p.ink, size::Heading, Font::Bold);
@@ -728,8 +921,17 @@ void App::DrawRemotePackDetail(float x0, float y0, float x1, float y1) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     {
         const ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + w, a.y + w * 9.0f / 16.0f);
-        DrawPackImage(dl, RemotePackThumb(*rp), "r:" + rp->id + ":" + rp->version, a, b, Dp(12.0f));
+        const std::string afterKey = "r:" + rp->id + ":" + rp->version;
+        const std::string beforeKey = "rb:" + rp->id + ":" + rp->version;
+        DrawPackCompare("##cmp_remote", dl, RemotePackThumbBefore(*rp), beforeKey, RemotePackThumb(*rp), afterKey,
+                        a, b, Dp(12.0f), 0, PackCompareMode::Drag);
         ImGui::Dummy(ImVec2(w, b.y - a.y));
+        if (!rp->previewBeforeFile.empty() || !rp->previewBeforeUrl.empty()) {
+            Gap(6.0f);
+            Text(dl, Font::Regular, size::Caption, ImGui::GetCursorScreenPos(), p.ink3,
+                 Tr("가운데 선을 끌어 적용 전후를 비교하세요"));
+            ImGui::Dummy(ImVec2(w, Dp(16.0f)));
+        }
     }
     Gap(14.0f);
     Para(rp->name.Get(lang), p.ink, size::Heading, Font::Bold);

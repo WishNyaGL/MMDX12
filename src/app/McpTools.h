@@ -125,6 +125,10 @@ inline nlohmann::json GetMcpToolDefinitions() {
                 {"return_image", {
                     {"type", "boolean"},
                     {"description", "With 'path': also return the image inline (default false)"}
+                }},
+                {"scene_only", {
+                    {"type", "boolean"},
+                    {"description", "Capture the renderer's last finished frame without any UI (default false)"}
                 }}
             }}
         }}
@@ -347,6 +351,10 @@ inline nlohmann::json GetMcpToolDefinitions() {
                 {"shader_pack", {
                     {"type", "string"},
                     {"description", "Shader pack ID for the selected character, or 'default'"}
+                }},
+                {"shader_texture_folder", {
+                    {"type", "string"},
+                    {"description", "Per-character texture folder for the selected character's shader pack (empty string clears)"}
                 }},
                 {"effects", {
                     {"type", "string"},

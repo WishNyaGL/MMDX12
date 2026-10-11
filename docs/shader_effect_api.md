@@ -12,6 +12,7 @@ my_effect/
   pack.json      manifest (same fields as surface packs, plus type / stage)
   effect.hlsl    implements PackEffect
   preview.png    optional
+  preview_before.png optional (same size/framing, effect disabled; with preview.png shows a before/after compare)
   textures/      optional, pack.json "textures" (same rules as surface packs, API 2)
 ```
 

@@ -148,6 +148,7 @@ struct ShaderPack {
     std::vector<std::string> tags;      // lower-case words ("toon", "anime", "hoyoverse", ...)
     LocalizedText recommendedFor;       // which models it is made for (free text)
     std::filesystem::path preview;      // dir/preview.png (or .jpg) when present, else empty
+    std::filesystem::path previewBefore; // dir/preview_before.png (or .jpg) when present, else empty
     // files
     std::filesystem::path dir;          // holds pack.json and surface.hlsl
     PackSource source = PackSource::User;

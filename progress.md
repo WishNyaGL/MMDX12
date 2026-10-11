@@ -1337,3 +1337,24 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 ### Notes
 - `--offline-renderer pt` stills looked identical to GI (option may apply to videos only); the studio viewport ignored the
   MCP render_path change. Not investigated.
+
+## 2026-10-11 - Pack previews: before/after compare (app + web), gallery sort / filter, all 13 packs re-shot
+- Pack contract: optional `preview_before.png|jpg` next to `preview.*` (= AFTER). App: `ShaderPack::previewBefore`,
+  `RemotePack::previewBeforeUrl/File` (index.json `previewBefore`, cached as a separate download), `DrawPackCompare`
+  (Drag mode in both detail panes: press / drag moves the split, double click resets, knob + "적용 전 / 적용 후" pills;
+  Hover mode on cards; "전/후 비교" badge). Web (MMDX12_Web): build-packs emits `previewBefore`, `type`, `stage`,
+  `updated` (git date); `BeforeAfter.astro` (pointer capture, keyboard slider, card hover scrub; the clipped BEFORE image is
+  fetched after AFTER loads because Chrome never starts a lazy image hidden by clip-path); docs in 4 languages.
+- Sort / filter: app shader screen gets per-tab type filter (전체 / 셰이더 / 효과) + sort (추천 / 이름 / 최근 업데이트 /
+  파라미터), count, empty state, type badge (`shaderType=` / `shaderSort=` ini). Website gallery: search, type segments,
+  tag chips, sort, URL query state (`PackGalleryControls.astro`).
+- MCP: `screenshot scene_only` (Renderer::ReadFinalImage, no UI), `set_render_settings shader_texture_folder`.
+- Previews: 13 packs re-shot over MCP with `tools/pack_previews.py` (1280x720 JPEG, stability check before / after /
+  before). Surface packs on the terrace (Hu Tao x2, Firefly, Felix), effects with Sour Miku on the theater stage;
+  lens_flare and auto_luminous need the concert lighting preset (2); auto_luminous is shot with threshold 0.35 /
+  strength 2.0 because its default threshold 1.0 barely triggers in MMD scenes (a default change was offered, not made).
+  Every pack's patch version bumped (installed apps cache previews by id + version); old preview.png files removed.
+- Implementation was delegated to Antigravity workers (app compare + MCP, web compare, both sort / filter); captures were
+  started by a worker, then finished by hand (8 of its pairs kept).
+### Notes
+- The website is not deployed yet; the app's online tab reads previewBefore only after the deploy.

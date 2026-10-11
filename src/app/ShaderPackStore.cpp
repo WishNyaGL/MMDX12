@@ -90,6 +90,9 @@ bool ParseShaderPackIndex(const std::string& json, const std::string& indexUrl, 
         r.version = Str(p, "version");
         if (!ValidShaderPackId(r.id) || r.version.empty()) continue;   // unusable entry
         r.apiVersion = p.value("apiVersion", 1);
+        r.type = Str(p, "type");
+        if (r.type != "effect") r.type = "surface";
+        r.updated = Str(p, "updated");
         r.minAppVersion = Str(p, "minAppVersion");
         r.name = Text(p, "name");
         if (r.name.Empty()) r.name.byLang[""] = r.id;
@@ -111,6 +114,7 @@ bool ParseShaderPackIndex(const std::string& json, const std::string& indexUrl, 
                 if (x.is_string()) r.tags.push_back(x.get<std::string>());
         r.builtIn = p.value("builtIn", false);
         r.previewUrl = Resolve(indexUrl, Str(p, "preview"));
+        r.previewBeforeUrl = Resolve(indexUrl, Str(p, "previewBefore"));
         r.downloadUrl = Resolve(indexUrl, Str(p, "download"));
         r.sha256 = Str(p, "sha256");
         std::transform(r.sha256.begin(), r.sha256.end(), r.sha256.begin(), [](char c) { return (char)tolower((unsigned char)c); });
@@ -144,6 +148,7 @@ struct ShaderPackStore::InstallJob {
 
 struct ShaderPackStore::PreviewJob {
     std::string id, version;
+    bool before = false;
     std::atomic<bool> done{false};
     fs::path file;   // empty on failure
 };
@@ -224,31 +229,60 @@ std::vector<ShaderPackStore::Event> ShaderPackStore::Poll(ShaderPackRegistry& re
             std::error_code ec;
             fs::create_directories(PreviewDir(), ec);
             for (const RemotePack& p : packs_) {
-                if (p.previewUrl.empty()) continue;
-                const size_t dot = p.previewUrl.rfind('.');
-                std::string ext = dot == std::string::npos ? ".png" : p.previewUrl.substr(dot);
-                if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp") ext = ".png";
-                const fs::path file = PreviewDir() / Utf8ToPath(p.id + "-" + p.version + ext);
-                auto job = std::make_shared<PreviewJob>();
-                job->id = p.id;
-                job->version = p.version;
-                previews_.push_back(job);
-                if (fs::exists(file, ec)) {
-                    job->file = file;
-                    job->done = true;
-                    continue;
-                }
-                const std::string url = p.previewUrl;
-                std::thread([job, url, file] {
-                    std::string err;
-                    const fs::path tmp = fs::path(file).concat(L".tmp");
-                    if (net::DownloadToFile(url, tmp, nullptr, nullptr, err)) {
-                        std::error_code e;
-                        fs::rename(tmp, file, e);
-                        if (!e) job->file = file;
+                if (!p.previewUrl.empty()) {
+                    const size_t dot = p.previewUrl.rfind('.');
+                    std::string ext = dot == std::string::npos ? ".png" : p.previewUrl.substr(dot);
+                    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp") ext = ".png";
+                    const fs::path file = PreviewDir() / Utf8ToPath(p.id + "-" + p.version + ext);
+                    auto job = std::make_shared<PreviewJob>();
+                    job->id = p.id;
+                    job->version = p.version;
+                    job->before = false;
+                    previews_.push_back(job);
+                    if (fs::exists(file, ec)) {
+                        job->file = file;
+                        job->done = true;
+                    } else {
+                        const std::string url = p.previewUrl;
+                        std::thread([job, url, file] {
+                            std::string err;
+                            const fs::path tmp = fs::path(file).concat(L".tmp");
+                            if (net::DownloadToFile(url, tmp, nullptr, nullptr, err)) {
+                                std::error_code e;
+                                fs::rename(tmp, file, e);
+                                if (!e) job->file = file;
+                            }
+                            job->done = true;
+                        }).detach();
                     }
-                    job->done = true;
-                }).detach();
+                }
+                if (!p.previewBeforeUrl.empty()) {
+                    const size_t dot = p.previewBeforeUrl.rfind('.');
+                    std::string ext = dot == std::string::npos ? ".png" : p.previewBeforeUrl.substr(dot);
+                    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp") ext = ".png";
+                    const fs::path file = PreviewDir() / Utf8ToPath(p.id + "-" + p.version + "-before" + ext);
+                    auto job = std::make_shared<PreviewJob>();
+                    job->id = p.id;
+                    job->version = p.version;
+                    job->before = true;
+                    previews_.push_back(job);
+                    if (fs::exists(file, ec)) {
+                        job->file = file;
+                        job->done = true;
+                    } else {
+                        const std::string url = p.previewBeforeUrl;
+                        std::thread([job, url, file] {
+                            std::string err;
+                            const fs::path tmp = fs::path(file).concat(L".tmp");
+                            if (net::DownloadToFile(url, tmp, nullptr, nullptr, err)) {
+                                std::error_code e;
+                                fs::rename(tmp, file, e);
+                                if (!e) job->file = file;
+                            }
+                            job->done = true;
+                        }).detach();
+                    }
+                }
             }
         } else {
             state_ = IndexState::Failed;
@@ -259,8 +293,12 @@ std::vector<ShaderPackStore::Event> ShaderPackStore::Poll(ShaderPackRegistry& re
     }
     for (auto it = previews_.begin(); it != previews_.end();) {
         if (!(*it)->done) { ++it; continue; }
-        for (RemotePack& p : packs_)
-            if (p.id == (*it)->id && p.version == (*it)->version) p.previewFile = (*it)->file;
+        for (RemotePack& p : packs_) {
+            if (p.id == (*it)->id && p.version == (*it)->version) {
+                if ((*it)->before) p.previewBeforeFile = (*it)->file;
+                else p.previewFile = (*it)->file;
+            }
+        }
         it = previews_.erase(it);
     }
     for (auto it = installs_.begin(); it != installs_.end();) {
