@@ -140,20 +140,35 @@ uint64_t Fnv(uint64_t h, const void* data, size_t n) {
 }
 
 std::mutex hashMutex;
-std::map<std::filesystem::path, uint64_t> hashes;
+struct DirHash {
+    uint64_t stamp = 0;   // names, sizes and write times of the sources: a cheap stat-only change check
+    uint64_t hash = 0;
+};
+std::map<std::filesystem::path, DirHash> hashes;
 
+// The content hash is memoized per folder until one of its sources changes (shader packs hot reload: an edited
+// surface.hlsl must miss the cache, not load the bytecode of the previous version).
 uint64_t SourceHash(const std::filesystem::path& dir) {
     std::lock_guard<std::mutex> lock(hashMutex);
-    auto it = hashes.find(dir);
-    if (it != hashes.end()) return it->second;
-    uint64_t h = 1469598103934665603ull;
     std::vector<std::filesystem::path> files;
+    uint64_t stamp = 1469598103934665603ull;
     std::error_code ec;
     for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
         const auto ext = e.path().extension();
         if (e.is_regular_file(ec) && (ext == L".hlsl" || ext == L".hlsli")) files.push_back(e.path());
     }
     std::sort(files.begin(), files.end());
+    for (const auto& f : files) {
+        const std::wstring name = f.filename().wstring();
+        const uint64_t size = std::filesystem::file_size(f, ec);
+        const auto t = std::filesystem::last_write_time(f, ec).time_since_epoch().count();
+        stamp = Fnv(stamp, name.data(), name.size() * sizeof(wchar_t));
+        stamp = Fnv(stamp, &size, sizeof(size));
+        stamp = Fnv(stamp, &t, sizeof(t));
+    }
+    auto it = hashes.find(dir);
+    if (it != hashes.end() && it->second.stamp == stamp) return it->second.hash;
+    uint64_t h = 1469598103934665603ull;
     for (const auto& f : files) {
         const std::string name = PathToUtf8(f.filename());
         h = Fnv(h, name.data(), name.size());
@@ -166,7 +181,8 @@ uint64_t SourceHash(const std::filesystem::path& dir) {
         const auto t = dll.time_since_epoch().count();
         h = Fnv(h, &t, sizeof(t));
     }
-    return hashes[dir] = h;
+    hashes[dir] = {stamp, h};
+    return h;
 }
 
 std::filesystem::path CachePath(const std::filesystem::path& file, const char* entry, const char* target,

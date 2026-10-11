@@ -28,26 +28,6 @@ float3 RampColour(uint tex, uint row, float u, float night) {
     return lerp(day, nightCol, night);
 }
 
-float3 SrRampColour(uint warm, uint cool, uint row, float u, float night) {
-    const bool hasWarm = HasMap(warm);
-    const bool hasCool = HasMap(cool);
-    const uint a = hasWarm ? warm : cool;
-    const uint b = hasCool ? cool : a;
-    float v = SrRampV(row, PtPackTexSize(a).y);
-    float3 ca = PtPackSampleTexLevel(a, float2(u, v), 0).rgb;
-    float3 cb = PtPackSampleTexLevel(b, float2(u, v), 0).rgb;
-    return lerp(ca, cb, hasWarm && hasCool ? night : 0.0);
-}
-
-bool HasGenshinRamp(bool hair) { return HasMap(hair ? T_HAIR_RAMP : T_BODY_RAMP); }
-bool HasSrRamp(bool hair) { return HasMap(hair ? T_HAIR_WARM : T_BODY_WARM) || HasMap(hair ? T_HAIR_COOL : T_BODY_COOL); }
-bool HasRamp(bool hair) { return HasGenshinRamp(hair) || HasSrRamp(hair); }
-
-float3 PartRamp(bool hair, bool sr, float alpha, float u, float night) {
-    if (!sr) return RampColour(hair ? T_HAIR_RAMP : T_BODY_RAMP, MaterialRow(alpha), u, night);
-    return SrRampColour(hair ? T_HAIR_WARM : T_BODY_WARM, hair ? T_HAIR_COOL : T_BODY_COOL, SrMaterialRow(alpha), u, night);
-}
-
 float3 FallbackShadowTint(float extraWarmth, float fbWarmth, float fbDarkness) {
     float3 toonDark = float3(0.5, 0.5, 0.5);
     float3 warm = HoyoV2WarmFactor(extraWarmth, fbWarmth);
@@ -94,17 +74,15 @@ PtPackOut PackEvaluate(PtPackIn i) {
                 o.shadowBias = 0.0;
             }
         }
-        const bool bodySr = !HasGenshinRamp(false);
-        o.shadowTint = HasRamp(false) ? PartRamp(false, bodySr, bodySr ? 0.0 : 1.0, 0.5, P_NIGHT) : FallbackShadowTint(0.15, P_FB_WARMTH, P_FB_DARKNESS);
+        o.shadowTint = HasMap(T_BODY_RAMP) ? RampColour(T_BODY_RAMP, 0u, 0.5, P_NIGHT) : FallbackShadowTint(0.15, P_FB_WARMTH, P_FB_DARKNESS);
     } else {
         const bool hair = (i.materialClass == PACK_HAIR);
-        const bool srLm = !hair && !HasMap(T_BODY_LM) && HasMap(T_BODY_LM_SR);
-        const bool sr = srLm || (!HasGenshinRamp(hair) && HasSrRamp(hair));
-        const uint lmTex = hair ? T_HAIR_LM : (srLm ? T_BODY_LM_SR : T_BODY_LM);
+        const uint lmTex = hair ? T_HAIR_LM : T_BODY_LM;
+        const uint rampTex = hair ? T_HAIR_RAMP : T_BODY_RAMP;
         float halfLambert = dot(i.normal, i.L) * 0.5 + 0.5;
         if (HasMap(lmTex)) {
             float4 lm = PtPackSampleTex(lmTex, i.uv);
-            float factor = halfLambert * saturate(lm.g * 2.0 * (sr ? kSrBiasScale : 1.0));
+            float factor = halfLambert * saturate(lm.g * 2.0);
             o.terminator = float2(-2.0 * P_SOFTNESS, 2.0 * P_SOFTNESS);
             if (lm.g < 0.05) {
                 o.shadowBias = -10.0;
@@ -114,8 +92,9 @@ PtPackOut PackEvaluate(PtPackIn i) {
                 float effective_ndl = 2.0 * factor - 1.0;
                 o.shadowBias = effective_ndl - dot(i.normal, i.L);
             }
+            uint row = MaterialRow(lm.a);
             float u = saturate(factor * 2.0) * 0.9;
-            o.shadowTint = HasRamp(hair) ? PartRamp(hair, sr, lm.a, u, P_NIGHT) : FallbackShadowTint(0.0, P_FB_WARMTH, P_FB_DARKNESS);
+            o.shadowTint = HasMap(rampTex) ? RampColour(rampTex, row, u, P_NIGHT) : FallbackShadowTint(0.0, P_FB_WARMTH, P_FB_DARKNESS);
         } else {
             o.terminator = float2(-2.0 * P_SOFTNESS, 2.0 * P_SOFTNESS);
             o.shadowBias = 0.0;

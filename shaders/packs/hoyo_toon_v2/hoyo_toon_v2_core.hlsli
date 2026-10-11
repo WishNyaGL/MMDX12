@@ -8,31 +8,11 @@
 #define T_HAIR_RAMP 3u
 #define T_FACE_SDF  4u
 #define T_METAL     5u
-// Star Rail maps (pack.json order): used when the Genshin map of the same part is missing
-#define T_BODY_WARM 6u   // Body_Warm_Ramp (day)   256 x 16: 8 material rows, two pixel rows each
-#define T_BODY_COOL 7u   // Body_Cool_Ramp (night)
-#define T_HAIR_WARM 8u   // Hair_Warm_Ramp         256 x 2: one row
-#define T_HAIR_COOL 9u
-#define T_BODY_LM_SR 10u // Body_LightMap_L: R specular, G shadow bias (0.39 neutral), B specular size, A material id (8 steps)
 
 // light map alpha (1.0 / 0.7 / 0.5 / 0.3 / 0.0) -> ramp row 0..4
 uint MaterialRow(float a) {
     return a > 0.85 ? 0u : (a > 0.6 ? 1u : (a > 0.4 ? 2u : (a > 0.15 ? 3u : 4u)));
 }
-
-// Star Rail light map alpha: eight steps of 1/8 (0.02, 0.15, 0.27 ...) -> ramp row 0..7
-uint SrMaterialRow(float a) {
-    return (uint)min(a * 8.0, 7.0);
-}
-
-// Star Rail ramp V for a material row; `height` = ramp height in pixels (16 body, 2 hair: rows are 2 pixels tall)
-float SrRampV(uint row, uint height) {
-    uint rows = max(height / 2u, 1u);
-    return (min(row, rows - 1u) * 2.0 + 1.0) / (rows * 2.0);
-}
-
-// Star Rail's painted shadow bias G is 0.39 where Genshin's is 0.5: rescale so the neutral value stays neutral
-static const float kSrBiasScale = 0.5 / 0.392;
 
 // Computes the horizontal face normal from the head frame.
 // Projects the head-local horizontal offset into a cylindrical normal.

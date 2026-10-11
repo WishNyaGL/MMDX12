@@ -234,6 +234,9 @@ progress.md is the session log. Read its latest entry first.
   `PackSampleTex(N)` indices against the declared count.
   `pt_surface.hlsl` (docs/shader_pt_api.md, phases 1-3): optional `PackEvaluate(PtPackIn)` hook for offline GI (`CSRender`, `OfflineRenderer`) and real-time PT (`CSPathTrace`, `PathTracePass`) with pack textures supported (`PtPackSampleTex*`, `render/PackTextures.*`); packs without it leave PT/GI untouched; shared variant cache `render/PtPackVariants.*`. `PtPackIn` also carries `headPos`/`headScale`; `PtPackOut::terminator` = N.L edges of the ramp (hi <= lo: engine default), `shadowBias` = smoothed-normal offset, and every field must be assigned (`pack_check` warns). Online-gallery-only `nimble_toon` (sources in the website repo `shader-packs/`; Eternal Return MMD models) = soft cel look (low-contrast coloured shadows, lifted dark-material shadow floor, skull-sphere face normals, soft hair gloss, wide environment rim, tinted outlines via `PackEdge`); `surface.hlsl` (raster / RT) and `pt_surface.hlsl` (PT / GI) share `nimble_core.hlsli`. `PtPackOut::flatFace` alone decides the
   flat-face path for pack surfaces (a material without toon, `MAT_FLAT`, no longer drops the pack's terminator in PT / GI).
+  Online-gallery-only `starrail_face` = Star Rail: game light maps, warm / cool ramps
+  read with the Unity row flip `1 - (2 id + 1) / 16`, body-type `*_FaceMap_00` SDF in A + nose line in B; the "weapon"
+  class = a model's second sheet; test texture sets in `library/gamerip/StarRailTextures/_sets`; hoyo_toon_v2 stays Genshin-only.
   API v3 effect packs (docs/shader_effect_api.md): `"type": "effect"`, `"stage": "post" | "pre-bloom"`, `effect.hlsl` implements
   `PackEffect(PackEffectInput)` (contract `shaders/effect_api.hlsli`, host `shaders/effect.hlsl`, DXC `ps_6_0` with `MMDX_PACK`).
   The user's ordered stack is `RenderSettings::packEffects` (`EffectStackEntry`; `AppSettings::effectStack`, ini `effect=`,

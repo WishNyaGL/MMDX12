@@ -1,7 +1,7 @@
 {
   "format": 1,
   "id": "hoyo_toon_v2",
-  "version": "2.2.0",
+  "version": "2.1.0",
   "apiVersion": 2,
   "minAppVersion": "1.5.0",
   "name": {
@@ -17,8 +17,8 @@
     "zh": "使用游戏本身的 LightMap、阴影 Ramp 与脸部 SDF 还原原神着色（支持路径追踪与离线GI）。贴图不包含在包内：请为每个角色指定贴图目录。缺少贴图的部分按 HoYo卡通 v1 的方式绘制。"
   },
   "recommendedFor": {
-    "ko": "원신 공식 MMD 모델 + 같은 캐릭터의 게임 텍스처 (Body/Hair_Lightmap, Body/Hair_Shadow_Ramp, FaceLightmap), 스타레일 모델 + 텍스처 (Body_LightMap_L, Hair_LightMap, Body/Hair Warm/Cool Ramp; 얼굴은 기하 음영)",
-    "en": "Official Genshin MMD models + that character's game textures (Body/Hair_Lightmap, Body/Hair_Shadow_Ramp, FaceLightmap), or Star Rail models + textures (Body_LightMap_L, Hair_LightMap, Body/Hair Warm/Cool Ramp; geometric face shading)",
+    "ko": "원신 공식 MMD 모델 + 같은 캐릭터의 게임 텍스처 (Body/Hair_Lightmap, Body/Hair_Shadow_Ramp, FaceLightmap)",
+    "en": "Official Genshin MMD models + that character's game textures (Body/Hair_Lightmap, Body/Hair_Shadow_Ramp, FaceLightmap)",
     "ja": "原神公式MMDモデル + 同じキャラクターのゲームテクスチャ (Body/Hair_Lightmap, Body/Hair_Shadow_Ramp, FaceLightmap)",
     "zh": "原神官方 MMD 模型 + 该角色的游戏贴图 (Body/Hair_Lightmap、Body/Hair_Shadow_Ramp、FaceLightmap)"
   },
@@ -42,12 +42,7 @@
     { "file": "Body_Shadow_Ramp.png", "address": "clamp" },
     { "file": "Hair_Shadow_Ramp.png", "address": "clamp" },
     { "file": "FaceLightmap.png", "address": "clamp", "srgb": false },
-    { "file": "MetalMap.png", "address": "clamp", "srgb": false },
-    { "file": "Body_Warm_Ramp.png", "address": "clamp" },
-    { "file": "Body_Cool_Ramp.png", "address": "clamp" },
-    { "file": "Hair_Warm_Ramp.png", "address": "clamp" },
-    { "file": "Hair_Cool_Ramp.png", "address": "clamp" },
-    { "file": "Body_LightMap_L.png", "srgb": false }
+    { "file": "MetalMap.png", "address": "clamp", "srgb": false }
   ],
   "params": [
     { "key": "softness",      "label": { "ko": "그림자 경계 부드러움", "en": "Shadow softness",      "ja": "影の境界の柔らかさ", "zh": "阴影边界柔和度" }, "default": 0.02, "min": 0.002, "max": 0.2 },

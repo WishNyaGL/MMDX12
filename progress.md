@@ -1313,3 +1313,27 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 - Leon: hair materials reference no texture in the FBX (white hair; `Hair_ALBSout.png` exists but is unreferenced);
   orange trims on the jacket (not from the albedo; material/texture assignment not investigated).
 - One asset_probe run reported "skipped X.glb: " with an empty error from a stale probes.json entry (not reproducible).
+
+## 2026-10-11 - Star Rail pack cleanup: starrail_face (online), hoyo_toon_v2 back to 2.1.0, pack hot reload fix
+- 848e62e had folded Star Rail maps into hoyo_toon_v2 (2.2.0) and read the ramps top-down. Reverted hoyo_toon_v2 to
+  2.1.0 (Genshin only). hoyo_toon v1 / v2 both stay: their no-texture paths differ (sRGB vs linear shadow mix, hair
+  highlight band, warm tint, ambient default, class rules), the user chose to keep both and not rename them.
+- New online-gallery-only pack `starrail_face` 1.0.0 "스타레일 페이스 셰이더" (MMDX12_Web `shader-packs/starrail_face`,
+  deployed; not bundled): HoyoToon / StarRailNPRShader formulas. shadow_rate (2 x half-Lambert x 2G, x0.85+0.15) ->
+  warm / cool ramp; ramp row flipped for D3D (`1 - (2 id + 1) / 16`, id = floor(8 A); verified: skin A = 6 -> bottom
+  row fbe9e8); cast shadow multiplies the area (high-G necks no longer ignore it); body-type FaceMap (A = SDF mirrored by
+  the light side, B = nose line), skin ramp row as the face shadow tone; thresholded Blinn-Phong (LM B / R), rim masked
+  by LM R, PackEdge outlines, pt_surface.hlsl twin. Body light map as `_L` / plain / `Body1`; the "weapon" class = the
+  second sheet (`衣服1` -> Body2_LightMap, `武器` -> Weapon_LightMap + Weapon_Ramp). LUTs / expression / stockings unused.
+- Test data (git-ignored): official MMD models March 7th, Ruan Mei, Firefly, Dan Heng in `library/model/`, StarRailTextures
+  rips + per-body-type FaceMaps + `HSR_SHADER_NOTES.md` + `INVENTORY.md` in `library/gamerip/StarRailTextures/`
+  (collected / researched by Antigravity workers), ready texture sets in `_sets/`. The official models use the game UVs
+  (verified against the 00 outfits); FaceMap layouts are near-identical across body types, so the body type is a guess.
+- Verified: raster (Ruan Mei, Firefly, March 7th, SDF direction / mirroring with a lit debug at 0 / +-45 deg light),
+  offline GI stills, no-texture fallback, pack_check. Real-time PT only compiled (not seen on screen).
+- Hot reload fix: `SourceHash` (ShaderCompiler.cpp) memoized each folder's hash for the whole run, so a pack edit
+  rescanned and "compiled" but hit the shader cache with the old key (old bytecode). Now the memo is keyed by a stat
+  stamp (names, sizes, write times). Checked live: an edited surface.hlsl shows within a second and reverts.
+### Notes
+- `--offline-renderer pt` stills looked identical to GI (option may apply to videos only); the studio viewport ignored the
+  MCP render_path change. Not investigated.
