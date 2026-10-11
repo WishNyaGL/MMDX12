@@ -582,6 +582,8 @@ void ExtractSlots(const ParsedFx& fx, RayMaterialDesc& desc) {
             s.hasValue = true;
             s.valueComponents = valIt->second.comps;
             for (int k = 0; k < valIt->second.comps && k < 3; ++k) s.value[k] = valIt->second.v[k];
+            // HLSL broadcasts a scalar initialiser (`const float3 albedo = 1.0;` is 1,1,1)
+            if (valIt->second.comps == 1) s.value[1] = s.value[2] = s.value[0];
         }
     }
     desc.shadingModel = IntDef(fx, "CUSTOM_ENABLE", 0);

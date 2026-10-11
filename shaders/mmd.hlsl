@@ -500,6 +500,37 @@ float3 Hemisphere(float3 n) {
     return lerp(gGroundColor, gSkyZenith, saturate(n.y * 0.5 + 0.5)) * gSunIntensity;
 }
 
+// GGX specular for the punctual lights (P3): the same attenuation / shadow term as PunctualSpecular, but with the
+// GGX lobe instead of Blinn. Added + scaled by the caller (SunIntensity lives in the light colour there).
+float3 PunctualSpecularGGX(float3 wp, float3 n, float3 V, float rough, float3 f0) {
+    float3 sum = 0;
+    uint count = (uint)gNumLights;
+    for (uint i = 0; i < count; ++i) {
+        Light l = gLights[i];
+        if (l.affectSpecular <= 0.0) continue;
+        float3 d = l.pos - wp;
+        float dist = length(d);
+        float3 ld = d / max(dist, 1e-4);
+        float atten = PunctualFalloff(dist, l.invRange, l.falloff);
+        if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
+        else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
+        if (atten <= 0.0) continue;
+        float rawVis;
+        if (l.cosOuter > -1.0) {
+            rawVis = SpotShadow(l, wp, n, dist);
+        } else {
+#ifdef RT_SHADOWS
+            rawVis = PointShadowRt(l, wp, n, dist, i);
+#else
+            rawVis = PointShadow(l, wp, n, dist);
+#endif
+        }
+        float3 shadowTerm = ShadowTransmission(rawVis, l.shadowDensity, l.shadowColor);
+        sum += SrgbToLinear(saturate(l.color)) * shadowTerm * atten * PbrSpecularGGX(n, V, ld, rough, f0);
+    }
+    return sum;
+}
+
 PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivity, float4 curClip, float4 prevClip) {
     PSOut o;
     o.color = float4(color, alpha);
@@ -517,12 +548,10 @@ PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivi
 PSOut PbrDebugOutput(in VSOut i, in GpuPbrMaterial m, float3 n, float alpha) {
     float2 uv = i.uv;
     float3 outColor;
-    if (gPbrDebug == 1u) {          // albedo (sRGB source -> linear)
-        outColor = SrgbToLinear(saturate(PbrSlotRgb(m.slots[PBR_SLOT_ALBEDO], uv)));
+    if (gPbrDebug == 1u) {          // albedo (Ray's linear albedo)
+        outColor = saturate(PbrAlbedo(m, uv, gDiffuse.rgb));
     } else if (gPbrDebug == 2u) {   // normal: tangent-space normal into the world
-        float3 nt = PbrDecodeNormal(m.slots[PBR_SLOT_NORMAL], uv);
-        float3 w = PbrTangentToWorld(n, i.worldPos, uv, nt);
-        outColor = w * 0.5 + 0.5;
+        outColor = PbrWorldNormal(m, n, i.worldPos, uv) * 0.5 + 0.5;
     } else if (gPbrDebug == 3u) {   // roughness = SmoothnessToRoughness(smoothness)
         outColor = PbrSlotRoughness(m.slots[PBR_SLOT_SMOOTHNESS], uv).xxx;
     } else if (gPbrDebug == 4u) {   // metalness
@@ -530,35 +559,15 @@ PSOut PbrDebugOutput(in VSOut i, in GpuPbrMaterial m, float3 n, float alpha) {
     } else if (gPbrDebug == 5u) {   // ambient occlusion
         outColor = PbrSlotAo(m.slots[PBR_SLOT_OCCLUSION], uv).xxx;
     } else if (gPbrDebug == 6u) {   // emissive
-        outColor = SrgbToLinear(saturate(PbrSlotRgb(m.slots[PBR_SLOT_EMISSIVE], uv)));
+        outColor = saturate(PbrEmissive(m, uv));
     } else {                        // shading model as a distinct hue
         outColor = PbrModelHue(m.shadingModel);
     }
     return PackOutput(outColor, alpha, n, gReflectivity, i.curClip, i.prevClip);
 }
 
-PSOut PSMain(VSOut i, bool front : SV_IsFrontFace) {
-    float3 n = normalize(i.nrm);
-    if (!front) n = -n;
-    float3 L = -gLightDir;
-    float3 V = normalize(gEyePos - i.worldPos);
-
-    float4 tex = (gFlags & MAT_HAS_TEXTURE) ? ApplyTexFactor(gTexture.Sample(gWrap, i.uv), gTexMul, gTexAdd)
-                                            : float4(1, 1, 1, 1);
-    float alpha = gDiffuse.a * tex.a;
-    if (alpha < 0.004) discard;
-
-    // Per-material PBR (gPbrActive is a runtime value; in the default run it is always 0, so the branch is a
-    // no-op and the frame is identical). The lit raster path only, as the plan requires.
-    if (gPbrActive != 0u && gShading < 0.5)
-        return PbrDebugOutput(i, PbrLoadMaterial(gPbrSrv, gPbrIndex), n, alpha);
-
-    // Unlit (gShading 1): texture * material diffuse colour only, still alpha-tested/blended.
-    // The lit path below is untouched when gShading == 0.
-    if (gShading > 0.5 && gShading < 1.5)
-        return PackOutput(SrgbToLinear(saturate(gDiffuse.rgb * tex.rgb)), alpha, n, gReflectivity,
-                          i.curClip, i.prevClip);
-
+// MMD colour model, unchanged (P2 keeps the default look byte-identical).
+PSOut MmdShade(VSOut i, bool front, float3 n, float3 L, float3 V, float4 tex, float alpha) {
     // MMD colour model (gamma space): saturate(ambient + diffuse * light) * texture * sphere.
     float3 lit = saturate(gAmbient + gDiffuse.rgb * gLightColor) * tex.rgb;
     // Albedo for the modern fill terms. MMD diffuse is a light-response factor, and rigs use
@@ -628,6 +637,180 @@ PSOut PSMain(VSOut i, bool front : SV_IsFrontFace) {
         color += gRimColor * rim * side * sh * gRimStrength * gSunIntensity * (1.0 - 0.6 * flat);
     }
     return PackOutput(color, alpha, n, alpha > 0.9 ? reflectivity : 0.0, i.curClip, i.prevClip);
+}
+
+// ---- PBR material shading (P3) --------------------------------------------------------------
+// "PBR on top of the MMD look": the MMD structure above stays; for a material with a PBR record only its inputs /
+// terms change (mapped normal, albedo / alpha, sphere ignored, metalness, GGX + env specular, AO, emissive, and the
+// per-model lobes). Sun / hemispheric / punctual diffuse keeps the MMD look.
+PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, float alpha) {
+    const uint model = m.shadingModel;
+    const bool celLike = (model == 8u || model == 9u);   // CEL / TONEBASED: MMD shading + normal + emissive only
+    float2 uv = i.uv;
+
+    // Mapped normal (NORMAL + NORMAL_SUB) replaces n for every term, including the written normal.
+    float3 n = PbrWorldNormal(m, n0, i.worldPos, uv);
+    float3 L = -gLightDir;
+    float3 V = normalize(gEyePos - i.worldPos);
+
+    // ALPHA slot cut-out: only the Cutout variants of the material file enforce a hard alpha threshold (0.2/0.5/
+    // 0.75, PBR_FLAG_CUTOUT). The standard 0.999 threshold is an opaque-pass detail that would otherwise kill
+    // blended materials in this single-pass engine; those keep the caller's gDiffuse.a * texture alpha coverage.
+    if ((m.flags & PBR_FLAG_CUTOUT) && PbrAlpha(m, uv) < m.alphaThreshold) discard;
+
+    // ALBEDO (+ sub blend) replaces the texture; a slot that reads the PMX texture (FROM 3) is unchanged by
+    // construction. Sphere map is ignored for PBR materials (Ray-MMD does not use it). CEL / TONEBASED keep the
+    // MMD shading, so they keep the plain texture as the diffuse colour. The MMD colour pipeline below is
+    // gamma-space, so the linear PBR albedo goes back through LinearToSrgb for the `c` term.
+    float3 pbrAlbedo = PbrAlbedo(m, uv, gDiffuse.rgb);          // linear
+    float3 pbrAlbedoGamma = LinearToSrgb(saturate(pbrAlbedo));
+    float3 celAlbedo = (gFlags & MAT_STAGE) ? gDiffuse.rgb * tex.rgb
+                                            : saturate(gAmbient + gDiffuse.rgb) * 0.8 * tex.rgb;
+    float3 diffAlbedo = celLike ? celAlbedo : pbrAlbedoGamma;   // gamma, for the MMD diffuse term
+
+    float rawSh = (gFlags & MAT_RECEIVE) ? SHADOW_TERM(i.worldPos, n, i.viewZ, i.pos.xy) : 1.0;
+    float occAmt = (1.0 - rawSh) * gSunShadowParams.z;
+    float sh = 1.0 - occAmt;
+    float ndl = dot(n, L);
+    const float flat = (gFlags & MAT_FLAT) ? 1.0 : 0.0;
+    const float3 mddLight = saturate(gAmbient + gDiffuse.rgb * gLightColor);   // MMD diffuse * light (gamma)
+    const float3 sunLin = SrgbToLinear(saturate(gLightColor)) * gSunIntensity;
+
+    // TONEBASED (9): the MMD shading is kept, but the diffuse is replaced by a hardness toon toward the customB
+    // shadow colour. Normal + emissive only otherwise, per the plan.
+    if (model == 9u) {
+        float hard = saturate(PbrCustomA(m, uv));
+        float3 shadowColor = PbrCustomB(m, uv);
+        float litAmt = saturate(ndl * hard + 1.0 - hard) * sh;
+        float3 c9 = SrgbToLinear(saturate(mddLight * tex.rgb)) * lerp(shadowColor, 1.0, litAmt) * gSunIntensity;
+        float3 rim9 = pow(1.0 - saturate(dot(n, V)), 4.0) * smoothstep(-0.2, 0.5, dot(n, L) + 0.25);
+        c9 += gRimColor * rim9 * sh * gRimStrength * gSunIntensity * (1.0 - 0.6 * flat);
+        c9 += saturate(PbrEmissive(m, uv));
+        return PackOutput(c9, alpha, n, alpha > 0.9 ? gReflectivity : 0.0, i.curClip, i.prevClip);
+    }
+
+    // MMD diffuse colour model (gamma). CEL keeps the toon ramp.
+    float metal = celLike ? 0.0 : saturate(PbrSlotMetalness(m.slots[PBR_SLOT_METALNESS], uv));
+    float3 cAlbedo = diffAlbedo * (1.0 - metal);   // metalness removes the diffuse
+    float3 c = mddLight * cAlbedo;
+    if (model == 8u) {
+        float v = lerp(1.0, saturate(0.5 - 0.5 * ndl), sh);
+        c = mddLight * tex.rgb * ApplyTexFactor3(gToon.Sample(gClamp, float2(0.5, v)).rgb, gToonMul, gToonAdd, 1.0);
+    } else if (!celLike) {
+        // Hue-preserving shadow, kept for the PBR albedo too (MMD look).
+        float term = lerp(sh * smoothstep(-0.12, 0.22, ndl), lerp(1.0, sh, 0.8), flat);
+        float3 shade = c * lerp(1.0, saturate(c), 0.55) * float3(0.90, 0.90, 0.96);
+        c = lerp(shade, c, term);
+    }
+    c += mddLight * cAlbedo * gSunShadowColor.rgb * occAmt;
+
+    float3 color = SrgbToLinear(saturate(c)) * gSunIntensity;
+
+    // Lambert metalness: the fill terms use (1 - metalness) too.
+    float3 f0mma = PbrSlotF0(m.slots[PBR_SLOT_SPECULAR], uv);
+    float3 albedoLin = celLike ? SrgbToLinear(saturate(celAlbedo)) : saturate(pbrAlbedo);
+    float3 diffLin = albedoLin * (1.0 - metal);
+    float3 f0 = celLike ? f0mma : lerp(f0mma, max(0.02, albedoLin), metal);
+    float rough = max(PbrSlotRoughness(m.slots[PBR_SLOT_SMOOTHNESS], uv), 0.03);
+    float ao = PbrSlotAo(m.slots[PBR_SLOT_OCCLUSION], uv);
+
+    bool specularOn = (model != 8u);
+    bool envSpecOn = !celLike;
+    float specScale = 1.0;
+    if (model == 1u) {   // SKIN: strict look policy (soft SSS tint, specular x <= 0.15, no env specular)
+        float curve = PbrCustomA(m, uv);
+        float3 trans = PbrCustomB(m, uv);
+        float ss = pow(1.0 - saturate(ndl), 2.0) * pow(1.0 - saturate(-ndl), 3.0 / (curve + 0.001)) *
+                   saturate(curve - 0.04);
+        color += trans * (ss * 0.7) * sunLin * sh;
+        rough = max(rough, 0.6);
+        specScale = 0.15;
+        envSpecOn = false;
+    }
+
+    // Hemispheric + punctual diffuse fill, scaled by (1 - metalness) and the PBR AO.
+    float3 hemi = lerp(Hemisphere(n), lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity, flat * 0.85);
+    color += diffLin * hemi * gHemiStrength * ao;
+    color += diffLin * PunctualDiffuse(i.worldPos, n, 1.0, flat) * ao;
+
+    // Environment specular: split-sum style over the hemisphere fill (no IBL), F0 x Schlick roughness x AO.
+    if (envSpecOn) {
+        float3 R = reflect(-V, n);
+        float3 envBrdf = f0 + (1.0 - f0) * pow(1.0 - saturate(dot(n, V)), 5.0) * (1.0 - rough);
+        color += envBrdf * Hemisphere(R) * max(1.0 - rough, 0.0) * ao * gHemiStrength;
+    }
+
+    // Sun specular (replaces the MMD Blinn), x N.L x light colour x shadow, per shading model.
+    float nl = saturate(ndl);
+    if (specularOn) {
+        float3 spec;
+        if (model == 3u) {                       // ANISOTROPY (hair): anisotropic GGX along the tangent
+            float3 T, B;
+            PbrTangentFrame(n, i.worldPos, uv, T, B);
+            float aniso = PbrCustomA(m, uv);
+            float3 cb = PbrCustomB(m, uv);
+            float shift = cb.r;
+            spec = PbrSpecularGGXAniso(n, V, L, rough, f0, aniso, T, shift);
+        } else if (model == 5u) {                // CLOTH: GGX lerped with a sheen lobe (customB = fuzz colour)
+            float3 fuzz = PbrCustomB(m, uv);
+            float sheenAmt = PbrCustomA(m, uv);
+            float3 ggx = PbrSpecularGGX(n, V, L, rough, f0);
+            float3 sheen = PbrSpecularSheen(n, V, L, rough, fuzz);
+            spec = lerp(ggx, sheen, saturate(sheenAmt));
+        } else {
+            spec = PbrSpecularGGX(n, V, L, rough, f0);
+        }
+        color += spec * sh * sunLin * nl * specScale;
+        color += PunctualSpecularGGX(i.worldPos, n, V, rough, f0) * specScale;
+    }
+
+    // Reflectivity output (SSR / RT reflections): F0 luminance scaled by smoothness, so smooth / metal materials
+    // mirror and rough dielectrics barely do. CEL keeps the MMD value. A stage with a record drops its floor gloss
+    // (floorGloss is only for stage materials without a PBR record, per the plan).
+    float reflectivity = celLike ? gReflectivity
+                                 : saturate(dot(f0, float3(0.2126, 0.7152, 0.0722)) * (1.0 - rough));
+    if (gFlags & MAT_STAGE) {
+        color += PunctualSpecular(i.worldPos, n, V, 48.0) * reflectivity;
+    } else {
+        // Rim stays; metals tint it by F0 (lerp toward F0's luminance).
+        float rim = pow(1.0 - saturate(dot(n, V)), 4.0);
+        float side = smoothstep(-0.2, 0.5, dot(n, L) + 0.25);
+        float3 rimTint = lerp(float3(1, 1, 1), dot(f0, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)).xxx, metal);
+        color += gRimColor * rimTint * rim * side * sh * gRimStrength * gSunIntensity * (1.0 - 0.6 * flat);
+    }
+
+    // Emissive (linear * intensity) after lighting. EMISSIVE promotion (custom 2) is the same term; the value is
+    // 0 for the library materials that leave EMISSIVE_ENABLE off. PbrEmissive returns linear already.
+    color += saturate(PbrEmissive(m, uv));
+    return PackOutput(color, alpha, n, alpha > 0.9 ? reflectivity : 0.0, i.curClip, i.prevClip);
+}
+
+// Per-material PBR branch entry (gPbrActive is 0 unless the run has Ray records for this draw). --pbr-debug wins
+// over the PBR shading; the lit path only. The default run never enters either, so its frame is unchanged.
+PSOut PSMain(VSOut i, bool front : SV_IsFrontFace) {
+    PbrSetUvGradients(ddx(i.uv), ddy(i.uv));
+    float3 n = normalize(i.nrm);
+    if (!front) n = -n;
+    float3 L = -gLightDir;
+    float3 V = normalize(gEyePos - i.worldPos);
+
+    float4 tex = (gFlags & MAT_HAS_TEXTURE) ? ApplyTexFactor(gTexture.Sample(gWrap, i.uv), gTexMul, gTexAdd)
+                                            : float4(1, 1, 1, 1);
+    float alpha = gDiffuse.a * tex.a;
+    if (alpha < 0.004) discard;
+
+    if (gPbrActive != 0u && gShading < 0.5) {
+        GpuPbrMaterial pbr = PbrLoadMaterial(gPbrSrv, gPbrIndex);
+        if (gPbrDebug != 0u) return PbrDebugOutput(i, pbr, n, alpha);
+        return MmdShadePbr(i, front, pbr, n, tex, alpha);
+    }
+
+    // Unlit (gShading 1): texture * material diffuse colour only, still alpha-tested/blended.
+    if (gShading > 0.5 && gShading < 1.5)
+        return PackOutput(SrgbToLinear(saturate(gDiffuse.rgb * tex.rgb)), alpha, n, gReflectivity,
+                          i.curClip, i.prevClip);
+
+    return MmdShade(i, front, n, L, V, tex, alpha);
 }
 
 // ---- shader packs ---------------------------------------------------------------------

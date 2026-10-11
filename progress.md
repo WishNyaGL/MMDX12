@@ -1531,3 +1531,18 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   mapped one; now mostly-Ray first, then distinct Ray .fx count. All 22 models now pick their MaterialMap .emd.
 - Verified: default path vs HEAD build = 59 px at +-1 LSB (FXC codegen; not bit-identical), Alcander normal / roughness
   debug views show the maps, RT and PT runs clean (no `[E]`). Alcander: 44/52 records, 37 textures, 281 MB VRAM, 171 ms load.
+
+## 2026-10-12 (5) - 2.0.0 P3: PBR shading for Ray materials (raster + RT camera view, RT reflection hits)
+- Delegated to DeepSeek (first run stopped for over-exploring the library's .fxsub; resumed with a decisions note),
+  smoke-reviewed and render-checked by the architect. Design: "PBR on top of the MMD look" - `PSMain` dispatches to
+  `MmdShade` (the old body) or `MmdShadePbr` (mapped normal, Ray albedo + sub blend, sphere ignored, metalness, GGX sun /
+  punctual (`PunctualSpecularGGX`), split-sum style env specular over `Hemisphere`, AO, emissive, reflectivity =
+  Luminance(F0) * (1 - roughness)); SKIN = roughness floor 0.6, specular x 0.15, no env specular, soft warm SSS tint;
+  ANISOTROPY / CLOTH lobes; CEL / TONEBASED keep MMD shading. `rtreflect.hlsl` hits take the PBR albedo + emissive.
+  Maps above 2048 px drop leading mips (Alcander 281 -> 225 MB).
+- Architect fixes: scalar float3 initialisers broadcast (`const float3 albedo = 1.0;` was read as (1,0,0): everything red),
+  emissive only with `EMISSIVE_ENABLE` (the default `emissive = 1.0` washed every material white), raster PBR maps sample
+  with mips (`SampleGrad` from gradients set at the top of `PSMain`; compute users define `PBR_SAMPLE_LEVEL0`).
+- Verified: default path vs the HEAD build = 3280 px at <= 3 LSB (invisible). Alcander raster / RT, EthanShax on the Ray
+  stage moonlit_waves (55/55 records): no `[E]`, Alcander skin stays matte. Not verified: EthanShax's arm shows streaky
+  gloss (shading model / roughness not checked), hair anisotropy up close, the other sets, studio, PT / GI (P4).

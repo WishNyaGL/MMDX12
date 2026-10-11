@@ -108,16 +108,31 @@ float2 PbrSlotUv(GpuPbrSlot s, float2 uv) {
 }
 
 // Sampled texel, or the slot's constant when it has no texture (the load-time fallback).
+// Pixel shaders set the screen-space UV gradients once in uniform control flow (PbrSetUvGradients, before any
+// record-dependent branch) so slots sample with mips through SampleGrad; compute users (rtreflect) define
+// PBR_SAMPLE_LEVEL0 and read mip 0.
+#ifndef PBR_SAMPLE_LEVEL0
+static float2 gPbrUvDx = 0, gPbrUvDy = 0;
+void PbrSetUvGradients(float2 dx, float2 dy) { gPbrUvDx = dx; gPbrUvDy = dy; }
+#endif
 float4 PbrSlotTexel(GpuPbrSlot s, float2 uv) {
-    if (s.textureSrv >= 0)
+    if (s.textureSrv >= 0) {
+#ifdef PBR_SAMPLE_LEVEL0
         return gPbrTex[NonUniformResourceIndex((uint)s.textureSrv)].SampleLevel(gPbrWrap, PbrSlotUv(s, uv), 0);
+#else
+        const float2 k = float2(s.loopU, s.loopV) * s.uvScale.xy;   // PbrSlotUv's scale (flips keep the length)
+        return gPbrTex[NonUniformResourceIndex((uint)s.textureSrv)].SampleGrad(gPbrWrap, PbrSlotUv(s, uv),
+                                                                             gPbrUvDx * k, gPbrUvDy * k);
+#endif
+    }
     return float4(s.value.xyz, 1.0);
 }
 
 float PbrChannel(float4 c, uint swizzle) { return c[swizzle]; }
 
 // roughness from a SMOOTHNESS slot sample per SMOOTHNESS_MAP_TYPE (0 value = smoothness, 1 roughness,
-// 2 linear roughness); SmoothnessToRoughness(s) = (1-s)^2.
+// 2 linear roughness); SmoothnessToRoughness(s) = (1-s)^2. Single-channel slots apply their swizzle; R8 file
+// uploads bake the channel into R (swizzle 0 in the record), PMX maps keep the declared channel.
 float PbrSlotRoughness(GpuPbrSlot s, float2 uv) {
     float v = PbrChannel(PbrSlotTexel(s, uv), s.swizzle);
     if (s.type == 0u) return pow(max(0.0, 1.0 - v), 2.0);
@@ -182,7 +197,8 @@ float3 PbrTangentToWorldTri(float3 N, float3 p0, float3 p1, float3 p2, float2 uv
     return normalize(T * nTangent.x * invmax - B * nTangent.y * invmax + N * nTangent.z);
 }
 
-// Sun F0 per docs/raymmd_semantics.md §4 (SPECULAR_MAP_TYPE 0/1/2/3), grayscale sampling through swizzle.
+// Sun F0 per docs/raymmd_semantics.md §4 (SPECULAR_MAP_TYPE 0/1/2/3). Types 2/3 are single-channel; R8 file
+// uploads bake the swizzle channel into R (swizzle 0), PMX maps use the declared channel.
 float3 PbrSlotF0(GpuPbrSlot s, float2 uv) {
     float4 c = PbrSlotTexel(s, uv);
     float3 rgb = c.rgb;
@@ -197,6 +213,171 @@ float3 PbrModelHue(uint model) {
     float h = frac((float)model * 0.61803398875);
     float3 k = frac(float3(1.0, 2.0 / 3.0, 1.0 / 3.0) + h);
     return saturate(abs(k * 6.0 - 3.0) - 1.0);
+}
+
+// ---- P3 surface decode (Ray semantics: docs/raymmd_semantics.md §1) -------------------------
+// Scalar slots (ALPHA / SMOOTHNESS / METALNESS / OCCLUSION / CUSTOM_A) select their channel with the record's
+// swizzle. A File map for such a slot is uploaded R8 with that channel baked into R and the record's swizzle set
+// to 0 (GpuModel), while a PMX-sourced map is RGBA and keeps the declared swizzle. A slot without a texture falls
+// back to its constant (value.x for a scalar slot).
+
+// <slot>_MAP_APPLY_SCALE for a scalar slot (1 = value * const, 2 = value ^ const).
+float PbrApplyScaleS(float v, GpuPbrSlot s) {
+    if (s.applyScale == 1u) return v * s.value.x;
+    if (s.applyScale == 2u) return pow(max(v, 0.0), s.value.x);
+    return v;
+}
+
+// <slot>_MAP_APPLY_SCALE for a colour slot.
+float3 PbrApplyScaleRgb(float3 c, GpuPbrSlot s) {
+    if (s.applyScale == 1u) return c * s.value.xyz;
+    if (s.applyScale == 2u) return pow(max(c, 0.0), s.value.xyz);
+    return c;
+}
+
+// ALBEDO (+ ALBEDO_SUB blend, APPLY_DIFFUSE, APPLY_SCALE), linear. `pmxDiffuse` is the PMX material diffuse
+// (gamma, as gDiffuse.rgb). Ray order: sample -> APPLY_DIFFUSE (gamma multiply) -> srgb2linear -> APPLY_SCALE ->
+// ALBEDO_SUB blend (linear) -> saturate.
+float3 PbrAlbedo(GpuPbrMaterial m, float2 uv, float3 pmxDiffuse) {
+    GpuPbrSlot sa = m.slots[PBR_SLOT_ALBEDO];
+    float3 a = PbrSlotRgb(sa, uv);
+    if (m.params.y > 0.5) a *= pmxDiffuse;                 // ALBEDO_MAP_APPLY_DIFFUSE
+    a = SrgbToLinear(saturate(a));
+    a = PbrApplyScaleRgb(a, sa);
+
+    const int sub = (int)m.params.x;                        // ALBEDO_SUB_ENABLE
+    if (sub > 0) {
+        GpuPbrSlot ss = m.slots[PBR_SLOT_ALBEDO_SUB];
+        float4 s4 = PbrSlotTexel(ss, uv);
+        float3 s = PbrApplyScaleRgb(SrgbToLinear(saturate(s4.rgb)), ss);
+        if (sub == 1) a = a * s;
+        else if (sub == 2) a = pow(max(a, 0.0), max(s, 1e-4));
+        else if (sub == 3) a = a + s;
+        else if (sub == 4) a = a * lerp(1.0, a * Luminance(a), s);   // ColorSynthesis
+        else if (sub == 5) a = lerp(a, s, s4.a);                     // alpha blend
+    }
+    return saturate(a);
+}
+
+// ALPHA slot (Ray GetAlpha): the sampled/constant channel selected by swizzle, times the PMX diffuse alpha (the
+// GPU record does not carry FROM; the library is ALPHA_MAP_FROM 3 almost everywhere, where Ray multiplies by
+// MaterialDiffuse.a). R8 file uploads bake the channel into R.
+float PbrAlpha(GpuPbrMaterial m, float2 uv) {
+    GpuPbrSlot s = m.slots[PBR_SLOT_ALPHA];
+    float v = PbrChannel(PbrSlotTexel(s, uv), s.swizzle) * m.diffuseAlpha;
+    return saturate(PbrApplyScaleS(v, s));
+}
+
+// EMISSIVE colour, linear, with APPLY_SCALE (the morph/blink controls are out of scope in P3).
+float3 PbrEmissive(GpuPbrMaterial m, float2 uv) {
+    if ((m.flags & PBR_FLAG_EMISSIVE) == 0u) return 0;   // EMISSIVE_ENABLE 0: the slot's value is not light
+    GpuPbrSlot s = m.slots[PBR_SLOT_EMISSIVE];
+    float3 e = SrgbToLinear(saturate(PbrSlotRgb(s, uv)));
+    return PbrApplyScaleRgb(e, s);
+}
+
+// CUSTOM_A scalar (curvature / sheen / threshold ...) with COLOR_FLIP.
+float PbrCustomA(GpuPbrMaterial m, float2 uv) {
+    GpuPbrSlot s = m.slots[PBR_SLOT_CUSTOM_A];
+    float v = PbrChannel(PbrSlotTexel(s, uv), s.swizzle);
+    v = PbrApplyScaleS(v, s);
+    if (s.colorFlip == 1u) v = 1.0 - v;
+    return saturate(v);
+}
+
+// CUSTOM_B colour (transmittance / fuzz / shadow colour) with COLOR_FLIP (the local library uses
+// CUSTOM_B_MAP_TYPE 0 = sRGB decode, handled here).
+float3 PbrCustomB(GpuPbrMaterial m, float2 uv) {
+    GpuPbrSlot s = m.slots[PBR_SLOT_CUSTOM_B];
+    float3 c = SrgbToLinear(saturate(PbrSlotRgb(s, uv)));
+    if (s.colorFlip == 1u) c = 1.0 - c;
+    return saturate(c);
+}
+
+// Screen-derivative tangent frame (Ray-MMD does the same; docs/raymmd_semantics.md §5). P is the world position.
+void PbrTangentFrame(float3 N, float3 P, float2 uv, out float3 T, out float3 B) {
+    float3 dp1 = ddx(P), dp2 = ddy(P);
+    float2 duv1 = ddx(uv), duv2 = ddy(uv);
+    float3 dp2perp = cross(dp2, N);
+    float3 dp1perp = cross(N, dp1);
+    T = dp2perp * duv1.x + dp1perp * duv2.x;
+    B = dp2perp * duv1.y + dp1perp * duv2.y;
+    float invmax = rsqrt(max(max(dot(T, T), dot(B, B)), 1e-12));
+    T *= invmax;
+    B *= invmax;
+}
+
+// Reoriented normal mapping (RNM) blend of a base and a sub tangent-space normal (Ray RNMBlendUnpacked).
+float3 PbrBlendRnm(float3 n1, float3 n2) {
+    n1.z += 1.0;
+    n2.xy = -n2.xy;
+    return normalize(n1 * dot(n1, n2) / max(n1.z, 1e-5) - n2);
+}
+
+// World-space mapped normal: NORMAL + NORMAL_SUB (RNM) through the derivative tangent frame. Returns baseN when
+// the material has no normal map. NORMAL_MAP_UV_FLIP 4 flips the shading normal X.
+float3 PbrWorldNormal(GpuPbrMaterial m, float3 baseN, float3 P, float2 uv) {
+    if (m.slots[PBR_SLOT_NORMAL].textureSrv < 0) return baseN;
+    float3 nt = PbrDecodeNormal(m.slots[PBR_SLOT_NORMAL], uv);
+    if (m.slots[PBR_SLOT_NORMAL_SUB].textureSrv >= 0)
+        nt = PbrBlendRnm(nt, PbrDecodeNormal(m.slots[PBR_SLOT_NORMAL_SUB], uv));
+    float3 N = PbrTangentToWorld(baseN, P, uv, nt);
+    if (m.slots[PBR_SLOT_NORMAL].uvFlip == 4u) N.x = -N.x;
+    return normalize(N);
+}
+
+// ---- GGX lobe (docs/raymmd_semantics.md §4) -------------------------------------------------
+// GGX + the doc's Smith pair + Schlick Fresnel; the geometry already carries N.L / N.V.
+float3 PbrSpecularGGX(float3 N, float3 V, float3 L, float rough, float3 f0) {
+    float3 H = normalize(L + V);
+    float nh = saturate(dot(N, H));
+    float nl = saturate(dot(N, L));
+    float nv = abs(dot(N, V)) + 1e-5;
+    float vh = saturate(dot(V, H));
+    float m2 = rough * rough;
+    float d = m2 / pow((nh * m2 - nh) * nh + 1.0, 2.0);
+    float gv = nl * (nv * (1.0 - rough) + rough);
+    float gl = nv * (nl * (1.0 - rough) + rough);
+    d *= 0.5 / max(gv + gl, 1e-5);
+    if (nl <= 0.0) d = 0.0;   // no light from behind the surface
+    float f90 = saturate(dot(f0, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)) * 50.0);
+    float3 f = lerp(f0, f90, pow(1.0 - vh, 5.0));
+    return f * d;
+}
+
+// Anisotropic GGX (docs/raymmd_semantics.md §2 ANISOTROPY): an elliptical lobe along `T`. `aniso` = customA
+// strength, `shift` = customB.r tangent shift.
+float3 PbrSpecularGGXAniso(float3 N, float3 V, float3 L, float rough, float3 f0, float aniso,
+                           float3 T, float shift) {
+    float3 X = normalize(T + N * shift);
+    float3 Y = cross(N, X);
+    float3 H = normalize(L + V);
+    float aspect = rsqrt(max(1.0 - aniso * 0.9, 1e-4));
+    float ax = max(rough / max(aspect, 1e-4), 1e-3);
+    float ay = max(rough * aspect, 1e-3);
+    float tx = dot(X, H) / ax;
+    float ty = dot(Y, H) / ay;
+    float hn = dot(N, H);
+    float d = 1.0 / (3.14159265 * ax * ay * pow(tx * tx + ty * ty + hn * hn, 2.0));
+    float nv = abs(dot(N, V)) + 1e-5;
+    float nl = saturate(dot(N, L));
+    float vh = saturate(dot(V, H));
+    float f90 = saturate(dot(f0, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)) * 50.0);
+    float3 f = lerp(f0, f90, pow(1.0 - vh, 5.0));
+    return f * (d * 0.25 / max(nv, 1e-5));
+}
+
+// Sheen lobe (docs/raymmd_semantics.md §2 CLOTH): `(2 + 1/rough) * sin^2(nh)^(0.5/rough) / 2 / G`.
+float3 PbrSpecularSheen(float3 N, float3 V, float3 L, float rough, float3 fuzz) {
+    float3 H = normalize(L + V);
+    float nh = saturate(dot(N, H));
+    float nl = saturate(dot(N, L));
+    float nv = abs(dot(N, V)) + 1e-5;
+    float s2 = (1.0 - nh) * (1.0 + nh);
+    float g = max(4.0 * (nl + nv - nl * nv), 1e-4);
+    float s = (2.0 + 1.0 / max(rough, 1e-3)) * pow(max(s2, 1e-6), 0.5 / max(rough, 1e-3)) / (2.0 * g);
+    float vh = saturate(dot(V, H));
+    return fuzz * (s * pow(1.0 - vh, 5.0));
 }
 
 #endif // MMDX_PBR_COMMON_HLSLI

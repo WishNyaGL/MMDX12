@@ -742,8 +742,7 @@ void ScenePass::Execute(PassContext& pc) {
     // through them on the plain raster path too, so bind the heap segments every frame (not only under RT).
     cmd->SetGraphicsRootDescriptorTable(9, ctx.SrvHeap().Gpu(0));
     cmd->SetGraphicsRootDescriptorTable(10, ctx.SrvHeap().Gpu(0));
-    // PBR record selection (b3) is per material; the debug channel / active flag are frame-wide (bound per draw).
-    const bool pbrDebug = pc.settings.materialSource == MaterialSource::Ray && pc.settings.pbrDebug != PbrDebug::None;
+    // PBR record selection (b3) is per material; the debug channel is frame-wide (bound per draw).
     const uint32_t pbrDebugChannel = (uint32_t)pc.settings.pbrDebug;
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -820,9 +819,14 @@ void ScenePass::Execute(PassContext& pc) {
                 }
                 cmd->SetGraphicsRootConstantBufferView(1, m.constants);
                 cmd->SetGraphicsRootDescriptorTable(3, ctx.SrvHeap().Gpu(m.srvTable));
-                if (pbrDebug && !(pack && !m.packOff) && model->HasPbr() &&
-                    model->PbrIndex(&m - model->Materials().data()) != DescriptorHeap::kInvalid) {
-                    const uint32_t c[4] = {model->PbrSrv(), model->PbrIndex(&m - model->Materials().data()), pbrDebugChannel, 1u};
+                // Per-material PBR record (P3): a draw with a Ray record (and no pack) selects it so PSMain shades
+                // with its PBR data (the --pbr-debug channel is passed along and wins inside PSMain). Any other draw
+                // keeps gPbrActive 0, i.e. the default look.
+                const size_t matIndex = (size_t)(&m - model->Materials().data());
+                const bool pbrRecord = pc.settings.materialSource == MaterialSource::Ray && !(pack && !m.packOff) &&
+                                       model->HasPbr() && model->PbrIndex(matIndex) != DescriptorHeap::kInvalid;
+                if (pbrRecord) {
+                    const uint32_t c[4] = {model->PbrSrv(), model->PbrIndex(matIndex), pbrDebugChannel, 1u};
                     cmd->SetGraphicsRoot32BitConstants(14, 4, c, 0);
                 } else {
                     const uint32_t c[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, pbrDebugChannel, 0u};

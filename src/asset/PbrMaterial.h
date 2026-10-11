@@ -57,6 +57,7 @@ struct PbrMaterial {
     int shadingModel = 0;       // CUSTOM_ENABLE (0..9; 10 rejected by Ray-MMD)
     float alphaThreshold = 0.999f;  // material_common ALPHA_THRESHOLD (per include chain)
     int albedoSubEnable = 0;    // ALBEDO_SUB_ENABLE blend mode
+    int albedoApplyDiffuse = 0; // ALBEDO_MAP_APPLY_DIFFUSE: multiply the sampled albedo by the PMX diffuse
     bool emissiveEnable = false;
     PbrSlot slots[kPbrSlotCount];
 };

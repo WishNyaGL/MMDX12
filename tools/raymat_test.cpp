@@ -159,6 +159,9 @@ int wmain() {
                        m0.slots[(int)RaySlot::Albedo].value[0] < 0.26f &&
                        m0.slots[(int)RaySlot::Albedo].value[2] > 0.74f,
                    "a material 0: ALBEDO float3 value (0.25,0.5,0.75)");
+            Expect(m0.slots[(int)RaySlot::AlbedoSub].value[1] > 0.79f &&
+                       m0.slots[(int)RaySlot::AlbedoSub].value[2] > 0.79f,
+                   "a material 0: scalar float3 initialiser broadcasts (albedoSub = 0.8)");
             Expect(!m0.slots[(int)RaySlot::Albedo].file.empty() &&
                        m0.slots[(int)RaySlot::Albedo].file.filename() == "tex.png" &&
                        !m0.slots[(int)RaySlot::Albedo].fileMissing,

@@ -467,6 +467,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             r.alphaThreshold = src.alphaThreshold;
             r.diffuseAlpha = pm.diffuse.w;
             r.params.x = (float)src.albedoSubEnable;
+            r.params.y = (float)src.albedoApplyDiffuse;
             for (int si = 0; si < kPbrSlotCount; ++si) {
                 const PbrSlot& s = src.slots[si];
                 GpuPbrSlot& d = r.slots[si];
@@ -484,6 +485,11 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
                                     pbrTextureSrvs_[(size_t)s.tex.fileIndex] != DescriptorHeap::kInvalid)
                                        ? (int)pbrTextureSrvs_[(size_t)s.tex.fileIndex]
                                        : -1;
+                    // A single-channel File map is uploaded R8 with the selected channel baked into R, so the
+                    // shader reads channel 0; PMX-sourced maps stay RGBA and keep the declared swizzle.
+                    if (s.tex.fileIndex >= 0 && (size_t)s.tex.fileIndex < pbr.textureChannels.size() &&
+                        pbr.textureChannels[(size_t)s.tex.fileIndex] >= 0)
+                        d.swizzle = 0;
                 } else if (s.tex.kind == PbrTexKind::PmxDiffuse) {
                     d.textureSrv = (int)materials_[mi].srvTable + 0;
                 } else if (s.tex.kind == PbrTexKind::PmxSphere) {

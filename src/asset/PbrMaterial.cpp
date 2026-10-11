@@ -85,6 +85,7 @@ PbrMaterial RayToPbr(const RayMaterialDesc& desc, const PmxMaterial& pmxMat) {
     out.shadingModel = desc.shadingModel;
     out.alphaThreshold = DefineFloat(desc.defines, "ALPHA_THRESHOLD", kDefaultAlphaThreshold);
     out.albedoSubEnable = DefineInt(desc.defines, "ALBEDO_SUB_ENABLE", 0);
+    out.albedoApplyDiffuse = DefineInt(desc.defines, "ALBEDO_MAP_APPLY_DIFFUSE", 0);
     out.emissiveEnable = DefineInt(desc.defines, "EMISSIVE_ENABLE", 0) != 0;
 
     // Ray and PBR slot orders differ (Ray has Parallax between Occlusion and Emissive, P2 drops it).
@@ -212,13 +213,27 @@ void DecodePbrTextures(PbrModelData& data, const char* label) {
 
     const int total = (int)entries.size();
     std::atomic<int> missing{0};
+    // Map-size cap: a decoded texture whose longest side exceeds this drops its leading mip levels until level 0
+    // fits, then keeps the remaining (already box-filtered) chain. Keeps VRAM bounded for 4K source maps.
+    constexpr uint32_t kMaxPbrMapSize = 2048;
     std::for_each(std::execution::par, entries.begin(), entries.end(), [&](Entry& e) {
         if (!e.path.empty()) {
             ImageRGBA8 img;
             std::string err;
-            if (LoadImageRGBA8(e.path, img, &err))
+            if (LoadImageRGBA8(e.path, img, &err)) {
+                size_t drop = 0;
+                while (drop + 1 < img.mips.size() &&
+                       std::max(img.mips[drop].width, img.mips[drop].height) > kMaxPbrMapSize)
+                    ++drop;
+                if (drop > 0) {
+                    img.mips.erase(img.mips.begin(), img.mips.begin() + (std::ptrdiff_t)drop);
+                    // hasAlpha reflected level 0 before the cap; recompute over the capped level 0.
+                    img.hasAlpha = false;
+                    for (size_t i = 3; i < img.mips[0].pixels.size(); i += 4)
+                        if (img.mips[0].pixels[i] < 255) { img.hasAlpha = true; break; }
+                }
                 data.textures[&e - entries.data()] = std::move(img);
-            else {
+            } else {
                 LOG_WARN("PBR map load failed: %s (%s): %s", PathToUtf8(e.path).c_str(), label, err.c_str());
                 ++missing;
             }

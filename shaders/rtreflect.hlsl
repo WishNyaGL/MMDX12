@@ -2,6 +2,8 @@
 // hit shaded with the MMD material model, sky on miss. Written linear; alpha = blend weight
 // (fades with the hit distance as a stand-in for gloss).
 #include "rt_common.hlsli"   // includes common.hlsli
+#define PBR_SAMPLE_LEVEL0   // compute: no screen-space gradients
+#include "pbr_common.hlsli"
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
 SamplerState gPoint : register(s0);
 SamplerState gLinear : register(s1);
@@ -45,6 +47,14 @@ void CSReflect(uint3 id : SV_DispatchThreadID) {
     if (dot(s.normal, s.faceNormal) < 0) s.normal = -s.normal;
 
     float4 tex = SampleBaseTexture(g, s.uv, 1.0 + log2(1.0 + hit.t / 20.0));
+    // A hit with a PBR record takes its PBR albedo (and emissive) instead of the PMX texture (no full PBR at hits).
+    // tex.rgb stays gamma-space: the reflect shading below decodes it like MaterialAlbedo/MaterialLit expect.
+    float3 pbrEmissive = 0;
+    if (g.pbrIndex != 0xFFFFFFFFu) {
+        GpuPbrMaterial pm = PbrLoadMaterial((int)g.pbrSrv, g.pbrIndex);
+        tex.rgb = LinearToSrgb(saturate(PbrAlbedo(pm, s.uv, g.diffuse.rgb)));
+        pbrEmissive = saturate(PbrEmissive(pm, s.uv));
+    }
     float3 L = -gLightDir;
     float ndl = dot(s.normal, L);
     float sh = 1.0;
@@ -57,6 +67,6 @@ void CSReflect(uint3 id : SV_DispatchThreadID) {
     float3 c = lerp(lit * 0.62, lit, lightTerm);
     float3 albedoLin = SrgbToLinear(saturate(MaterialAlbedo(g, tex.rgb)));
     float3 hemi = lerp(gGroundColor, gSkyZenith, saturate(s.normal.y * 0.5 + 0.5)) * gSunIntensity;
-    float3 color = SrgbToLinear(saturate(c)) * gSunIntensity + albedoLin * hemi * gHemiStrength;
+    float3 color = SrgbToLinear(saturate(c)) * gSunIntensity + albedoLin * hemi * gHemiStrength + pbrEmissive;
     gReflOut[p] = float4(color, lerp(0.8, 0.35, saturate(hit.t / 300.0)));
 }
