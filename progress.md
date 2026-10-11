@@ -1470,3 +1470,8 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   renders with the pack (compiled only).
 - Look tuning against the game: faces / skin read slightly bright; outlines use the material edge colour, not `_S`
   (`PackEdge` has no mesh UV).
+- Release 1.10.0: GitHub release v1.10.0 (notes dist/notes_1.10.0.md, 4 languages; asset SHA-256 96df54bb... = local
+  zip); packaged exe: select screen, no `[E]`, `shaders/packs` = hoyo_toon + hoyo_toon_v2 only. Delta manifest 1.10.0
+  (12 new objects) uploaded, live manifest / exe object hashes match; website deployed: /latest.json -> 1.10.0 with
+  manifest fields, gallery index lists project_sekai_toon 1.0.0 (apiVersion 6, minAppVersion 1.10.0, live zip SHA-256 =
+  local), the zip passes the shipped 1.10.0 `pack_check --compile`; website commit 2d362eb pushed.
