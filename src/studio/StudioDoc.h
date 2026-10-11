@@ -11,6 +11,7 @@
 #include "studio/StudioPose.h"
 #include "studio/StudioProject.h"
 #include "studio/UiTimeline.h"
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -126,6 +127,7 @@ struct StudioDoc {
     double time = 0;            // seconds
     bool playing = false;
     float physicsFrame = -1;    // frame of the last physics step (-1: reset)
+    std::chrono::steady_clock::time_point physicsClock;  // wall time of the last physics step
     bool useMotionCamera = true;
     bool useShadowTrack = true;     // the self-shadow track drives the shadows (else the render settings)
     bool showCameraPath = true;     // camera path overlay in the viewport (free camera only)

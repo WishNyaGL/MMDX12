@@ -402,11 +402,16 @@ void App::UpdateStudioScene() {
 
     // Physics runs while playing and when stepping one frame forward; any other jump (seek, scrub, loop) resets it
     // like play mode does. Paused on the same frame: no simulation (dt 0).
+    // While playing, a slow frame (the motion advanced about as much as the wall clock) keeps stepping instead of
+    // resetting: a reset settles every body for a second and could keep every following frame over 0.25 s too.
+    const auto now = std::chrono::steady_clock::now();
+    const float wallDt = std::chrono::duration<float>(now - d.physicsClock).count();
+    d.physicsClock = now;
     float physicsDt = 0.0f;
     bool resetPhysics = d.physicsFrame < 0.0f;
     if (!resetPhysics) {
         const float df = frame - d.physicsFrame;
-        if (d.playing) resetPhysics = df < 0.0f || df > 0.25f * kMmdFps;
+        if (d.playing) resetPhysics = df < 0.0f || (df > 0.25f * kMmdFps && df > (wallDt * 1.5f + 0.1f) * kMmdFps);
         else if (std::fabs(df) > 1e-3f) resetPhysics = df < 0.0f || df > 1.0f + 1e-3f;
         if (!resetPhysics) physicsDt = std::max(0.0f, df) / kMmdFps;
         // paused with pose edits: keep simulating so hair and skirts follow the edited pose

@@ -42,7 +42,8 @@ ComputePipeline* PtPackVariants::Resolve(Dx12Context& ctx,
         if (!pack || !pack->hasPtSurface) continue;
         if (!chosenPack) {
             chosenPack = pack;
-        } else if (chosenPack->id != pack->id && !warnedMultiple) {
+        } else if (chosenPack->id != pack->id && !warnedMultiple && warnedChoice_ != chosenPack->id) {
+            warnedChoice_ = chosenPack->id;
             if (logTag && std::string_view(logTag) == "offline") {
                 LOG_WARN("offline: multiple pt packs present; using %s for GiTable", chosenPack->id.c_str());
             } else {

@@ -1420,3 +1420,18 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 ### Not verified
 - The new progress-dialog strings were not captured on screen. Delta updates only start working from the first
   release that contains this code (installs older than it still take the zip once).
+
+## 2026-10-11 (late night) - fix: unit dances stuck at 2-5 fps (physics reset loop), release 1.9.2
+- Report: 1.9.1 played a six-performer unit dance at ~5 fps (raster; GPU 23 %, CPU 8 % = one core), smooth again
+  after pause / play. Not an unoptimized build this time (the 1.1.0 regression): the shipped exe hashes equal to the
+  build_release exe, every TU has `/O2 /Ob2 /DNDEBUG /EHsc`.
+- Cause: play mode reset the physics whenever the motion clock advanced > 0.25 s between updates (meant for seeks).
+  A reset settles every body for 1 s (120 substeps); six physics-heavy performers (~1200 bodies) made that frame
+  itself > 0.25 s, so every following frame reset again. Pause / play broke the loop (small dt). One-performer scenes
+  recovered because their reset stays under 0.25 s.
+- Fix (`App::UpdateScene`, studio `UiStudio.cpp` playback): a forward jump only resets when it is much larger than
+  the wall-clock time since the last update (`physicsClock`); slow frames keep stepping (Bullet's 10-substep cap bounds
+  the cost). `PtPackVariants` logs "multiple pt packs present" once per chosen pack instead of every frame.
+- Verified: liar_dancer, 5 performers (Aiden, Dan Heng, Felix, Sour Miku White / CWL), `--frames 600`: the 1.9.1 exe
+  got stuck (52+ s after the first frame, freed by the user's pause), the fix ran 600 frames in ~3.8 s.
+- Release 1.9.2 (also carries the smart updater), notes dist/notes_1.9.2.md; delta manifest published for 1.9.2.

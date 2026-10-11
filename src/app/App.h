@@ -199,6 +199,7 @@ private:
         float endFrame = 0;
         bool hasAudio = false;
         float physicsFrame = -1;  // motion frame of the last physics step (-1: reset on next update)
+        std::chrono::steady_clock::time_point physicsClock;  // wall time of the last physics step
         // Render benchmark: performers after `character` (posed once by PoseRenderBench, never
         // updated per frame). Empty for normal playback.
         struct Performer {

@@ -29,6 +29,7 @@ private:
     uint32_t generation_ = 0;
     std::map<std::string, ComputePipeline> pipes_;
     std::set<std::string> failed_;
+    std::string warnedChoice_;   // pack named by the last "multiple pt packs" warning (logged once per choice)
 };
 
 } // namespace mmdx

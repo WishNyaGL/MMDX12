@@ -1554,9 +1554,16 @@ void App::UpdateScene(float frame) {
                     ? 1.0f
                     : settings_.CharacterScale(scene_->characterId));
     ch.EnablePhysics(screen_ == Screen::BenchRun || (settings_.physics && !options_.noPhysics));
+    // A slow frame is not a jump: when the motion advanced about as much as the wall clock, keep stepping (Bullet
+    // caps the work at kMaxSubsteps). Resetting there settles every body for a second, which made a six-performer
+    // frame slower than 0.25 s, so every following frame reset again (stuck at 2-5 fps until a pause).
+    const auto now = std::chrono::steady_clock::now();
+    const float wallDt = std::chrono::duration<float>(now - scene_->physicsClock).count();
+    scene_->physicsClock = now;
     float physicsDt = 0.0f;
     if (scene_->physicsFrame >= 0.0f) physicsDt = (frame - scene_->physicsFrame) / kMmdFps;
-    const bool resetPhysics = scene_->physicsFrame < 0.0f || physicsDt < 0.0f || physicsDt > 0.25f;
+    const bool resetPhysics = scene_->physicsFrame < 0.0f || physicsDt < 0.0f ||
+                              (physicsDt > 0.25f && physicsDt > wallDt * 1.5f + 0.1f);
     if (resetPhysics) {
         ch.ResetPhysics();
         physicsDt = 0.0f;
