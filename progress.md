@@ -1546,3 +1546,19 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 - Verified: default path vs the HEAD build = 3280 px at <= 3 LSB (invisible). Alcander raster / RT, EthanShax on the Ray
   stage moonlit_waves (55/55 records): no `[E]`, Alcander skin stays matte. Not verified: EthanShax's arm shows streaky
   gloss (shading model / roughness not checked), hair anisotropy up close, the other sets, studio, PT / GI (P4).
+
+## 2026-10-12 (6) - 2.0.0 P4: PBR materials in the real-time path tracer and offline GI
+- Delegated to DeepSeek (opencode, level high, 18.5 min), smoke-reviewed, DXC-compiled and render-checked by the architect.
+  Shaders only, no C++ changes. New `shaders/pt_pbr.hlsli` shared by `pathtrace.hlsl` / `offline_gi.hlsl`: hit decode
+  (triangle-UV tangent frame normal + sub normal RNM via `rt_common.hlsli` `LoadTriPosUv`), per-model policy, GGX VNDF
+  sampling (Heitz 2018, weight F*G2/G1, alpha = rough like `PbrSpecularGGX`), lobe choice from Schlick F(N.V) vs diffuse.
+  PT / GI mirror `MmdShadePbr`'s sun structure (toon terminator, hue-preserving shadow, rim) with GGX sun / punctual
+  specular, metalness removing diffuse, AO on indirect diffuse only, emissive per hit; denoiser albedo = base colour,
+  reflectivity = the raster formula. SKIN: no specular continuation, specular x 0.15, roughness >= 0.6. CEL / TONEBASED:
+  MMD + normal + emissive. GI: `Surf::pbr`, IC branch's mirror lobe -> GGX sample, `GatherPath` diffuse albedo only.
+- Architect fixes: the PBR decode ran before the "pack wins" check (normal / roughness / reflectivity, and in GI the
+  normal handed to the pack); now a PT pack record skips the decode. GI punctual specular tests used a float `dot` as a bool.
+- Verified: DXC cs_6_5 (no pack + hoyo_toon_v2) for CSPathTrace / CSRender / CSPrepassLevel. PT default path vs HEAD
+  shaders: 80.8k px at 1 LSB, ~4.6k above (noise floor of two identical runs: 2.2k px) = codegen level. Alcander Ray PT
+  and offline GI still (960x540, 256 spp): no `[E]`, skin matte, no fireflies. Not verified: PBR + PT pack render, Ray
+  stage in PT / GI, GI video, EthanShax arm, the other sets.

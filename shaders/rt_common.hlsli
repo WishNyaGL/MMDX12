@@ -97,6 +97,18 @@ float2 LoadUv(RtGeometry g, uint3 tri, float2 bary) {
     return uv0 * (1.0 - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y;
 }
 
+// Per-vertex positions and UVs of a hit triangle (for the triangle-UV tangent frame of a mapped normal).
+void LoadTriPosUv(RtGeometry g, uint prim, out float3 p0, out float3 p1, out float3 p2,
+                  out float2 uv0, out float2 uv1, out float2 uv2) {
+    ByteAddressBuffer vb = gBindlessBuf[NonUniformResourceIndex(g.vertexSrv)];
+    uint3 tri = LoadTriangle(g, prim);
+    uint3 a = tri * kRtVertexStride;
+    p0 = asfloat(vb.Load3(a.x)); p1 = asfloat(vb.Load3(a.y)); p2 = asfloat(vb.Load3(a.z));
+    uv0 = asfloat(vb.Load2(a.x + 24));
+    uv1 = asfloat(vb.Load2(a.y + 24));
+    uv2 = asfloat(vb.Load2(a.z + 24));
+}
+
 static const uint kAddUvStride = 32;   // GpuAddUv (uv1 at 0, uv2 at 16)
 
 // Additional UV1 / UV2 at a hit (same triangle / barycentrics as FetchSurface). Zeros when the

@@ -32,6 +32,8 @@
 #include "rt_common.hlsli"   // includes common.hlsli
 #include "offline_common.hlsli"
 #include "offline_glass.hlsli"
+#define PBR_SAMPLE_LEVEL0     // compute: no screen-space gradients
+#include "pt_pbr.hlsli"
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
 SamplerState gPoint : register(s0);
 SamplerState gLinear : register(s1);
@@ -198,10 +200,12 @@ struct Surf {
     bool character, flat, receive;
     bool glass, inside;     // glass crossing; inside = leaving the glass body
     bool emitter;           // softbox: the path ends here with `emission`
+    bool pbr;               // the mesh hit has a PBR record (pt_pbr decoded into `pb`)
     RtGeometry g;           // undefined for the studio floor and the props
     float4 tex;
     float2 uv;
     float4 uv1, uv2;        // additional UV1/UV2 (zero for the floor / props)
+    PtPbrSurface pb;        // PBR record (valid when `pbr`)
 };
 
 // Closest surface along a ray: meshes (stochastic alpha), the analytic studio floor, the glass box
@@ -281,6 +285,20 @@ bool TraceScene(float3 o, float3 d, float tMin, inout uint rng, float lod, out S
         s.refl = r;
         s.rough = clamp(sqrt(2.0 / (g.specularPower + 2.0)), 0.03, 0.6);
         s.emission = s.character ? 0.0 : SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
+        bool canPbr = (g.pbrIndex != 0xFFFFFFFFu);
+#ifdef MMDX_PT_PACK
+        // a PT pack wins over the record (raster rule): keep the plain surface the pack expects
+        if (canPbr && (g.flags & RTG_PT_PACK) && LoadPtPackRecord(g.packSrv).materialClass != PACK_CLASS_OFF)
+            canPbr = false;
+#endif
+        if (canPbr) {   // PBR record: mapped normal, albedo, GGX, AO, emissive
+            s.pb = PtPbrDecode(hit.prim, g, sf, sf.normal, g.diffuse.rgb);
+            s.n = s.pb.N;
+            s.albedo = s.pb.baseColor;
+            s.refl = saturate(Luminance(s.pb.f0) * (1.0 - s.pb.rough));
+            s.rough = s.pb.rough;
+            s.pbr = true;
+        }
     } else {
         t = tMax;
         s.pos = o + d * t;
@@ -409,7 +427,8 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
         }
 
         bool evalDiff = (atten > 0.0) && (diff > 0.0) && (l.affectDiffuse > 0.5);
-        bool evalSpecForPicked = canSpec && (l.affectSpecular > 0.5) && (atten > 0.0) && (dot(R, ld) >= cosHalfAngle) && (dot(s.faceN, ld) > 0.0);
+        bool evalSpecForPicked = canSpec && (l.affectSpecular > 0.5) && (atten > 0.0) &&
+                                 ((s.pbr ? dot(s.pb.N, ld) > 0.0 : dot(R, ld) >= cosHalfAngle)) && (dot(s.faceN, ld) > 0.0);
 
         if (evalDiff || evalSpecForPicked) {
             float3 vis = 1.0;
@@ -437,7 +456,10 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                 diffE = e * (total / pickedW) * vis;
             }
             if (evalSpecForPicked) {
-                specR += pSpec * l.color * atten * vis / omega;
+                if (s.pbr)
+                    specR += pSpec * l.color * atten * vis * PtPbrEvalSpecular(s.pb, V, ld);
+                else
+                    specR += pSpec * l.color * atten * vis / omega;
             }
         }
     }
@@ -471,7 +493,7 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                 if (lk.cosOuter > -1.0) atten *= smoothstep(lk.cosOuter, lk.cosInner, dot(-ld, lk.dir));
             }
 
-            if (atten > 0.0 && dot(R, ld) >= cosHalfAngle && dot(s.faceN, ld) > 0.0) {
+            if (atten > 0.0 && (s.pbr ? dot(s.pb.N, ld) > 0.0 : dot(R, ld) >= cosHalfAngle) && dot(s.faceN, ld) > 0.0) {
                 int shadowType = (int)lk.shadowType;
                 float3 vis = 1.0;
                 if (lk.isArea > 0.5) {
@@ -492,7 +514,7 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                     float3 shadowTrans = ShadowTransmission(hitVis, lk.shadowDensity, lk.shadowColor);
                     vis = shadowTrans * (hitVis > 0.0 ? GlassShadow(po, dir, max(dist - 0.05, 0.0)) : float3(1, 1, 1));
                 }
-                specR += pSpec * lk.color * atten * vis / omega;
+                specR += pSpec * lk.color * atten * vis * (s.pbr ? PtPbrEvalSpecular(s.pb, V, ld) : (1.0 / omega));
             }
         }
     }
@@ -672,6 +694,50 @@ float3 ToonSun(Surf s, float3 V, float3 sh, float skin) {
     return color;
 }
 
+// PBR sun direct at a camera/mirror hit (mirrors mmd.hlsl MmdShadePbr; linear). CEL/TONEBASED keep the toon
+// structure with the PBR mapped normal; the MMD Blinn specular is replaced by GGX. Emissive is added by the caller.
+float3 PbrSunDirect(Surf s, float3 V, float3 sh) {
+    PtPbrSurface p = s.pb;
+    RtGeometry g = s.g;
+    float3 L = -gLightDir;
+    float3 n = p.N;
+    float ndl = dot(n, L);
+    float flat = s.flat ? 1.0 : 0.0;
+    float3 mddLight = saturate(g.ambient + g.diffuse.rgb * gLightColor);
+
+    if (p.model == 9u) {   // TONEBASED: hardness toon toward the customB shadow colour
+        float hard = saturate(p.customA);
+        float litAmt = saturate(ndl * hard + 1.0 - hard) * max(sh.r, max(sh.g, sh.b));
+        float3 c9 = SrgbToLinear(saturate(mddLight * s.tex.rgb)) * lerp(p.customB, 1.0, litAmt) * gSunIntensity;
+        float3 rim9 = pow(1.0 - saturate(dot(n, V)), 4.0) * smoothstep(-0.2, 0.5, dot(n, L) + 0.25);
+        c9 += gRimColor * rim9 * max(sh.r, max(sh.g, sh.b)) * gRimStrength * gSunIntensity * (1.0 - 0.6 * flat);
+        return c9;
+    }
+
+    float3 cAlbedo = LinearToSrgb(saturate(p.diffuse));
+    float3 c = mddLight * cAlbedo;
+    if (p.model == 8u) {   // CEL: toon ramp replaces the PBR diffuse colour
+        float v = lerp(1.0, saturate(0.5 - 0.5 * ndl), max(sh.r, max(sh.g, sh.b)));
+        c = mddLight * s.tex.rgb * ApplyTexFactor3(gBindlessTex[NonUniformResourceIndex(g.toonSrv)].SampleLevel(gLinear, float2(0.5, v), 0).rgb, g.toonMul, g.toonAdd, 1.0);
+    } else {
+        float3 term = sh * lerp(smoothstep(-0.12, 0.22, ndl), 1.0, flat);
+        float3 shade = c * lerp(1.0, saturate(c), 0.55) * float3(0.90, 0.90, 0.96);
+        c = lerp(shade, c, term);
+    }
+    float3 color = SrgbToLinear(saturate(c)) * gSunIntensity;
+
+    if (p.model == 1u) {   // SKIN: soft SSS tint (per-channel visibility, like ToonSun's skin path)
+        float band = smoothstep(-0.35, -0.02, ndl) * (1.0 - smoothstep(-0.02, 0.25, ndl)) * (1.0 - flat);
+        color += p.customB * (band * 0.7) * SunIrradiance() / PI * sh;
+    }
+    if (p.specOn)   // MMD Blinn replaced by GGX (per-model lobe), scaled by the sun visibility
+        color += PtPbrEvalSpecular(p, V, L) * sh * SrgbToLinear(saturate(gLightColor)) * gSunIntensity * saturate(ndl) * p.specScale;
+    float rim = pow(1.0 - saturate(dot(n, V)), 4.0);
+    float side = smoothstep(-0.2, 0.5, dot(n, L) + 0.25);
+    float3 rimTint = lerp(float3(1, 1, 1), dot(p.f0, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)).xxx, p.metal);
+    return color + gRimColor * rimTint * rim * side * sh * gRimStrength * gSunIntensity * (1.0 - 0.6 * flat);
+}
+
 // Glass crossing seen by the camera (or a mirror): delta lights have no mirror image in a smooth
 // dielectric, so the sun and the spots add a tight normalized Blinn-Phong glint weighted by Fresnel.
 float3 GlassGlint(Surf s, float3 V, inout uint rng) {
@@ -713,7 +779,13 @@ float3 GlassGlint(Surf s, float3 V, inout uint rng) {
 // stage, the punctual lights. `pSpec` is the probability of the specular continuation.
 float3 CameraDirect(Surf s, float3 V, float pSpec, inout uint rng) {
     float3 c = s.emission;
-    if (s.character) {
+    if (s.pbr) {
+        // PBR record: MMD sun structure with GGX (characters keep the soft skin visibility).
+        float skin = SkinWeight(s);
+        float3 sh = (skin > 0.01) ? SkinSunVisibility(s, skin, rng) : SunVisibility(s, rng);
+        c += PbrSunDirect(s, V, sh) + s.pb.emissive;
+        if (skin > 0.01) c += SkinTranslucency(s, skin, rng);
+    } else if (s.character) {
         float skin = SkinWeight(s);
         if (skin > 0.01) {
             c += ToonSun(s, V, SkinSunVisibility(s, skin, rng), skin);
@@ -725,12 +797,12 @@ float3 CameraDirect(Surf s, float3 V, float pSpec, inout uint rng) {
         float3 L = -gLightDir;
         float ndl = dot(s.n, L);
         if (ndl > 0.0 && dot(s.faceN, L) > 0.0)
-            c += (1.0 - pSpec) * s.albedo / PI * SunIrradiance() * ndl * SunVisibility(s, rng);
+            c += (1.0 - pSpec) * (s.pbr ? s.pb.diffuse : s.albedo) / PI * SunIrradiance() * ndl * SunVisibility(s, rng);
     }
     if (gNumLights >= 1.0) {
         float3 diffE = 0, specR = 0;
-        PunctualLighting(s, V, s.character, pSpec, rng, diffE, specR);
-        c += (1.0 - pSpec) * s.albedo / PI * diffE + specR;
+        PunctualLighting(s, V, s.character || s.pbr, pSpec, rng, diffE, specR);
+        c += (1.0 - pSpec) * (s.pbr ? s.pb.diffuse : s.albedo) / PI * diffE + specR;
     }
     return c;
 }
@@ -790,10 +862,10 @@ float3 GatherPath(float3 o, float3 d, float tMin, inout uint rng) {
             if (++glassEvents < 8u) --depth;
             continue;
         }
-        L += T * (y.emission + y.albedo / PI * DirectIrradiance(y, rng));
+        L += T * (y.emission + (y.pbr ? y.pb.diffuse : y.albedo) / PI * DirectIrradiance(y, rng));
         float3 nd = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), y.n);
         if (dot(nd, y.faceN) <= 0.0) break;
-        T *= y.albedo;
+        T *= (y.pbr ? y.pb.diffuse : y.albedo);
         o = OffsetRayOrigin(y.pos, y.faceN);
         d = nd;
         if (depth >= 1u) {
@@ -1098,6 +1170,11 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
             }
         }
 #endif
+        // PBR record is used unless a PT pack class wins the hit (raster rule).
+        bool isPbrHit = s.pbr;
+#ifdef MMDX_PT_PACK
+        if (isPtPackHit) { isPbrHit = false; s.pbr = false; }
+#endif
         if (specChain) {
             primHit = true;
             primAlbedo = s.albedo;
@@ -1111,6 +1188,7 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
         float3 V = -d;
         float cosV = saturate(dot(s.n, V));
         float pSpec = s.refl > 0.001 ? saturate(s.refl + (1.0 - s.refl) * pow(1.0 - cosV, 5.0) * s.refl) : 0.0;
+        if (isPbrHit) pSpec = PtPbrSpecProb(s.pb, V);
         if (!diffuseChain) {
 #ifdef MMDX_PT_PACK
             if (isPtPackHit) {
@@ -1125,7 +1203,10 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
             } else
 #endif
             {
-                radiance += T * CameraDirect(s, V, pSpec, rng);
+                if (isPbrHit)
+                    radiance += T * (CameraDirect(s, V, pSpec, rng) + s.pb.emissive);
+                else
+                    radiance += T * CameraDirect(s, V, pSpec, rng);
             }
         } else {
             float3 sunE = 0;
@@ -1135,25 +1216,34 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
             float3 diffE = 0, specR = 0;
             if (gNumLights >= 1.0)
                 PunctualLighting(s, V, false, pSpec, rng, diffE, specR);
-            radiance += T * (s.emission + (1.0 - pSpec) * s.albedo / PI * (sunE + diffE) + specR);
+            radiance += T * (s.emission + (isPbrHit ? s.pb.emissive : 0.0) + (1.0 - pSpec) * (isPbrHit ? s.pb.diffuse : s.albedo) / PI * (sunE + diffE) + specR);
         }
         if (depth == maxDepth) break;
 
-        // indirect diffuse from the irradiance cache (the prepass); mirror lobe still traced
+        // indirect diffuse from the irradiance cache (the prepass); specular lobe still traced
         if ((depth == 0u || viaGlass) && gP2.w > 0.5) {
             float3 Eic;
             if (IcLookup(s, Eic)) {
+                float flatIndirect = s.flat;
 #ifdef PT_PACK_HAS_LIGHTING
-                if (s.character && (s.flat || ptPackLgt.flatIndirect > 0.5)) {
-#else
-                if (s.character && s.flat) {
+                if (isPtPackHit) flatIndirect = ptPackLgt.flatIndirect;
 #endif
+                if (s.character && flatIndirect) {
                     radiance += T * s.albedo * kToonIndirect * Eic / PI;
                     break;
                 }
-                radiance += T * (1.0 - pSpec) * s.albedo * (s.character ? kToonIndirect : 1.0) * Eic / PI;
+                float3 indAlbedo = isPbrHit ? s.pb.diffuse : s.albedo;
+                float indScale = (isPbrHit ? s.pb.ao : 1.0) * (s.character ? kToonIndirect : 1.0);
+                radiance += T * (1.0 - pSpec) * indAlbedo * indScale * Eic / PI;
                 if (Rand(rng) >= pSpec) break;
-                float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), reflect(d, s.n), cos(s.rough * 0.5));
+                float3 sd;
+                if (isPbrHit) {
+                    float3 w;
+                    PtPbrSampleSpecular(s.pb, V, float2(Rand(rng), Rand(rng)), sd, w);
+                    T *= w / pSpec;
+                } else {
+                    sd = SampleCone(float2(Rand(rng), Rand(rng)), reflect(d, s.n), cos(s.rough * 0.5));
+                }
                 if (dot(sd, s.faceN) <= 0.0) break;
                 o = OffsetRayOrigin(s.pos, s.faceN);
                 d = sd;
@@ -1164,18 +1254,29 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
 
         float3 nd;
         tMinNext = 0.0;
+        float flatIndirect = s.flat;
 #ifdef PT_PACK_HAS_LIGHTING
-        if (s.character && (s.flat || ptPackLgt.flatIndirect > 0.5) && !diffuseChain) {
-#else
-        if (s.character && s.flat && !diffuseChain) {
+        if (isPtPackHit) flatIndirect = ptPackLgt.flatIndirect;
 #endif
+        if (s.character && flatIndirect && !diffuseChain) {
             // faces: even fill around the view direction, skipping nearby geometry (nose, fringe)
             nd = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), V);
             T *= s.albedo * kToonIndirect;
             diffuseChain = true;
             tMinNext = kFlatGatherSkip;
         } else {
-            if (Rand(rng) < pSpec) {
+            if (isPbrHit) {
+                // PBR continuation: VNDF specular vs cosine diffuse (same pSpec).
+                if (Rand(rng) < pSpec) {
+                    float3 w;
+                    PtPbrSampleSpecular(s.pb, V, float2(Rand(rng), Rand(rng)), nd, w);
+                    T *= w / pSpec;
+                } else {
+                    nd = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), s.n);
+                    T *= s.pb.diffuse * s.pb.ao * ((s.character && !diffuseChain) ? kToonIndirect : 1.0) / (1.0 - pSpec);
+                    diffuseChain = true;
+                }
+            } else if (Rand(rng) < pSpec) {
                 nd = SampleCone(float2(Rand(rng), Rand(rng)), reflect(d, s.n), cos(s.rough * 0.5));
             } else {
                 nd = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), s.n);

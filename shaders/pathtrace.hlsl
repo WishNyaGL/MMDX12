@@ -2,6 +2,8 @@
 // punctual-light NEE, analytic studio floor, stochastic alpha-tested transparency.
 // u0 light (divided by albedo on surfaces), u1/u2/u3/u4 primary G-buffer for denoising.
 #include "rt_common.hlsli"   // includes common.hlsli
+#define PBR_SAMPLE_LEVEL0     // compute: no screen-space gradients
+#include "pt_pbr.hlsli"
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
 SamplerState gPoint : register(s0);
 SamplerState gLinear : register(s1);
@@ -81,6 +83,55 @@ float3 ToonSun(RtGeometry g, float4 tex, float2 uv, float3 n, float3 V, float ra
     return color;
 }
 
+// PBR direct at a hit (mirrors mmd.hlsl MmdShadePbr's sun structure; linear, traced visibility `sh`).
+// CEL/TONEBASED keep the MMD shading with the PBR mapped normal; the MMD Blinn specular is replaced by GGX.
+// Emissive is added by the caller (once per hit).
+float3 PbrSunDirect(PtPbrSurface p, RtGeometry g, float4 tex, float2 uv, float3 V, float sh, float flat) {
+    float3 L = -gLightDir;
+    float3 n = p.N;
+    float ndl = dot(n, L);
+    float occ = (1.0 - sh) * gSunShadowParams.z;
+    float3 mddLight = saturate(g.ambient + g.diffuse.rgb * gLightColor);
+    float3 sunLin = SrgbToLinear(saturate(gLightColor)) * gSunIntensity;
+
+    // TONEBASED (9): MMD shading replaced by a hardness toon toward the customB shadow colour.
+    if (p.model == 9u) {
+        float hard = saturate(p.customA);
+        float litAmt = saturate(ndl * hard + 1.0 - hard) * sh;
+        float3 c9 = SrgbToLinear(saturate(mddLight * tex.rgb)) * lerp(p.customB, 1.0, litAmt) * gSunIntensity;
+        float3 rim9 = pow(1.0 - saturate(dot(n, V)), 4.0) * smoothstep(-0.2, 0.5, dot(n, L) + 0.25);
+        c9 += gRimColor * rim9 * sh * gRimStrength * gSunIntensity * (1.0 - 0.6 * flat);
+        return c9;
+    }
+
+    float3 cAlbedo = LinearToSrgb(saturate(p.diffuse));   // gamma, for the MMD diffuse term (metal removed)
+    float3 c = mddLight * cAlbedo;
+    if (p.model == 8u) {   // CEL: the toon ramp replaces the PBR diffuse colour
+        float v = lerp(1.0, saturate(0.5 - 0.5 * ndl), sh);
+        c = mddLight * tex.rgb * ApplyTexFactor3(gBindlessTex[NonUniformResourceIndex(g.toonSrv)].SampleLevel(gLinear, float2(0.5, v), 0).rgb, g.toonMul, g.toonAdd, 1.0);
+    } else {
+        float term = lerp(sh * smoothstep(-0.12, 0.22, ndl), lerp(1.0, sh, 0.8), flat);
+        float3 shade = c * lerp(1.0, saturate(c), 0.55) * float3(0.90, 0.90, 0.96);
+        c = lerp(shade, c, term);
+    }
+    c += mddLight * cAlbedo * gSunShadowColor.rgb * occ;
+    float3 color = SrgbToLinear(saturate(c)) * gSunIntensity;
+
+    if (p.model == 1u) {   // SKIN: soft SSS tint (customA curvature, customB transmittance)
+        float ss = pow(1.0 - saturate(ndl), 2.0) * pow(1.0 - saturate(-ndl), 3.0 / (p.customA + 0.001)) *
+                   saturate(p.customA - 0.04);
+        color += p.customB * (ss * 0.7) * sunLin * sh;
+    }
+    if (p.specOn) {   // MMD Blinn replaced by GGX (per-model lobe), shadowed by the same sun visibility
+        float3 spec = PtPbrEvalSpecular(p, V, L);
+        color += spec * sh * sunLin * saturate(ndl) * p.specScale;
+    }
+    float rim = pow(1.0 - saturate(dot(n, V)), 4.0);
+    float side = smoothstep(-0.2, 0.5, dot(n, L) + 0.25);
+    float3 rimTint = lerp(float3(1, 1, 1), dot(p.f0, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)).xxx, p.metal);
+    return color + gRimColor * rimTint * rim * side * sh * gRimStrength * gSunIntensity * (1.0 - 0.6 * flat);
+}
+
 [numthreads(8, 8, 1)]
 void CSPathTrace(uint3 id : SV_DispatchThreadID) {
     uint w, h;
@@ -143,6 +194,8 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
             bool receive;
             bool toon = false;    // character material: raster toon sun, no Lambert NEE
             float flat = 0.0;     // MAT_FLAT (faces): even fill instead of traced indirect
+            PtPbrSurface pbr;     // decoded PBR record (used when isPbrHit)
+            bool isPbrHit = false;
 #ifdef PT_PACK_HAS_LIGHTING
             float flatIndirect = 0.0;   // pack's flat indirect requesting (falls back to flat)
 #endif
@@ -160,6 +213,20 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 rough = clamp(sqrt(2.0 / (g.specularPower + 2.0)), 0.03, 0.6);
                 receive = (g.flags & MAT_RECEIVE) != 0;
                 pos = sf.pos; prevPos = sf.prevPos; n = sf.normal; faceN = sf.faceNormal;
+                bool canPbr = (g.pbrIndex != 0xFFFFFFFFu);
+#ifdef MMDX_PT_PACK
+                // a PT pack wins over the record (raster rule): keep the plain surface the pack expects
+                if (canPbr && (g.flags & RTG_PT_PACK) && LoadPtPackRecord(g.packSrv).materialClass != PACK_CLASS_OFF)
+                    canPbr = false;
+#endif
+                if (canPbr) {   // PBR record: mapped normal, albedo, GGX, AO, emissive, reflectivity
+                    pbr = PtPbrDecode(hit.prim, g, sf, sf.normal, g.diffuse.rgb);
+                    n = pbr.N;
+                    albedo = pbr.baseColor;
+                    refl = saturate(Luminance(pbr.f0) * (1.0 - pbr.rough));
+                    rough = pbr.rough;
+                    isPbrHit = true;
+                }
                 if (g.flags & MAT_STAGE) {
                     radiance += throughput * SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
                 } else {
@@ -168,6 +235,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     if (isPtPackHit) {
                         RtPtPackRecord rec = LoadPtPackRecord(g.packSrv);
                         if (rec.materialClass != PACK_CLASS_OFF) {
+                            isPbrHit = false;   // the pack wins the PBR record (raster rule)
                             PtPackBindRecord(rec);
                             PtPackBindGeometry(g);
                             PtPackIn packIn;
@@ -238,26 +306,46 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     if (!isPtPackHit)
 #endif
                     {
-                        toon = true;
-                        flat = (g.flags & MAT_FLAT) ? 1.0 : 0.0;
+                        if (isPbrHit) {
+                            // ---- PBR record: mirror MmdShadePbr's sun structure; GGX for punctual NEE ----
+                            toon = true;
+                            flat = (g.flags & MAT_FLAT) ? 1.0 : 0.0;
 #ifdef PT_PACK_HAS_LIGHTING
-                        flatIndirect = flat;
+                            flatIndirect = flat;
 #endif
-                        float sh = 1.0;
-                        if (receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5) {
-                            float cosMax = SunShadowConeCos(kSunCosMax);
-                            float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, cosMax);
-                            sh = TraceShadowRay(OffsetRayOrigin(pos, faceN), sd, 1e5);
-                        }
-                        radiance += throughput * ToonSun(g, tex, sf.uv, n, -dir, sh);
+                            float sh = 1.0;
+                            if (receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5) {
+                                float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, SunShadowConeCos(kSunCosMax));
+                                sh = TraceShadowRay(OffsetRayOrigin(pos, faceN), sd, 1e5);
+                            }
+                            radiance += throughput * (PbrSunDirect(pbr, g, tex, sf.uv, -dir, sh, flat) + pbr.emissive);
+                            if (flat > 0.5) {
+                                // raster flat fill: no sky/ground gradient and no occlusion modelling the face
+                                float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
+                                radiance += throughput * albedo * fill;
+                            }
+                        } else {
+                            toon = true;
+                            flat = (g.flags & MAT_FLAT) ? 1.0 : 0.0;
 #ifdef PT_PACK_HAS_LIGHTING
-                        if (flatIndirect > 0.5) {
+                            flatIndirect = flat;
+#endif
+                            float sh = 1.0;
+                            if (receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5) {
+                                float cosMax = SunShadowConeCos(kSunCosMax);
+                                float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, cosMax);
+                                sh = TraceShadowRay(OffsetRayOrigin(pos, faceN), sd, 1e5);
+                            }
+                            radiance += throughput * ToonSun(g, tex, sf.uv, n, -dir, sh);
+#ifdef PT_PACK_HAS_LIGHTING
+                            if (flatIndirect > 0.5) {
 #else
-                        if (flat > 0.5) {
+                            if (flat > 0.5) {
 #endif
-                            // raster flat fill: no sky/ground gradient and no occlusion modelling the face
-                            float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
-                            radiance += throughput * albedo * fill;
+                                // raster flat fill: no sky/ground gradient and no occlusion modelling the face
+                                float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
+                                radiance += throughput * albedo * fill;
+                            }
                         }
                     }
                 }
@@ -282,9 +370,10 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 primHit = true;
             }
 
-            // Fresnel-weighted specular probability
+            // Fresnel-weighted specular probability (PBR: Schlick F(N.V) luminance vs the diffuse weight)
             float cosV = saturate(dot(n, -dir));
             float pSpec = refl > 0.001 ? saturate(refl + (1.0 - refl) * pow(1.0 - cosV, 5.0) * refl) : 0.0;
+            if (isPbrHit) pSpec = PtPbrSpecProb(pbr, -dir);
 
             // sun next-event estimation (diffuse lobe)
             float3 L = -gLightDir;
@@ -297,7 +386,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                                    : 1.0;
                 float occ = (1.0 - rawVis) * gSunShadowParams.z;
                 float3 visFactor = (1.0 - occ) + gSunShadowColor.rgb * occ;
-                radiance += throughput * (1.0 - pSpec) * albedo / PI * SunIrradiance() * ndl * visFactor;
+                radiance += throughput * (1.0 - pSpec) * (isPbrHit ? pbr.diffuse : albedo) / PI * SunIrradiance() * ndl * visFactor;
             }
 
             // punctual-light NEE (one uniform light per bounce)
@@ -336,7 +425,11 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     float3 R = reflect(dir, n);
                     float cosHalfAngle = cos(rough * 0.5);
                     float omega = max(2.0 * PI * (1.0 - cosHalfAngle), 1e-6);
-                    bool evalSpec = (l.affectSpecular > 0.5) && (pSpec > 0.0) && (dot(faceN, ld) > 0.0) && (dot(R, ld) >= cosHalfAngle);
+                    bool evalSpec;
+                    if (isPbrHit)
+                        evalSpec = (l.affectSpecular > 0.5) && (pSpec > 0.0) && (dot(faceN, ld) > 0.0) && (dot(pbr.N, ld) > 0.0);
+                    else
+                        evalSpec = (l.affectSpecular > 0.5) && (pSpec > 0.0) && (dot(faceN, ld) > 0.0) && (dot(R, ld) >= cosHalfAngle);
 
                     if (evalDiff || evalSpec) {
                         float rawVis = 1.0;
@@ -351,10 +444,14 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                         }
                         float3 shadowFactor = ShadowTransmission(rawVis, l.shadowDensity, l.shadowColor);
                         if (evalDiff) {
-                            radiance += throughput * (1.0 - pSpec) * albedo * l.color * shadowFactor * atten * diff * (float)nl;
+                            radiance += throughput * (1.0 - pSpec) * (isPbrHit ? pbr.diffuse : albedo) * l.color * shadowFactor * atten * diff * (float)nl;
                         }
                         if (evalSpec) {
-                            radiance += throughput * pSpec * l.color * shadowFactor * atten * ((float)nl / omega);
+                            if (isPbrHit)   // GGX (the lobe already carries N.L)
+                                radiance += throughput * pSpec * l.color * shadowFactor * atten *
+                                            PtPbrEvalSpecular(pbr, -dir, ld) * (float)nl;
+                            else
+                                radiance += throughput * pSpec * l.color * shadowFactor * atten * ((float)nl / omega);
                         }
                     }
                 }
@@ -368,7 +465,20 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
 
             // next direction: Fresnel-weighted specular vs cosine diffuse
             float3 nextDir;
-            if (Rand(rng) < pSpec) {
+            if (isPbrHit) {
+                // PBR continuation: VNDF specular vs cosine diffuse, weighted by the same pSpec.
+                if (Rand(rng) < pSpec) {
+                    float3 w;
+                    PtPbrSampleSpecular(pbr, -dir, float2(Rand(rng), Rand(rng)), nextDir, w);
+                    throughput *= w / pSpec;
+                } else {
+                    nextDir = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), n);
+                    throughput *= pbr.diffuse * pbr.ao / (1.0 - pSpec);
+#ifdef MMDX_PT_PACK
+                    diffuseChain = true;
+#endif
+                }
+            } else if (Rand(rng) < pSpec) {
                 nextDir = SampleCone(float2(Rand(rng), Rand(rng)), reflect(dir, n), cos(rough * 0.5));
             } else {
                 nextDir = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), n);
