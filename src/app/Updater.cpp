@@ -208,6 +208,7 @@ void RollbackAside() {
 // Keep the updating app's log: the applier (and the restarted app) start fresh logs, so the
 // pre-update log is archived as mmdx12.previous.log. Ignore errors (no log, locked, ...).
 void ArchiveLog() {
+    LogCloseFile();  // an open log cannot be renamed
     std::error_code ec;
     const fs::path logPath = ExecutableDir() / L"mmdx12.log";
     if (!FileExists(logPath)) return;
@@ -311,6 +312,82 @@ bool InstallDirWritable() {
     return true;
 }
 
+// --- delta path ----------------------------------------------------------------------------
+
+// Resolve an URL/path from the manifest against the manifest's own URL: an absolute URL / local
+// path is used as-is, otherwise it is joined onto the manifest's directory (or URL prefix).
+std::string ResolveRelative(const std::string& base, const std::string& ref) {
+    if (ref.empty()) return {};
+    if (ref.rfind("http://", 0) == 0 || ref.rfind("https://", 0) == 0 || ref.rfind("file:", 0) == 0)
+        return ref;
+    // A Windows drive path (C:\... or C:/...) or a UNC path is absolute.
+    if ((ref.size() >= 2 && ref[1] == ':') || ref.rfind("\\\\", 0) == 0 || ref[0] == '/' || ref[0] == '\\')
+        return ref;
+    // Split the base at the last '/' and append.
+    const size_t slash = base.find_last_of("/\\");
+    if (slash == std::string::npos) return ref;
+    return base.substr(0, slash + 1) + ref;
+}
+
+// Join a base URL with a relative "aa/hash" object key, keeping a single slash.
+std::string JoinUrl(const std::string& base, const std::string& rel) {
+    std::string out = base;
+    if (!out.empty() && out.back() != '/' && out.back() != '\\') out += '/';
+    out += rel;
+    return out;
+}
+
+// Verify `file` against `expectSha` (lowercase hex) and `expectSize` (0: not checked).
+bool VerifyFile(const fs::path& file, uint64_t expectSize, const std::string& expectSha,
+                std::atomic<uint64_t>* progress) {
+    if (expectSize > 0) {
+        std::error_code ec;
+        if (fs::file_size(file, ec) != expectSize) return false;
+    }
+    if (expectSha.empty()) return true;
+    return LowerAsciiOf(Sha256OfFile(file, progress)) == expectSha;
+}
+
+// Hard-link `src` to `dst`; fall back to a copy (different volumes / filesystems). False on error.
+bool LinkOrCopy(const fs::path& src, const fs::path& dst, std::string& error) {
+    std::error_code ec;
+    fs::create_directories(dst.parent_path(), ec);
+    if (!CreateHardLinkW(dst.c_str(), src.c_str(), nullptr)) {
+        ec.clear();
+        fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            error = "cannot link/copy " + PathToUtf8(src.filename()) + " (" + ec.message() + ")";
+            return false;
+        }
+    }
+    return true;
+}
+
+// Fetch a URL / local path as raw bytes into memory (manifest, or an object when small). The
+// manifest is the only intended use; objects are downloaded to files. Returns false on error.
+bool FetchBytes(const std::string& url, size_t maxBytes, std::string& out, std::string& error) {
+    if (IsLocalSource(url)) {
+        if (!ReadSmallFile(LocalPathOf(url), out)) {
+            error = "cannot open " + url;
+            return false;
+        }
+        if (out.size() > maxBytes) {
+            error = "source too large";
+            return false;
+        }
+        return true;
+    }
+    return HttpGet(url, out, error, maxBytes, net::HttpOption::AcceptGzip);
+}
+
+// Download one object (raw bytes) to `dest`, decompressing a gzip-encoded response. The object
+// url as written is <base><sha[0:2]>/<sha>; a gzip_static sibling is the server's business, so
+// no content-type sniffing here. The caller verifies the SHA-256.
+bool DownloadObject(const std::string& url, const fs::path& dest, std::atomic<uint64_t>* done,
+                    std::atomic<bool>* cancel, std::string& error) {
+    return DownloadToFile(url, dest, done, cancel, error, net::HttpOption::AcceptGzip);
+}
+
 } // namespace
 
 // --- public API ----------------------------------------------------------------------------
@@ -363,6 +440,8 @@ Feed FetchFeed(const std::string& feedUrlOrPath) {
     out.page = Trimmed(j.value("page", std::string()));
     out.sha256 = LowerAsciiOf(Trimmed(j.value("sha256", std::string())));
     out.size = j.value("size", (uint64_t)0);
+    out.manifest = Trimmed(j.value("manifest", std::string()));
+    out.manifestSha256 = LowerAsciiOf(Trimmed(j.value("manifestSha256", std::string())));
     if (j.contains("notes") && j["notes"].is_object())
         for (auto it = j["notes"].begin(); it != j["notes"].end(); ++it)
             if (it.value().is_string()) out.notes[it.key()] = it.value().get<std::string>();
@@ -378,11 +457,66 @@ Feed FetchFeed(const std::string& feedUrlOrPath) {
     return out;
 }
 
+// Parse the delta manifest JSON (see Updater.h for the contract). Paths are normalized to
+// lowercase-forward-slash keys; the manifest itself is trusted only after its sha256 is checked
+// by the caller.
+bool ParseManifest(const std::string& json, Manifest& out, std::string& error) {
+    const nlohmann::json j = nlohmann::json::parse(json, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) {
+        error = "invalid manifest JSON";
+        return false;
+    }
+    out = Manifest{};
+    out.format = j.value("format", 0);
+    out.version = Trimmed(j.value("version", std::string()));
+    out.objects = Trimmed(j.value("objects", std::string()));
+    if (out.format != 1) {
+        error = "unsupported manifest format " + std::to_string(out.format);
+        return false;
+    }
+    if (out.version.empty()) {
+        error = "manifest has no version";
+        return false;
+    }
+    if (out.objects.empty()) {
+        error = "manifest has no objects base";
+        return false;
+    }
+    if (!j.contains("files") || !j["files"].is_array()) {
+        error = "manifest has no files array";
+        return false;
+    }
+    for (const auto& e : j["files"]) {
+        if (!e.is_object()) continue;
+        ManifestFile f;
+        f.path = e.value("path", std::string());
+        f.size = e.value("size", (uint64_t)0);
+        f.sha256 = LowerAsciiOf(Trimmed(e.value("sha256", std::string())));
+        f.path = Trimmed(f.path);
+        if (f.path.empty()) continue;
+        for (char& c : f.path)
+            if (c == '\\') c = '/';
+        if (f.sha256.size() != 64) {
+            error = "manifest file has a bad sha256: " + f.path;
+            return false;
+        }
+        out.files.push_back(std::move(f));
+    }
+    if (out.files.empty()) {
+        error = "manifest has no files";
+        return false;
+    }
+    return true;
+}
+
 // The applier: flow step 2 (no window, no UI). Runs when the updating app spawned
 // MMDX12.exe --apply-update --apply-wait <pid>, or at the next start after an interrupted
 // swap. Returns the process exit code.
 int ApplyPendingUpdateAndRelaunch(uint32_t waitPid, bool fromCli) {
     (void)fromCli;
+    // Continue the updating app's log (a fresh one would wipe its download lines before
+    // ArchiveLog keeps them as mmdx12.previous.log).
+    LogAppendToExisting();
     const fs::path stateFile = StateFile();
     Journal j;
     if (!j.Read(stateFile)) {
@@ -411,12 +545,11 @@ int ApplyPendingUpdateAndRelaunch(uint32_t waitPid, bool fromCli) {
         SpawnRelaunch(j.relaunchArgs);     // give the user the old app back
         return 1202;
     }
-    ArchiveLog();
-
     WriteSmallFile(UpdateRoot() / L"applied.txt", j.version);  // breadcrumb for the next start
     std::error_code ec;
     fs::remove(stateFile, ec);
     LOG_INFO("update: %s installed - restarting", j.version.c_str());
+    ArchiveLog();  // last: closes our log so the rename can succeed
     SpawnRelaunch(j.relaunchArgs);
     return 0;
 }
@@ -529,55 +662,215 @@ void Controller::StartFeedUpdate(const Feed& f, std::string relaunchArgs) {
     });
 }
 
+// Delta path: fetch + verify the manifest, scan the local install, build the staged tree from
+// hard links of unchanged files + downloads of the changed/new objects. "" on success,
+// "cancelled", else a human error (the caller falls back to the full zip).
+std::string Controller::StageDelta(const Feed& feed, int& changedFiles, uint64_t& changedBytes) {
+    const fs::path root = UpdateRoot();
+    const fs::path extract = ExtractDir();
+    std::string error;
+
+    // 1. fetch the manifest (verify its sha256 before trusting it).
+    std::string body;
+    if (!FetchBytes(feed.manifest, 1u << 24, body, error)) {
+        LOG_WARN("update: delta manifest fetch failed: %s", error.c_str());
+        return "manifest fetch failed (" + error + ")";
+    }
+    const fs::path manifestFile = root / L"manifest.json";
+    if (!WriteSmallFile(manifestFile, body)) return std::string("cannot write the manifest");
+    if (!feed.manifestSha256.empty()) {
+        const std::string got = LowerAsciiOf(Sha256OfFile(manifestFile, nullptr));
+        if (got != feed.manifestSha256) {
+            LOG_WARN("update: manifest sha256 mismatch (%s...)", got.substr(0, 12).c_str());
+            return "manifest checksum mismatch";
+        }
+    }
+    Manifest m;
+    if (!ParseManifest(body, m, error)) {
+        LOG_WARN("update: bad manifest: %s", error.c_str());
+        return "bad manifest (" + error + ")";
+    }
+    if (m.version != feed.version)
+        LOG_WARN("update: manifest version %s differs from feed %s (using the feed version)",
+                 m.version.c_str(), feed.version.c_str());
+    const std::string objects = ResolveRelative(feed.manifest, m.objects);
+    if (objects.empty()) return std::string("manifest has no objects base");
+
+    // 2. scan: hash every local file the manifest lists; unchanged -> hard-link, else download.
+    noticeStage_.store((int)Stage::Scan, std::memory_order_relaxed);
+    progressDone_.store(0, std::memory_order_relaxed);
+    uint64_t manifestBytes = 0;
+    for (const ManifestFile& f : m.files) manifestBytes += f.size;
+    progressTotal_.store(manifestBytes, std::memory_order_relaxed);
+
+    std::vector<const ManifestFile*> toDownload;
+    std::vector<bool> changedFlags(m.files.size(), false);
+    uint64_t scanned = 0;
+    for (size_t i = 0; i < m.files.size(); ++i) {
+        const ManifestFile& f = m.files[i];
+        if (cancel_.load(std::memory_order_relaxed)) return std::string("cancelled");
+        const fs::path live = ExecutableDir() / Utf8ToPath(f.path);
+        bool same = false;
+        if (FileExists(live)) {
+            std::error_code fec;
+            if (fs::file_size(live, fec) == f.size) {
+                const std::string digest = LowerAsciiOf(Sha256OfFile(live, nullptr));
+                same = digest == f.sha256;
+            }
+        }
+        if (!same) {
+            toDownload.push_back(&f);
+            changedFlags[i] = true;
+            changedBytes += f.size;
+        }
+        scanned += f.size;
+        progressDone_.store(scanned, std::memory_order_relaxed);
+    }
+    changedFiles = (int)toDownload.size();
+    deltaFiles_.store(changedFiles, std::memory_order_relaxed);
+    deltaFullBytes_.store(feed.size, std::memory_order_relaxed);
+    LOG_INFO("update: delta %d files changed, %.1f MB to download (full zip %.1f MB)", changedFiles,
+             (double)changedBytes / (1024.0 * 1024.0), (double)feed.size / (1024.0 * 1024.0));
+    if (cancel_.load(std::memory_order_relaxed)) return std::string("cancelled");
+
+    // 3. build the staged tree: hard-link the unchanged files, download the changed/new objects.
+    const fs::path top = extract / (L"MMDX12-" + Utf8ToWide(feed.version) + L"-win64");
+    std::error_code ec;
+    fs::remove_all(extract, ec);
+    fs::create_directories(top, ec);
+    for (size_t i = 0; i < m.files.size(); ++i) {
+        if (cancel_.load(std::memory_order_relaxed)) return std::string("cancelled");
+        const ManifestFile& f = m.files[i];
+        const fs::path rel = Utf8ToPath(f.path);
+        if (f.path.empty() || f.path[0] == '/' || f.path.find("..") != std::string::npos ||
+            f.path.find(':') != std::string::npos) {
+            LOG_WARN("update: manifest has an unsafe path: %s", f.path.c_str());
+            return "manifest has an unsafe path";
+        }
+        const fs::path dst = top / rel;
+        if (!changedFlags[i]) {
+            if (!LinkOrCopy(ExecutableDir() / rel, dst, error)) {
+                LOG_WARN("update: delta link failed: %s", error.c_str());
+                return "delta link failed (" + error + ")";
+            }
+        }
+    }
+    // Objects after linking: download progress measures only the changed bytes.
+    noticeStage_.store((int)Stage::Download, std::memory_order_relaxed);
+    progressDone_.store(0, std::memory_order_relaxed);
+    progressTotal_.store(changedBytes, std::memory_order_relaxed);
+    for (size_t i = 0; i < m.files.size(); ++i) {
+        if (cancel_.load(std::memory_order_relaxed)) return std::string("cancelled");
+        if (!changedFlags[i]) continue;
+        const ManifestFile& f = m.files[i];
+        const std::string key = f.sha256.substr(0, 2) + "/" + f.sha256;
+        const std::string url = JoinUrl(objects, key);
+        const fs::path tmp = root / L"objects" / Utf8ToWide(f.sha256.substr(0, 2)) / Utf8ToWide(f.sha256);
+        std::string derr;
+        if (!DownloadObject(url, tmp, &progressDone_, &cancel_, derr)) {
+            if (derr == "cancelled") return derr;
+            LOG_WARN("update: delta object failed for %s: %s", f.path.c_str(), derr.c_str());
+            return "object download failed for " + f.path + " (" + derr + ")";
+        }
+        if (!VerifyFile(tmp, f.size, f.sha256, nullptr)) {
+            LOG_WARN("update: delta object hash mismatch for %s", f.path.c_str());
+            return "object hash mismatch for " + f.path;
+        }
+        const fs::path dst = top / Utf8ToPath(f.path);
+        fs::create_directories(dst.parent_path(), ec);
+        fs::remove(dst, ec);
+        fs::rename(tmp, dst, ec);
+        if (ec) {
+            ec.clear();
+            fs::copy_file(tmp, dst, fs::copy_options::overwrite_existing, ec);
+            fs::remove(tmp, ec);
+            if (ec) return "cannot place " + f.path;
+        }
+    }
+    if (!FileExists(top / L"MMDX12.exe")) {
+        LOG_WARN("update: the manifest has no MMDX12.exe");
+        return std::string("the manifest has no MMDX12.exe");
+    }
+    return std::string();
+}
+
 // The download/verify/extract worker: "" = staged (applier spawned), "cancelled", else the error.
 std::string Controller::UpdateWorker(Feed feed) {
     const fs::path root = UpdateRoot();
     std::error_code ec;
     fs::remove_all(root, ec);  // stale staging from an earlier attempt
-    const fs::path zip = root / (L"MMDX12-" + Utf8ToWide(feed.version) + L".zip");
+    noticeStage_.store((int)Stage::Download, std::memory_order_relaxed);
+    deltaFiles_.store(0, std::memory_order_relaxed);
+    deltaFullBytes_.store(feed.size, std::memory_order_relaxed);
 
-    // 1. download
-    std::string error;
-    if (!DownloadToFile(feed.url, zip, &progressDone_, &cancel_, error)) {
-        if (error != "cancelled") LOG_WARN("update: download failed: %s", error.c_str());
-        return error;
-    }
-    if (cancel_.load(std::memory_order_relaxed)) return std::string("cancelled");
-
-    // 2. verify size + SHA-256 (streamed; the progress strip switches to "verifying")
-    noticeStage_.store(1, std::memory_order_relaxed);
-    progressTotal_.store(fs::file_size(zip, ec), std::memory_order_relaxed);
-    progressDone_.store(0, std::memory_order_relaxed);
-    const std::string digest = Sha256OfFile(zip, &progressDone_);
-    if (digest.empty()) {
-        LOG_WARN("update: cannot hash the download");
-        return std::string("cannot hash the download");
-    }
-    if (!feed.sha256.empty() && digest != feed.sha256) {
-        LOG_WARN("update: checksum mismatch (%s...)", digest.substr(0, 12).c_str());
-        return "checksum mismatch (" + digest.substr(0, 12) + "...)";
-    }
-    if (!feed.sha256.empty()) LOG_INFO("update: sha256 ok (%s...)", digest.substr(0, 12).c_str());
-    if (feed.size > 0 && fs::file_size(zip, ec) != feed.size) {
-        LOG_WARN("update: size mismatch (%llu/%llu)", (unsigned long long)fs::file_size(zip, ec),
-                 (unsigned long long)feed.size);
-        return std::string("size mismatch");
+    // Delta path first: when the feed carries a manifest, build the staged tree from it. Any
+    // failure except cancel falls back to the full zip in this same run.
+    bool delta = false;
+    if (!feed.manifest.empty()) {
+        int changedFiles = 0;
+        uint64_t changedBytes = 0;
+        const std::string derr = StageDelta(feed, changedFiles, changedBytes);
+        if (derr == "cancelled") return derr;
+        if (derr.empty()) {
+            delta = true;
+            LOG_INFO("update: delta staged");
+        } else {
+            LOG_WARN("update: delta failed (%s), falling back to the full zip", derr.c_str());
+            fs::remove_all(root, ec);
+            deltaFiles_.store(0, std::memory_order_relaxed);
+            noticeStage_.store((int)Stage::Download, std::memory_order_relaxed);
+            progressDone_.store(0, std::memory_order_relaxed);
+            progressTotal_.store(feed.size, std::memory_order_relaxed);
+        }
     }
 
-    // 3. extract
-    if (cancel_.load(std::memory_order_relaxed)) return std::string("cancelled");
-    noticeStage_.store(2, std::memory_order_relaxed);
-    if (!ExtractZip(zip, ExtractDir(), error)) {
-        LOG_WARN("update: extraction failed: %s", error.c_str());
-        return error;
+    if (!delta) {
+        const fs::path zip = root / (L"MMDX12-" + Utf8ToWide(feed.version) + L".zip");
+        // 1. download
+        std::string error;
+        if (!DownloadToFile(feed.url, zip, &progressDone_, &cancel_, error)) {
+            if (error != "cancelled") LOG_WARN("update: download failed: %s", error.c_str());
+            return error;
+        }
+        if (cancel_.load(std::memory_order_relaxed)) return std::string("cancelled");
+
+        // 2. verify size + SHA-256 (streamed; the progress strip switches to "verifying")
+        noticeStage_.store((int)Stage::Verify, std::memory_order_relaxed);
+        progressTotal_.store(fs::file_size(zip, ec), std::memory_order_relaxed);
+        progressDone_.store(0, std::memory_order_relaxed);
+        const std::string digest = Sha256OfFile(zip, &progressDone_);
+        if (digest.empty()) {
+            LOG_WARN("update: cannot hash the download");
+            return std::string("cannot hash the download");
+        }
+        if (!feed.sha256.empty() && digest != feed.sha256) {
+            LOG_WARN("update: checksum mismatch (%s...)", digest.substr(0, 12).c_str());
+            return "checksum mismatch (" + digest.substr(0, 12) + "...)";
+        }
+        if (!feed.sha256.empty()) LOG_INFO("update: sha256 ok (%s...)", digest.substr(0, 12).c_str());
+        if (feed.size > 0 && fs::file_size(zip, ec) != feed.size) {
+            LOG_WARN("update: size mismatch (%llu/%llu)", (unsigned long long)fs::file_size(zip, ec),
+                     (unsigned long long)feed.size);
+            return std::string("size mismatch");
+        }
+
+        // 3. extract
+        if (cancel_.load(std::memory_order_relaxed)) return std::string("cancelled");
+        noticeStage_.store((int)Stage::Extract, std::memory_order_relaxed);
+        std::string error2;
+        if (!ExtractZip(zip, ExtractDir(), error2)) {
+            LOG_WARN("update: extraction failed: %s", error2.c_str());
+            return error2;
+        }
     }
+
     const fs::path stagedRoot = FindStagedRoot(ExtractDir());
     if (stagedRoot.empty() || !FileExists(stagedRoot / L"MMDX12.exe")) {
-        LOG_WARN("update: the zip has no MMDX12.exe");
-        return std::string("the zip has no MMDX12.exe");
+        LOG_WARN("update: the staged tree has no MMDX12.exe");
+        return std::string("the staged tree has no MMDX12.exe");
     }
 
-    // 4. journal + spawn the applier (the running exe cannot overwrite itself)
+    // journal + spawn the applier (the running exe cannot overwrite itself)
     if (!JournalWrite("pending", feed.version, CurrentPid(), relaunchArgs_)) {
         LOG_WARN("update: cannot write update_tmp/state.json");
         return std::string("cannot write update_tmp/state.json");
@@ -646,6 +939,9 @@ const Controller::State& Controller::Get() {
             notice_.doneMb = (double)done / (1024.0 * 1024.0);
             notice_.totalMb = (double)total / (1024.0 * 1024.0);
             notice_.fraction = total > 0 ? (float)std::clamp((double)done / (double)total, 0.0, 1.0) : 0.0f;
+            notice_.deltaFiles = deltaFiles_.load(std::memory_order_relaxed);
+            notice_.delta = notice_.deltaFiles > 0;
+            notice_.fullMb = (double)deltaFullBytes_.load(std::memory_order_relaxed) / (1024.0 * 1024.0);
         }
     }
     return notice_;

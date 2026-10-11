@@ -88,3 +88,4 @@ $zip = Join-Path $dist "$name.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "packaged $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB)"
+Write-Host "delta update: python tools\make_update.py `"$stage`" --version $Version --out dist\update --base-url <updates url>"

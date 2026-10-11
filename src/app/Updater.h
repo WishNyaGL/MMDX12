@@ -6,9 +6,19 @@
 //
 // Feed: GET https://mmdx.codingbot.kr/latest.json ->
 //   { "version": "1.0.1", "url": "<zip>", "size": 1, "sha256": "<hex>", "page": "<releases>",
+//     "manifest": "<manifest url>", "manifestSha256": "<hex>",
 //     "notes": { "ko": "...", "en": "...", ... } }
 // `url` may be https/http, a file: URL or a local path (testing); `size` and `sha256` are
 // verified before the zip is trusted. `notes` falls back to "en", then the first entry.
+// `manifest` / `manifestSha256` are optional: when present and valid the download uses the delta
+// path (only changed/new files), otherwise it falls back to the full zip. Old apps ignore them.
+//
+// Delta path: the manifest lists every program file of the new version (path under the install
+// root, size, SHA-256) and an object store base url. The app hashes its own matching-size files,
+// hard-links the unchanged ones into the staged tree, and downloads only the changed/new objects
+// (verifying each SHA-256). Files the install has but the manifest lacks vanish with the swap (the
+// top-level entries are replaced wholesale, as in the zip path). Any delta failure except cancel
+// logs a [W] and continues with the full zip in the same run.
 //
 // The flow spans three processes and is designed so a failure at any point leaves a working
 // install (the running exe cannot overwrite itself, so the swap is rename-aside + move):
@@ -33,6 +43,7 @@
 #include <future>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace mmdx::updater {
 
@@ -46,9 +57,33 @@ struct Feed {
     std::string page;      // release page (offered when the install folder is not writable)
     std::string sha256;    // lowercase hex of the zip
     uint64_t size = 0;     // zip bytes (0: not checked)
+    // Optional delta fields: a per-file manifest (see Manifest below). Old apps ignore them; when
+    // both are present and valid the update only downloads the files whose SHA-256 changed.
+    std::string manifest;         // manifest URL (https / http / file: / local path)
+    std::string manifestSha256;   // lowercase hex of the manifest file
     std::map<std::string, std::string> notes;  // language code -> short plain text
     std::string error;     // !ok: human readable
 };
+
+// The per-file manifest (UTF-8 JSON) — the cross-version contract:
+//   { "format": 1, "version": "1.9.2", "objects": "objects/",
+//     "files": [ { "path": "shaders/mmd.hlsl", "size": 12345, "sha256": "<lowercase hex>" }, ... ] }
+// `path` is forward-slash, relative to the install root (the zip's top folder content), no
+// library/. `objects` is the base URL of the content-addressed store, absolute or relative to
+// the manifest URL; an object lives at <objects><sha[0:2]>/<sha> and holds the raw bytes.
+struct ManifestFile {
+    std::string path;    // forward slashes, relative to the install root
+    uint64_t size = 0;
+    std::string sha256;  // lowercase hex
+};
+struct Manifest {
+    int format = 0;
+    std::string version;
+    std::string objects;  // object store base URL (as written in the manifest)
+    std::vector<ManifestFile> files;
+};
+// Parse manifest JSON. True with `out` filled; false + error otherwise.
+bool ParseManifest(const std::string& json, Manifest& out, std::string& error);
 
 // ".-component" semantic compare ("1.2.10" > "1.2.9"): negative / 0 / positive.
 int CompareVersions(const std::string& a, const std::string& b);
@@ -84,7 +119,9 @@ public:
     ~Controller();
 
     enum class Phase { Idle, Checking, UpToDate, Available, Downloading, NotWritable, Failed, Staged };
-    enum class Stage { Download, Verify, Extract };  // Downloading sub-step for the progress label
+    // Downloading sub-step for the progress label. In the delta path the order is Scan -> Download
+    // -> Verify -> Extract; the full-zip path skips Scan.
+    enum class Stage { Scan, Download, Verify, Extract };
     struct State {
         Phase phase = Phase::Idle;
         std::string version;             // feed version (Available / Downloading / Staged)
@@ -94,6 +131,11 @@ public:
         float fraction = 0;              // Downloading: 0..1
         double doneMb = 0, totalMb = 0;  // Downloading: progress in MB
         Stage stage = Stage::Download;   // Downloading: which label the progress strip shows
+        // Delta path (Downloading): how many files changed and the full-zip size, for
+        // "N files changed · X MB / Y MB".
+        bool delta = false;
+        int deltaFiles = 0;              // changed + new files to fetch
+        double fullMb = 0;               // full zip size (MB) for the "of the whole" figure
     };
 
     void Configure(std::string feedUrl, std::string currentVersion);  // once, at App start
@@ -112,6 +154,9 @@ public:
 private:
     void ProcessFeed(const Feed& f);    // shared tail of StartCheck / CheckNow
     std::string UpdateWorker(Feed f);   // download -> verify -> extract -> journal + applier
+    // Delta path (inside UpdateWorker): fetch + verify the manifest, build the staged tree from
+    // hard links + changed objects. "" on success; "cancelled"; else an error to fall back on.
+    std::string StageDelta(const Feed& feed, int& changedFiles, uint64_t& changedBytes);
 
     State notice_;
     Feed feed_;                         // latest good feed
@@ -122,6 +167,8 @@ private:
     std::future<std::string> update_;   // "" = staged, "cancelled" = aborted, else the error
     std::atomic<bool> cancel_{false};
     std::atomic<uint64_t> progressDone_{0}, progressTotal_{0};
+    std::atomic<int> deltaFiles_{0};    // worker -> UI: delta changed files (0 = full-zip path)
+    std::atomic<uint64_t> deltaFullBytes_{0};  // worker -> UI: full zip size for the delta label
 };
 
 } // namespace mmdx::updater

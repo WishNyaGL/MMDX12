@@ -17,10 +17,11 @@ constexpr size_t kMaxRingLines = 512;
 std::mutex g_logMutex;
 std::deque<std::string> g_ring;
 FILE* g_logFile = nullptr;
+bool g_logAppend = false;
 
 void WriteFileLocked(const std::string& line) {
     if (!g_logFile) {
-        g_logFile = _wfopen((ExecutableDir() / L"mmdx12.log").c_str(), L"wb");
+        g_logFile = _wfopen((ExecutableDir() / L"mmdx12.log").c_str(), g_logAppend ? L"ab" : L"wb");
         if (!g_logFile) return;
     }
     fputs(line.c_str(), g_logFile);
@@ -29,6 +30,18 @@ void WriteFileLocked(const std::string& line) {
 }
 
 } // namespace
+
+void LogAppendToExisting() {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    g_logAppend = true;
+}
+
+void LogCloseFile() {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    if (g_logFile) fclose(g_logFile);
+    g_logFile = nullptr;
+    g_logAppend = true;
+}
 
 void LogWrite(LogLevel level, const char* fmt, ...) {
     const char* prefix = "[I] ";

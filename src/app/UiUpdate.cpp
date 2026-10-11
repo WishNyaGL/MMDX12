@@ -96,7 +96,13 @@ void App::UpdateInstallCommand() {
     }
     // The restarted app must find the feed again (the applier relaunches with these args).
     std::string relaunch;
-    if (!options_.updateFeed.empty()) relaunch = "--update-feed \"" + options_.updateFeed + "\"";
+    if (!options_.updateFeed.empty()) {
+        relaunch = "--update-feed \"" + options_.updateFeed + "\"";
+        // An automated E2E run: the restarted version quits on its own after a few frames
+        // (--screen select makes --frames count from the first frame; see AppRenderFrame).
+        if (options_.updateRelaunchFrames > 0)
+            relaunch += " --screen select --frames " + std::to_string(options_.updateRelaunchFrames);
+    }
     update_.Configure(!options_.updateFeed.empty() ? options_.updateFeed : updater::kDefaultFeedUrl,
                       MMDX12_VERSION);
     update_.StartFeedUpdate(f, relaunch);
@@ -229,14 +235,19 @@ void App::DrawUpdateProgressDialog() {
     std::snprintf(buf, sizeof(buf), Tr("MMDX12 %s(으)로 업데이트하는 중..."), s.version.c_str());
     Text(dl, Font::Semibold, size::Body, ImVec2(tx, a.y + Dp(16.0f)), p.ink, buf);
 
-    const char* stage = s.stage == updater::Controller::Stage::Verify   ? Tr("확인하는 중")
+    const char* stage = s.stage == updater::Controller::Stage::Scan     ? Tr("설치된 파일 확인 중")
+                        : s.stage == updater::Controller::Stage::Verify ? Tr("확인하는 중")
                         : s.stage == updater::Controller::Stage::Extract ? Tr("압축을 푸는 중")
                                                                          : Tr("다운로드하는 중");
     char detail[160];
-    if (s.totalMb > 0.5 && s.stage == updater::Controller::Stage::Download)
+    if (s.stage == updater::Controller::Stage::Download && s.delta && s.deltaFiles > 0) {
+        std::snprintf(detail, sizeof(detail), Tr("변경 파일 %d개 · %.1f MB / 전체 %.0f MB"), s.deltaFiles,
+                      s.doneMb, s.fullMb > 0 ? s.fullMb : s.totalMb);
+    } else if (s.totalMb > 0.5 && s.stage == updater::Controller::Stage::Download) {
         std::snprintf(detail, sizeof(detail), "%s  ·  %.0f / %.0f MB", stage, s.doneMb, s.totalMb);
-    else
+    } else {
         std::snprintf(detail, sizeof(detail), "%s", stage);
+    }
     Text(dl, Font::Regular, size::Small, ImVec2(tx, a.y + Dp(40.0f)), p.ink2, detail);
 
     const float barY = a.y + Dp(66.0f);

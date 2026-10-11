@@ -129,9 +129,18 @@ struct Sha256 {
     }
 };
 
-// SHA-256 of a file, streamed (progress in bytes for the verify strip). Empty string on failure.
+// Ask WinHTTP to accept and transparently decompress a gzip-encoded response body
+// (WINHTTP_OPTION_DECOMPRESSION; Win 8.1+). Best effort: an ancient WinHTTP just leaves the
+// option unset and the body arrives raw, which fails the caller's hash check instead of crashing.
+void SetDecompression(HINTERNET request, HttpOption option) {
+    if (option != HttpOption::AcceptGzip) return;
+    DWORD codings = WINHTTP_DECOMPRESSION_FLAG_GZIP;
+    WinHttpSetOption(request, WINHTTP_OPTION_DECOMPRESSION, &codings, sizeof(codings));
+}
+
 } // namespace
 
+// SHA-256 of a file, streamed (progress in bytes for the verify strip). Empty string on failure.
 std::string Sha256OfFile(const fs::path& file, std::atomic<uint64_t>* progress) {
     std::ifstream in(file, std::ios::binary);
     if (!in) return {};
@@ -189,7 +198,8 @@ int CompareVersions(const std::string& a, const std::string& b) {
 // --- feed / download over WinHTTP ----------------------------------------------------------
 
 // https/http GET with a size cap; 200 with the body, false + error otherwise.
-bool HttpGet(const std::string& url, std::string& body, std::string& error, uint64_t maxBytes) {
+bool HttpGet(const std::string& url, std::string& body, std::string& error, uint64_t maxBytes,
+             HttpOption option) {
     URL_COMPONENTS uc{};
     uc.dwStructSize = sizeof(uc);
     uc.dwSchemeLength = (DWORD)-1;
@@ -229,6 +239,7 @@ bool HttpGet(const std::string& url, std::string& body, std::string& error, uint
         error = "network error (WinHTTP " + std::to_string(GetLastError()) + ")";
         return false;
     }
+    SetDecompression(request.h, option);
     if (!WinHttpSendRequest(request.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(request.h, nullptr)) {
         error = "network error (WinHTTP " + std::to_string(GetLastError()) + ")";
@@ -288,7 +299,7 @@ fs::path LocalPathOf(const std::string& source) {
 // Download a url to a file (https/http), or copy a local/file: source. Reports bytes done and
 // honours the cancel flag between chunks.
 bool DownloadToFile(const std::string& url, const fs::path& dest, std::atomic<uint64_t>* done,
-                    std::atomic<bool>* cancel, std::string& error) {
+                    std::atomic<bool>* cancel, std::string& error, HttpOption option) {
     if (IsLocalSource(url)) {
         const fs::path src = LocalPathOf(url);
         std::error_code ec;
@@ -298,7 +309,7 @@ bool DownloadToFile(const std::string& url, const fs::path& dest, std::atomic<ui
             error = "cannot copy " + PathToUtf8(src) + " (" + ec.message() + ")";
             return false;
         }
-        if (done) done->store(fs::file_size(dest, ec), std::memory_order_relaxed);
+        if (done) done->fetch_add(fs::file_size(dest, ec), std::memory_order_relaxed);  // adds, like https
         return true;
     }
 
@@ -341,6 +352,7 @@ bool DownloadToFile(const std::string& url, const fs::path& dest, std::atomic<ui
         error = "network error (WinHTTP " + std::to_string(GetLastError()) + ")";
         return false;
     }
+    SetDecompression(request.h, option);
     if (!WinHttpSendRequest(request.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(request.h, nullptr)) {
         error = "network error (WinHTTP " + std::to_string(GetLastError()) + ")";

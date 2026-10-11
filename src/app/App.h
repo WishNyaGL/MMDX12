@@ -105,6 +105,8 @@ namespace mmdx {
 //   --ui-scale <f>              UI scale for this run instead of the monitor's DPI scale (1.5 = 144 dpi; captures)
 //   --update-feed <url-or-file>  auto-update feed override: an https URL, a file: URL or a local
 //                                latest.json path (testing); the zip url may also be file:/local
+//   --update-relaunch-frames <n> with --update-feed: relaunch the updated app with --frames <n>
+//                                (headless E2E; the restarted version quits on its own)
 //   --apply-update               internal: apply a staged update with no window, then exit
 //   --apply-wait <pid>           internal: process id the applier waits for before the swap
 struct AppOptions {
@@ -155,6 +157,7 @@ struct AppOptions {
     std::string formation;          // --formation <spec>
     std::string startScreen;  // --screen select|bench: open that screen after the scan; --frames then counts every frame  // --free-camera: start in the orbit camera instead of the VMD camera
     std::string updateFeed;   // --update-feed: feed URL / file override (empty: the default feed)
+    int updateRelaunchFrames = 0;  // --update-relaunch-frames: relaunch the updated app with --frames (E2E)
     bool applyUpdate = false; // --apply-update (internal): apply a staged update, then exit
     uint32_t applyWaitPid = 0;        // --apply-wait (internal): pid the applier waits for
     int mcp = -1;                     // --mcp (1), --no-mcp (0), auto (-1)

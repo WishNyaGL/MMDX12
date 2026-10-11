@@ -7,15 +7,21 @@
 
 namespace mmdx::net {
 
+// WINHTTP_OPTION_DECOMPRESSION for the request. None: as before (no gzip); AcceptGzip: transparently
+// decompresses a server response that is gzip-encoded (Content-Encoding: gzip). The delta updater
+// asks for AcceptGzip; the zip download / shader pack store keep the default.
+enum class HttpOption { None, AcceptGzip };
+
 // https/http GET with a size cap; true with the body on 200, false + error otherwise.
-bool HttpGet(const std::string& url, std::string& body, std::string& error, uint64_t maxBytes);
+bool HttpGet(const std::string& url, std::string& body, std::string& error, uint64_t maxBytes,
+             HttpOption option = HttpOption::None);
 // A source the app accepts for testing: file: URLs or plain local paths (not http/https).
 bool IsLocalSource(const std::string& url);
 std::filesystem::path LocalPathOf(const std::string& source);
 // Downloads a url to a file (https/http), or copies a local / file: source. Reports bytes done and honours the
 // cancel flag between chunks (both may be null).
 bool DownloadToFile(const std::string& url, const std::filesystem::path& dest, std::atomic<uint64_t>* done,
-                    std::atomic<bool>* cancel, std::string& error);
+                    std::atomic<bool>* cancel, std::string& error, HttpOption option = HttpOption::None);
 // SHA-256 of a file as lower-case hex (progress in bytes, may be null). Empty on failure.
 std::string Sha256OfFile(const std::filesystem::path& file, std::atomic<uint64_t>* progress);
 // Extracts a zip with Windows' tar.exe (bsdtar, Windows 10 1803+), hidden.

@@ -1390,3 +1390,33 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 - Studio stills ignore `--offline-renderer raster` (both "raster" and "gi" stills came out as GI); use the viewport
   capture for raster references. `--offline-renderer` persists into the ini.
 - Play-mode song cameras rarely frame Ruan Mei's face (senbonzakura / envy_baby seeks showed empty frames).
+
+## 2026-10-11 (night) - smart (delta) updater
+- Goal: stop downloading the full ~178 MB zip for every update (1.9.0 -> 1.9.1 changed only the exe, tools and a few
+  shaders).
+- Feed: optional `manifest` / `manifestSha256` next to the zip fields (old apps ignore them). Manifest (format 1):
+  `{version, objects, files: [{path, size, sha256}]}`; objects are content-addressed (`<objects><aa>/<sha>`, raw bytes,
+  served gzip-encoded via pre-built `.gz` siblings; WinHTTP `WINHTTP_OPTION_DECOMPRESSION` through the new
+  `net::HttpOption::AcceptGzip`, other downloads unchanged).
+- `Controller::StageDelta`: fetch + verify the manifest, hash the install, hard-link unchanged files (copy fallback)
+  into `update_tmp/extract/MMDX12-<ver>-win64/`, download + verify only changed/new objects; then the unchanged
+  journal / swap / rollback / relaunch. Any failure except cancel falls back to the full zip in the same run. UI: a
+  "checking installed files" stage and "N files changed · X MB / Y MB total" (four languages).
+- Publisher `tools/make_update.py` (manifest + shared object store, `.gz` only where smaller); the website feed adds
+  the manifest fields for versions listed in its `src/data/update_manifests.json`; the server serves
+  `/updates/objects/` (immutable, gzip_static) and `/updates/manifests/` outside the site root, so site deploys don't
+  touch them. The 1.9.1 release objects are already uploaded.
+- Fixed two old updater bugs found by the E2E: the applier opened `mmdx12.log` with "wb" and wiped the updating app's
+  log (now `LogAppendToExisting`), and `ArchiveLog` renamed the log while the applier held it open, so
+  `mmdx12.previous.log` never survived (now `LogCloseFile` first, as the applier's last step).
+- Verified: `tools/update_e2e.py` (local stores, headless, sequential runs) - delta (3 changed files fetched; changed /
+  new / removed / unchanged files, library / ini / recovery intact, update_tmp cleaned, breadcrumb, previous log) and a
+  corrupted object -> zip fallback, all checks pass. Same scenario over https against the real object store with the
+  shipped 1.9.1 exe as the new exe: `delta 4 files changed, 5.4 MB to download (full zip 171.7 MB)` (the exe went
+  over the wire as 2.6 MB gzip), installed; the test manifest was removed afterwards.
+- Implementation started by a delegated worker (opencode, deepseek-v4.1-flash, level high); stopped by the user's
+  request mid-E2E, reviewed and finished by Claude (stage label on fallback, progress accumulation, progress reset on
+  fallback, drive-letter path check, log fixes, E2E assertions).
+### Not verified
+- The new progress-dialog strings were not captured on screen. Delta updates only start working from the first
+  release that contains this code (installs older than it still take the zip once).

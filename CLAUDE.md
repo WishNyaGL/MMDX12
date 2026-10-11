@@ -73,6 +73,8 @@ progress.md is the session log. Read its latest entry first.
   - `pack_previews.py [--only ids] [--out-dir d] [--bump]`: re-shoots every public pack's before/after preview over the pipe
     (shot table in the script; scene-only `screenshot`, `set_render_settings shader_texture_folder`; writes the website
     repo's `shader-packs/<id>/` and the built-in packs, contact sheet in `captures/pack_previews`)
+  - `make_update.py <stage> --version X --out d [--base-url u]`: delta-update manifest + content-addressed objects (+ .gz)
+    for the smart updater (feed `manifest` / `manifestSha256`); `update_e2e.py`: headless updater E2E (delta + corrupt-object fallback)
   - `mcp_pipe.py` / `mcp_x.py`: talk to a running app's pipe without the bridge (`python tools/mcp_x.py "click 플레이" "wait 30" "shot out.png" "items 셰이더"`)
 - The play bar auto-hides while playing with no mouse movement, so captures usually don't show it.
 

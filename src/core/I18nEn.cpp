@@ -704,6 +704,8 @@ const Entry kEnglish[] = {
     {"확인하는 중", "Verifying"},
     {"압축을 푸는 중", "Extracting"},
     {"다운로드하는 중", "Downloading"},
+    {"설치된 파일 확인 중", "Checking installed files"},
+    {"변경 파일 %d개 · %.1f MB / 전체 %.0f MB", "%d files changed · %.1f MB / %.0f MB total"},
     {"카메라 값", "Camera values"},
     {"자동 키", "Auto key"},
     {"값을 고치면 재생 헤드에 키가 생겨요", "Editing a value keys it at the playhead"},

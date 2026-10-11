@@ -193,6 +193,8 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             }
         } else if (arg == L"--update-feed") {
             opt.updateFeed = WideToUtf8(next());
+        } else if (arg == L"--update-relaunch-frames") {
+            opt.updateRelaunchFrames = _wtoi(next().c_str());
         } else if (arg == L"--apply-update") {
             opt.applyUpdate = true;
         } else if (arg == L"--apply-wait") {
