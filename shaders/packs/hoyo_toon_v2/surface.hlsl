@@ -15,6 +15,12 @@
 //                                            u = 0 deep shadow .. 1 the light side
 //   4 FaceLightmap   linear SDF for a light from the character's right; mirrored for the other side
 //   5 MetalMap       matcap for metal parts
+//
+// Star Rail (2.2.0): the same pack reads Star Rail's maps when a part has no Genshin one. 6 Body_Warm_Ramp / 7 Body_Cool_Ramp
+// (day / night, 8 material rows picked by the light map alpha in steps of 1/8), 8 / 9 Hair_Warm_Ramp / Hair_Cool_Ramp (one
+// row), 10 Body_LightMap_L (the body light map; the hair one is Hair_LightMap, as in Genshin). Star Rail's light map has G = 0.39
+// neutral and no metal flag in R (R is plain specular strength), so there is no matcap on those parts. Its Face_Shadow is not
+// a Genshin SDF, so the face keeps the geometric light with the body ramp's skin tone.
 
 #include "hoyo_toon_v2_core.hlsli"
 
@@ -39,11 +45,33 @@ bool HasMap(uint i) { return PackTexSize(i).x > 1u; }   // a missing map is a 1 
 
 // ---- maps --------------------------------------------------------------------------------------------------------------
 
+// Star Rail: warm = day, cool = night; one of the two alone is used as it is
+float3 SrRampColour(uint warm, uint cool, uint row, float u) {
+    const bool hasWarm = HasMap(warm);
+    const bool hasCool = HasMap(cool);
+    const uint a = hasWarm ? warm : cool;
+    const uint b = hasCool ? cool : a;
+    float v = SrRampV(row, PackTexSize(a).y);
+    float3 ca = PackSampleTexLevel(a, float2(u, v), 0).rgb;
+    float3 cb = PackSampleTexLevel(b, float2(u, v), 0).rgb;
+    return lerp(ca, cb, hasWarm && hasCool ? P_NIGHT : 0.0);
+}
+
+bool HasGenshinRamp(bool hair) { return HasMap(hair ? T_HAIR_RAMP : T_BODY_RAMP); }
+bool HasSrRamp(bool hair) { return HasMap(hair ? T_HAIR_WARM : T_BODY_WARM) || HasMap(hair ? T_HAIR_COOL : T_BODY_COOL); }
+bool HasRamp(bool hair) { return HasGenshinRamp(hair) || HasSrRamp(hair); }
+
 float3 RampColour(uint tex, uint row, float u) {
     float v = (row * 2.0 + 1.0) / 20.0;
     float3 day = PackSampleTexLevel(tex, float2(u, v), 0).rgb;
     float3 night = PackSampleTexLevel(tex, float2(u, v + 0.5), 0).rgb;
     return lerp(day, night, P_NIGHT);   // linear (sRGB ramp)
+}
+
+// Genshin row (light map alpha in 5 steps) or Star Rail row (8 steps) of the part's ramp
+float3 PartRamp(bool hair, bool sr, float alpha, float u) {
+    if (!sr) return RampColour(hair ? T_HAIR_RAMP : T_BODY_RAMP, MaterialRow(alpha), u);
+    return SrRampColour(hair ? T_HAIR_WARM : T_BODY_WARM, hair ? T_HAIR_COOL : T_BODY_COOL, SrMaterialRow(alpha), u);
 }
 
 // Face light from the SDF: the light is projected into the head's horizontal plane; the SDF holds, per pixel, the light
@@ -108,26 +136,28 @@ PackResult PackShade(PackSurface s) {
         lit = faceLit * lerp(1.0, s.shadow, P_FACE_CAST);
         if (eye) lit = lerp(lit, 1.0, 0.6);   // eyes stay readable in shadow
         // the skin row of the body ramp is the face's shadow tone
-        shadowTint = HasMap(T_BODY_RAMP) ? RampColour(T_BODY_RAMP, 0u, 0.5) : FallbackShadowTint(0.15);
+        const bool bodySr = !HasGenshinRamp(false);
+        shadowTint = HasRamp(false) ? PartRamp(false, bodySr, bodySr ? 0.0 : 1.0, 0.5) : FallbackShadowTint(0.15);
     } else {
         const bool hair = s.materialClass == PACK_HAIR;
-        const uint lmTex = hair ? T_HAIR_LM : T_BODY_LM;
-        const uint rampTex = hair ? T_HAIR_RAMP : T_BODY_RAMP;
+        // Star Rail part: its ramp and (body) light map stand in for the Genshin ones that are missing
+        const bool srLm = !hair && !HasMap(T_BODY_LM) && HasMap(T_BODY_LM_SR);
+        const bool sr = srLm || (!HasGenshinRamp(hair) && HasSrRamp(hair));
+        const uint lmTex = hair ? T_HAIR_LM : (srLm ? T_BODY_LM_SR : T_BODY_LM);
         float halfLambert = dot(s.N, s.L) * 0.5 + 0.5;
         if (HasMap(lmTex)) {
             float4 lm = PackSampleTex(lmTex, s.uv);
             // painted shadow bias: G = 0.5 leaves the half-Lambert alone, lower pulls toward shadow, 0 / 1 are fixed
-            float factor = halfLambert * saturate(lm.g * 2.0);
+            float factor = halfLambert * saturate(lm.g * 2.0 * (sr ? kSrBiasScale : 1.0));
             lit = smoothstep(0.5 - P_SOFTNESS, 0.5 + P_SOFTNESS, factor);
             if (lm.g < 0.05) lit = 0.0;
             if (lm.g > 0.95) lit = 1.0;
             lit *= s.shadow;
-            uint row = MaterialRow(lm.a);
             float u = saturate(factor * 2.0) * 0.9;   // the ramp's shadow part: darker toward the core
-            shadowTint = HasMap(rampTex) ? RampColour(rampTex, row, u) : FallbackShadowTint(0.0);
+            shadowTint = HasRamp(hair) ? PartRamp(hair, sr, lm.a, u) : FallbackShadowTint(0.0);
             float3 h = normalize(s.L + s.V);
             float ndh = saturate(dot(s.N, h));
-            if (lm.r > 0.9 && HasMap(T_METAL)) {
+            if (!sr && lm.r > 0.9 && HasMap(T_METAL)) {
                 // metal: matcap from the view-space normal, tinted by the albedo
                 float3 nv = normalize(mul(s.N, (float3x3)gView));
                 float m = PackSampleTexLevel(T_METAL, nv.xy * float2(0.5, -0.5) + 0.5, 0).r;
