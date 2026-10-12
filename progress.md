@@ -1615,8 +1615,8 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   bench OK; 7 Ray characters raster / PT + the Ray stage raster / PT / GI with no `[E]`; pack + PBR (pack wins);
   material UI in 4 languages, light / dark, Ray row (.emd combo + file pick), stage row, studio stage; suggestion toast
   seen on screen (MCP run); packaged exe (fresh library, v2.0.0, no `[E]`); `update_e2e.py` all checks pass.
-- Release 2.0.0: GitHub v2.0.0 (notes dist/notes_2.0.0.md, 4 languages, PBR off / on images docs/media/compare-2.0.0.jpg +
-  detail-2.0.0.jpg; asset SHA-256 c6d76f75... = local zip), delta manifest 2.0.0 (13 new objects) uploaded, live
+- Release 2.0.0: GitHub v2.0.0 (notes dist/notes_2.0.0.md, 4 languages, PBR off / on images docs/media/pbr-2.0.0.jpg +
+  pbr-closeup-2.0.0.jpg (Sour Miku on the Ray stage; the first upload used a furry rig and was replaced within the hour); asset SHA-256 c6d76f75... = local zip), delta manifest 2.0.0 (13 new objects) uploaded, live
   manifest hash matches; website deployed (/latest.json -> 2.0.0 with manifest fields, /<lang>/docs/materials/ 200),
   web commit f10d0f4 pushed.
 ### Not verified / left
