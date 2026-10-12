@@ -136,7 +136,8 @@ float PbrChannel(float4 c, uint swizzle) { return c[swizzle]; }
 float PbrSlotRoughness(GpuPbrSlot s, float2 uv) {
     float v = PbrChannel(PbrSlotTexel(s, uv), s.swizzle);
     if (s.type == 0u) return pow(max(0.0, 1.0 - v), 2.0);
-    return max(0.0, v);   // types 1 / 2 store roughness
+    if (s.type == 2u) return v * v;   // linear (perceptual) roughness: s = 1 - r, so (1 - s)^2 = r^2 (glTF too)
+    return max(0.0, v);               // type 1: s = 1 - sqrt(r), so (1 - s)^2 = r
 }
 
 // metalness scalar (METALNESS has no meaningful MAP_TYPE).
