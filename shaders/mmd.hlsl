@@ -640,6 +640,16 @@ PSOut MmdShade(VSOut i, bool front, float3 n, float3 L, float3 V, float4 tex, fl
 }
 
 // ---- PBR material shading (P3) --------------------------------------------------------------
+// Analytic split-sum environment BRDF (Karis 2014 after Lazarov 2013): F0 * A + B for perceptual roughness `pr`.
+float3 PbrEnvBrdfApprox(float3 f0, float pr, float nv) {
+    const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
+    const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
+    float4 r = pr * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+    float2 ab = float2(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
 // "PBR on top of the MMD look": the MMD structure above stays; for a material with a PBR record only its inputs /
 // terms change (mapped normal, albedo / alpha, sphere ignored, metalness, GGX + env specular, AO, emissive, and the
 // per-model lobes). Sun / hemispheric / punctual diffuse keeps the MMD look.
@@ -733,11 +743,16 @@ PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, 
     color += diffLin * hemi * gHemiStrength * ao;
     color += diffLin * PunctualDiffuse(i.worldPos, n, 1.0, flat) * ao;
 
-    // Environment specular: split-sum style over the hemisphere fill (no IBL), F0 x Schlick roughness x AO.
+    // Environment specular: the sky the path tracer reflects (SkyColor at full radiance, not the hemiStrength fill),
+    // seen along the GGX dominant direction and pre-blurred toward the normal's sky for rough lobes, weighted by the
+    // analytic split-sum DFG (Karis, "Physically Based Shading on Mobile") x AO. Metals get their colour from here.
     if (envSpecOn) {
+        float nv = saturate(dot(n, V));
+        float pr = sqrt(saturate(rough));   // perceptual roughness (rough is GGX alpha)
         float3 R = reflect(-V, n);
-        float3 envBrdf = f0 + (1.0 - f0) * pow(1.0 - saturate(dot(n, V)), 5.0) * (1.0 - rough);
-        color += envBrdf * Hemisphere(R) * max(1.0 - rough, 0.0) * ao * gHemiStrength;
+        float3 Rd = normalize(lerp(n, R, (1.0 - pr) * (sqrt(1.0 - pr) + pr)));
+        float3 env = lerp(SkyColor(Rd), Hemisphere(n), pr * pr);
+        color += PbrEnvBrdfApprox(f0, pr, nv) * env * ao;
     }
 
     // Sun specular (replaces the MMD Blinn), x N.L x light colour x shadow, per shading model.
