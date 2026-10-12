@@ -156,6 +156,25 @@ struct PmxDisplayFrame {
     std::vector<Item> items;
 };
 
+// P6: per-material PBR data read from an imported (glTF/GLB/VRM/FBX) model, parallel to `materials` and empty for
+// PMX/PMD/.x. Texture indices point into PmxModel::textures; the PBR map textures are APPENDED to `textures` (and
+// `embeddedTextures`/`opaqueTextures` when those are non-empty) and are not referenced by any material's
+// texture / sphere / toon index, so the loader never decodes them as a diffuse texture. asset/PbrMaterial.cpp's
+// BuildImportedPbrModelData turns one into the engine-neutral PbrMaterial. Kept here (not in PbrMaterial.h) to avoid
+// a PmxModel <-> PbrMaterial include cycle.
+struct ImportedPbr {
+    bool valid = false;
+    float metallic = 1.0f;          // glTF/FBX metallic factor
+    float roughness = 1.0f;         // glTF/FBX roughness factor
+    float normalScale = 1.0f;       // normal map scale
+    float occlusionStrength = 1.0f; // occlusion map strength
+    float emissive[3] = {0, 0, 0};  // sRGB emissive factor (already x KHR_materials_emissive_strength)
+    int metalRoughTex = -1;         // packed map: G = roughness, B = metalness
+    int normalTex = -1;
+    int occlusionTex = -1;
+    int emissiveTex = -1;
+};
+
 struct PmxModel {
     std::filesystem::path sourcePath;  // absolute path of the loaded .pmx
     float version = 2.0f;
@@ -172,6 +191,7 @@ struct PmxModel {
     // holds other data (game masks) and the decoder forces it to 255. Empty, or parallel to `textures`.
     std::vector<char> opaqueTextures;
     std::vector<PmxMaterial> materials;
+    std::vector<ImportedPbr> importedPbr;   // P6: parallel to materials, empty for PMX/PMD (see ImportedPbr)
     std::vector<PmxBone> bones;
     std::vector<PmxMorph> morphs;
     std::vector<PmxRigidBody> rigidBodies;

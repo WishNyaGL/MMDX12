@@ -167,12 +167,17 @@ PbrMaterial RayToPbr(const RayMaterialDesc& desc, const PmxMaterial& pmxMat) {
 }
 
 void DecodePbrTextures(PbrModelData& data, const char* label) {
-    // Group File slots by (path, channel). channel < 0 = full RGBA, 0..3 = one channel (R8 upload).
-    // The channel of a single-channel read is its swizzle.
+    // Group texture slots by (source, channel). channel < 0 = full RGBA, 0..3 = one channel (R8 upload).
+    // The channel of a single-channel read is its swizzle. `File` sources dedupe by resolved path, `Embedded`
+    // sources by the PmxModel texture index; both are keyed with the channel (the same packed metal-roughness image
+    // is read as two R8 entries: G = roughness, B = metalness).
     struct Entry {
-        std::filesystem::path path;
+        std::filesystem::path path;                 // File source
+        const std::vector<uint8_t>* bytes = nullptr; // Embedded source (valid during the decode only)
         int channel = -1;
-        std::vector<std::pair<int, int>> slots;   // (material, slot) referencing this entry
+        float mapScale = 1.0f;                       // multiply the decoded channel (glTF roughness/metalness factor)
+        float aoStrength = -1.0f;                    // >= 0: bake glTF occlusion strength (lerp 1 .. map) into `channel`
+        std::vector<std::pair<int, int>> slots;      // (material, slot) referencing this entry
     };
     std::map<std::string, int> byKey;
     std::vector<Entry> entries;
@@ -182,16 +187,26 @@ void DecodePbrTextures(PbrModelData& data, const char* label) {
         ++data.materialsWithRecord;
         for (int si = 0; si < kPbrSlotCount; ++si) {
             PbrSlot& s = m.slots[si];
-            if (s.tex.kind != PbrTexKind::File) continue;
+            if (s.tex.kind != PbrTexKind::File && s.tex.kind != PbrTexKind::Embedded) continue;
             const bool single = SingleChannelSlot((PbrSlotId)si, s.type);
             const int channel = single ? s.swizzle : -1;
-            const std::string key = PathToUtf8(s.tex.path) + "|" + std::to_string(channel);
+            // glTF occlusion strength (lerp 1 .. map) and the roughness / metalness factors have no Ray slot flag to
+            // ride on; they are baked into the decoded R8 channel here. RayToPbr never sets these, so Ray output is
+            // byte-identical (its `mapScale` stays 1 and `aoStrength` -1).
+            const float aoStrength = ((PbrSlotId)si == PbrSlotId::Occlusion && single) ? s.aoStrength : -1.0f;
+            std::string key = (s.tex.kind == PbrTexKind::File ? PathToUtf8(s.tex.path)
+                                                              : "emb:" + std::to_string(s.tex.pmxIndex)) +
+                              "|" + std::to_string(channel) + "|" + std::to_string(s.mapScale) + "|" +
+                              std::to_string(aoStrength);
             auto it = byKey.find(key);
             int index;
             if (it == byKey.end()) {
                 Entry e;
                 e.path = s.tex.path;
+                e.bytes = s.tex.bytes;
                 e.channel = channel;
+                e.mapScale = s.mapScale;
+                e.aoStrength = aoStrength;
                 index = (int)entries.size();
                 byKey.emplace(key, index);
                 entries.push_back(std::move(e));
@@ -217,32 +232,51 @@ void DecodePbrTextures(PbrModelData& data, const char* label) {
     // fits, then keeps the remaining (already box-filtered) chain. Keeps VRAM bounded for 4K source maps.
     constexpr uint32_t kMaxPbrMapSize = 2048;
     std::for_each(std::execution::par, entries.begin(), entries.end(), [&](Entry& e) {
-        if (!e.path.empty()) {
-            ImageRGBA8 img;
-            std::string err;
-            if (LoadImageRGBA8(e.path, img, &err)) {
-                size_t drop = 0;
-                while (drop + 1 < img.mips.size() &&
-                       std::max(img.mips[drop].width, img.mips[drop].height) > kMaxPbrMapSize)
-                    ++drop;
-                if (drop > 0) {
-                    img.mips.erase(img.mips.begin(), img.mips.begin() + (std::ptrdiff_t)drop);
-                    // hasAlpha reflected level 0 before the cap; recompute over the capped level 0.
-                    img.hasAlpha = false;
-                    for (size_t i = 3; i < img.mips[0].pixels.size(); i += 4)
-                        if (img.mips[0].pixels[i] < 255) { img.hasAlpha = true; break; }
-                }
-                data.textures[&e - entries.data()] = std::move(img);
-            } else {
-                LOG_WARN("PBR map load failed: %s (%s): %s", PathToUtf8(e.path).c_str(), label, err.c_str());
-                ++missing;
+        const size_t idx = (size_t)(&e - entries.data());
+        ImageRGBA8 img;
+        std::string err;
+        bool loaded = false;
+        if (e.bytes && !e.bytes->empty()) {
+            loaded = LoadImageRGBA8FromMemory(e.bytes->data(), e.bytes->size(), img, &err);
+        } else if (!e.path.empty()) {
+            loaded = LoadImageRGBA8(e.path, img, &err);
+        }
+        if (loaded) {
+            size_t drop = 0;
+            while (drop + 1 < img.mips.size() &&
+                   std::max(img.mips[drop].width, img.mips[drop].height) > kMaxPbrMapSize)
+                ++drop;
+            if (drop > 0) {
+                img.mips.erase(img.mips.begin(), img.mips.begin() + (std::ptrdiff_t)drop);
+                // hasAlpha reflected level 0 before the cap; recompute over the capped level 0.
+                img.hasAlpha = false;
+                for (size_t i = 3; i < img.mips[0].pixels.size(); i += 4)
+                    if (img.mips[0].pixels[i] < 255) { img.hasAlpha = true; break; }
             }
+            // glTF occlusion: ao = 1 + strength * (map - 1), baked so the shader's PbrSlotAo stays unchanged.
+            if (e.aoStrength >= 0.0f && e.channel >= 0 && e.aoStrength < 0.999f) {
+                const size_t c = (size_t)e.channel;
+                for (ImageRGBA8::Level& lv : img.mips)
+                    for (size_t p = c; p < lv.pixels.size(); p += 4)
+                        lv.pixels[p] = (uint8_t)std::lround(
+                            std::clamp(255.0f * (1.0f + e.aoStrength * ((float)lv.pixels[p] / 255.0f - 1.0f)), 0.0f, 255.0f));
+            }
+            // glTF roughness / metallic factors: multiply the decoded R8 channel by the factor.
+            if (e.mapScale != 1.0f && e.channel >= 0)
+                for (ImageRGBA8::Level& lv : img.mips)
+                    for (size_t p = (size_t)e.channel; p < lv.pixels.size(); p += 4)
+                        lv.pixels[p] = (uint8_t)std::lround(std::clamp((float)lv.pixels[p] * e.mapScale, 0.0f, 255.0f));
+            data.textures[idx] = std::move(img);
+        } else if (e.bytes || !e.path.empty()) {
+            LOG_WARN("PBR map load failed: %s (%s): %s",
+                     e.path.empty() ? "(embedded)" : PathToUtf8(e.path).c_str(), label, err.c_str());
+            ++missing;
         }
     });
     data.filesMissing = missing.load();
     (void)total;
 
-    // A missing / undecodable file falls the slot back to its constant; every other slot points the GPU record
+    // A missing / undecodable source falls the slot back to its constant; every other slot points the GPU record
     // at the (deduped) decoded texture.
     for (size_t idx = 0; idx < entries.size(); ++idx) {
         const Entry& e = entries[idx];
@@ -251,6 +285,7 @@ void DecodePbrTextures(PbrModelData& data, const char* label) {
                 PbrSlot& s = data.materials[(size_t)ms.first].slots[ms.second];
                 s.tex.kind = PbrTexKind::None;
                 s.tex.fileIndex = -1;
+                s.tex.bytes = nullptr;
             }
             continue;
         }
@@ -264,6 +299,7 @@ void DecodePbrTextures(PbrModelData& data, const char* label) {
             PbrSlot& s = data.materials[(size_t)ms.first].slots[ms.second];
             s.tex.kind = PbrTexKind::File;
             s.tex.fileIndex = (int)idx;
+            s.tex.bytes = nullptr;
         }
     }
 }
@@ -318,6 +354,145 @@ void BuildPbrModelData(const std::filesystem::path& modelPath, const std::vector
     LOG_INFO("PBR model=%s materials=%d/%d textures=%d filesMissing=%d vramMB=%.1f loadMs=%.1f (parse %.1f decode %.1f)",
              modelName.c_str(), out.materialsWithRecord, (int)out.materials.size(), (int)out.texturePaths.size(),
              out.filesMissing, (double)out.textureBytes / (1024.0 * 1024.0), out.loadMs, parseMs, decodeMs);
+}
+
+void BuildImportedPbrModelData(const PmxModel& pmx, PbrModelData& out) {
+    out = PbrModelData{};
+    out.modelName = pmx.name;
+    if (pmx.importedPbr.empty() || pmx.importedPbr.size() != pmx.materials.size()) return;
+    const auto t0 = std::chrono::steady_clock::now();
+
+    // A PmxModel texture index -> a PbrTextureRef (embedded bytes or a resolved file path).
+    const auto refFor = [&](int index) {
+        PbrTextureRef ref;
+        if (index < 0 || (size_t)index >= pmx.textures.size()) return ref;
+        if ((size_t)index < pmx.embeddedTextures.size() && !pmx.embeddedTextures[(size_t)index].empty()) {
+            ref.kind = PbrTexKind::Embedded;
+            ref.pmxIndex = index;
+            ref.bytes = &pmx.embeddedTextures[(size_t)index];
+        } else {
+            const std::filesystem::path p = pmx.ResolveTexturePath(index);
+            if (!p.empty()) {
+                ref.kind = PbrTexKind::File;
+                ref.path = p;
+            }
+        }
+        return ref;
+    };
+
+    out.materials.resize(pmx.materials.size());
+    for (size_t i = 0; i < pmx.materials.size(); ++i) {
+        const ImportedPbr& ip = pmx.importedPbr[i];
+        if (!ip.valid) continue;
+        const PmxMaterial& pm = pmx.materials[i];
+        PbrMaterial& m = out.materials[i];
+        m.valid = true;
+        m.shadingModel = 0;   // DEFAULT (per the plan)
+
+        // Albedo: the PMX material's own diffuse texture is the glTF base colour; apply the base colour factor once
+        // (FROM 3 + APPLY_DIFFUSE, exactly like a Ray ALBEDO_MAP_FROM 3).
+        PbrSlot& albedo = m.slots[(int)PbrSlotId::Albedo];
+        if (pm.textureIndex >= 0) {
+            albedo.from = 3;
+            albedo.tex.kind = PbrTexKind::PmxDiffuse;
+            albedo.tex.pmxIndex = pm.textureIndex;
+        } else {
+            albedo.from = 0;
+            albedo.hasValue = true;
+            albedo.value[0] = pm.diffuse.x;
+            albedo.value[1] = pm.diffuse.y;
+            albedo.value[2] = pm.diffuse.z;
+        }
+        m.albedoApplyDiffuse = 1;
+
+        // Smoothness: the glTF roughnessFactor; a metal-roughness map carries roughness in G, linear (TYPE 2 -> the
+        // shader decodes GGX alpha = r^2, matching glTF). applyScale 1 x the slot value; the factor is baked into
+        // the R8 channel when a map exists (the map decoder ignores applyScale).
+        const PbrTextureRef mrRef = ip.metalRoughTex >= 0 ? refFor(ip.metalRoughTex) : PbrTextureRef{};
+        PbrSlot& rough = m.slots[(int)PbrSlotId::Smoothness];
+        rough.type = 2;
+        rough.hasValue = true;
+        rough.value[0] = ip.roughness;
+        if (mrRef.kind != PbrTexKind::None) {
+            rough.from = 1;
+            rough.swizzle = 1;   // G
+            rough.applyScale = 1;
+            rough.tex = mrRef;
+            rough.mapScale = ip.roughness;
+        } else {
+            rough.from = 0;
+        }
+
+        // Metalness: B of the same map.
+        PbrSlot& metal = m.slots[(int)PbrSlotId::Metalness];
+        metal.hasValue = true;
+        metal.value[0] = ip.metallic;
+        if (mrRef.kind != PbrTexKind::None) {
+            metal.from = 1;
+            metal.swizzle = 2;   // B
+            metal.applyScale = 1;
+            metal.tex = mrRef;
+            metal.mapScale = ip.metallic;
+        } else {
+            metal.from = 0;
+        }
+
+        // Normal: RGB tangent-space (TYPE 0). glTF's +Y-up tangent space matches the Ray derivative frame (its
+        // bitangent is negated, see pbr_common.hlsli PbrTangentToWorld), so no uvFlip. Scale rides value.w.
+        if (ip.normalTex >= 0) {
+            PbrSlot& nrm = m.slots[(int)PbrSlotId::Normal];
+            nrm.from = 1;
+            nrm.type = 0;
+            nrm.tex = refFor(ip.normalTex);
+            nrm.hasScale = true;
+            nrm.scale = ip.normalScale;
+        }
+
+        // Occlusion: R channel, strength lerp(1, map) baked at decode (PbrSlot::aoStrength).
+        if (ip.occlusionTex >= 0 && ip.occlusionStrength > 0.0f) {
+            PbrSlot& occ = m.slots[(int)PbrSlotId::Occlusion];
+            occ.from = 1;
+            occ.type = 0;        // linear, UV0
+            occ.swizzle = 0;     // R
+            occ.tex = refFor(ip.occlusionTex);
+            occ.aoStrength = ip.occlusionStrength;
+        }
+
+        // Emissive: sRGB colour map x emissiveFactor. The shader sRGB-decodes PbrEmissive and multiplies by value
+        // (applyScale 1); the factor is baked into the RGBA map (the RGBA path is not channel-baked).
+        const bool emissive = ip.emissive[0] > 0 || ip.emissive[1] > 0 || ip.emissive[2] > 0;
+        m.emissiveEnable = emissive;
+        PbrSlot& em = m.slots[(int)PbrSlotId::Emissive];
+        if (ip.emissiveTex >= 0) {
+            em.from = 1;
+            em.applyScale = 1;
+            em.hasValue = true;
+            em.value[0] = ip.emissive[0];
+            em.value[1] = ip.emissive[1];
+            em.value[2] = ip.emissive[2];
+            em.tex = refFor(ip.emissiveTex);
+        } else if (emissive) {
+            em.from = 0;
+            em.hasValue = true;
+            em.value[0] = ip.emissive[0];
+            em.value[1] = ip.emissive[1];
+            em.value[2] = ip.emissive[2];
+        }
+    }
+
+    const auto tDecodeStart = std::chrono::steady_clock::now();
+    DecodePbrTextures(out, out.modelName.c_str());
+    const auto tDecode = std::chrono::steady_clock::now();
+
+    if (out.materialsWithRecord == 0) {
+        out.materials.clear();
+        return;
+    }
+    out.loadMs = std::chrono::duration<double, std::milli>(tDecode - t0).count();
+    const double decodeMs = std::chrono::duration<double, std::milli>(tDecode - tDecodeStart).count();
+    LOG_INFO("PBR model=%s materials=%d/%d textures=%d filesMissing=%d vramMB=%.1f loadMs=%.1f (parse %.1f decode %.1f)",
+             out.modelName.c_str(), out.materialsWithRecord, (int)out.materials.size(), (int)out.texturePaths.size(),
+             out.filesMissing, (double)out.textureBytes / (1024.0 * 1024.0), out.loadMs, 0.0, decodeMs);
 }
 
 } // namespace mmdx

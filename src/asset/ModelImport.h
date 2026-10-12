@@ -44,4 +44,9 @@ struct ModelProbe {
 };
 bool ProbeModelFile(const std::filesystem::path& path, ModelProbe& out, std::string* error = nullptr);
 
+// P6: does the imported (glTF/GLB/VRM/FBX) file carry any PBR material data? Parses the scene without decoding
+// textures; always false for PMX/PMD/.x and for VRM / MToon / KHR_materials_unlit (NPR) materials. Used by the UI
+// to decide whether to offer the material-source selector for an imported model.
+bool ModelHasImportedPbr(const std::filesystem::path& path);
+
 } // namespace mmdx

@@ -628,6 +628,9 @@ private:
     // the session so the detail panel never repeats the ~10 ms scan. Empty = none found.
     const std::vector<RayEmdCandidate>& MaterialCandidates(const std::string& key,
                                                            const std::filesystem::path& modelPath, int pmxMaterialCount);
+    // P6: does the imported model carry PBR data (asset/ModelImport.h ModelHasImportedPbr)? Cached per key like
+    // MaterialCandidates; false for PMX/PMD.
+    bool ImportedPbrCandidates(const std::string& key, const std::filesystem::path& modelPath);
     // The shared "재질" widget (Default / Ray-MMD + candidate combo + file picker). Shown only when the model has a
     // Ray candidate or an explicit .emd is saved. Writes `choice`; true = changed. `modelPath`/`count` come from the
     // model (PMX or a loaded-only copy); `cacheKey` names the candidate cache entry.
@@ -639,6 +642,7 @@ private:
     // applies). Imitates SuggestShaderPack; skipped in headless / scripted runs and with --material-source.
     void SuggestRayMaterial(const std::string& characterId, const std::filesystem::path& modelPath, int pmxMaterialCount);
     std::map<std::string, std::vector<RayEmdCandidate>> materialCandidates_;   // session cache (see MaterialCandidates)
+    std::map<std::string, bool> importedPbrCandidates_;                         // P6 session cache (ImportedPbrCandidates)
     std::map<std::string, bool> materialSuggestChecked_;                        // ids checked this session
     // Play character: the saved settings choice or the --shader-pack override. A character with no saved choice also
     // gets SuggestShaderPack (a toast only; the choice is never set by the app).

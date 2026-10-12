@@ -1579,3 +1579,16 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   Not verified: the toast on screen, the file dialog, forced-.emd fallback, unit songs, dark theme / other languages.
   Now visible: metallic gold on Alcander renders dark (to check next).
 
+
+## 2026-10-12 (8) - 2.0.0: dark PBR metals fixed, SMOOTHNESS type 2 decode, P6 glTF / FBX PBR maps
+- Metals rendered nearly black in raster: `MmdShadePbr`'s env specular reflected the hemisphere fill x `hemiStrength` x
+  (1 - rough) twice. Now the full `SkyColor` the path tracer reflects, along the GGX dominant direction, blurred toward
+  the normal's sky with roughness, weighted by the analytic split-sum DFG (Karis). Alcander's gold matches PT; skin unchanged.
+- `SMOOTHNESS_MAP_TYPE 2` (linear roughness) decoded as alpha = r; now r^2 (Ray: smoothness = 1 - r).
+- P6 (DeepSeek, level high; resumed once after over-exploring): imported glTF/GLB/FBX PBR maps (metal-rough, normal,
+  occlusion, emissive) fill the same `PbrMaterial` block (`PmxModel::importedPbr`, `BuildImportedPbrModelData`,
+  `PbrTexKind::Embedded`), gated by the per-model material choice ("기본 / PBR" for imported models); VRM / MToon /
+  unlit / default-only materials get no record. `tools/gltf_pbr_test`.
+- Verified: tests pass; BoomBox studio prop default vs PBR renders right; Alcander raster vs PT gold. EthanShax's arm
+  "gloss" is the texture's tattoo stripes. Found (pre-existing): coplanar alpha decals vanish in PT (`TraceClosest`).
+  Not verified: glTF normal sign up close, imported-model selector UI, FBX PBR, glTF in PT / GI.

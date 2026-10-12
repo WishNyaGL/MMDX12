@@ -28,12 +28,33 @@ struct ImpTexture {
 struct ImpMaterial {
     std::string name;
     DirectX::XMFLOAT4 baseColor{1, 1, 1, 1};
-    DirectX::XMFLOAT3 emissive{0, 0, 0};
+    DirectX::XMFLOAT3 emissive{0, 0, 0};   // already times KHR_materials_emissive_strength
     int texture = -1;             // into ImpScene::textures
     bool doubleSided = false;
     bool blend = false;           // alpha blend or mask: keep texture alpha
     bool opaque = false;          // declared opaque (glTF alphaMode OPAQUE): texture alpha is not coverage
+    // P6: PBR data read from the glTF/FBX material (texture indices into ImpScene::textures). `npr` marks VRM /
+    // MToon / KHR_materials_unlit materials: those are cel-shaded on purpose and get no PBR record.
+    bool npr = false;
+    bool hasMetallicRoughness = false;
+    float metallic = 1.0f, roughness = 1.0f;
+    int metalRoughTex = -1;       // packed metal-roughness map: G = roughness, B = metalness (glTF)
+    int normalTex = -1;
+    float normalScale = 1.0f;
+    int occlusionTex = -1;
+    float occlusionStrength = 1.0f;
+    int emissiveTex = -1;
 };
+
+// P6 record rule: a material gets a PBR record unless it is NPR (VRM / MToon / KHR_materials_unlit), or has no PBR
+// map and its factors are the glTF defaults (metallic 1, roughness 1) — many exporters leave those untouched.
+inline bool ImpMaterialHasPbrData(const ImpMaterial& m) {
+    if (m.npr) return false;
+    const bool anyMap = m.metalRoughTex >= 0 || m.normalTex >= 0 || m.occlusionTex >= 0 || m.emissiveTex >= 0;
+    if (anyMap) return true;
+    if (m.emissive.x > 0 || m.emissive.y > 0 || m.emissive.z > 0) return true;
+    return m.hasMetallicRoughness && (m.metallic < 0.999f || m.roughness < 0.999f);
+}
 
 struct ImpMorphTarget {
     std::string name;

@@ -18,7 +18,8 @@ progress.md is the session log. Read its latest entry first.
 - PBR material data (2.0.0): per-character material source (기본 / Ray-MMD, saved as `characterMaterial=` ini lines and
   `.mmdxproj` "material"), `--material-source default|ray` overrides it for a run, and
   `--pbr-debug none|albedo|normal|roughness|metalness|ao|emissive|model` shows one channel (`asset/PbrMaterial`,
-  `shaders/pbr_common.hlsli`).
+  `shaders/pbr_common.hlsli`). Imported glTF/GLB/VRM/FBX models fill the same block from their PBR maps
+  (asset/ModelImport `ImportedPbr`, `BuildImportedPbrModelData`); VRM / MToon / KHR_materials_unlit stay NPR (no record).
 - No debugger is installed (no cdb). For crashes, use the dbghelp `CrashFilter` in `tools/render_smoke.cpp`.
 - Visual verification without a human: render a frame headlessly, then Read the PNG. First read "Running MMDX12.exe from the CLI" below.
   - Play scene: `MMDX12.exe --character <s> --stage <s|none> --song <s> --autoplay --seek <sec> --frames N --capture out.png`
@@ -72,6 +73,7 @@ progress.md is the session log. Read its latest entry first.
   - `studio_gizmo_test` / `studio_pose_test`: gizmo projection/hit/drag math and bone overlay; mirror names/poses, VPD pose ops
   - `studio_project_test`: .mmdxproj save/load round trip, VMD naming/cleanup, atomic writes, prop offset matrix
   - `pbr_tex_probe <pmx> [--dump <dir>] [--verbose]`: PBR (Ray-MMD) map decode per material: paths, channel, mip-0 size, loops, UV scale/flip
+  - `gltf_pbr_test`: imported PBR records (`captures/assets_dl` BoomBox.glb maps / channels, Seed-san.vrm = no records; SKIP when absent)
   - `studio_focus_test`: DoF focus track evaluation, automatic focus (score, hysteresis, rack), focus keys in projects
   - `mmdx12_mcp [--pipe <name>] [--pid <pid>] [--launch] [--timeout <ms>]`: Model Context Protocol stdio bridge
   - `mcp_smoke.py [--handshake-only] [--scenario]`: MCP test client (protocol handshake & end-to-end scenario)

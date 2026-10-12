@@ -75,9 +75,15 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
                           progress->fraction.store(fracBegin + (fracEnd - fracBegin) * (float)d / (float)total,
                                                    std::memory_order_relaxed);
                   });
-    if (choice.ray)
-        BuildPbrModelData(m.pmx->sourcePath, m.pmx->materials, m.pmx->name, m.pbr,
-                          choice.emd.empty() ? std::filesystem::path() : Utf8ToPath(choice.emd));
+    if (choice.ray) {
+        // P6: an imported model (glTF/GLB/VRM/FBX) carries its PBR data on PmxModel::importedPbr; PMX/PMD keep the
+        // Ray .emd path. `choice.ray` means "use the model's own PBR material data".
+        if (!m.pmx->importedPbr.empty())
+            BuildImportedPbrModelData(*m.pmx, m.pbr);
+        else
+            BuildPbrModelData(m.pmx->sourcePath, m.pmx->materials, m.pmx->name, m.pbr,
+                              choice.emd.empty() ? std::filesystem::path() : Utf8ToPath(choice.emd));
+    }
 }
 
 // The model's default shader-pack texture folder: the directory of the face texture its own MME files reference (the

@@ -173,6 +173,38 @@ bool ImportUfbx(const std::filesystem::path& path, ImpScene& scene, std::string*
         }
         if (m->pbr.opacity.texture) out.blend = true;
         out.doubleSided = m->features.double_sided.enabled;
+
+        // P6: ufbx's resolved PBR maps (metalness / roughness / normal / ambient occlusion / emission). Only the
+        // file's UV0 is used (the import stores one UV set). Our PBR block carries ONE packed metal-roughness map
+        // (G = roughness, B = metalness, the glTF convention), but ufbx gives roughness and metalness as separate
+        // maps; only carry the packed slot when both came from the same texture (a glTF-style export). Separate
+        // maps and `roughness_as_glossiness` shaders are skipped rather than misread; the factors still apply.
+        const ufbx_material_map* rough = &m->pbr.roughness;
+        const ufbx_material_map* metal = &m->pbr.metalness;
+        out.hasMetallicRoughness = metal->has_value || rough->has_value;
+        if (metal->has_value) out.metallic = (float)metal->value_real;
+        if (rough->has_value) out.roughness = (float)rough->value_real;
+        if (metal->texture && rough->texture && metal->texture == rough->texture)
+            out.metalRoughTex = importTexture(metal->texture);
+        if (m->pbr.normal_map.texture) out.normalTex = importTexture(m->pbr.normal_map.texture);
+        else if (m->fbx.normal_map.texture) out.normalTex = importTexture(m->fbx.normal_map.texture);
+        if (out.normalTex >= 0) {
+            const ufbx_material_map& ns = m->pbr.normal_map.texture ? m->pbr.normal_map : m->fbx.normal_map;
+            if (ns.has_value) out.normalScale = (float)ns.value_real;
+        }
+        if (m->pbr.ambient_occlusion.texture) out.occlusionTex = importTexture(m->pbr.ambient_occlusion.texture);
+        if (m->pbr.ambient_occlusion.has_value) out.occlusionStrength = (float)m->pbr.ambient_occlusion.value_real;
+        if (m->pbr.emission_color.has_value) {
+            const ufbx_vec3 e = m->pbr.emission_color.value_vec3;
+            out.emissive = {(float)e.x, (float)e.y, (float)e.z};
+        }
+        if (m->features.emission.enabled && !m->pbr.emission_color.has_value) out.emissive = {1, 1, 1};
+        if (m->pbr.emission_factor.has_value) {
+            const float f = (float)m->pbr.emission_factor.value_real;
+            out.emissive = {out.emissive.x * f, out.emissive.y * f, out.emissive.z * f};
+        }
+        if (m->pbr.emission_color.texture) out.emissiveTex = importTexture(m->pbr.emission_color.texture);
+        if (m->features.unlit.enabled) out.npr = true;
         matIndex[m] = (int)scene.materials.size();
         scene.materials.push_back(std::move(out));
     }

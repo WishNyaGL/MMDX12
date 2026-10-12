@@ -24,14 +24,18 @@ inline constexpr int kPbrSlotCount = (int)PbrSlotId::Count;
 const char* PbrSlotName(PbrSlotId slot);
 
 // Where a slot's texture comes from. `File` is a decoded file path (deduped per model); `Pmx*` reuse the
-// PMX material's own texture / sphere / toon slot (already uploaded by GpuModel).
-enum class PbrTexKind : uint8_t { None = 0, File, PmxDiffuse, PmxSphere, PmxToon };
+// PMX material's own texture / sphere / toon slot (already uploaded by GpuModel); `Embedded` reads the encoded
+// bytes from `PmxModel::embeddedTextures[pmxIndex]` (GLB/VRM/FBX maps that live inside the model file).
+enum class PbrTexKind : uint8_t { None = 0, File, PmxDiffuse, PmxSphere, PmxToon, Embedded };
 
 struct PbrTextureRef {
     PbrTexKind kind = PbrTexKind::None;
     std::filesystem::path path;   // kind == File, before DecodePbrTextures resolves it
     int fileIndex = -1;           // kind == File, after DecodePbrTextures
-    int pmxIndex = -1;            // PMX texture index for Pmx* kinds
+    int pmxIndex = -1;            // PMX texture index for Pmx* kinds; PmxModel::textures index for Embedded
+    // kind == Embedded: the encoded image bytes (points into the PmxModel's embeddedTextures during decode only;
+    // cleared once DecodePbrTextures has decoded it).
+    const std::vector<uint8_t>* bytes = nullptr;
 };
 
 // One field as it reaches the shader: constant value, texture source, and the raw decode hints.
@@ -50,6 +54,11 @@ struct PbrSlot {
     float loopU = 1, loopV = 1;        // <slot>MapLoopNum
     float uvScaleU = 1, uvScaleV = 1;  // <PREFIX>_MAP_UV_SCALE
     PbrTextureRef tex;
+    // P6 imported maps (Ray never sets these; they do not reach GpuPbrMaterial). `mapScale` multiplies the decoded
+    // channel (glTF roughnessFactor / metallicFactor), `aoStrength` bakes lerp(1, map, strength) into the channel
+    // (< 0 = none). Both are load-time instructions applied by DecodePbrTextures.
+    float mapScale = 1.0f;
+    float aoStrength = -1.0f;
 };
 
 struct PbrMaterial {
@@ -96,5 +105,10 @@ void DecodePbrTextures(PbrModelData& data, const char* label);
 void BuildPbrModelData(const std::filesystem::path& modelPath, const std::vector<PmxMaterial>& pmxMaterials,
                        const std::string& modelName, PbrModelData& out,
                        const std::filesystem::path& forcedEmd = {});
+
+// P6: builds the PbrModelData for an imported (glTF/GLB/VRM/FBX) model from its PmxModel::importedPbr records.
+// One PbrMaterial per PMX material, `valid` only where the source material carried PBR data. `File` maps use the
+// resolved path, `Embedded` maps the PmxModel texture bytes. Logs the same `PBR model=` line as BuildPbrModelData.
+void BuildImportedPbrModelData(const PmxModel& pmx, PbrModelData& out);
 
 } // namespace mmdx

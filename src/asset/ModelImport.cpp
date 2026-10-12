@@ -407,7 +407,7 @@ PmxBone MakeBone(const std::string& name, XMFLOAT3 pos, int parent, uint16_t ext
     return b;
 }
 
-void BuildTextures(const ImpScene& s, PmxModel& out) {
+std::unordered_map<int, int> BuildTextures(const ImpScene& s, PmxModel& out) {
     bool anyEmbedded = false;
     for (const ImpTexture& t : s.textures) anyEmbedded |= !t.bytes.empty();
     for (const ImpTexture& t : s.textures) {
@@ -425,11 +425,25 @@ void BuildTextures(const ImpScene& s, PmxModel& out) {
         out.opaqueTextures.assign(s.textures.size(), 0);
         for (size_t i = 0; i < s.textures.size(); ++i) out.opaqueTextures[i] = users[i] > 0 && users[i] == opaqueUsers[i];
     }
+    // P6: append the PBR map textures (deduped by ImpScene texture index). They are addressed only through
+    // PmxModel::importedPbr, so no material's texture / sphere / toon index ever reaches them.
+    std::unordered_map<int, int> pbrMap;
+    for (const ImpMaterial& m : s.materials)
+        for (int idx : {m.metalRoughTex, m.normalTex, m.occlusionTex, m.emissiveTex}) {
+            if (idx < 0 || (size_t)idx >= s.textures.size() || pbrMap.count(idx)) continue;
+            const int outIdx = (int)out.textures.size();
+            const ImpTexture& t = s.textures[(size_t)idx];
+            out.textures.push_back(!t.file.empty() ? PathToUtf8(t.file) : t.label);
+            if (anyEmbedded) out.embeddedTextures.push_back(t.bytes);
+            if (!out.opaqueTextures.empty()) out.opaqueTextures.push_back(0);
+            pbrMap.emplace(idx, outIdx);
+        }
+    return pbrMap;
 }
 
 void BuildMaterialsAndGeometry(const ImpScene& s, Builder& b, bool character, const std::vector<int>& boneOfNode,
                                const std::vector<int>& skinJointBone /*flattened per skin*/, const std::vector<size_t>& skinBase,
-                               std::vector<uint32_t>& meshVertexBase) {
+                               const std::unordered_map<int, int>& pbrTexMap, std::vector<uint32_t>& meshVertexBase) {
     PmxModel& out = b.out;
     meshVertexBase.assign(s.meshes.size(), 0);
     // Vertices, mesh by mesh.
@@ -521,6 +535,34 @@ void BuildMaterialsAndGeometry(const ImpScene& s, Builder& b, bool character, co
             if (im.doubleSided) pm.flags |= PmxMat_DoubleSided;
         } else {
             pm.name = "default";
+        }
+        // P6: carry the source material's PBR data on the PmxModel (texture indices remapped into out.textures).
+        if (slot < matCount) {
+            const ImpMaterial& im = s.materials[slot];
+            if (ImpMaterialHasPbrData(im)) {
+                ImportedPbr ip;
+                ip.valid = true;
+                ip.metallic = im.metallic;
+                ip.roughness = im.roughness;
+                ip.normalScale = im.normalScale;
+                ip.occlusionStrength = im.occlusionStrength;
+                ip.emissive[0] = im.emissive.x;
+                ip.emissive[1] = im.emissive.y;
+                ip.emissive[2] = im.emissive.z;
+                const auto remap = [&](int idx) {
+                    auto it = pbrTexMap.find(idx);
+                    return it == pbrTexMap.end() ? -1 : it->second;
+                };
+                ip.metalRoughTex = remap(im.metalRoughTex);
+                ip.normalTex = remap(im.normalTex);
+                ip.occlusionTex = remap(im.occlusionTex);
+                ip.emissiveTex = remap(im.emissiveTex);
+                out.importedPbr.push_back(ip);
+            } else {
+                out.importedPbr.push_back(ImportedPbr{});
+            }
+        } else {
+            out.importedPbr.push_back(ImportedPbr{});
         }
         // MMD colour model: saturate(ambient + diffuse * light) * texture. d = base, a = base / 2
         // gives "fully lit = texture colour" like most PMX rigs.
@@ -693,8 +735,8 @@ bool ConvertStage(const ImpScene& s, PmxModel& out, bool place) {
     out.bones.push_back(MakeBone("全ての親", {0, 0, 0}, -1, PmxBone_Movable));
     std::vector<int> boneOfNode(s.nodes.size(), 0);
     std::vector<uint32_t> base;
-    BuildTextures(s, out);
-    BuildMaterialsAndGeometry(s, b, false, boneOfNode, {}, {}, base);
+    const std::unordered_map<int, int> pbrTexMap = BuildTextures(s, out);
+    BuildMaterialsAndGeometry(s, b, false, boneOfNode, {}, {}, pbrTexMap, base);
     if (place) PlaceStage(out);
     return !out.vertices.empty();
 }
@@ -810,8 +852,8 @@ bool ConvertCharacter(ImpScene& s, PmxModel& out, std::string* error) {
         for (int j : sk.joints) skinJointBone.push_back(j >= 0 && (size_t)j < boneOfNode.size() ? boneOfNode[j] : 1);
     }
     std::vector<uint32_t> base;
-    BuildTextures(s, out);
-    BuildMaterialsAndGeometry(s, b, true, boneOfNode, skinJointBone, skinBase, base);
+    const std::unordered_map<int, int> pbrTexMap = BuildTextures(s, out);
+    BuildMaterialsAndGeometry(s, b, true, boneOfNode, skinJointBone, skinBase, pbrTexMap, base);
     BuildMorphs(s, b, base);
     return !out.vertices.empty();
 }
@@ -982,6 +1024,22 @@ bool ProbeModelFile(const std::filesystem::path& path, ModelProbe& out, std::str
         return false;
     } catch (...) {
         if (error) *error = "unexpected exception";
+        return false;
+    }
+}
+
+bool ModelHasImportedPbr(const std::filesystem::path& path) {
+    const ModelFormat format = ModelFormatFromPath(path);
+    if (format != ModelFormat::Gltf && format != ModelFormat::Vrm && format != ModelFormat::Fbx &&
+        format != ModelFormat::Obj)
+        return false;
+    try {
+        ImpScene scene;
+        if (!ImportAny(path, scene, nullptr)) return false;
+        if (!scene.unsupported.empty()) return false;
+        return std::any_of(scene.materials.begin(), scene.materials.end(),
+                           [](const ImpMaterial& m) { return ImpMaterialHasPbrData(m); });
+    } catch (...) {
         return false;
     }
 }

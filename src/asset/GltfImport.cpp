@@ -252,6 +252,7 @@ bool ImportGltf(const std::filesystem::path& path, ImpScene& scene, std::string*
     // Materials and textures.
     const std::filesystem::path dir = path.parent_path();
     std::map<const cgltf_image*, int> imageCache;
+    const bool isVrm = ToLowerAscii(PathToUtf8(path.extension())) == ".vrm";
     for (cgltf_size i = 0; i < data->materials_count; ++i) {
         const cgltf_material& m = data->materials[i];
         ImpMaterial out;
@@ -268,9 +269,42 @@ bool ImportGltf(const std::filesystem::path& path, ImpScene& scene, std::string*
         }
         if (tex) out.texture = ImportImage(data, tex->image ? tex->image : (tex->has_webp ? tex->webp_image : nullptr), dir, scene, imageCache);
         out.emissive = {m.emissive_factor[0], m.emissive_factor[1], m.emissive_factor[2]};
+        if (m.has_emissive_strength) {
+            const float s = m.emissive_strength.emissive_strength;
+            out.emissive = {out.emissive.x * s, out.emissive.y * s, out.emissive.z * s};
+        }
         out.doubleSided = m.double_sided;
         out.blend = m.alpha_mode != cgltf_alpha_mode_opaque;
         out.opaque = !out.blend;
+
+        // P6: metallic-roughness / normal / occlusion / emissive maps. These are the SAME cgltf images as the base
+        // colour, so the shared image cache dedupes them into ImpScene::textures.
+        auto importView = [&](const cgltf_texture_view& v) {
+            const cgltf_texture* t = v.texture;
+            if (!t) return -1;
+            if (v.texcoord != 0) {   // only UV0 is supported
+                scene.warnings.push_back("ignored a PBR map on UV" + std::to_string((int)v.texcoord) + " of " + out.name);
+                return -1;
+            }
+            return ImportImage(data, t->image ? t->image : (t->has_webp ? t->webp_image : nullptr), dir, scene, imageCache);
+        };
+        // VRM / MToon / KHR_materials_unlit are NPR on purpose: never give them glossy PBR data.
+        if (isVrm || m.unlit) out.npr = true;
+        for (cgltf_size e = 0; e < m.extensions_count; ++e)
+            if (m.extensions[e].name && std::string(m.extensions[e].name).find("mtoon") != std::string::npos) out.npr = true;
+        if (!out.npr) {
+            if (m.has_pbr_metallic_roughness) {
+                out.hasMetallicRoughness = true;
+                out.metallic = m.pbr_metallic_roughness.metallic_factor;
+                out.roughness = m.pbr_metallic_roughness.roughness_factor;
+                out.metalRoughTex = importView(m.pbr_metallic_roughness.metallic_roughness_texture);
+            }
+            out.normalTex = importView(m.normal_texture);
+            out.normalScale = m.normal_texture.scale;
+            out.occlusionTex = importView(m.occlusion_texture);
+            out.occlusionStrength = m.occlusion_texture.scale;   // cgltf's `scale` is the occlusion strength
+            out.emissiveTex = importView(m.emissive_texture);
+        }
         scene.materials.push_back(std::move(out));
     }
 

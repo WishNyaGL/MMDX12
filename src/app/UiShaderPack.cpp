@@ -29,6 +29,10 @@ namespace mmdx {
 
 using namespace ui;
 
+// P6: declared here rather than including asset/ModelImport.h, which also defines mmdx::ModelRole (GpuModel.h wins
+// in this translation unit). Defined in asset/ModelImport.cpp.
+bool ModelHasImportedPbr(const std::filesystem::path& path);
+
 // Folder picker (FOS_PICKFOLDERS): runs on its own STA thread like studio::FileDialog, keeping the
 // owner's messages pumped so the enable ping-pong cannot deadlock. Declared in App.h, shared with
 // the shader manager screen (UiShaders.cpp).
@@ -734,9 +738,17 @@ const std::vector<RayEmdCandidate>& App::MaterialCandidates(const std::string& k
     return materialCandidates_.emplace(key, std::move(cands)).first->second;
 }
 
+bool App::ImportedPbrCandidates(const std::string& key, const std::filesystem::path& modelPath) {
+    auto it = importedPbrCandidates_.find(key);
+    if (it != importedPbrCandidates_.end()) return it->second;
+    const bool has = ModelHasImportedPbr(modelPath);   // parses the file, does not decode textures
+    return importedPbrCandidates_.emplace(key, has).first->second;
+}
+
 bool App::HasMaterialOptions(const std::string& cacheKey, const std::filesystem::path& modelPath, int pmxMaterialCount,
                              const MaterialChoice& choice) {
     if (modelPath.empty() || pmxMaterialCount <= 0) return false;
+    if (ImportedPbrCandidates(cacheKey, modelPath)) return true;   // P6: an imported model with PBR data
     const std::vector<RayEmdCandidate>& cands = MaterialCandidates(cacheKey, modelPath, pmxMaterialCount);
     return std::any_of(cands.begin(), cands.end(),
                        [](const RayEmdCandidate& c) { return !c.readFailed && c.rayEntries > 0; }) ||
@@ -747,23 +759,26 @@ bool App::DrawMaterialSelector(const char* id, MaterialChoice& choice, const std
                                const std::filesystem::path& modelPath, int pmxMaterialCount, float width) {
     if (modelPath.empty() || pmxMaterialCount <= 0) return false;
     bool changed = false;
+    const bool importedPbr = ImportedPbrCandidates(cacheKey, modelPath);   // P6: imported model PBR data
     const std::vector<RayEmdCandidate>& cands = MaterialCandidates(cacheKey, modelPath, pmxMaterialCount);
-    // The widget only exists when there is something to choose: at least one Ray candidate, or an explicit .emd.
+    // The widget only exists when there is something to choose: at least one Ray candidate, imported PBR data, or
+    // an explicit .emd.
     const bool hasRayCandidate = std::any_of(cands.begin(), cands.end(), [](const RayEmdCandidate& c) {
         return !c.readFailed && c.rayEntries > 0;
     });
-    if (!hasRayCandidate && choice.emd.empty()) return false;
+    if (!hasRayCandidate && !importedPbr && choice.emd.empty()) return false;
 
-    // Default / Ray-MMD selector (imitate DrawShaderSelector's option control).
+    // Default / Ray-MMD selector (imitate DrawShaderSelector's option control). An imported model's second segment
+    // is "PBR" (its own material data, no .emd row).
     {
-        const char* labels[] = {Tr("기본"), "Ray-MMD"};
+        const char* labels[] = {Tr("기본"), importedPbr ? "PBR" : "Ray-MMD"};
         int mode = choice.ray ? 1 : 0;
         if (ui::Segmented((std::string(id) + "_src").c_str(), labels, 2, &mode, width / Dpi(), 34.0f)) {
             choice.ray = mode == 1;
             changed = true;
         }
     }
-    if (!choice.ray) return changed;   // Default: no .emd row
+    if (!choice.ray || importedPbr) return changed;   // Default, or an imported model: no .emd row
 
     // Candidate combo: relative to the model folder; an explicit path shows its file name. "파일 선택…" opens a dialog.
     const std::filesystem::path modelDir = modelPath.parent_path();
@@ -828,6 +843,7 @@ bool App::DrawMaterialSelector(const char* id, MaterialChoice& choice, const std
 
 void App::SuggestRayMaterial(const std::string& characterId, const std::filesystem::path& modelPath, int pmxMaterialCount) {
     if (characterId.empty() || options_.materialSourceSet || HeadlessRun()) return;
+    if (ImportedPbrCandidates(characterId, modelPath)) return;   // P6: imported models get no suggestion toast
     if (!materialSuggestChecked_.emplace(characterId, true).second) return;
     if (settings_.CharacterMaterial(characterId).ray || settings_.MaterialSuggested(characterId)) return;
     const std::vector<RayEmdCandidate>& cands = MaterialCandidates(characterId, modelPath, pmxMaterialCount);
