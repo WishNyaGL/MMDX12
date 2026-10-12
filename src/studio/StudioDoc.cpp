@@ -2,6 +2,7 @@
 #include "anim/ModelInstance.h"
 #include "render/GpuModel.h"
 #include <algorithm>
+#include <DirectXMath.h>
 
 namespace mmdx::studio {
 
@@ -32,6 +33,28 @@ uint64_t CanonicalRow(const StudioModel& m, RowKind kind, uint32_t index) {
     if (kind == RowKind::Bone && index < m.boneRowGroup.size()) return MakeRowId(kind, m.boneRowGroup[index], index);
     if (kind == RowKind::Morph && index < m.morphRowGroup.size()) return MakeRowId(kind, m.morphRowGroup[index], index);
     return 0;
+}
+
+PropAttach AccessoryPlacement(const StudioModel& m, float frame) {
+    if (m.motion.accessory.empty()) return m.attach;
+    const AccessoryKf k = SampleAccessory(m.motion.accessory, frame);
+    PropAttach a;
+    a.parent = k.parentUid == 0 ? -1 : (int)k.parentUid;
+    a.bone = k.bone;
+    a.translation = k.translation;
+    a.rotationDeg = k.rotationDeg;
+    a.scale = k.scale;
+    return a;
+}
+
+float AccessoryOpacity(const StudioModel& m, float frame) {
+    if (m.motion.accessory.empty()) return 1.0f;
+    return SampleAccessory(m.motion.accessory, frame).opacity;
+}
+
+bool AccessoryVisible(const StudioModel& m, float frame) {
+    if (m.motion.accessory.empty()) return true;
+    return SampleAccessory(m.motion.accessory, frame).visible;
 }
 
 int StudioDoc::EndFrame() const {
@@ -77,6 +100,9 @@ TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::stri
         auto it = m.bones.find(name);
         s.existed = it != m.bones.end();
         if (s.existed) s.bones = it->second;
+    } else if (kind == RowKind::Accessory) {
+        s.existed = !m.accessory.empty();
+        s.accessories = m.accessory;
     } else {
         auto it = m.morphs.find(name);
         s.existed = it != m.morphs.end();
@@ -107,6 +133,8 @@ void RestoreTrack(StudioDoc& doc, const TrackState& s) {
         if (s.kind == RowKind::Bone) {
             if (s.bones.empty()) m.bones.erase(s.name);
             else m.bones[s.name] = s.bones;
+        } else if (s.kind == RowKind::Accessory) {
+            m.accessory = s.accessories;
         } else {
             if (s.morphs.empty()) m.morphs.erase(s.name);
             else m.morphs[s.name] = s.morphs;

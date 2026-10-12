@@ -20,6 +20,12 @@ constexpr uint32_t kCbSlots = Dx12Context::kFramesInFlight + 1;  // + RenderToIm
 constexpr uint32_t kOffscreenSlot = Dx12Context::kFramesInFlight;
 constexpr uint32_t kLightBytes = Renderer::kMaxPunctualLights * sizeof(GpuLight);
 
+// post.hlsl's interleaved gradient noise (float2 unjitter(pos.xy)). Mirrored here to invert the per-pixel
+// dither when a transparent export is read back, so a flat background decodes to alpha 0 exactly.
+float Ign(float x, float y) {
+    return std::fmod(52.9829189f * std::fmod(0.06711056f * x + 0.00583715f * y, 1.0f), 1.0f);
+}
+
 // Cache: same requested value -> same result.
 uint32_t g_cachedRequestedMsaa = 0;
 uint32_t g_cachedMsaaResult = 0;
@@ -464,12 +470,14 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
     sc.fog = settings_.fog;
     sc.viewportSize = {(float)w, (float)h};
     sc.edgeScale = (float)h / 1080.0f;
-    sc.transparentBg = settings_.transparentBackground ? 1.0f : 0.0f;
+    sc.transparentBg = (settings_.transparentBackground || settings_.exportAlpha) ? 1.0f : 0.0f;
     sc.jitterUv = {jx * 0.5f, -jy * 0.5f};
     sc.invViewportSize = {1.0f / w, 1.0f / h};
     sc.nearZ = cam.nearZ;
     sc.farZ = cam.farZ;
     sc.frameIndex = (float)(temporalIndex_ % 64);
+    // AutoLuminous (そぼろ): the global glow switch (settings_.autoLuminous) reaches every path through SceneConstants.
+    sc.autoLumParams = {settings_.autoLuminous ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
     // The DXR scene shaders read shading as 0 (Lit): RayTraced / PathTraced ignore the setting.
     // The quad view's extra views get their own shading from their SceneConstants below.
     uint32_t shading = (EffectivePath() == RenderPath::Raster) ? (uint32_t)settings_.shading : 0u;
@@ -555,6 +563,10 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     // The shading mode is the camera view's: in a quad view the extra views are drawn flat through
     // their own SceneConstants, and the camera view keeps the selected shading.
     RenderSettings frameSettings = settings_;
+    if (settings_.exportAlpha) {
+        frameSettings.transparentBackground = true;   // sky writes alpha 0, colour premultiplied
+        frameSettings.fog = 0.0f;                     // no distance haze: it would tint the transparent background
+    }
     const bool nonLit = path == RenderPath::Raster && settings_.shading != ViewShading::Lit;
     if (quad) {
         frameSettings.taa = false;
@@ -817,7 +829,7 @@ bool Renderer::RenderToImage(const FrameView& view, uint32_t w, uint32_t h, Imag
     return ok;
 }
 
-bool Renderer::ReadFinalImage(ImageRGBA8& out) {
+bool Renderer::ReadFinalImage(ImageRGBA8& out, bool preserveAlpha) {
     if (!ctx_ || !targets_.ldr || !hasFinal_) return false;
     ID3D12Device* device = ctx_->Device();
     ctx_->WaitForGpu();
@@ -863,9 +875,29 @@ bool Renderer::ReadFinalImage(ImageRGBA8& out) {
         const uint8_t* srcRow = data + (size_t)fp.Footprint.RowPitch * y;
         uint8_t* dstRow = out.mips[0].pixels.data() + (size_t)w * 4 * y;
         memcpy(dstRow, srcRow, (size_t)w * 4);
-        for (uint32_t x = 0; x < w; ++x) dstRow[x * 4 + 3] = 255;
+        for (uint32_t x = 0; x < w; ++x) {
+            if (!preserveAlpha) {
+                dstRow[x * 4 + 3] = 255;
+                continue;
+            }
+            // straight (non-premultiplied) sRGB colour: post.hlsl (transparentBg) kept the coverage alpha and the
+            // unjittered scene targets premultiply the colour. Un-premultiply here, then un-jitter with the exact
+            // inverse of post.hlsl's +1/255 dither (same per-pixel seed), so a flat background decodes to alpha 0.
+            const uint8_t a = dstRow[x * 4 + 3];
+            if (a == 0) {
+                dstRow[x * 4 + 0] = dstRow[x * 4 + 1] = dstRow[x * 4 + 2] = 0;
+                continue;
+            }
+            const float fx = (float)x + 0.5f, fy = (float)y + 0.5f;
+            const float j = Ign(fx, fy) - 0.5f;
+            for (int ch = 0; ch < 3; ++ch) {
+                // the dither is j / 255 in normalized units = j in 8-bit units
+                const int encoded = std::clamp((int)std::lround((float)dstRow[x * 4 + ch] - j), 0, 255);
+                dstRow[x * 4 + ch] = (uint8_t)std::min(255, (int)std::lround(encoded * 255.0f / a));
+            }
+        }
     }
-    out.hasAlpha = false;
+    out.hasAlpha = preserveAlpha;
     D3D12_RANGE none{0, 0};
     readback->Unmap(0, &none);
     return true;

@@ -275,6 +275,7 @@ static void TestRoundTrip() {
         m.place.translation = {2.5f, 0.0f, -3.0f};  // world placement of a character
         m.place.rotationDeg = {0.0f, 45.0f, 0.0f};
         m.place.scale = 1.25f;
+        m.physicsOff = true;                                                          // P2.2: physics baked / off
         m.shader.pack = "test_pack";                                                   // shader pack choice
         m.shader.params["threshold"] = 0.5f;
         m.shader.textureFolder = "F:/tex/miku";                                        // per-character texture folder
@@ -332,6 +333,25 @@ static void TestRoundTrip() {
         b.t = {7, 8, 9};
         SetTestInterp(b.interp, 64);
         m.motion.bones["root"] = {b};
+        // accessory keys: world at 0, parented to model index 0 (parentUid 1) at 30
+        AccessoryKf a0;
+        a0.frame = 0;
+        a0.translation = {0, 1, 2};
+        a0.rotationDeg = {0, 45, 0};
+        a0.scale = 2.0f;
+        a0.opacity = 1.0f;
+        a0.visible = true;
+        a0.parentUid = 0;
+        AccessoryKf a30;
+        a30.frame = 30;
+        a30.translation = {3, 4, 5};
+        a30.rotationDeg = {10, 20, 30};
+        a30.scale = 0.5f;
+        a30.opacity = 0.3f;
+        a30.visible = false;
+        a30.parentUid = 1;  // 1 + model index 0
+        a30.bone = "\xE5\x8F\xB3\xE6\x89\x8B\xE9\xA6\x96";  // 右手首
+        m.motion.accessory = {a0, a30};
         data.models.push_back(m);
     }
     // camera: 2 camera keys, 1 light key, 1 shadow key
@@ -438,6 +458,8 @@ static void TestRoundTrip() {
         Check(b.motion.ik.size() == 1 && b.motion.ik.at("\xE5\x8F\xB3\xE8\x85\x95").size() == 2 &&
                   b.motion.ik.at("\xE5\x8F\xB3\xE8\x85\x95")[1].enabled == false,
               "IK track kept");
+        Check(b.physicsOff == a.physicsOff && b.physicsOff, "physics-off flag kept (baked character)");
+        Check(!loaded.models[1].physicsOff, "physics on by default for a model without the flag");
         Check(b.shader == a.shader, "shader choice kept (pack, params, textureFolder)");
         Check(b.material == a.material, "material choice kept (ray + explicit .emd)");
 
@@ -453,6 +475,9 @@ static void TestRoundTrip() {
         Check(p.kind == ModelKind::Prop && p.attach == data.models[2].attach,
               "prop attach kept (parent/bone/t/r/s)");
         Check(p.motion.bones.size() == 1, "prop bone key kept");
+        Check(p.motion.accessory.size() == 2 && p.motion.accessory[0] == data.models[2].motion.accessory[0] &&
+                  p.motion.accessory[1] == data.models[2].motion.accessory[1],
+              "prop accessory keys kept (placement, scale, opacity, visible, parent, bone)");
 
         // camera from the "camera" VMD: only camera/light/shadow
         Check(loaded.camera.camera.size() == 2 && loaded.camera.light.size() == 1 && loaded.camera.shadow.size() == 1,

@@ -52,6 +52,25 @@ struct FocusKf {
                aperture == o.aperture && transition == o.transition;
     }
 };
+// An accessory (prop) key, modelled on MMD's accessory frame: placement interpolates linearly (rotation as Euler
+// degrees slerped through quaternions), opacity linearly; visible and the parent/bone are stepped (held until the
+// next key). Targets are model uids (project file: 1 + the model index; 0 = the world origin). Never written to VMD.
+struct AccessoryKf {
+    int frame = 0;
+    DirectX::XMFLOAT3 translation{0, 0, 0};
+    DirectX::XMFLOAT3 rotationDeg{0, 0, 0};
+    float scale = 1.0f;
+    float opacity = 1.0f;              // per-model alpha multiplier (1 = opaque)
+    bool visible = true;
+    uint32_t parentUid = 0;            // 0 = the world origin
+    std::string bone;                  // parent bone name; empty = the parent model's origin
+    bool operator==(const AccessoryKf& o) const {
+        return frame == o.frame && translation.x == o.translation.x && translation.y == o.translation.y &&
+               translation.z == o.translation.z && rotationDeg.x == o.rotationDeg.x &&
+               rotationDeg.y == o.rotationDeg.y && rotationDeg.z == o.rotationDeg.z && scale == o.scale &&
+               opacity == o.opacity && visible == o.visible && parentUid == o.parentUid && bone == o.bone;
+    }
+};
 
 // Bone interpolation block (64 bytes). The true table T is 16 bytes: x1 of channels X,Y,Z,R, then y1, x2, y2 (4 each).
 // MMD stores T in row 0 with bytes 2 and 3 overwritten by physics flags (0 = physics on), and rows 1..3 as T shifted
@@ -157,10 +176,15 @@ struct MotionData {
     std::vector<LightKf> light;
     std::vector<ShadowKf> shadow;
     std::vector<FocusKf> focus;                   // the studio's DoF focus track (never written to VMD)
+    std::vector<AccessoryKf> accessory;           // a prop's accessory keys (never written to VMD)
 
     bool Empty() const {
-        return bones.empty() && morphs.empty() && ik.empty() && camera.empty() && light.empty() && shadow.empty() && focus.empty();
+        return bones.empty() && morphs.empty() && ik.empty() && camera.empty() && light.empty() && shadow.empty() &&
+               focus.empty() && accessory.empty();
     }
+    // Whether ToVmd() would write anything: a model motion's VMD carries bones, morphs and IK keys only, so a prop
+    // with accessory keys alone writes no VMD (the keys live in the project JSON).
+    bool HasVmdKeys() const { return !bones.empty() || !morphs.empty() || !ik.empty(); }
     int EndFrame() const;  // last key frame over everything (0 when empty)
 
     // Frame insert/delete over every track (bones, morphs, IK, camera, light, shadow, focus); see InsertFrameSpan/DeleteFrameSpan.
@@ -193,6 +217,10 @@ LightKf SampleLight(const std::vector<LightKf>& keys, float frame);
 // Self-shadow: no interpolation (MMD holds each key until the next): the last key at or before `frame`, the first key
 // before it. The returned key's frame is (int)floor(frame). `keys` non-empty.
 ShadowKf SampleShadow(const std::vector<ShadowKf>& keys, float frame);
+// Accessory (prop) key: placement and opacity interpolate linearly (rotation as Euler degrees through quaternions),
+// visible and the parent/bone are stepped (the last key at or before `frame`). Before the first key: the first;
+// after the last: the last. `frame` may be fractional. The returned key's frame is (int)floor(frame). `keys` non-empty.
+AccessoryKf SampleAccessory(const std::vector<AccessoryKf>& keys, float frame);
 // MMD's self-shadow distance UI value (0..9999) <-> the VMD value.
 inline float ShadowUiFromVmd(float d) { return (0.1f - d) * 100000.0f; }
 // The VMD self-shadow distance -> the renderer's cascade range in MMD units. MMD's default 8875 maps to the

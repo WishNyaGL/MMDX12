@@ -56,7 +56,9 @@ const std::vector<FileFilter>& ModelFilters() {
     return f;
 }
 const std::vector<FileFilter>& ProjectFilters() {
-    static const std::vector<FileFilter> f = {{L"MMDX12 Studio", L"*.mmdxproj"}};
+    static const std::vector<FileFilter> f = {{L"MMDX12 Studio / MMD 프로젝트", L"*.mmdxproj;*.pmm"},
+                                              {L"MMDX12 Studio", L"*.mmdxproj"},
+                                              {L"MMD 프로젝트 (읽기 전용)", L"*.pmm"}};
     return f;
 }
 
@@ -102,6 +104,25 @@ void App::StartStudioProjectLoad(const std::filesystem::path& file, bool recover
     });
 }
 
+// A .pmm (MMD project) import: builds a NEW unsaved studio project. The library's characters / stages
+// are copied for the worker (it may not touch the UI).
+void App::StartStudioPmmImport(const std::filesystem::path& file) {
+    StopVideoProbe(false);
+    UnloadScene();
+    screen_ = Screen::Loading;
+    loadTarget_ = LoadTarget::Studio;
+    loadError_.clear();
+    loadProgress_.fraction.store(0.0f, std::memory_order_relaxed);
+    loadProgress_.SetStatus("");
+    studioLoadTitle_ = StemUtf8(file);
+    studioPackage_ = std::make_unique<StudioPackage>();
+    const std::vector<CharacterAsset> chars = library_.characters;
+    const std::vector<StageAsset> stages = library_.stages;
+    loadFuture_ = std::async(std::launch::async, [=, pkg = studioPackage_.get(), this] {
+        return LoadStudioPmmPackage(file, chars, stages, *pkg, &loadProgress_, &loadError_);
+    });
+}
+
 void App::StudioRequest(StudioAction a, const std::filesystem::path& file) {
     if (a == StudioAction::Open && file.empty()) {
         // pick the file first; the unsaved-changes prompt comes after (cancelling the dialog changes nothing)
@@ -128,7 +149,11 @@ void App::StudioRunAction(StudioAction a, const std::filesystem::path& file) {
     if (a == StudioAction::None) return;
     if (studio_) LeaveStudio();  // waits for loads and the GPU, deletes the recovery file
     if (a == StudioAction::New) StartStudioEmpty();
-    else if (a == StudioAction::OpenFile && !file.empty()) StartStudioProjectLoad(file, false);
+    else if (a == StudioAction::OpenFile && !file.empty()) {
+        const std::string e = ToLowerAscii(PathToUtf8(file.extension()));
+        if (e == ".pmm") StartStudioPmmImport(file);
+        else StartStudioProjectLoad(file, false);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +172,7 @@ ProjectData App::StudioProjectData() const {
         pm.path = m.path;
         pm.libraryId = m.libraryId;
         pm.visible = m.visible;
+        pm.physicsOff = m.physicsOff;
         pm.place = m.place;
         pm.shader = m.shader;
         pm.material = m.material;
@@ -156,6 +182,12 @@ ProjectData App::StudioProjectData() const {
         }
         pm.motion = m.motion;
         pm.motion.modelName = m.pmx->name;  // MMD checks it against the model the motion is loaded onto
+        // accessory key parents: uid -> 1 + the package model index (0 = the world); a parent that is gone -> world
+        for (AccessoryKf& k : pm.motion.accessory) {
+            if (k.parentUid == 0) continue;
+            const int i = d.IndexOfUid(k.parentUid);
+            k.parentUid = i >= 0 ? (uint32_t)i + 1 : 0;
+        }
         pd.models.push_back(std::move(pm));
     }
     pd.camera.camera = d.camera.camera;
@@ -358,10 +390,13 @@ void App::DrawRecoveryPrompt() {
 // ---------------------------------------------------------------------------
 
 void App::StudioAddModelFile(ModelKind kind, const std::filesystem::path& file, uint32_t replaceUid,
-                             const MaterialChoice* material) {
+                             const MaterialChoice* material, std::vector<std::filesystem::path> queuedDrops,
+                             size_t retryQueuedDrops) {
     auto job = std::make_unique<StudioJob>();
     job->label = StemUtf8(file);
     job->replaceUid = replaceUid;
+    job->queuedDrops = std::move(queuedDrops);
+    job->retryQueuedDrops = retryQueuedDrops;
     job->models.resize(1);
     StudioJob* j = job.get();
     j->materialReload = material != nullptr && replaceUid != 0;
@@ -496,6 +531,17 @@ void App::StudioPollJobs() {
             toast_ = {Tr("불러오지 못했습니다"), job.label + (job.error.empty() ? "" : ": " + job.error), {}, true,
                       timeSeconds_ + 6.0};
             LOG_ERROR("studio: load failed: %s: %s", job.label.c_str(), job.error.c_str());
+            // A dropped VMD/VPD whose model never loaded: hand it to the next pending model load so it still lands.
+            if (job.retryQueuedDrops > 0) {
+                for (auto& j : studioJobs_) {
+                    if (j.get() == &job || j->replaceUid || j->song) continue;
+                    j->queuedDrops.insert(j->queuedDrops.end(), job.queuedDrops.begin(),
+                                          job.queuedDrops.begin() +
+                                              (ptrdiff_t)std::min(job.retryQueuedDrops, job.queuedDrops.size()));
+                    j->retryQueuedDrops = std::min(job.retryQueuedDrops, job.queuedDrops.size());
+                    break;
+                }
+            }
         } else if (job.audioOnly) {
             if (StudioSetAudio(job.audio)) toast_ = {Tr("음원을 넣었어요"), job.label, {}, false, timeSeconds_ + 4.0};
         } else if (job.song) {
@@ -596,6 +642,8 @@ void App::StudioPollJobs() {
                 if (d.models[(size_t)first]->kind != ModelKind::Stage && !replaced) StudioSelectModel(first);
                 if (!replaced) toast_ = {Tr("모델을 추가했어요"), job.label, {}, false, timeSeconds_ + 3.0};
                 LOG_INFO("studio: added %s (%d models)", job.label.c_str(), (int)d.models.size());
+                // a dropped VMD / VPD with one new model waits for it: apply now that the model is in the document
+                if (!replaced && !job.queuedDrops.empty()) ApplyQueuedDrops(first, job.queuedDrops);
             }
         }
         if (job.mcp) {  // an MCP studio_add_model waits for this
@@ -751,18 +799,20 @@ void App::StudioSelectModel(int index) {
 DirectX::XMFLOAT4X4 App::StudioPropRoot(const StudioModel& m) const {
     using namespace DirectX;
     const StudioDoc& d = *studio_;
+    // a keyed prop is placed by the evaluated accessory key at the current frame, else by its static attach
+    const PropAttach place = AccessoryPlacement(m, (float)(d.time * kMmdFps));
     XMMATRIX parent = XMMatrixIdentity();
-    const int pi = m.attach.parent >= 0 ? d.IndexOfUid((uint32_t)m.attach.parent) : -1;
+    const int pi = place.parent >= 0 ? d.IndexOfUid((uint32_t)place.parent) : -1;
     if (pi >= 0 && d.models[(size_t)pi].get() != &m) {
         const StudioModel& p = *d.models[(size_t)pi];
-        const int bone = m.attach.bone.empty() ? -1 : p.pmx->FindBone(m.attach.bone);
+        const int bone = place.bone.empty() ? -1 : p.pmx->FindBone(place.bone);
         if (bone >= 0) parent = XMLoadFloat4x4(&p.inst->BoneWorld(bone));
         // the parent's display scale is applied after its bone worlds (ModelInstance::SetScale)
         const float s = p.inst->Scale();
         if (s != 1.0f) parent = XMMatrixMultiply(parent, XMMatrixScaling(s, s, s));
     }
     XMFLOAT4X4 out;
-    XMStoreFloat4x4(&out, XMMatrixMultiply(PropOffsetMatrix(m.attach), parent));
+    XMStoreFloat4x4(&out, XMMatrixMultiply(PropOffsetMatrix(place), parent));
     return out;
 }
 
@@ -1021,6 +1071,12 @@ void App::DrawStudioModelMenu(int index) {
                     StudioSelectModel(index);
                     StudioExportVmd();
                 }
+                if (m.kind == ModelKind::Character &&
+                    MenuItemChip("##mbake", Tr("물리 굽기…"), icon::Atom)) {
+                    ImGui::CloseCurrentPopup();
+                    StudioSelectModel(index);
+                    StudioOpenBakeDialog();
+                }
             }
             MenuSeparator();
             if (MenuItemChip("##remove", Tr("제거…"), icon::Trash)) {
@@ -1111,19 +1167,28 @@ void App::DrawStudioPropPanel(float w) {
     if (!m || !m->IsProp()) return;
     const Palette& p = P();
     ImDrawList* cdl = ImGui::GetWindowDrawList();
+    const bool keyed = !m->motion.accessory.empty();
     ImGui::Dummy(ImVec2(w, Dp(6.0f)));
     {
         const ImVec2 c = ImGui::GetCursorScreenPos();
         Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("배치 (부모 본에 붙이기)"));
+        if (keyed) {
+            char kb[64];
+            std::snprintf(kb, sizeof(kb), Tr("키 %d개"), (int)m->motion.accessory.size());
+            const float tw = TextSize(Font::Semibold, size::Caption, Tr("배치 (부모 본에 붙이기)")).x;
+            Text(cdl, Font::Regular, size::Caption, ImVec2(c.x + tw + Dp(8.0f), c.y + Dp(1.0f)), p.accent, kb);
+        }
         ImGui::Dummy(ImVec2(w, Dp(20.0f)));
     }
-    const PropAttach before = m->attach;
-    PropAttach a = m->attach;
+    const bool keyHere = FindKey(m->motion.accessory, d.Frame()) != nullptr;
+    const bool editKey = keyed && (keyHere || d.autoKey);  // a keyed prop with auto-key: the fields edit the key at the playhead
+    const PropAttach cur = AccessoryPlacement(*m, (float)d.Frame());
+    const PropAttach before = editKey ? cur : m->attach;
+    PropAttach a = before;
     const int parentIndex = a.parent >= 0 ? d.IndexOfUid((uint32_t)a.parent) : -1;
     const StudioModel* parent = parentIndex >= 0 ? d.models[(size_t)parentIndex].get() : nullptr;
     bool commit = false;  // push one undo step now (combo picks, chips, the end of a drag)
     static bool dragging = false;
-    static PropAttach dragBefore;
     const auto row = [&](const char* label, auto&& widget) {
         const ImVec2 c = ImGui::GetCursorScreenPos();
         Text(cdl, Font::Regular, size::Small, ImVec2(c.x, c.y + Dp(5.0f)), p.ink3, label);
@@ -1202,7 +1267,7 @@ void App::DrawStudioPropPanel(float w) {
     const auto dragRow = [&](const char* label, auto&& widget) {
         row(label, [&] {
             widget();
-            if (ImGui::IsItemActivated() && !dragging) { dragging = true; dragBefore = before; }
+            if (ImGui::IsItemActivated() && !dragging) { dragging = true; }
             if (ImGui::IsItemDeactivated()) dragEnded = true;
         });
     };
@@ -1210,12 +1275,28 @@ void App::DrawStudioPropPanel(float w) {
     dragRow(Tr("회전"), [&] { ImGui::DragFloat3("##propr", &a.rotationDeg.x, 0.25f, 0.0f, 0.0f, "%.1f°"); });
     dragRow(Tr("크기"), [&] { ImGui::DragFloat("##props", &a.scale, 0.005f, 0.01f, 100.0f, "%.3f"); });
     a.scale = std::clamp(a.scale, 0.01f, 100.0f);
-    if (!(a == m->attach)) m->attach = a;  // live while dragging; the undo step is pushed below
-    if (commit && !(a == before)) {
-        d.history.Push(std::make_unique<PropAttachCommand>(d, m->uid, before, a));
+    // a keyed prop with auto-key: a finished placement edit writes the accessory key at the playhead (undoable);
+    // without keys (or with auto-key off) the static attach is edited, as before.
+    const auto commitPlacement = [&] {
+        if (editKey) {
+            AccessoryKf k = StudioNewAccessoryKey(*m, d.Frame());
+            k.translation = a.translation;
+            k.rotationDeg = a.rotationDeg;
+            k.scale = a.scale;
+            k.parentUid = a.parent < 0 ? 0 : (uint32_t)a.parent;
+            k.bone = a.bone;
+            if (const AccessoryKf* cur = FindKey(m->motion.accessory, k.frame); cur && *cur == k) return;
+            StudioSetAccessoryAtPlayhead(k, Tr("소품 키 편집"));
+        } else {
+            if (!(a == before)) d.history.Push(std::make_unique<PropAttachCommand>(d, m->uid, before, a));
+        }
+    };
+    if (!editKey && !(a == m->attach)) m->attach = a;  // live while dragging (the non-key path); the undo step is pushed below
+    if (commit) {
+        commitPlacement();
     } else if (dragEnded && dragging) {
         dragging = false;
-        if (!(m->attach == dragBefore)) d.history.Push(std::make_unique<PropAttachCommand>(d, m->uid, dragBefore, m->attach));
+        commitPlacement();
     }
     ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x + Dp(64.0f), ImGui::GetCursorScreenPos().y));
     if (Button("##propreset", Tr("배치 초기화"), icon::ArrowCcw, ButtonKind::Ghost, ImVec2((w - Dp(64.0f)) / Dpi(), 32.0f))) {
@@ -1225,6 +1306,7 @@ void App::DrawStudioPropPanel(float w) {
         if (!(reset == m->attach)) d.history.Push(std::make_unique<PropAttachCommand>(d, m->uid, m->attach, reset));
     }
     ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+    DrawStudioAccessorySection(w);
 }
 
 void App::StudioCommitPlace(uint32_t uid, const PropAttach& before, const PropAttach& after) {
@@ -1343,9 +1425,11 @@ void App::DrawStudioProjectMenu() {
         if (MenuItemChip("##psaveas", Tr("다른 이름으로 저장…"), icon::FloppyDisk, "Ctrl+Shift+S")) saveAs = true;
         const StudioDoc& d = *studio_;
         bool anyRecent = false;
+        // A .pmm import has no projectPath: recent .pmm entries are never the "current" file.
+        const std::filesystem::path cur = d.projectPath;
         for (size_t i = 0; i < settings_.recentProjects.size(); ++i) {
             const std::filesystem::path rp = Utf8ToPath(settings_.recentProjects[i]);
-            if (!d.projectPath.empty() && rp.lexically_normal() == d.projectPath.lexically_normal()) continue;
+            if (!cur.empty() && rp.lexically_normal() == cur.lexically_normal()) continue;
             if (!anyRecent) {
                 MenuSeparator();
                 SectionLabel(Tr("최근 프로젝트"));

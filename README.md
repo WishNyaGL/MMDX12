@@ -26,6 +26,9 @@
 
 ## Gallery
 
+<img src="docs/media/compare-classic.jpg" width="100%" alt="The same frame four ways: classic MMD look, MMDX12 raster (the default, any DX12 GPU), real-time ray tracing, real-time path tracing">
+<br><sub>The same frame four ways: classic MMD look, MMDX12 raster (the default, any DX12 GPU), real-time ray tracing, real-time path tracing</sub>
+
 Straight out of the built-in renderer, no touch-ups.
 
 <table>
@@ -94,10 +97,15 @@ Full songs rendered with MMDX12's video mode, uploaded as-is.
 - **Photo mode**: press P for a 4K picture.
 - **Video mode**: render a whole song to MP4, with the music, up to 4K. The app tells you how long it will take before you start.
 - **Studio**: edit dances yourself with an MMD-style keyframe editor, saving standard VMD/VPD files that MMD opens.
+- **Any DirectX 12 graphics card.** The default renderer (soft shadows, ambient occlusion, reflections, bloom) needs no ray-tracing GPU; ray tracing, path tracing and offline GI switch on where the card supports them.
+- **Drag and drop.** Drop a model, a VMD and a song onto the window and they open in the Studio, posed and with music. MMD `.pmm` projects open too (read-only import).
+- **AutoLuminous built in.** Materials set up for そぼろ's AutoLuminous (black specular, power 100 or more) glow on their own in every renderer, no MME needed.
+- **Transparent video.** Export a PNG sequence with alpha for After Effects, Premiere or DaVinci.
+- **Studio extras**: auto-IK (drag a wrist and the arm follows), keyframed accessories (position, rotation, scale, opacity, parent bone), and baking hair/skirt physics into ordinary keys.
 - **A benchmark** with an online leaderboard, just for fun.
 
 <img src="docs/media/ui-library.jpg" width="100%" alt="Library screen">
-<br><sub>The library screen. The app's UI is in Korean.</sub>
+<br><sub>The library screen. The UI speaks English, Korean, Japanese and Chinese (globe button, top right).</sub>
 
 ## Bring your own assets
 
@@ -158,7 +166,7 @@ The scene list on the left manages the camera, characters, accessories, stages, 
 
 Click bones in the 3D viewport and pose them with rotation and translation gizmos (local or global axes). Moving IK bones drives the bone chain. Just like MMD, edits stay until you register them (`I`), and you can use morph sliders, mirror poses, or import and export VPD pose files. The timeline supports adding, moving, deleting, copying, and pasting keys, pasting curves only, curve presets, MMD-style frame insertion and deletion, frame range selection, loop playback with music, and toggling physics. You can also edit camera, light, and self-shadow tracks, use "Key the current view", and see the camera path while using the free camera.
 
-Projects are saved as `.mmdxproj` files, and motions are saved alongside them as standard VMD files that MMD can open. Autosave provides recovery after crashes, audio supports a start offset, and accessories (props) can be attached to any bone of another model. You can render directly from the studio using the same video dialog as the library (raster, real-time ray tracing, real-time path tracing, offline GI), exporting the timeline range or the whole project through the motion camera with music to a video or high-quality still. MMD compatibility relies on standard files (VMD, VPD); PMM project files are not supported.
+Projects are saved as `.mmdxproj` files, and motions are saved alongside them as standard VMD files that MMD can open. Autosave provides recovery after crashes, audio supports a start offset, and accessories (props) can be attached to any bone of another model. You can render directly from the studio using the same video dialog as the library (raster, real-time ray tracing, real-time path tracing, offline GI), exporting the timeline range or the whole project through the motion camera with music to a video or high-quality still. MMD compatibility relies on standard files (VMD, VPD). MMD `.pmm` projects can be imported (read-only): opening one builds a new studio project from its models, motions, camera, accessories and audio; PMM is never written.
 
 | Key | Action |
 |---|---|
@@ -251,4 +259,4 @@ MMDX12's own code is [MIT](LICENSE). Third-party code keeps its own license, and
 
 - Material morphs, SDEF skinning, PMD models, and the player's VMD light track.
 - Faster library loading.
-- Studio follow-ups: accessories (.x), PMM import.
+- Studio follow-ups: older PMM (0001) files, more MME effects mapped on PMM import.

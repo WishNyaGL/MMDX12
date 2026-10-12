@@ -29,6 +29,9 @@ struct AppSettings {
     // Graphics quality: 0 low, 1 medium, 2 high, 3 ultra, 4 custom (toggles below as set).
     int graphicsPreset = 2;
     bool shadows = true, ssao = true, ssr = true, bloom = true, taa = false;
+    // そぼろ AutoLuminous convention: PMX materials the author marked (black specular, power >= 100) glow. Default on.
+    bool autoLuminous = true;
+    bool readOnly = false;     // runtime only, never saved: Save() is a no-op (--classic runs)
     int shadowMapSize = 2048;
     int lighting = 0;          // LightingPreset (app/Lighting.h)
     float exposure = 1.0f;     // 0.5 .. 2.0

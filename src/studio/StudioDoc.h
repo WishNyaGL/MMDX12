@@ -6,6 +6,7 @@
 #include "asset/ImageLoader.h"
 #include "asset/MaterialChoice.h"
 #include "asset/PbrMaterial.h"
+#include "asset/PmmLoader.h"
 #include "asset/PmxModel.h"
 #include "studio/CommandStack.h"
 #include "studio/SceneLight.h"
@@ -48,6 +49,7 @@ struct StudioModel {
     PropAttach place;              // characters / stages: world placement (translation, rotationDeg, scale)
     PropAttach placeApplied;       // the placement the instance was last posed with (physics resets when it changes)
     bool visible = true;
+    bool physicsOff = false;       // P2.2: rigid-body physics is off for this model (saved in the project; baked keys replace it)
     ShaderChoice shader;           // characters: shader pack (render/ShaderPack.h); empty = the default shading
     MaterialChoice material;       // P5: per-material PBR source (Default / Ray-MMD + optional explicit .emd)
     std::shared_ptr<const PmxModel> pmx;
@@ -72,7 +74,7 @@ struct StudioModel {
 // Timeline row ids: kind in the top byte, then a 24-bit group and a 32-bit index. Light is the camera VMD's light
 // track; SceneLight is the keys of one scene light (SceneLight.h): MakeRowId(RowKind::SceneLight, 0, light uid).
 // Focus is the studio's depth-of-field focus track (camera MotionData::focus, saved in the project, not in VMD).
-enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8 };
+enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9 };
 inline uint64_t MakeRowId(RowKind k, uint32_t group, uint32_t index) {
     return ((uint64_t)k << 56) | ((uint64_t)(group & 0xFFFFFF) << 32) | index;
 }
@@ -92,6 +94,13 @@ inline uint32_t LightUidOfTrack(const std::string& name) { return (uint32_t)std:
 // but its keys are selected through the first one only (CanonicalRow), so counts and edits see each key once.
 uint64_t CanonicalRow(const StudioModel& m, RowKind kind, uint32_t index);
 
+// A prop's placement at `frame`: without accessory keys the static `attach`, else the evaluated key (translation /
+// rotation / scale / visibility / parent / bone), so a keyed prop keeps today's `attach` as its no-key fallback.
+PropAttach AccessoryPlacement(const StudioModel& m, float frame);
+// A prop's evaluated opacity / visibility at `frame` (1 / true without accessory keys).
+float AccessoryOpacity(const StudioModel& m, float frame);
+bool AccessoryVisible(const StudioModel& m, float frame);
+
 // A key in the timeline selection: row (bone/morph/camera rows only, never groups) + frame.
 using KeyId = std::pair<uint64_t, int>;
 
@@ -99,6 +108,7 @@ struct ClipboardKey {
     uint64_t row = 0;
     int offset = 0;  // frame relative to the first copied key
     BoneKf bone; MorphKf morph; CameraKf camera; LightKf light; ShadowKf shadow; LightKey sceneLight; FocusKf focus;
+    AccessoryKf accessory;
 };
 
 struct StudioDoc {
@@ -192,6 +202,7 @@ struct StudioDoc {
     int activeBone = -1;              // the gizmo's bone (last picked), -1 none
     int gizmoTool = 0;                // 0 rotate, 1 translate
     bool gizmoLocal = false;          // gizmo axes: bone-local (true) or global
+    bool autoIk = false;              // auto-IK posing: dragging a wrist / hand solves the parent chain (not saved)
     bool showBones = true;            // bone overlay
     int inspectorTab = 0;             // 0 keys, 1 bone, 2 morphs (characters only)
     int poseScope = 0;                // VPD / mirror scope: 0 whole model, 1 selected bones
@@ -231,12 +242,13 @@ struct TrackState {
     std::vector<ShadowKf> shadows;
     std::vector<FocusKf> focuses;
     std::vector<LightKey> lightKeys;  // a scene light's keys
+    std::vector<AccessoryKf> accessories;
 
     size_t Bytes() const {
         return sizeof(TrackState) + name.size() + bones.capacity() * sizeof(BoneKf) + morphs.capacity() * sizeof(MorphKf) +
                cameras.capacity() * sizeof(CameraKf) + lights.capacity() * sizeof(LightKf) +
                shadows.capacity() * sizeof(ShadowKf) + focuses.capacity() * sizeof(FocusKf) +
-               lightKeys.capacity() * sizeof(LightKey);
+               lightKeys.capacity() * sizeof(LightKey) + accessories.capacity() * sizeof(AccessoryKf);
     }
 };
 // A SceneLight track is addressed by its uid (`name` = LightTrackName(uid)): restoring one whose light no longer
@@ -336,6 +348,30 @@ private:
     MotionData before_, after_;
 };
 
+// P2.2: the per-model rigid-body physics switch (StudioModel::physicsOff, saved in the project). The next
+// frame's StudioUpdateModel re-enables / disables the instance from the flag, so Apply only clears it.
+class PhysicsOffCommand : public Command {
+public:
+    PhysicsOffCommand(StudioDoc& doc, int model, bool before, bool after)
+        : doc_(doc), model_(model), before_(before), after_(after) {}
+    void Do() override { Apply(after_); }
+    void Undo() override { Apply(before_); }
+    std::string Name() const override { return "physics"; }
+    size_t Bytes() const override { return sizeof(*this); }
+
+private:
+    void Apply(bool v) {
+        if (model_ < 0 || model_ >= (int)doc_.models.size()) return;
+        // StudioUpdateModel calls EnablePhysics from the flag every frame; reset so the change takes at the next pose.
+        doc_.models[(size_t)model_]->physicsOff = v;
+        doc_.physicsFrame = -1.0f;
+        ++doc_.projectVersion;
+    }
+    StudioDoc& doc_;
+    int model_;
+    bool before_, after_;
+};
+
 // One IK bone's enable track (VMD IK on/off keys): small, unlike MotionSwapCommand.
 class IkEditCommand : public Command {
 public:
@@ -368,6 +404,7 @@ struct StudioPackageModel {
     std::string name, libraryId;
     ModelKind kind = ModelKind::Character;
     bool visible = true;
+    bool physicsOff = false;                 // P2.2: physics off for this model (project files)
     std::filesystem::path defaultPackTextureFolder;  // model's MME face texture folder (shader pack default)
     PbrModelData pbr;                        // per-material Ray PBR records + decoded maps (work unit P2)
     PropAttach attach;                       // props: parent = index into StudioPackage::models (-1 world)
@@ -383,10 +420,15 @@ struct StudioPackage {
     double audioOffset = 0;
     // project loads only
     bool fromProject = false;
+    bool fromPmm = false;                    // a .pmm import: a NEW unsaved project (no projectPath / recents)
     ProjectEditor editor;
     std::filesystem::path projectPath;       // the file loaded (recovery: the project it belongs to, may be empty)
     bool recovered = false;                  // loaded from the autosave: opens dirty
     std::vector<std::string> warnings;       // missing models / motions (shown as a toast)
+    PmmEffectSettings pmmEffects;            // .pmm import: MME controller mapping (App applies it)
+    int pmmWidth = 0, pmmHeight = 0;         // .pmm import: output resolution (aspect preset)
+    float pmmFps = 0.0f;                     // .pmm import: preferred fps (informational)
+    std::filesystem::path pmmSourcePath;     // .pmm import: the file opened (added to the recent list)
 };
 // `character` is required, `stage` and `song` may be null. The song's dance + facial VMDs become the
 // character's motion (names canonicalised to the model), its camera VMD the camera track.
@@ -409,5 +451,17 @@ bool LoadStudioSong(const SongAsset& song, MotionData& dance, MotionData& camera
 // parents pointing at them become -1, later indices are remapped).
 bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, StudioPackage& out,
                               LoadProgress* progress, std::string* error);
+// A .pmm (MMD project) import (asset/PmmLoader.h). Only the camera / light / self-shadow tracks come
+// directly (they do not need the models); each model's motion is split into one temporary VMD (under
+// the temp dir, never the PMM's own folder) and re-read with LoadVmd, so PMM bone / morph / IK /
+// interpolation semantics go through the VMD code. PMM stores no accessory visibility->prop mapping,
+// so accessories become props statically placed at their first key; MME effect controllers are
+// recognised (MapMmeControllers) and left out. `out.fromPmm` is set; `out.warnings` holds one line
+// per unresolved model / unsupported controller. pkg.editor carries the frame range / aspect / fps
+// (resolved by the App). `characters` / `stages` are the library, used to resolve a PMM model path by
+// file name when neither the absolute path nor the folder relative to the .pmm exists.
+bool LoadStudioPmmPackage(const std::filesystem::path& file, const std::vector<CharacterAsset>& characters,
+                          const std::vector<StageAsset>& stages, StudioPackage& out, LoadProgress* progress,
+                          std::string* error);
 
 } // namespace mmdx::studio

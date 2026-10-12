@@ -76,6 +76,7 @@ void App::StartStudioRender(bool video) {
     offline_.studioTime = d.time;
     offline_.studioMotionCamera = d.useMotionCamera;
     offline_.fromCli = !options_.offlineStill.empty();
+    offline_.alpha = options_.offlineAlpha == 1;   // transparent PNG still (MakeJobDesc sets the job's exportAlpha)
     offline_.output = offline_.fromCli              ? options_.offlineStill
                       : !mcpOfflineOutput_.empty() ? mcpOfflineOutput_  // MCP render_still
                                                    : OfflineOutputDir(false) / Utf8ToPath(StillName());
@@ -179,6 +180,8 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
 
         SectionLabel(Tr("실시간 효과"));
         changed |= Switch("##bloom", Tr("블룸"), &settings_.bloom);
+        changed |= Switch("##autolum", Tr("오토루미너스 발광"), &settings_.autoLuminous,
+                          Tr("AutoLuminous 규격 재질의 자체 발광"));
         changed |= Switch("##bloomconv", Tr("컨볼루션 블룸"), &settings_.bloomConvolution, Tr("FFT 스타버스트 블룸"));
         changed |= Switch("##dof", Tr("피사계 심도"), &settings_.dof, Tr("초점 밖을 흐림 · 뷰포트와 GI 스틸 (초점은 카메라의 초점 트랙)"));
         if (settings_.dof) {

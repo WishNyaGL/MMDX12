@@ -5,6 +5,7 @@
 #include <dxcapi.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -249,8 +250,11 @@ ComPtr<ID3DBlob> Cached(bool dxc, const std::filesystem::path& file, const char*
         return hit;
     }
     g_coldShaderCount.fetch_add(1, std::memory_order_relaxed);
+    const auto t0 = std::chrono::steady_clock::now();
     ComPtr<ID3DBlob> blob = dxc ? CompileShaderDxcUncached(file, entry, target, defines, errors)
                                 : CompileShaderUncached(file, entry, target, defines, errors);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (ms > 1000.0) LOG_INFO("shader compile %s:%s %s %.0f ms", PathToUtf8(file.filename()).c_str(), entry, target, ms);
     if (blob) CacheStore(path, blob.Get());
     g_compiledShaderCount.fetch_add(1, std::memory_order_relaxed);
     return blob;

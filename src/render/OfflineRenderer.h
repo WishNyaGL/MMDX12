@@ -79,6 +79,10 @@ struct OfflineJobDesc {
     float effectDt = 0.0f;           // >0: dt in seconds (1/fps for video)
     bool still = false;              // true for still renders (state pass runs 64 times)
     bool effectReset = false;        // reset effect state (first frame, cut)
+    // Transparent-background export (P2.3): primary camera-ray misses output the background override colour
+    // (no bloom, straight alpha 0) and CSFinalize writes the pixel's coverage into the alpha channel, giving a
+    // straight RGBA8 image for ReadOfflineImage(out, true). Off = today's opaque image.
+    bool exportAlpha = false;
 };
 
 struct OfflineProgress {
@@ -125,8 +129,9 @@ public:
     const OfflineProgress& Progress() const { return progress_; }
     void Cancel();  // phase -> Idle; resources are kept for the next job
     // Copies the final image (phase Done) into `out` (RGBA8, opaque). Waits for the GPU; must be
-    // called outside frame recording.
-    bool ReadImage(ImageRGBA8& out);
+    // called outside frame recording. preserveAlpha: keep the coverage alpha (job.exportAlpha) and
+    // un-premultiply the colour, giving straight RGBA8 for a transparent export.
+    bool ReadImage(ImageRGBA8& out, bool preserveAlpha = false);
 
 private:
     struct Impl;

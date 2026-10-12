@@ -45,6 +45,8 @@
 #include <string>
 #include <vector>
 
+#include "app/Components.h"
+
 namespace mmdx::updater {
 
 constexpr const char* kDefaultFeedUrl = "https://mmdx.codingbot.kr/latest.json";
@@ -84,6 +86,45 @@ struct Manifest {
 };
 // Parse manifest JSON. True with `out` filled; false + error otherwise.
 bool ParseManifest(const std::string& json, Manifest& out, std::string& error);
+
+// --- optional components (Components.h) -----------------------------------------------------
+// A lite install (tools/package_release.ps1 -lite) lacks the upscaler DLLs and the Noto CJK fonts.
+// This fetches one component on demand from the update object store, using the manifest of the
+// INSTALLED version so the bytes always match this exe. It reuses the feed / manifest / object
+// helpers above; the manifest URL is derived from the feed's `manifest` (same folder,
+// "<current version>.json"). SHA-256 per file is verified; downloads land in a .part file and are
+// renamed into place. One background job at a time, polled from the UI thread (no callbacks).
+class ComponentFetcher {
+public:
+    ComponentFetcher() = default;
+    ~ComponentFetcher();
+
+    void Configure(std::string feedUrl, std::string currentVersion);  // once, at App start
+
+    enum class Phase { Idle, Running, Done, Failed };
+    struct State {
+        Phase phase = Phase::Idle;
+        std::string id;      // Components.h id of the finished/running/failed component
+        std::string error;   // Korean, for the UI (Failed)
+        float fraction = 0;
+        double doneMb = 0, totalMb = 0;
+    };
+    const State& Get();       // drains a finished worker; call every frame
+    bool Busy() const { return job_.valid(); }
+    void ClearDone();         // Done/Failed -> Idle (after the UI reacted)
+
+    // Starts fetching component `comp` (a Components.h def). No-op while a job is running.
+    void Start(const components::Def& comp);
+
+private:
+    std::string Worker(components::Def comp);
+    State state_;
+    std::string feedUrl_, currentVersion_;
+    std::atomic<bool> cancel_{false};
+    std::atomic<uint64_t> progressDone_{0}, progressTotal_{0};
+    std::future<std::string> job_;
+};
+
 
 // ".-component" semantic compare ("1.2.10" > "1.2.9"): negative / 0 / positive.
 int CompareVersions(const std::string& a, const std::string& b);

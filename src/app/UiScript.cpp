@@ -2,11 +2,14 @@
 // Events are queued right before ImGui::NewFrame, so widgets see them exactly like real mouse/keyboard input.
 #include "app/App.h"
 
+#include <chrono>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #include "anim/ModelInstance.h"
 #include "app/Lighting.h"
+#include "core/I18n.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
 #include "imgui.h"
@@ -142,9 +145,32 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                     value = buf;
                 }
             }
-            LOG_INFO("STUDIOPOSE bone=%s %s selBones=%zu pose=%zu/%zu@%d tool=%d local=%d tab=%d gizmo=%d viewDrag=%d",
+            LOG_INFO("STUDIOPOSE bone=%s %s selBones=%zu pose=%zu/%zu@%d tool=%d local=%d autoIk=%d tab=%d gizmo=%d viewDrag=%d",
                      bone.c_str(), value.c_str(), d.selectedBones.size(), poseBones, poseMorphs, poseFrame, d.gizmoTool,
-                     (int)d.gizmoLocal, d.inspectorTab, (int)studioGizmoShown_, studioViewDrag_);
+                     (int)d.gizmoLocal, (int)d.autoIk, d.inspectorTab, (int)studioGizmoShown_, studioViewDrag_);
+            // the bones the pose layer currently overrides (auto-IK writes 2-3 of them per drag)
+            if (m && !m->pose.bones.empty()) {
+                std::string changed;
+                for (const auto& [b, v] : m->pose.bones) {
+                    (void)v;
+                    if (b >= 0 && b < (int)m->pmx->bones.size()) {
+                        changed += changed.empty() ? "" : ",";
+                        changed += m->pmx->bones[(size_t)b].name;
+                    }
+                }
+                LOG_INFO("STUDIOPOSEBONES %s", changed.c_str());
+            }
+            // P2.2: the selected model's physics bake state (driven bones + baked key count + the off flag)
+            if (m) {
+                size_t bakedKeys = 0;
+                const std::vector<int> driven = studio::PhysicsDrivenBones(*m->pmx);
+                for (int b : driven) {
+                    if (b < 0 || b >= (int)m->pmx->bones.size()) continue;
+                    auto it = m->motion.bones.find(m->pmx->bones[(size_t)b].name);
+                    if (it != m->motion.bones.end()) bakedKeys += it->second.size();
+                }
+                LOG_INFO("STUDIOBAKE bones=%zu keys=%zu physicsOff=%d", driven.size(), bakedKeys, (int)m->physicsOff);
+            }
             // project + every model (save / reopen comparisons, prop following)
             LOG_INFO("STUDIOPROJ path=%s dirty=%d aspect=%s models=%zu jobs=%zu audio=%s offset=%.3f end=%d camKeys=%zu "
                      "lightKeys=%zu shadowKeys=%zu",
@@ -173,6 +199,18 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                          mm.attach.rotationDeg.y, mm.attach.rotationDeg.z, mm.attach.scale, pos.x, pos.y, pos.z,
                          mm.material.ray ? "ray" : "default", mm.material.emd.empty() ? "-" : mm.material.emd.c_str(),
                          PathToUtf8(mm.path.filename()).c_str());
+                if (mm.IsProp()) {  // the accessory key track: the evaluated placement at the playhead
+                    const float af = (float)(d.time * kMmdFps);
+                    const studio::AccessoryKf ak =
+                        mm.motion.accessory.empty() ? studio::AccessoryKf{} : studio::SampleAccessory(mm.motion.accessory, af);
+                    const studio::PropAttach ap = studio::AccessoryPlacement(mm, af);
+                    LOG_INFO("STUDIOACC %zu name=%s keys=%zu frame=%d t=(%.3f,%.3f,%.3f) r=(%.2f,%.2f,%.2f) s=%.3f "
+                             "opacity=%.3f visible=%d parent=%d bone=%s",
+                             i, mm.name.c_str(), mm.motion.accessory.size(), d.Frame(), ap.translation.x, ap.translation.y,
+                             ap.translation.z, ap.rotationDeg.x, ap.rotationDeg.y, ap.rotationDeg.z, ap.scale,
+                             studio::AccessoryOpacity(mm, af), (int)studio::AccessoryVisible(mm, af),
+                             ap.parent, ap.bone.empty() ? "-" : ap.bone.c_str());
+                }
             }
             const LightAnchors anchors = StudioBuildLightAnchors();
             const int lightFrame = d.Frame();
@@ -226,6 +264,8 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             sched(now + 1, "down", {"l"});
             sched(now + 2, "up", {"l"});
         }
+    } else if (cmd == "studioautoik") {  // studioautoik <0|1>: auto-IK posing toggle
+        if (studio_ && !args.empty()) studio_->autoIk = std::atoi(args[0].c_str()) != 0;
     } else if (cmd == "studiogizmo") {  // studiogizmo <x|y|z|yz|zx|xy|rx|ry|rz> <dx> <dy> [frames]: drag a gizmo part
         static const char* const kParts[] = {"", "x", "y", "z", "yz", "zx", "xy", "rx", "ry", "rz"};
         int part = 0;
@@ -436,6 +476,12 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
         if (studio_ && !args.empty()) StudioImportVpdFrom(Utf8ToPath(args[0]));
     } else if (cmd == "studiovpdexport") {
         if (studio_ && !args.empty()) StudioExportVpdTo(Utf8ToPath(args[0]));
+    } else if (cmd == "drop") {  // drop <file>[|<file>...]: inject a drag-and-drop path list
+        std::vector<std::filesystem::path> files;
+        for (const std::string& a : args)
+            if (!a.empty()) files.push_back(std::filesystem::absolute(Utf8ToPath(a)));
+        if (!files.empty()) ApplyStudioDrop(std::move(files));
+        else LOG_WARN("ui script: drop with no files");
     } else if (cmd == "studioimport") {
         if (studio_ && !args.empty()) StudioImportVmdFrom(Utf8ToPath(args[0]));
     } else if (cmd == "studioexport") {
@@ -514,6 +560,47 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             m->attach.scale = num(8);
             ++studio_->projectVersion;
         }
+    } else if (cmd == "studioacckey") {  // studioacckey <frame> tx ty tz rx ry rz s [opacity] [visible 0|1]
+        studio::StudioModel* m = studio_ ? studio_->Selected() : nullptr;
+        if (m && m->IsProp() && args.size() >= 8) {
+            studio::AccessoryKf k;
+            k.frame = std::atoi(args[0].c_str());
+            k.translation = {num(1), num(2), num(3)};
+            k.rotationDeg = {num(4), num(5), num(6)};
+            k.scale = num(7);
+            if (args.size() > 8) k.opacity = num(8);
+            if (args.size() > 9) k.visible = (args[9] == "1" || args[9] == "true" || args[9] == "on");
+            // keep the current parent / bone (editable through the inspector) unless a key already set one
+            if (const studio::AccessoryKf* cur = studio::FindKey(m->motion.accessory, k.frame)) {
+                k.parentUid = cur->parentUid;
+                k.bone = cur->bone;
+            } else {
+                const studio::PropAttach place = studio::AccessoryPlacement(*m, (float)k.frame);
+                k.parentUid = place.parent < 0 ? 0 : (uint32_t)place.parent;
+                k.bone = place.bone;
+            }
+            std::vector<studio::TrackState> before{studio::CaptureTrack(*studio_, studio_->selectedModel, studio::RowKind::Accessory, "")};
+            studio::UpsertKey(m->motion.accessory, k);
+            StudioPushTrackEdit(Tr("소품 키"), before);
+            studio_->selection = {{studio::MakeRowId(studio::RowKind::Accessory, 0, 0), k.frame}};
+            studio_->rowsKey = ~0ull;
+        }
+    } else if (cmd == "studiobake") {  // studiobake <startFrame> <endFrame> [step]: bake the selected model's physics
+        if (studio_ && args.size() >= 2) {
+            const int a = std::max(0, std::atoi(args[0].c_str()));
+            const int b = std::max(a, std::atoi(args[1].c_str()));
+            const int step = args.size() > 2 ? std::max(1, std::atoi(args[2].c_str())) : 1;
+            if (StudioStartBake(a, b, step, false, true)) {
+                while (studioBakeRunning_) {  // scripts may block until the bake is done
+                    StudioPollBake();
+                    if (studioBakeRunning_) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            } else {
+                LOG_WARN("ui script: studiobake could not start");
+                if (outError) *outError = "Bake could not start";
+                return false;
+            }
+        }
     } else if (cmd == "studiomaterial") {  // studiomaterial <default|ray> [emd path] (selected studio model)
         studio::StudioModel* m = studio_ ? studio_->Selected() : nullptr;
         if (m && !args.empty()) {
@@ -562,6 +649,23 @@ void App::PumpUiScript() {
                 std::string rest;
                 std::getline(ss, rest);
                 s.args.push_back(rest);
+            } else if (s.cmd == "drop") {
+                // drop <file>[|<file>...]: paths may contain spaces, so `|` separates them (paths relative to the cwd)
+                std::string rest;
+                std::getline(ss, rest);
+                size_t start = rest.find_first_not_of(" \t");
+                if (start != std::string::npos) {
+                    rest = rest.substr(start);
+                    for (size_t bar = 0; bar <= rest.size();) {
+                        const size_t next = rest.find('|', bar);
+                        std::string part = rest.substr(bar, next == std::string::npos ? std::string::npos : next - bar);
+                        const size_t a = part.find_first_not_of(" \t");
+                        const size_t b = part.find_last_not_of(" \t");
+                        if (a != std::string::npos) s.args.push_back(part.substr(a, b - a + 1));
+                        if (next == std::string::npos) break;
+                        bar = next + 1;
+                    }
+                }
             } else {
                 for (std::string a; ss >> a;) s.args.push_back(a);
             }

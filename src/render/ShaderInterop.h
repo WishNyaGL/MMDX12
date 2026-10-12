@@ -56,6 +56,10 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     DirectX::XMFLOAT4 sunShadowParams;   // x = shadowType (0=NoCast, 1=Hard, 2=Soft), y = softness, z = density, w = unused
     DirectX::XMFLOAT4 sunShadowColor;    // xyz = shadow colour (linear RGB), w = unused
     DirectX::XMFLOAT4 pointShadowParams; // x = point lights shadowed this frame (0 = none), y = 1/pointMapSize
+    DirectX::XMFLOAT4 autoLumParams;     // x = AutoLuminous glow enabled (0/1), yzw unused
+    // Transparent-background export (offline GI): primary camera-ray misses output xyz (linear); w = enabled (0/1).
+    // Real-time renderers use RenderSettings::transparentBackground for the same effect. 0 = the real sky.
+    DirectX::XMFLOAT4 bgOverride;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 
@@ -88,6 +92,7 @@ enum MaterialShaderFlags : uint32_t {
     MatFlag_ToonMap       = 1u << 6,  // "toon" is a UV-mapped shadow-colour texture (an MME data layout)
     MatFlag_FlatShade     = 1u << 7,  // no N.L modelling (faces): only cast shadows darken
     MatFlag_HasSphereTex  = 1u << 8,  // a real sphere-slot texture is bound (not the white fallback)
+    MatFlag_AutoLuminous  = 1u << 9,  // そぼろ AutoLuminous convention: this material glows (black specular, power >= 100)
 };
 
 struct MaterialConstants {            // b1, one 256-byte slot per material

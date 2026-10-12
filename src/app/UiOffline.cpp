@@ -65,6 +65,7 @@ OfflineJobDesc MakeJobDesc(const AppOptions& o, const AppSettings& st, const Vid
     j.still = !video;
     j.effectDt = video ? (1.0f / (float)v.fps) : (1.0f / 60.0f);
     j.effectReset = !video;
+    j.exportAlpha = video ? v.alpha : (o.offlineAlpha == 1);   // transparent PNG sequence / still
     return j;
 }
 
@@ -91,6 +92,17 @@ std::string SanitizeFileName(std::string s) {
     }
     if (s.find_first_not_of(" \t_") == std::string::npos) s = "render";
     return s;
+}
+
+// Writes one straight-alpha PNG of a transparent export: "<dir>/<base>_00000.png".
+bool WriteAlphaFrame(const std::filesystem::path& dir, const std::string& base, int index, const ImageRGBA8& img) {
+    if (img.mips.empty() || img.mips[0].pixels.empty()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    char suffix[16];
+    std::snprintf(suffix, sizeof(suffix), "_%05d.png", index);
+    const std::filesystem::path path = dir / Utf8ToPath(base + suffix);
+    return SavePngRGBA8(path, img.Width(), img.Height(), img.mips[0].pixels.data(), img.Width() * 4);
 }
 
 // Width ui::Button gives itself for `label` (+ optional icon) with size.x == 0. UiUpdate.cpp
@@ -146,6 +158,12 @@ std::filesystem::path App::OfflineOutputDir(bool video) const {
     return dir;
 }
 
+std::filesystem::path App::AlphaSequenceDir(const std::filesystem::path& output) {
+    std::filesystem::path dir = output.parent_path();
+    const std::filesystem::path stem = output.stem().empty() ? std::filesystem::path(L"render") : output.stem();
+    return dir / Utf8ToPath(PathToUtf8(stem) + "_frames");
+}
+
 // ---------------------------------------------------------------------------
 // Job starts
 // ---------------------------------------------------------------------------
@@ -164,6 +182,7 @@ void App::StartOfflineStill() {
     offline_.startSeconds = playTime_;
     offline_.frame = 0;
     offline_.frameCount = 1;
+    offline_.alpha = options_.offlineAlpha == 1;   // transparent PNG still (MakeJobDesc sets the job's exportAlpha)
     offline_.startWall = timeSeconds_;
     offline_.beginPending = true;
     screen_ = Screen::Offline;
@@ -234,6 +253,13 @@ void App::StartOfflineVideo(double startSeconds, double endSeconds, bool fromLob
     if (probe) offline_.probeKey = CurrentVideoProbeKey();
     const OfflineJobDesc jd = MakeJobDesc(options_, settings_, offline_.video, true, false,
                                            studio ? studio_->AspectRatio() : 0.0f);
+    const bool alpha = offline_.video.alpha;
+    if (!probe) {
+        // transparent export: a straight-alpha RGBA8 PNG sequence in a folder next to the chosen output path
+        offline_.alpha = alpha;
+        offline_.alphaDir = AlphaSequenceDir(offline_.output);
+        offline_.alphaBase = PathToUtf8(offline_.output.stem());
+    }
     VideoEncoder::Desc d;
     d.width = jd.width;
     d.height = jd.height;
@@ -247,11 +273,17 @@ void App::StartOfflineVideo(double startSeconds, double endSeconds, bool fromLob
         if (!probe && scene_->hasAudio && selSong_ >= 0) d.audioPath = library_.songs[selSong_].audioPath;
         d.audioStartSeconds = startSeconds;
     }
-    offline_.encoder = std::make_unique<VideoEncoder>();
-    std::string err;
-    if (!offline_.encoder->Open(offline_.output, d, &err)) {
-        abort(probe ? Tr("시간을 측정할 수 없습니다") : Tr("영상 렌더를 시작할 수 없습니다"), err);
-        return;
+    if (alpha) {
+        // the alpha sequence writes PNGs itself; the probe still uses an encoder to measure the frame time
+        std::error_code ec;
+        std::filesystem::create_directories(offline_.alphaDir, ec);
+    } else {
+        offline_.encoder = std::make_unique<VideoEncoder>();
+        std::string err;
+        if (!offline_.encoder->Open(offline_.output, d, &err)) {
+            abort(probe ? Tr("시간을 측정할 수 없습니다") : Tr("영상 렌더를 시작할 수 없습니다"), err);
+            return;
+        }
     }
     if (studio) {
         // the whole window shows the render (no studio panels): the image is not fitted into the viewport area
@@ -533,9 +565,10 @@ void App::AfterOfflineFrame() {
     }
     if (offline_.beginPending) return;
     ImageRGBA8 img;
+    const bool alpha = offline_.alpha;
     if (offline_.realtime) {
         if (++offline_.iter < offline_.iterCount) return;   // more passes accumulate into this frame
-        if (!renderer_.ReadFinalImage(img)) {
+        if (!renderer_.ReadFinalImage(img, alpha)) {
             LOG_ERROR("offline render: could not read the frame");
             toast_ = {Tr("렌더 결과를 읽을 수 없습니다"), "", {}, true, timeSeconds_ + 8.0};
             FinishOffline(true);
@@ -543,7 +576,7 @@ void App::AfterOfflineFrame() {
         }
     } else {
         if (renderer_.OfflineStatus().phase != OfflinePhase::Done) return;
-        if (!renderer_.ReadOfflineImage(img)) {
+        if (!renderer_.ReadOfflineImage(img, alpha)) {
             LOG_ERROR("offline render: could not read the result image");
             toast_ = {Tr("렌더 결과를 읽을 수 없습니다"), "", {}, true, timeSeconds_ + 8.0};
             FinishOffline(true);
@@ -566,7 +599,8 @@ void App::AfterOfflineFrame() {
         return;
     }
     const auto encodeStart = std::chrono::steady_clock::now();
-    const bool added = offline_.encoder && offline_.encoder->AddFrame(img);
+    const bool added = alpha ? WriteAlphaFrame(offline_.alphaDir, offline_.alphaBase, offline_.frame, img)
+                             : (offline_.encoder && offline_.encoder->AddFrame(img));
     const double encodeSecs = std::chrono::duration<double>(std::chrono::steady_clock::now() - encodeStart).count();
     offline_.avgEncodeSeconds = offline_.frame == 0 ? encodeSecs
                                                     : (offline_.avgEncodeSeconds * offline_.frame + encodeSecs) /
@@ -610,7 +644,22 @@ void App::FinishOffline(bool cancelled) {
     const bool cli = offline_.fromCli;
     const bool lobby = (video || probe) && offline_.fromLobby;
     if (offline_.realtime) ApplyRenderSettings();   // back from the video's fixed-resolution settings
-    if ((video || probe) && offline_.encoder) {
+    if (offline_.alpha && !probe) {
+        // transparent export: the PNG sequence is already written by AfterOfflineFrame
+        const int written = offline_.frame;
+        if (written == 0) {
+            if (!toast_.error || toast_.until < timeSeconds_)
+                toast_ = {Tr("영상 렌더를 취소했습니다"), "", {}, false, timeSeconds_ + 6.0};
+        } else if (cancelled) {
+            if (!toast_.error || toast_.until < timeSeconds_)
+                toast_ = {Tr("영상 렌더를 중단했습니다"),
+                          std::to_string(written) + Tr("프레임까지 저장했습니다 · ") + PathToUtf8(offline_.alphaDir.filename()),
+                          offline_.alphaDir, false, timeSeconds_ + 10.0};
+        } else {
+            toast_ = {Tr("고품질 영상 프레임을 저장했습니다"), PathToUtf8(offline_.alphaDir.filename()), offline_.alphaDir,
+                      false, timeSeconds_ + 10.0};
+        }
+    } else if ((video || probe) && offline_.encoder) {
         const uint32_t written = offline_.encoder->FramesWritten();
         offline_.encoder->Finish();
         std::error_code ec;
@@ -802,6 +851,7 @@ VideoRenderConfig App::ActiveVideoConfig() const {
     if (options_.offlineBitrate > 0) c.bitrateMbps = options_.offlineBitrate;
     if (options_.offlineQuality >= 0) c.quality = options_.offlineQuality;
     if (options_.offlineRenderer >= 0) c.renderer = options_.offlineRenderer;
+    if (options_.offlineAlpha >= 0) c.alpha = options_.offlineAlpha != 0;
     if (options_.dof >= 0) c.dof = options_.dof != 0;
     if (options_.volumetric >= 0) c.volumetric = options_.volumetric != 0;
     if (options_.volumetricDensity > 0.0f) c.volumetricDensity = options_.volumetricDensity;
@@ -848,6 +898,7 @@ RenderSettings App::VideoRealtimeSettings(const VideoRenderConfig& cfg) const {
     rs.volumetricDensity = cfg.volumetricDensity;
     rs.dof = cfg.dof;
     rs.dofAperture = cfg.dofAperture;
+    rs.exportAlpha = cfg.alpha;   // transparent export: sky writes alpha 0 and the frame is read as straight RGBA
     rs.packEffects = settings_.effectStack;   // effect packs apply to the real-time renderers' frames
     return rs;
 }

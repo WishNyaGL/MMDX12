@@ -361,9 +361,15 @@ bool App::StudioGizmoFrameOf(const StudioModel& m, int bone, GizmoFrame& f, Gizm
     const PmxBone& b = pmx.bones[(size_t)bone];
     const bool movable = b.flags & PmxBone_Movable, rotatable = b.flags & PmxBone_Rotatable;
     if (!movable && !rotatable) return false;
-    // the chosen tool if the bone allows it, else the other one
-    mode = d.gizmoTool == 1 ? (movable ? GizmoMode::Translate : GizmoMode::Rotate)
-                            : (rotatable ? GizmoMode::Rotate : GizmoMode::Translate);
+    // auto-IK: a wrist / any bone whose parent chain has >= 2 rotatable bones gets a translate gizmo
+    int ikRoot = -1, ikMid = -1;
+    if (d.autoIk && FindAutoIkChain(pmx, bone, ikRoot, ikMid)) {
+        mode = GizmoMode::Translate;
+    } else {
+        // the chosen tool if the bone allows it, else the other one
+        mode = d.gizmoTool == 1 ? (movable ? GizmoMode::Translate : GizmoMode::Rotate)
+                                : (rotatable ? GizmoMode::Rotate : GizmoMode::Translate);
+    }
     f = GizmoFrame{};
     f.center = BoneJointWorld(pmx, *m.inst, bone);
     const XMVECTOR world = RotationOf(m.inst->BoneWorld(bone));
@@ -404,6 +410,7 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
         if (studioViewDrag_ == 2) {  // playback started mid-drag: keep the edit made so far
             StudioSetPose(Tr("본 편집"), studioPoseBefore_);
             studioViewDrag_ = 0;
+            studioAutoIkActive_ = false;
         }
         if (studioViewDrag_ == 6 && d.Selected()) {
             StudioCommitPlace(d.Selected()->uid, studioPlaceBefore_, d.Selected()->place);
@@ -461,6 +468,36 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
                                                           ? RotationOf(m->inst->BoneWorld(parent))
                                                           : XMQuaternionIdentity());
                 studioDragScale_ = m->inst->Scale();
+                // auto-IK: capture the chain's world state so the drag can solve it
+                studioAutoIkActive_ = false;
+                int ikRoot = -1, ikMid = -1;
+                if (d.autoIk && studioGizmoMode_ == GizmoMode::Translate && FindAutoIkChain(*m->pmx, bone, ikRoot, ikMid)) {
+                    const PmxModel& pmx = *m->pmx;
+                    const int endParent = pmx.bones[(size_t)bone].parentIndex;
+                    const int midParent = pmx.bones[(size_t)ikMid].parentIndex;
+                    const int rootParent = pmx.bones[(size_t)ikRoot].parentIndex;
+                    studioAutoIkDrag_ = AutoIkDrag{};
+                    studioAutoIkDrag_.root = ikRoot;
+                    studioAutoIkDrag_.mid = ikMid;
+                    studioAutoIkDrag_.end = bone;
+                    studioAutoIkDrag_.rootPos = BoneJointWorld(pmx, *m->inst, ikRoot);
+                    studioAutoIkDrag_.midPos = BoneJointWorld(pmx, *m->inst, ikMid);
+                    studioAutoIkDrag_.endPos = BoneJointWorld(pmx, *m->inst, bone);
+                    XMStoreFloat4(&studioAutoIkDrag_.rootWorld, RotationOf(m->inst->BoneWorld(ikRoot)));
+                    XMStoreFloat4(&studioAutoIkDrag_.midWorld, RotationOf(m->inst->BoneWorld(ikMid)));
+                    XMStoreFloat4(&studioAutoIkDrag_.endWorld, RotationOf(m->inst->BoneWorld(bone)));
+                    XMStoreFloat4(&studioAutoIkDrag_.rootParentWorld,
+                                  rootParent >= 0 ? RotationOf(m->inst->BoneWorld(rootParent)) : XMQuaternionIdentity());
+                    XMStoreFloat4(&studioAutoIkDrag_.midParentWorld,
+                                  midParent >= 0 ? RotationOf(m->inst->BoneWorld(midParent)) : XMQuaternionIdentity());
+                    XMStoreFloat4(&studioAutoIkDrag_.endParentWorld,
+                                  endParent >= 0 ? RotationOf(m->inst->BoneWorld(endParent)) : XMQuaternionIdentity());
+                    studioAutoIkDrag_.bendNormal =
+                        AutoIkBendNormal(pmx, ikRoot, ikMid, bone, studioAutoIkDrag_.rootPos, studioAutoIkDrag_.midPos,
+                                         studioAutoIkDrag_.endPos);
+                    studioAutoIkDrag_.valid = true;
+                    studioAutoIkActive_ = true;
+                }
             }
         } else if (studioHoverBone_ >= 0) {
             StudioSelectBone(studioHoverBone_, io.KeyCtrl);
@@ -474,10 +511,38 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {  // cancel
             m->pose = studioPoseBefore_;
             studioViewDrag_ = 4;  // swallow the rest of this press
+            studioAutoIkActive_ = false;
         } else {
             PoseBone v = studioDragBase_;
             const XMVECTOR parent = XMLoadFloat4(&studioDragParentRot_);
-            if (studioGizmoMode_ == GizmoMode::Translate) {
+            if (studioAutoIkActive_) {
+                // auto-IK: solve the two parent bones so the end bone follows the gizmo (world), keep its orientation
+                const XMFLOAT3 w = GizmoDragTranslation(studioGizmoDrag_, mouse);
+                const XMFLOAT3 target{w.x + studioAutoIkDrag_.endPos.x, w.y + studioAutoIkDrag_.endPos.y,
+                                      w.z + studioAutoIkDrag_.endPos.z};
+                AutoIkResult r;
+                if (SolveAutoIkDrag(studioAutoIkDrag_, target, &r)) {
+                    PoseLayer& pose = m->pose;
+                    if (pose.frame != d.Frame()) pose = PoseLayer{};
+                    pose.frame = d.Frame();
+                    // start values (layer overrides or the evaluated anim) keep their translations; only r changes
+                    const auto startBone = [&](int b) {
+                        const auto it = studioPoseBefore_.bones.find(b);
+                        return it != studioPoseBefore_.bones.end() && studioPoseBefore_.frame == d.Frame()
+                                   ? it->second
+                                   : PoseBone{m->inst->BoneAnimTranslation(b), m->inst->BoneAnimRotation(b)};
+                    };
+                    PoseBone rb = startBone(studioAutoIkDrag_.root);
+                    PoseBone mb = startBone(studioAutoIkDrag_.mid);
+                    PoseBone eb = startBone(studioAutoIkDrag_.end);
+                    rb.r = r.rootLocal;
+                    mb.r = r.midLocal;
+                    eb.r = r.endLocal;
+                    pose.bones[studioAutoIkDrag_.root] = rb;
+                    pose.bones[studioAutoIkDrag_.mid] = mb;
+                    pose.bones[studioAutoIkDrag_.end] = eb;
+                }
+            } else if (studioGizmoMode_ == GizmoMode::Translate) {
                 XMFLOAT3 w = GizmoDragTranslation(studioGizmoDrag_, mouse);
                 XMVECTOR dt = XMVectorScale(XMLoadFloat3(&w), 1.0f / std::max(studioDragScale_, 1e-4f));
                 dt = XMVector3Rotate(dt, XMQuaternionInverse(parent));  // world -> parent frame (the key's space)
@@ -492,13 +557,18 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
                     XMStoreFloat4(&v.r, XMQuaternionNormalize(XMQuaternionMultiply(XMLoadFloat4(&studioDragBase_.r), dq)));
                 }
             }
-            PoseLayer& pose = m->pose;
-            if (pose.frame != d.Frame()) pose = PoseLayer{};
-            pose.frame = d.Frame();
-            pose.bones[studioDragBone_] = v;
+            if (!studioAutoIkActive_) {
+                PoseLayer& pose = m->pose;
+                if (pose.frame != d.Frame()) pose = PoseLayer{};
+                pose.frame = d.Frame();
+                pose.bones[studioDragBone_] = v;
+            }
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                StudioSetPose(studioGizmoMode_ == GizmoMode::Translate ? Tr("본 이동") : Tr("본 회전"), studioPoseBefore_);
+                StudioSetPose(studioAutoIkActive_ ? Tr("자동 IK")
+                                                  : studioGizmoMode_ == GizmoMode::Translate ? Tr("본 이동") : Tr("본 회전"),
+                              studioPoseBefore_);
                 studioViewDrag_ = 0;
+                studioAutoIkActive_ = false;
             }
         }
     }
@@ -558,7 +628,7 @@ void App::StudioViewportToolbar(float x, float cy) {
     const Palette& p = P();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float b = 30.0f, gap = 2.0f;
-    const float w = Dp(5 * b + 4 * gap + 3 * 9.0f + 8.0f);
+    const float w = Dp(6 * b + 5 * gap + 3 * 9.0f + 8.0f);
     dl->AddRectFilled(ImVec2(x, cy - Dp(b * 0.5f + 4.0f)), ImVec2(x + w, cy + Dp(b * 0.5f + 4.0f)), WithAlpha(p.surface, 0.85f),
                       Dp(10.0f));
     ImGui::SetCursorScreenPos(ImVec2(x + Dp(4.0f), cy - Dp(b * 0.5f)));
@@ -567,6 +637,8 @@ void App::StudioViewportToolbar(float x, float cy) {
     if (IconButton("##vprot", icon::Refresh, Tr("회전  (E)"), d.gizmoTool == 0, b)) d.gizmoTool = 0;
     ImGui::SameLine(0, Dp(gap));
     if (IconButton("##vpmove", icon::ArrowsOutCardinal, Tr("이동  (W)"), d.gizmoTool == 1, b)) d.gizmoTool = 1;
+    ImGui::SameLine(0, Dp(gap));
+    if (IconButton("##vpautoik", icon::Magnet, Tr("자동 IK: 손목을 끌면 팔이 따라옵니다  (K)"), d.autoIk, b)) d.autoIk = !d.autoIk;
     ImGui::SameLine(0, Dp(gap));
     if (IconButton("##vpmodel", icon::PersonSimple, d.modelGizmo ? Tr("모델 이동/회전 끄기  (T)") : Tr("모델 이동/회전  (T)"), d.modelGizmo, b))
         d.modelGizmo = !d.modelGizmo;

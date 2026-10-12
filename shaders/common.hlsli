@@ -49,6 +49,8 @@ cbuffer SceneCB : register(b0) {
     float4 gSunShadowParams;     // x = shadowType (0=NoCast, 1=Hard, 2=Soft), y = softness, z = density, w = unused (sun shadows: only x/y/z are read)
     float4 gSunShadowColor;      // xyz = shadow colour (linear RGB), w = unused
     float4 gPointShadowParams;   // x = point lights shadowed this frame (0 = none), y = 1/pointMapSize
+    float4 gAutoLumParams;       // x = AutoLuminous glow enabled (0/1), yzw unused
+    float4 gBgOverride;          // xyz = transparent-export background colour (linear), w = enabled (offline GI)
 };
 
 static const float PI = 3.14159265;
@@ -134,6 +136,24 @@ float SunShadowConeCos(float baseCos) {
 float3 ShadowTransmission(float vis, float density, float3 shadowColor) {
     float occ = (1.0 - vis) * density;
     return (1.0 - occ) + shadowColor * occ;
+}
+
+// そぼろ AutoLuminous convention (MME's most used glow effect): a PMX material the model author marked with a black
+// specular colour (reflection colour 0,0,0) and a specular power (反射強度) of 100 or more emits. The strength scales
+// with specularPower - 100 (110 = the documented standard, "1.0"); the emission colour is the material colour times
+// the texture (the author paints the glow colour into the diffuse / texture). Returns added HDR radiance; 0 when the
+// material carries no MAT_AUTO_LUMINOUS flag or the glow is off. `texLinear` is the linear base texture colour.
+#ifndef MAT_AUTO_LUMINOUS
+#define MAT_AUTO_LUMINOUS 512u
+#endif
+float3 AutoLumEmission(uint flags, float4 diffuse, float specPower, float3 texLinear) {
+    if ((flags & MAT_AUTO_LUMINOUS) == 0u || gAutoLumParams.x < 0.5) return 0.0;
+    float strength = clamp((specPower - 100.0) * 0.1, 0.0, 20.0);   // 110 -> 1.0 (documented standard), 100 -> 0
+    float3 base = saturate(diffuse.rgb) * saturate(texLinear);      // author's emission colour (diffuse x texture)
+    // HDR gain: AutoLuminous blurs every emitter with its own threshold-free glow; our bloom starts at luminance 1.1,
+    // so the standard 110 must land above it for a typical saturated colour (pink 1, .4, .6 -> ~1.4).
+    const float kAutoLumGain = 4.0;
+    return base * strength * kAutoLumGain;
 }
 
 #endif

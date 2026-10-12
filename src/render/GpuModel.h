@@ -72,8 +72,10 @@ public:
     // Material morphs (ModelInstance::MaterialMul/MaterialAdd/MaterialVersion): final = base * mul + add.
     // Empty vectors mean identity. Rewrites ring entry frame % kRing when it holds another version and
     // points Materials()[i].constants at it, so call it every frame like UpdateSkinning.
+    // `opacity` is a per-model multiplier on every material's diffuse alpha (studio accessories, 1 = unchanged);
+    // it is folded into the version, so 1 stays bit-identical to the call without it.
     void UpdateMaterials(uint64_t frame, const std::vector<PmxMorph::MaterialOffset>& mul,
-                         const std::vector<PmxMorph::MaterialOffset>& add, uint64_t version);
+                         const std::vector<PmxMorph::MaterialOffset>& add, uint64_t version, float opacity = 1.0f);
 
     // Shader pack (render/ShaderPack.h): nullptr = the default shading. Writes the material class, head bone and
     // parameters into the material constants; a no-op when nothing changed, so call it every frame before
@@ -177,6 +179,7 @@ private:
     uint64_t materialEntryVersion_[kRing] = {};
     uint64_t materialVersion_ = 0;              // version of materialConsts_
     std::vector<MaterialConstants> baseConsts_; // without material morphs
+    std::vector<char> autoLum_;                 // per material: AutoLuminous convention matched at load (packs clear it)
     struct MaterialBase { bool edgeFlag = false, castFlag = false; };
     std::vector<MaterialBase> materialBase_;
     std::vector<ComPtr<ID3D12Resource>> textures_;  // parallel to pmx.textures (null if unused)

@@ -908,6 +908,10 @@ void App::DrawSelect() {
                     ImGui::PopStyleColor();
                     PopFont();
                 }
+                // Offer the runtime DLL when the upscaler's GPU is present but its file (an optional
+                // component, Components.h) is not: the missing DLL is the only reason it is unavailable.
+                for (int k = 1; k <= 3; ++k)
+                    if (!renderer_.UpscalerAvailable((UpscalerKind)k)) DrawUpscalerComponentRow((UpscalerKind)k, colW);
             }
             if (settings_.upscaler != 0) {
                 Gap(10.0f);
@@ -938,6 +942,8 @@ void App::DrawSelect() {
                 changed |= Switch("##ssao", Tr("앰비언트 오클루전"), &settings_.ssao);
                 changed |= Switch("##ssr", Tr("화면 공간 반사"), &settings_.ssr);
                 changed |= Switch("##bloom", Tr("블룸"), &settings_.bloom);
+                changed |= Switch("##autolum", Tr("오토루미너스 발광"), &settings_.autoLuminous,
+                                  Tr("AutoLuminous 규격 재질의 자체 발광"));
                 changed |= Switch("##taa", "TAA", &settings_.taa, Tr("시간 누적 안티에일리어싱"));
                 changed |= Switch("##edges", Tr("외곽선"), &settings_.drawEdges);
                 changed |= Switch("##motionlight", Tr("모션 조명·그림자"), &settings_.motionLighting,
@@ -1015,6 +1021,8 @@ void App::DrawSelect() {
                     ApplyRenderSettings();
                     settings_.Save(settingsPath_);
                 }
+                // Japanese / Chinese UI without the bundled Noto CJK fonts: offer them here.
+                DrawFontComponentRow(colW);
             }
             ImGui::PopClipRect();
             ImGui::EndGroup();

@@ -25,6 +25,9 @@
 #ifndef MAT_HAS_SPHERE_TEX
 #define MAT_HAS_SPHERE_TEX 256u   // a real sphere-slot texture is bound (not the white fallback)
 #endif
+#ifndef MAT_AUTO_LUMINOUS
+#define MAT_AUTO_LUMINOUS 512u    // そぼろ AutoLuminous: this material emits (see AutoLumEmission in common.hlsli)
+#endif
 #define RTG_CAST_SHADOW (1u << 16)
 #define RTG_ALPHA_TEST  (1u << 17)
 #define RTG_CHARACTER   (1u << 18)

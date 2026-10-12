@@ -69,6 +69,7 @@ int MotionData::EndFrame() const {
     if (!light.empty()) end = std::max(end, light.back().frame);
     if (!shadow.empty()) end = std::max(end, shadow.back().frame);
     if (!focus.empty()) end = std::max(end, focus.back().frame);
+    if (!accessory.empty()) end = std::max(end, accessory.back().frame);
     return end;
 }
 
@@ -82,6 +83,7 @@ bool MotionData::InsertFrames(int at, int count) {
     changed |= InsertFrameSpan(light, at, count);
     changed |= InsertFrameSpan(shadow, at, count);
     changed |= InsertFrameSpan(focus, at, count);
+    changed |= InsertFrameSpan(accessory, at, count);
     return changed;
 }
 
@@ -95,6 +97,7 @@ bool MotionData::DeleteFrames(int at, int count) {
     changed |= DeleteFrameSpan(light, at, count);
     changed |= DeleteFrameSpan(shadow, at, count);
     changed |= DeleteFrameSpan(focus, at, count);
+    changed |= DeleteFrameSpan(accessory, at, count);
     // Tracks that lost their last key are removed from the maps.
     for (auto it = bones.begin(); it != bones.end();) it = it->second.empty() ? bones.erase(it) : std::next(it);
     for (auto it = morphs.begin(); it != morphs.end();) it = it->second.empty() ? morphs.erase(it) : std::next(it);
@@ -116,6 +119,7 @@ size_t MotionData::ApproxBytes() const {
     bytes += light.capacity() * sizeof(LightKf);
     bytes += shadow.capacity() * sizeof(ShadowKf);
     bytes += focus.capacity() * sizeof(FocusKf);
+    bytes += accessory.capacity() * sizeof(AccessoryKf);
     return bytes;
 }
 
@@ -151,6 +155,7 @@ void MotionData::Merge(const MotionData& o) {
     for (const LightKf& k : o.light) UpsertKey(light, k);
     for (const ShadowKf& k : o.shadow) UpsertKey(shadow, k);
     for (const FocusKf& k : o.focus) UpsertKey(focus, k);
+    for (const AccessoryKf& k : o.accessory) UpsertKey(accessory, k);
 }
 
 namespace {
@@ -288,6 +293,45 @@ ShadowKf SampleShadow(const std::vector<ShadowKf>& keys, float frame) {
     const ShadowKf& k = it != keys.begin() ? *(it - 1) : keys.front();
     ShadowKf out = k;
     out.frame = f;
+    return out;
+}
+
+AccessoryKf SampleAccessory(const std::vector<AccessoryKf>& keys, float frame) {
+    const int f = (int)std::floor(frame);
+    if (f <= keys.front().frame || keys.size() == 1) { AccessoryKf k = keys.front(); k.frame = f; return k; }
+    if (f >= keys.back().frame) { AccessoryKf k = keys.back(); k.frame = f; return k; }
+    auto it = std::upper_bound(keys.begin(), keys.end(), f, [](int v, const AccessoryKf& k) { return v < k.frame; });
+    const size_t i = (size_t)(it - keys.begin()) - 1;
+    const AccessoryKf& a = keys[i];
+    const AccessoryKf& b = keys[i + 1];
+    const float t = (frame - (float)a.frame) / (float)(b.frame - a.frame);
+    AccessoryKf out;
+    out.frame = f;
+    // placement and opacity: linear
+    out.translation.x = a.translation.x + (b.translation.x - a.translation.x) * t;
+    out.translation.y = a.translation.y + (b.translation.y - a.translation.y) * t;
+    out.translation.z = a.translation.z + (b.translation.z - a.translation.z) * t;
+    out.scale = a.scale + (b.scale - a.scale) * t;
+    out.opacity = a.opacity + (b.opacity - a.opacity) * t;
+    // rotation: Euler degrees slerped through quaternions (roll/pitch/yaw order, as PropOffsetMatrix)
+    constexpr float kRad = 0.01745329252f;
+    const DirectX::XMVECTOR qa = DirectX::XMQuaternionRotationRollPitchYaw(
+        a.rotationDeg.x * kRad, a.rotationDeg.y * kRad, a.rotationDeg.z * kRad);
+    const DirectX::XMVECTOR qb = DirectX::XMQuaternionRotationRollPitchYaw(
+        b.rotationDeg.x * kRad, b.rotationDeg.y * kRad, b.rotationDeg.z * kRad);
+    const DirectX::XMVECTOR q = DirectX::XMQuaternionSlerp(qa, qb, t);
+    // back to Euler degrees (PropOffsetMatrix's XMMatrixRotationRollPitchYaw(x, y, z) order)
+    DirectX::XMFLOAT4X4 rm;
+    DirectX::XMStoreFloat4x4(&rm, DirectX::XMMatrixRotationQuaternion(q));
+    const float pitch = std::asin(std::clamp(-rm._32, -1.0f, 1.0f));
+    const float yaw = std::atan2(rm._31, rm._33);
+    const float roll = std::atan2(rm._12, rm._22);
+    constexpr float kDeg = 57.295779513f;
+    out.rotationDeg = {pitch * kDeg, yaw * kDeg, roll * kDeg};
+    // stepped: the last key at or before `frame`
+    out.visible = a.visible;
+    out.parentUid = a.parentUid;
+    out.bone = a.bone;
     return out;
 }
 

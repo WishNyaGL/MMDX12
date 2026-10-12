@@ -99,6 +99,7 @@ bool App::FinishStudioLoad() {
         sm->defaultPackTextureFolder = m.defaultPackTextureFolder;
         sm->kind = m.kind;
         sm->visible = m.visible;
+        sm->physicsOff = m.physicsOff;
         sm->attach = m.attach;
         sm->place = sm->placeApplied = m.place;
         sm->shader = m.shader;
@@ -132,6 +133,13 @@ bool App::FinishStudioLoad() {
         const int p = m->attach.parent;
         const int di = p >= 0 && p < (int)remap.size() ? remap[(size_t)p] : -1;
         m->attach.parent = di >= 0 ? (int)doc->models[(size_t)di]->uid : -1;
+        // accessory keys are saved as 1 + the package model index (0 = the world): back to the model's uid
+        for (AccessoryKf& k : m->motion.accessory) {
+            if (k.parentUid == 0) continue;
+            const size_t pi = k.parentUid - 1;
+            const int ki = pi < remap.size() ? remap[pi] : -1;
+            k.parentUid = ki >= 0 ? doc->models[(size_t)ki]->uid : 0;
+        }
     }
 
     doc->camera = std::move(pkg.camera);
@@ -185,10 +193,37 @@ bool App::FinishStudioLoad() {
         freeCam_.distance = std::clamp(e.camDistance, 2.0f, 600.0f);
         freeCam_.fovDeg = std::clamp(e.camFovDeg, 5.0f, 120.0f);
         doc->projectPath = pkg.projectPath;  // recovery: the project the autosave belongs to (may be empty)
-        if (!pkg.recovered && !pkg.projectPath.empty()) {
-            settings_.AddRecentProject(PathToUtf8(pkg.projectPath));
-            settings_.Save(settingsPath_);
+    } else if (pkg.fromPmm) {
+        // PMM import: a NEW unsaved project. Camera motion when the PMM had camera keys; the PMM has
+        // no scene lights, so the Studio preset is the default (a PMM light track overrides it).
+        doc->useMotionCamera = !doc->camera.camera.empty() && !options_.freeCamera;
+        doc->lights = PresetLights(0, DirectX::XMFLOAT3{0.0f, 10.0f, 0.0f}, doc->nextLightUid);
+        doc->selectedModel = -1;
+        for (int i = 0; i < (int)doc->models.size(); ++i)
+            if (doc->models[(size_t)i]->kind == ModelKind::Character) { doc->selectedModel = i; break; }
+        doc->time = options_.seekSeconds > 0 ? options_.seekSeconds
+                                             : (float)std::max(0, pkg.editor.rangeStart) / (double)kMmdFps;
+        doc->view.rangeStart = pkg.editor.rangeStart;
+        doc->view.rangeEnd = pkg.editor.rangeEnd;
+        // Frame aspect from the PMM output size when it maps to a preset (else keep 16:9).
+        if (pkg.pmmWidth > 0 && pkg.pmmHeight > 0 && AspectIndexFromWH(pkg.pmmWidth, pkg.pmmHeight) != 0)
+            doc->SetAspect(pkg.pmmWidth, pkg.pmmHeight);
+        // MME effect controllers -> native render settings (bloom / DoF / SSAO / AutoLuminous / ...).
+        const PmmEffectSettings& fx = pkg.pmmEffects;
+        if (fx.autoLuminous) settings_.autoLuminous = true;
+        if (fx.bloom) settings_.bloom = true;
+        if (fx.ssao) settings_.ssao = true;
+        if (fx.dof) settings_.dof = true;
+        if (fx.dofAperture >= 0.0f) settings_.dofAperture = std::clamp(fx.dofAperture, 0.2f, 3.0f);
+        if (fx.lutIntensity >= 0.0f) settings_.lutIntensity = std::clamp(fx.lutIntensity, 0.0f, 1.0f);
+        ApplyRenderSettings();
+        if (!fx.recognised.empty()) {
+            LOG_INFO("studio: pmm MME effects: %d recognised, %d unsupported",
+                     (int)fx.recognised.size(), (int)fx.unsupported.size());
+            for (const std::string& r : fx.recognised) LOG_INFO("studio: pmm MME: %s", r.c_str());
         }
+        toast_ = {Tr("이 .pmm 파일은 MMD 프로젝트(읽기 전용)예요. 모델·카메라·음원을 불러와 새 스튜디오 프로젝트를 만들어요."),
+                  studioLoadTitle_, {}, false, timeSeconds_ + 6.0};
     } else {
         doc->useMotionCamera = !doc->camera.camera.empty() && !options_.freeCamera;
         doc->lights = PresetLights(0, DirectX::XMFLOAT3{0.0f, 10.0f, 0.0f}, doc->nextLightUid);  // the Studio preset
@@ -207,6 +242,15 @@ bool App::FinishStudioLoad() {
         freeCam_.distance = c[5];
         doc->useMotionCamera = false;
     }
+    // A project opened from disk joins the recent list; a .pmm import (a new unsaved project) remembers
+    // the source so "recent files" can reopen it, but never overwrites .mmdxproj entries.
+    if (!pkg.recovered && !pkg.projectPath.empty()) {
+        settings_.AddRecentProject(PathToUtf8(pkg.projectPath));
+        settings_.Save(settingsPath_);
+    } else if (pkg.fromPmm && !pkg.pmmSourcePath.empty()) {
+        settings_.AddRecentProject(PathToUtf8(pkg.pmmSourcePath));
+        settings_.Save(settingsPath_);
+    }
     // a recovered autosave is unsaved work; a project opened from disk or a fresh scene is clean
     doc->MarkSaved();
     if (pkg.recovered) ++doc->projectVersion;
@@ -217,6 +261,15 @@ bool App::FinishStudioLoad() {
         if (pkg.warnings.size() > 3) detail += "\n...";
         toast_ = {Tr("일부 파일을 불러오지 못했어요"), detail, {}, true, timeSeconds_ + 8.0};
         for (const std::string& w : pkg.warnings) LOG_WARN("studio: %s", w.c_str());
+    }
+    if (pkg.fromPmm && !pkg.pmmEffects.unsupported.empty()) {
+        std::string list;
+        for (size_t i = 0; i < pkg.pmmEffects.unsupported.size(); ++i)
+            list += (i ? ", " : "") + pkg.pmmEffects.unsupported[i];
+        char title[64];
+        std::snprintf(title, sizeof(title), Tr("MME 효과 %d개는 지원하지 않습니다"),
+                      (int)pkg.pmmEffects.unsupported.size());
+        toast_ = {title, list, {}, true, timeSeconds_ + 8.0};
     }
     StudioEnter(std::move(doc));
     return true;
@@ -347,6 +400,7 @@ void App::UpdateStudio(double dt) {
         if (!ctrl && pressed(ImGuiKey_E, false)) d.gizmoTool = 0;
         if (!ctrl && pressed(ImGuiKey_W, false)) d.gizmoTool = 1;
         if (!ctrl && pressed(ImGuiKey_L, false)) d.gizmoLocal = !d.gizmoLocal;
+        if (!ctrl && pressed(ImGuiKey_K, false)) d.autoIk = !d.autoIk;
         if (pressed(ImGuiKey_Escape, false) && d.possessCamera) StudioPossess(false);
         if (pressed(ImGuiKey_Escape, false) && studioViewDrag_ != 2 && d.activeBone >= 0) StudioSelectBone(-1, false);
         if (ctrl && pressed(ImGuiKey_S, false)) StudioSave(shift);
@@ -355,6 +409,7 @@ void App::UpdateStudio(double dt) {
         if (studio_.get() != &d) return;  // the project was closed or replaced (New / Open)
     }
     StudioPollJobs();
+    StudioPollBake();
     StudioAutosave(false, false);
     if (d.playing) {
         if (d.hasAudio && audio_.IsPlaying()) {
@@ -468,7 +523,7 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
                 DirectX::XMMatrixTranslation(pl.translation.x / s, pl.translation.y / s, pl.translation.z / s)));
             inst.SetRootTransform(root);
         }
-        inst.EnablePhysics(d.physics);
+        inst.EnablePhysics(d.physics && !m.physicsOff);
         if (!(m.placeApplied == m.place)) {  // moved by hand: the bodies restart at the new place
             m.placeApplied = m.place;
             resetPhysics = true;
@@ -516,7 +571,8 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
         }
         ApplyShaderChoice(*m.gpu, shader);
     }
-    m.gpu->UpdateMaterials(slot, inst.MaterialMul(), inst.MaterialAdd(), inst.MaterialVersion());
+    m.gpu->UpdateMaterials(slot, inst.MaterialMul(), inst.MaterialAdd(), inst.MaterialVersion(),
+                           m.IsProp() ? AccessoryOpacity(m, frame) : 1.0f);
 }
 
 void App::StudioCamera(CameraParams& camera) const {
@@ -580,9 +636,11 @@ void App::BuildStudioFrameView(FrameView& view) {
 
     // stage parts first (the renderer's draw order), then characters and props
     bool anyStage = false;
+    const float viewFrame = (float)(d.time * kMmdFps);
     for (int pass = 0; pass < 2; ++pass) {
         for (const auto& m : d.models) {
             if (!m->visible || m->IsStage() != (pass == 0)) continue;
+            if (m->IsProp() && !AccessoryVisible(*m, viewFrame)) continue;  // a hidden accessory key hides the prop
             view.models.push_back(m->gpu.get());
             if (m->IsStage()) anyStage = true;
         }
@@ -621,6 +679,7 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
     if (d.selectedModel < 0 || d.selectedModel >= (int)d.models.size()) return false;
     const PmxModel& pmx = *d.models[d.selectedModel]->pmx;
     const uint32_t idx = RowIndexOf(row);
+    if (kind == RowKind::Accessory) return d.models[d.selectedModel]->IsProp();
     if (kind == RowKind::Bone && idx < pmx.bones.size()) { name = pmx.bones[idx].name; return true; }
     if (kind == RowKind::Morph && idx < pmx.morphs.size()) { name = pmx.morphs[idx].name; return true; }
     return false;
@@ -738,6 +797,15 @@ void App::StudioInsertKeys(const std::vector<uint64_t>& rows, int frame) {
             UpsertKey(d.camera.shadow, k);
         } else if (kind == RowKind::Focus) {
             UpsertKey(d.camera.focus, StudioNewFocusKey(frame));
+        } else if (kind == RowKind::Accessory) {
+            StudioModel* m = d.Selected();
+            if (m && m->IsProp()) {
+                AccessoryKf k;
+                if (m->motion.accessory.empty()) k = StudioNewAccessoryKey(*m, frame);
+                else k = SampleAccessory(m->motion.accessory, (float)frame);
+                k.frame = frame;
+                UpsertKey(m->motion.accessory, k);
+            }
         } else if (kind == RowKind::SceneLight) {
             // a new light key keeps the light's current value (sampled where keys exist)
             if (SceneLight* light = d.FindLight(LightUidOfTrack(name)))
@@ -780,6 +848,8 @@ std::vector<int> App::StudioRowFrames(uint64_t row) const {
         add(d.camera.shadow);
     } else if (kind == RowKind::Focus) {
         add(d.camera.focus);
+    } else if (kind == RowKind::Accessory) {
+        if (d.models[d.selectedModel]->IsProp()) add(d.models[d.selectedModel]->motion.accessory);
     } else if (kind == RowKind::SceneLight) {
         if (const SceneLight* light = d.FindLight(LightUidOfTrack(name))) add(light->keys);
     } else {
@@ -859,7 +929,8 @@ void App::StudioDeleteSelected(const char* undoName) {
             if (SceneLight* light = d.FindLight(LightUidOfTrack(track.second))) EraseKeyFrames(light->keys, fs);
         }
         else if (kind == RowKind::Bone) EraseKeyFrames(d.models[d.selectedModel]->motion.bones[track.second], fs);
-        else EraseKeyFrames(d.models[d.selectedModel]->motion.morphs[track.second], fs);
+        else if (kind == RowKind::Morph) EraseKeyFrames(d.models[d.selectedModel]->motion.morphs[track.second], fs);
+        else if (kind == RowKind::Accessory) EraseKeyFrames(d.models[d.selectedModel]->motion.accessory, fs);
     }
     StudioPushTrackEdit(undoName, before);
     d.selection.clear();
@@ -896,6 +967,9 @@ void App::StudioCopySelected() {
             const auto& t = d.models[d.selectedModel]->motion.bones;
             if (auto it = t.find(name); it != t.end())
                 if (const BoneKf* p = FindKey(it->second, k.second)) { c.bone = *p; found = true; }
+        } else if (kind == RowKind::Accessory) {
+            const auto& t = d.models[d.selectedModel]->motion.accessory;
+            if (const AccessoryKf* p = FindKey(t, k.second)) { c.accessory = *p; found = true; }
         } else {
             const auto& t = d.models[d.selectedModel]->motion.morphs;
             if (auto it = t.find(name); it != t.end())
@@ -976,6 +1050,7 @@ void App::StudioPaste(bool curvesOnly, bool mirrored) {
         else if (kind == RowKind::Light) { LightKf k = c.light; k.frame = f; UpsertKey(d.camera.light, k); }
         else if (kind == RowKind::Shadow) { ShadowKf k = c.shadow; k.frame = f; UpsertKey(d.camera.shadow, k); }
         else if (kind == RowKind::Focus) { FocusKf k = c.focus; k.frame = f; UpsertKey(d.camera.focus, k); }
+        else if (kind == RowKind::Accessory) { AccessoryKf k = c.accessory; k.frame = f; UpsertKey(d.models[d.selectedModel]->motion.accessory, k); }
         else if (kind == RowKind::SceneLight) {
             if (SceneLight* light = d.FindLight(LightUidOfTrack(name))) { LightKey k = c.sceneLight; k.frame = f; UpsertKey(light->keys, k); }
         }
@@ -1033,6 +1108,8 @@ void App::StudioShiftFrames(bool remove) {
                 apply(d.camera.shadow);
             } else if (kind == RowKind::Focus) {
                 apply(d.camera.focus);
+            } else if (kind == RowKind::Accessory) {
+                if (d.models[d.selectedModel]->IsProp()) apply(d.models[d.selectedModel]->motion.accessory);
             } else if (kind == RowKind::SceneLight) {
                 if (SceneLight* light = d.FindLight(LightUidOfTrack(name))) apply(light->keys);
             } else {
@@ -1216,6 +1293,9 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
             else if (kind == RowKind::Light) MoveKeyFrames(d.camera.light, fs, ev.moveDelta);
             else if (kind == RowKind::Shadow) MoveKeyFrames(d.camera.shadow, fs, ev.moveDelta);
             else if (kind == RowKind::Focus) MoveKeyFrames(d.camera.focus, fs, ev.moveDelta);
+            else if (kind == RowKind::Accessory) {
+                if (d.models[d.selectedModel]->IsProp()) MoveKeyFrames(d.models[d.selectedModel]->motion.accessory, fs, ev.moveDelta);
+            }
             else if (kind == RowKind::SceneLight) {
                 if (SceneLight* light = d.FindLight(LightUidOfTrack(track.second)))
                     MoveKeyFrames(light->keys, fs, ev.moveDelta);
@@ -1282,6 +1362,15 @@ void App::StudioRebuildRows() {
     if (!m) return;
     const PmxModel& pmx = *m->pmx;
     const MotionData& mo = m->motion;
+    // a prop's accessory (placement) track: one row, like the camera's Focus row
+    if (m->IsProp()) {
+        TimelineRow acc;
+        acc.id = MakeRowId(RowKind::Accessory, 0, 0);
+        acc.label = Tr("소품");
+        acc.selected = d.selectedRows.count(acc.id) != 0;
+        keysOf(acc.id, mo.accessory, acc.keys);
+        d.rows.push_back(std::move(acc));
+    }
     // A bone listed in two display frames has two rows: keys are selected through its canonical row only, so each key
     // counts once and both rows show the same selection.
     const auto canon = [&](uint64_t row) {
@@ -1570,6 +1659,7 @@ void App::DrawStudio() {
     if (studio_.get() != &d) return;  // left (or replaced) from the prompt
     DrawStudioHelp();
     DrawStudioLightPresetConfirm();
+    DrawStudioBakeDialog();    // P2.2: the physics bake options / progress modal
     DrawVideoRenderDialog();   // the render dialog (top bar render menu); starting it leaves for Screen::Offline
     if (screen_ != Screen::Studio) return;
     DrawToast();
@@ -1920,6 +2010,14 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
             line(Tr("본 / 모프"), std::to_string(m->pmx->bones.size()) + " / " + std::to_string(m->pmx->morphs.size()));
             if (m->IsProp()) DrawStudioPropPanel(w);
             else DrawStudioPlacePanel(w);
+            // P2.2: per-model physics off (saved in the project; baked keys play instead of physics)
+            if (m->kind == ModelKind::Character && !PhysicsDrivenBones(*m->pmx).empty()) {
+                ImGui::Dummy(ImVec2(w, Dp(6.0f)));
+                bool off = m->physicsOff;
+                if (Switch("##modelphysics", Tr("물리 끄기"), &off, Tr("구운 키로 재생할 때 (프로젝트에 저장)")) &&
+                    off != m->physicsOff)
+                    d.history.Push(std::make_unique<PhysicsOffCommand>(d, d.selectedModel, m->physicsOff, off));
+            }
             if (m->kind == ModelKind::Character) DrawStudioShaderRow(w);
             DrawStudioMaterialRow(w);
         } else {
@@ -1997,6 +2095,11 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
             ImGui::EndChild();
             return;
         }
+    }
+    if (kind == RowKind::Accessory) {  // accessory keys have no curve editor (linear / stepped only)
+        DrawStudioAccessoryKeyFields(w, first->second);
+        ImGui::EndChild();
+        return;
     }
     if (kind == RowKind::SceneLight) {  // light keys have no curve editor; their values are shown, not edited, here
         const LightKey* k = sceneLight ? FindKey(sceneLight->keys, first->second) : nullptr;
@@ -2284,6 +2387,7 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
                 case RowKind::Light: case RowKind::SceneLight: r.tint = IM_COL32(236, 170, 50, 255); break;
                 case RowKind::Shadow: r.tint = IM_COL32(150, 110, 220, 255); break;
                 case RowKind::Focus: r.tint = IM_COL32(232, 96, 150, 255); break;
+                case RowKind::Accessory: r.tint = IM_COL32(120, 200, 160, 255); break;
                 default: break;
             }
         }

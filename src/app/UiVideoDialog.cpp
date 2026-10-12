@@ -261,6 +261,9 @@ void App::DrawVideoRenderDialog() {
             SliderRow("##dofaperture", Tr("조리개"), &cfg.dofAperture, 0.2f, 3.0f, "%.1f");
             ImGui::Unindent(Dp(16.0f));
         }
+
+        // 투명 배경 (PNG 시퀀스): straight-alpha RGBA8 frames instead of an MP4
+        Switch("##valpha", Tr("투명 배경 (PNG 시퀀스)"), &cfg.alpha, Tr("배경을 지우고 알파 프레임을 저장합니다"));
         if (cfg.Gi()) {
             const ImVec2 pos = ImGui::GetCursorScreenPos();
             Text(ImGui::GetWindowDrawList(), Font::Regular, size::Caption, ImVec2(pos.x, pos.y + Dp(2.0f)), p.ink3,

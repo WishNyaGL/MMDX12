@@ -71,7 +71,9 @@ public:
     // The final (post-processed, sRGB) image of the last Render() call at output resolution, as an
     // opaque RGBA8 image. Waits for the GPU; call after the frame was submitted (ctx.EndFrame),
     // outside frame recording. Used to render videos with the real-time renderers.
-    bool ReadFinalImage(ImageRGBA8& out);
+    // preserveAlpha: keep the frame's coverage alpha (RenderSettings::transparentBackground) and un-premultiply the
+    // colour, giving straight RGBA8 for a transparent export; false forces opaque (today's behaviour).
+    bool ReadFinalImage(ImageRGBA8& out, bool preserveAlpha = false);
 
     // Blurred copy of the last presented frame for frosted UI panels (ImTextureID, 0 if none)
     // and the back-buffer rectangle the scene image occupies (letterbox), to map UVs.
@@ -99,7 +101,8 @@ public:
     void RenderOffline(ID3D12GraphicsCommandList* cmd);
     const OfflineProgress& OfflineStatus() const;
     // Final image of a Done job (RGBA8, opaque). Waits for the GPU; call outside frame recording.
-    bool ReadOfflineImage(ImageRGBA8& out);
+    // preserveAlpha: keep the coverage alpha (OfflineJobDesc::exportAlpha) and un-premultiply the colour.
+    bool ReadOfflineImage(ImageRGBA8& out, bool preserveAlpha = false);
     void CancelOffline();
     // false: BeginOffline / RenderOffline leave the back buffer alone (a sample render behind the UI).
     void SetOfflinePresent(bool present) { offlinePresent_ = present; }

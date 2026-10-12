@@ -12,7 +12,9 @@ progress.md is the session log. Read its latest entry first.
   UTF-8 console stored it in the wrong code page (no deps: header edits rebuilt nothing, stale-layout crashes).
   build.cmd detects that and reconfigures once.
 - Shaders are compiled at runtime from `build/bin/shaders` (the `copy_shaders` target keeps them in sync).
-  Raster shaders use FXC (`*_5_1`); ray-query shaders use DXC (`*_6_5`, `-HV 2018` because common.hlsli uses vector ternaries that HLSL 2021 rejects). `dxcompiler.dll`/`dxil.dll` are copied from the Windows SDK.
+  Raster shaders use FXC (`*_5_1`), except the lit / floor scene PSOs (mmd.hlsl VSMain/PSMain, VSFloor/PSFloor): DXC
+  `*_6_0` on SM 6.0 devices because FXC needs ~5.5 min for PSMain since the PBR branch (FXC stays their fallback; a PSO
+  never mixes DXBC and DXIL). Slow cold compiles (> 1 s) log a `shader compile` line. Ray-query shaders use DXC (`*_6_5`, `-HV 2018` because common.hlsli uses vector ternaries that HLSL 2021 rejects). `dxcompiler.dll`/`dxil.dll` are copied from the Windows SDK.
 - Upscaler runtime DLLs are git-ignored: run `tools/fetch_sdks.ps1` once (DLSS 310.9.1, XeSS 3.0.2, FidelityFX 2.3.0), then rebuild. Missing DLLs only disable that upscaler.
 - Render path / upscaler from the CLI: `--render raster|rt|pt`, `--upscaler none|dlss|fsr|xess`, `--upscale-quality native|quality|balanced|performance|ultra`.
 - PBR material data (2.0.0): per-character material source (기본 / Ray-MMD, saved as `characterMaterial=` ini lines and
@@ -51,6 +53,8 @@ progress.md is the session log. Read its latest entry first.
     `studioaddlib <character|stage> <substr>`, `studiosong <substr>`, `studioaudio <file|none> [offset]`,
     `studioselect`/`studioremove <index>`, `studioreplace <index> <file>` / `studioreplacelib <index> <substr>` (swap a model's file), `studiorename <text>`, `studiomaterial <default|ray> [emd path]` (PBR material source of the selected model), `studioattach <parent|-1> <bone|-> tx ty tz rx ry rz s`,
     `studioaspect <w:h>` (frame aspect preset, e.g. `9:16`, `16:9`, `2.39:1`).
+    Drag and drop: `drop <file>[|<file>...]` injects a drop path list (models → characters/props, `.vmd`/`.vpd` onto
+    the selected / single new model, audio, `.mmdxproj`; `|` separates paths so they may contain spaces).
     Focus: `studiofocus <frame> <auto|target|manual> [model index|distance] [aperture] [transition] [head|upper|center]`
     upserts a focus key (`studiostate` logs a `STUDIOFOCUS` line: distance, aperture, subject).
     Lighting rig: `studiolight <vmd|preset|custom> [presetIndex] [spotCount] [keyOverride 0|1]` sets the studio's
@@ -68,6 +72,8 @@ progress.md is the session log. Read its latest entry first.
   - `anim_probe <pmx> <vmd> [cam.vmd]`: IK convergence, CPU skinning bounds, NaN scan, physics scan (explosions, cost)
   - `render_smoke`: renders a cube with no assets
   - `vmd_roundtrip <file|dir> [--vpd-selftest]`: VMD load -> save -> load comparison (SaveVmd), VPD self test
+  - `pmm_probe <file.pmm> [--no-fuzz] [--fuzz-rounds N]`: PMM (MMD project) dump (models / per-track key counts /
+    camera / accessories / audio / MME controllers) + a fuzz self test (truncate at every 1 KiB, random byte flips)
   - `rest_pose_test [model|dir...]`: T-pose -> A-pose self test (synthetic model: bones, weights, morphs, bodies, joints), then the arm angle of every PMX/PMD found
   - `studio_edit_test`: Studio key-edit core (move/insert/delete frames, undo byte budget, 100k-key timings)
   - `studio_gizmo_test` / `studio_pose_test`: gizmo projection/hit/drag math and bone overlay; mirror names/poses, VPD pose ops
@@ -80,6 +86,11 @@ progress.md is the session log. Read its latest entry first.
   - `pack_previews.py [--only ids] [--out-dir d] [--bump]`: re-shoots every public pack's before/after preview over the pipe
     (shot table in the script; scene-only `screenshot`, `set_render_settings shader_texture_folder`; writes the website
     repo's `shader-packs/<id>/` and the built-in packs, contact sheet in `captures/pack_previews`)
+  - `media_kit.py [--exe e] [--out dir] [--scene name] [--only v,...] [--size W H] [--clips] [--dry-run]`: regenerates the
+    README / promo A/B media (classic MMD / raster / RT / PT / offline GI of one pinned frame, composed into `compare_2x2`,
+    `compare_strip`, `compare_split` (classic | `--split-right`, default raster) + JPEG q90) in `captures/media_kit`;
+    strictly sequential, backs up/restores `mmdx12.ini`. Captures use `--capture-scene 1` (the rendered scene only, no
+    play bar / stats overlay; works for any `--capture` in a scene) and `--classic` (vanilla-MMD look for one run).
   - `make_update.py <stage> --version X --out d [--base-url u]`: delta-update manifest + content-addressed objects (+ .gz)
     for the smart updater (feed `manifest` / `manifestSha256`); `update_e2e.py`: headless updater E2E (delta + corrupt-object fallback)
   - `mcp_pipe.py` / `mcp_x.py`: talk to a running app's pipe without the bridge (`python tools/mcp_x.py "click 플레이" "wait 30" "shot out.png" "items 셰이더"`)
@@ -152,6 +163,12 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     `PathTracePass` composites that layer over the denoised colour (`pt_edge.hlsl`, outline velocity where it covers), as the
     offline GI renderer composites its outline layer.
     Pass implementations live in `Passes.cpp` and `Pass*.cpp` (shared helpers in `PassCommon.h`). Volumetric and the FFT bloom are `ComputePipeline` (cs_6_5) and silently disable themselves without DXR-class hardware.
+    AutoLuminous (そぼろ convention, native): `GpuModel::Create` flags a non-PBR material with black specular and
+    specular power >= 100 as `MatFlag_AutoLuminous` (cleared for pack-shaded materials); `AutoLumEmission`
+    (common.hlsli) adds diffuse x texture x (power - 100) / 10 x 4 as HDR after lighting in the raster / RT PS, PT and
+    offline GI (emitters light their surroundings there). Switch `RenderSettings::autoLuminous` (ini `autoLuminous=`,
+    `--auto-luminous 0|1`, lobby + studio effects toggles) -> `SceneConstants::autoLumParams.x`; off = identical frame.
+    Translucent pixels (alpha < 0.98) write nt.z = -1 (no AO / no SSR): SSAO no longer greys sheer curtains.
     Colour LUTs (`ColorLut.h`) are 32³ strips uploaded with `Renderer::SetColorLut`; PostPass applies them after the sRGB encode.
   - `GpuModel` keeps a 3-frame ring of bone/morph buffers so the previous pose (motion vectors) stays valid.
   - `GpuModel` handles GPU skinning. `RtScene` (RayTracing.h) skins every model into world-space `RtVertex` buffers with a compute shader and builds BLAS (characters every frame, stages once) + TLAS; shaders read geometry bindlessly (`rt_common.hlsli`, `RtGeometry` table, unbounded tables over the whole SRV heap, root signature 1.0 so descriptors stay volatile).
@@ -163,7 +180,13 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   motions (`MotionData`, StudioMotion.h, converted to VmdMotion and re-bound with `BoundMotion::Bind` after edits), the camera
   track, `CommandStack` undo (edits are `TrackEditCommand` track snapshots / `MotionSwapCommand`) and the editor state.
   `UiTimeline`/`UiBezier` are data-agnostic widgets. The viewport is the renderer drawing into `RenderSettings::viewport*`.
-  Compatibility with MMD goes through standard files: VMD (`SaveVmd`) and VPD (`asset/VpdFile.h`); PMM is not supported.
+  Compatibility with MMD goes through standard files: VMD (`SaveVmd`) and VPD (`asset/VpdFile.h`). PMM
+  (MMD `.pmm` projects, "Polygon Movie maker 0002") is import-only (`asset/PmmLoader.{h,cpp}`, `tools/pmm_probe`):
+  opening one (open dialog / `--project x.pmm` / recent / drop) builds a NEW unsaved studio project — models resolved
+  by absolute path, then relative to the PMM folder, then by file name in the library; each model's PMM motion is
+  split into a temporary VMD and re-read (VMD semantics), camera / light / self-shadow come from the PMM tracks, MME
+  effect controllers (`MapMmeControllers`) are recognised and mapped onto native settings instead of becoming props,
+  remaining accessories become props with an accessory key track. We never WRITE PMM (undocumented binary).
   - VMD bone interpolation: bytes 2/3 are MMD physics flags; Z/rotation x1 are bytes 17/18 (`GetBoneCurve`/`SetBoneCurve`).
   - Pose editing (`app/UiStudioPose.cpp`, `studio/Gizmo.*`, `studio/StudioPose.*`): viewport edits go to the model's
     `PoseLayer` (bone/morph overrides valid at one frame, applied after `BoundMotion::Evaluate`, so drags never re-bind).

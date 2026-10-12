@@ -209,7 +209,15 @@ void CSFinalize(uint3 id : SV_DispatchThreadID) {
     c *= 1.0 - gP1.z * smoothstep(0.35, 1.05, length(v));
     c = LinearToSrgb(saturate(c));
     c += (Ign(float2(p)) - 0.5) / 255.0;
-    gOut[p] = float4(saturate(c), 1.0);
+    // Transparent export (gP2.z): coverage = the fraction of this pixel's primary samples that hit a surface
+    // (the sky rays output the black background override, so they contribute nothing to `c`, which is already
+    // premultiplied). Soft silhouette / hair edges and stochastic-transparency materials get partial coverage.
+    float cover = 1.0;
+    if (gP2.z > 0.5) {
+        const float n = max(gAccumT.Load(int3(p, 0)).a, 1.0);
+        cover = saturate(gAlbedoT.Load(int3(p, 0)).a / n);
+    }
+    gOut[p] = float4(saturate(c), cover);
 }
 
 // Lit HDR for the pre-bloom effects, in the real-time frame's order: the denoised radiance back in albedo, the

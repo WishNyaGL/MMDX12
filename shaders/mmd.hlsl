@@ -38,6 +38,7 @@ cbuffer PbrRoot : register(b3) {
 #define MAT_TOON_MAP    64u
 #define MAT_FLAT        128u
 #define MAT_HAS_SPHERE_TEX 256u
+#define MAT_AUTO_LUMINOUS 512u
 #endif
 
 // Shader-pack material class: the PackClass lives in bits 0..7 of gPackClass, bits 8..15 hold the class's alpha key
@@ -535,7 +536,10 @@ PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivi
     PSOut o;
     o.color = float4(color, alpha);
     float3 vn = normalize(mul(worldNormal, (float3x3)gView));
-    o.normal = float4(OctEncode(vn), reflectivity, alpha);
+    // Translucent pixels (sheer curtains, glass, hair fringes) write "no AO" (negative reflectivity, the composite's
+    // nt.z < 0 rule): the normal target blends like the colour, so the mark wins where the translucent layer
+    // dominates, and SSAO no longer greys a sheer curtain by its folds (it also skips SSR there).
+    o.normal = float4(OctEncode(vn), alpha < 0.98 ? -1.0 : reflectivity, alpha);
     o.velocity = Velocity(curClip, prevClip);
     return o;
 }
@@ -636,6 +640,9 @@ PSOut MmdShade(VSOut i, bool front, float3 n, float3 L, float3 V, float4 tex, fl
         float side = smoothstep(-0.2, 0.5, dot(n, L) + 0.25);
         color += gRimColor * rim * side * sh * gRimStrength * gSunIntensity * (1.0 - 0.6 * flat);
     }
+    // AutoLuminous (そぼろ): a marked material adds its own colour as HDR radiance after lighting so bloom picks it
+    // up. Off (gAutoLumParams.x 0) or unmarked = 0, the pre-existing frame.
+    color += AutoLumEmission(gFlags, gDiffuse, gSpecularPower, SrgbToLinear(saturate(tex.rgb)));
     return PackOutput(color, alpha, n, alpha > 0.9 ? reflectivity : 0.0, i.curClip, i.prevClip);
 }
 

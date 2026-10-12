@@ -16,6 +16,7 @@
 #include <vector>
 
 #include <json.hpp>
+#include "app/Components.h"
 #include "core/I18n.h"
 #include "core/NetUtil.h"
 #include "core/Log.h"
@@ -703,7 +704,7 @@ std::string Controller::StageDelta(const Feed& feed, int& changedFiles, uint64_t
     for (const ManifestFile& f : m.files) manifestBytes += f.size;
     progressTotal_.store(manifestBytes, std::memory_order_relaxed);
 
-    std::vector<const ManifestFile*> toDownload;
+    std::vector<size_t> toDownload;
     std::vector<bool> changedFlags(m.files.size(), false);
     uint64_t scanned = 0;
     for (size_t i = 0; i < m.files.size(); ++i) {
@@ -719,7 +720,15 @@ std::string Controller::StageDelta(const Feed& feed, int& changedFiles, uint64_t
             }
         }
         if (!same) {
-            toDownload.push_back(&f);
+            // An optional component (Components.h) that is not installed stays uninstalled: a lite
+            // install must not silently gain the upscaler DLLs / CJK fonts through a delta update.
+            // Installed components keep being updated like any other file.
+            if (!FileExists(live) && components::IsComponentPath(f.path)) {
+                scanned += f.size;
+                progressDone_.store(scanned, std::memory_order_relaxed);
+                continue;
+            }
+            toDownload.push_back(i);
             changedFlags[i] = true;
             changedBytes += f.size;
         }
@@ -749,7 +758,11 @@ std::string Controller::StageDelta(const Feed& feed, int& changedFiles, uint64_t
         }
         const fs::path dst = top / rel;
         if (!changedFlags[i]) {
-            if (!LinkOrCopy(ExecutableDir() / rel, dst, error)) {
+            const fs::path src = ExecutableDir() / rel;
+            // An absent optional component (Components.h) that was not installed stays absent from
+            // the staged tree: skip the link (there is nothing to link) so a lite install stays lite.
+            if (!FileExists(src) && components::IsComponentPath(f.path)) continue;
+            if (!LinkOrCopy(src, dst, error)) {
                 LOG_WARN("update: delta link failed: %s", error.c_str());
                 return "delta link failed (" + error + ")";
             }
@@ -911,7 +924,6 @@ void Controller::OpenReleasePage() const {
 const Controller::State& Controller::Get() {
     if (check_.valid() && check_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         ProcessFeed(check_.get());
-
     if (update_.valid()) {
         if (update_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             const std::string error = update_.get();
@@ -945,6 +957,134 @@ const Controller::State& Controller::Get() {
         }
     }
     return notice_;
+}
+
+// --- ComponentFetcher (Components.h) -------------------------------------------------------
+
+ComponentFetcher::~ComponentFetcher() {
+    cancel_.store(true, std::memory_order_relaxed);
+    if (job_.valid()) job_.wait();
+}
+
+void ComponentFetcher::Configure(std::string feedUrl, std::string currentVersion) {
+    feedUrl_ = std::move(feedUrl);
+    currentVersion_ = std::move(currentVersion);
+}
+
+void ComponentFetcher::Start(const components::Def& comp) {
+    if (job_.valid()) return;
+    cancel_.store(false, std::memory_order_relaxed);
+    state_ = State{};
+    state_.phase = Phase::Running;
+    state_.id = comp.id;
+    progressDone_.store(0, std::memory_order_relaxed);
+    progressTotal_.store(0, std::memory_order_relaxed);
+    job_ = std::async(std::launch::async, [this, comp] { return Worker(comp); });
+    LOG_INFO("component: fetching %s", comp.id);
+}
+
+void ComponentFetcher::ClearDone() {
+    if (state_.phase == Phase::Done || state_.phase == Phase::Failed) state_ = State{};
+}
+
+const ComponentFetcher::State& ComponentFetcher::Get() {
+    if (job_.valid() && job_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const std::string error = job_.get();
+        const std::string id = state_.id;
+        state_ = State{};
+        state_.id = id;
+        if (error.empty()) {
+            state_.phase = Phase::Done;
+            state_.fraction = 1;
+            LOG_INFO("component: %s installed", id.c_str());
+        } else if (error == "cancelled") {
+            state_.phase = Phase::Idle;
+            LOG_INFO("component: cancelled");
+        } else {
+            state_.phase = Phase::Failed;
+            state_.error = error;
+            LOG_WARN("component: %s failed: %s", id.c_str(), error.c_str());
+        }
+    } else if (job_.valid() && state_.phase == Phase::Running) {
+        const uint64_t done = progressDone_.load(std::memory_order_relaxed);
+        const uint64_t total = progressTotal_.load(std::memory_order_relaxed);
+        state_.doneMb = (double)done / (1024.0 * 1024.0);
+        state_.totalMb = (double)total / (1024.0 * 1024.0);
+        state_.fraction = total > 0 ? (float)std::clamp((double)done / (double)total, 0.0, 1.0) : 0.0f;
+    }
+    return state_;
+}
+
+std::string ComponentFetcher::Worker(components::Def comp) {
+    // 1. the feed (only to locate the object store).
+    const Feed feed = FetchFeed(feedUrl_);
+    if (!feed.ok) return "feed: " + feed.error;
+    if (feed.manifest.empty()) return std::string("feed has no manifest url");
+
+    // 2. the INSTALLED version's manifest: same folder as the feed's manifest, "<current version>.json".
+    //    Never the new version's manifest: the upscaler DLLs / fonts must match this exe.
+    const std::string manifestUrl = ResolveRelative(feed.manifest, currentVersion_ + ".json");
+    std::string body, error;
+    if (!FetchBytes(manifestUrl, 1u << 24, body, error)) return "manifest: " + error;
+    Manifest m;
+    if (!ParseManifest(body, m, error)) return "manifest: " + error;
+    if (m.version != currentVersion_)
+        LOG_WARN("component: manifest version %s differs from this build %s", m.version.c_str(),
+                 currentVersion_.c_str());
+    const std::string objects = ResolveRelative(manifestUrl, m.objects);
+    if (objects.empty()) return std::string("manifest has no objects base");
+
+    // 3. resolve every file of the component in the manifest and sum its size (progress).
+    struct Item {
+        const ManifestFile* file = nullptr;
+        fs::path dest;
+    };
+    std::vector<Item> items;
+    uint64_t total = 0;
+    for (int i = 0; i < comp.fileCount; ++i) {
+        const std::string path = comp.files[i];
+        const ManifestFile* found = nullptr;
+        for (const ManifestFile& f : m.files)
+            if (f.path == path) {
+                found = &f;
+                break;
+            }
+        if (!found) return std::string("component file not in the manifest: ") + path;
+        items.push_back({found, ExecutableDir() / Utf8ToPath(path)});
+        total += found->size;
+    }
+    progressTotal_.store(total, std::memory_order_relaxed);
+    progressDone_.store(0, std::memory_order_relaxed);
+
+    // 4. download + verify each file into a sibling .part, then rename it into place.
+    for (const Item& it : items) {
+        if (cancel_.load(std::memory_order_relaxed)) return std::string("cancelled");
+        const ManifestFile& f = *it.file;
+        const fs::path tmp = it.dest.parent_path() / (it.dest.filename().wstring() + L".component.part");
+        std::error_code ec;
+        fs::create_directories(tmp.parent_path(), ec);
+        const std::string key = f.sha256.substr(0, 2) + "/" + f.sha256;
+        const std::string url = JoinUrl(objects, key);
+        std::string derr;
+        if (!DownloadObject(url, tmp, &progressDone_, &cancel_, derr)) {
+            fs::remove(tmp, ec);
+            if (derr == "cancelled") return derr;
+            return "download failed for " + f.path + " (" + derr + ")";
+        }
+        if (!VerifyFile(tmp, f.size, f.sha256, nullptr)) {
+            fs::remove(tmp, ec);
+            return "checksum mismatch for " + f.path;
+        }
+        fs::remove(it.dest, ec);
+        fs::rename(tmp, it.dest, ec);
+        if (ec) {
+            ec.clear();
+            fs::copy_file(tmp, it.dest, fs::copy_options::overwrite_existing, ec);
+            fs::remove(tmp, ec);
+            if (ec) return "cannot place " + f.path;
+        }
+    }
+    return std::string();
 }
 
 } // namespace mmdx::updater

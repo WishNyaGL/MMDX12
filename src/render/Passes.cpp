@@ -335,19 +335,34 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
 
     const std::filesystem::path file = shaderDir / L"mmd.hlsl";
     ComPtr<ID3DBlob> vs = CompileShader(file, "VSMain", "vs_5_1");
-    ComPtr<ID3DBlob> ps = CompileShader(file, "PSMain", "ps_5_1");
     ComPtr<ID3DBlob> vsEdge = CompileShader(file, "VSEdge", "vs_5_1");
     ComPtr<ID3DBlob> psEdge = CompileShader(file, "PSEdge", "ps_5_1");
     ComPtr<ID3DBlob> vsSky = CompileShader(file, "VSSky", "vs_5_1");
     ComPtr<ID3DBlob> psSky = CompileShader(file, "PSSky", "ps_5_1");
     ComPtr<ID3DBlob> vsFloor = CompileShader(file, "VSFloor", "vs_5_1");
-    ComPtr<ID3DBlob> psFloor = CompileShader(file, "PSFloor", "ps_5_1");
     ComPtr<ID3DBlob> psWire = CompileShader(file, "PSWire", "ps_5_1");
     ComPtr<ID3DBlob> psWireBg = CompileShader(file, "PSWireBg", "ps_5_1");
     ComPtr<ID3DBlob> psWireFloor = CompileShader(file, "PSWireFloor", "ps_5_1");
-    if (!vs || !ps || !vsEdge || !psEdge || !vsSky || !psSky || !vsFloor || !psFloor || !psWire ||
-        !psWireBg || !psWireFloor)
+    if (!vs || !vsEdge || !psEdge || !vsSky || !psSky || !vsFloor || !psWire || !psWireBg || !psWireFloor)
         return false;
+    // The lit and floor PSOs: FXC needs minutes for PSMain since the PBR branch (2.0.0: 332 s cold vs 1.2 s with
+    // DXC, PSFloor 14 s), so SM 6.0 devices get DXC bytecode for both stages (a PSO cannot mix DXBC and DXIL; the
+    // other PSOs below keep the FXC `vs` / `vsFloor`). FXC stays the fallback.
+    ComPtr<ID3DBlob> vsLit, ps, vsFloorLit, psFloor;
+    if (ctx.Caps().shaderModel >= D3D_SHADER_MODEL_6_0) {
+        vsLit = CompileShaderDxc(file, "VSMain", "vs_6_0");
+        ps = vsLit ? CompileShaderDxc(file, "PSMain", "ps_6_0") : nullptr;
+        vsFloorLit = ps ? CompileShaderDxc(file, "VSFloor", "vs_6_0") : nullptr;
+        psFloor = vsFloorLit ? CompileShaderDxc(file, "PSFloor", "ps_6_0") : nullptr;
+        if (!psFloor) LOG_WARN("ScenePass: DXC lit shaders unavailable, compiling with FXC");
+    }
+    if (!psFloor) {
+        vsLit = vs;
+        ps = CompileShader(file, "PSMain", "ps_5_1");
+        vsFloorLit = vsFloor;
+        psFloor = CompileShader(file, "PSFloor", "ps_5_1");
+        if (!ps || !psFloor) return false;
+    }
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
     pso.InputLayout = {kMmdLayout, (UINT)std::size(kMmdLayout)};
@@ -377,12 +392,12 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pso.SampleDesc.Count = msaa > 1 ? msaa : 1;
 
-    pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    pso.VS = {vsLit->GetBufferPointer(), vsLit->GetBufferSize()};
     pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     shaderDir_ = shaderDir;
     litDesc_ = pso;
-    vs_ = vs;
+    vs_ = vsLit;
     vsRt_.Reset();
     vsDxc_.Reset();
     ReleasePackPsos(ctx);
@@ -391,6 +406,7 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     if (!CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&psoNoCull_)), "ScenePass: PSO no cull"))
         return false;
+    pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};   // FXC: the descs derived below pair it with FXC PSs
 
     // Floor desc: needed by both the raster and RT floor PSOs; built here so the RT block below
     // can copy it before the edge/sky descs mutate `pso`.
@@ -487,10 +503,11 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     if (!CheckHr(device->CreateGraphicsPipelineState(&sky, IID_PPV_ARGS(&psoFlatBg_)), "ScenePass: PSO flat bg"))
         return false;
 
-    floor.VS = {vsFloor->GetBufferPointer(), vsFloor->GetBufferSize()};
+    floor.VS = {vsFloorLit->GetBufferPointer(), vsFloorLit->GetBufferSize()};
     floor.PS = {psFloor->GetBufferPointer(), psFloor->GetBufferSize()};
     bool okFloor = CheckHr(device->CreateGraphicsPipelineState(&floor, IID_PPV_ARGS(&psoFloor_)), "ScenePass: PSO floor");
     // Wireframe floor: the two-triangle quad as its 5 edges, flat colour.
+    floor.VS = {vsFloor->GetBufferPointer(), vsFloor->GetBufferSize()};
     floor.PS = {psWireFloor->GetBufferPointer(), psWireFloor->GetBufferSize()};
     floor.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     okFloor = okFloor &&
@@ -781,8 +798,9 @@ void ScenePass::Execute(PassContext& pc) {
             cmd->DrawInstanced(3, 1, 0, 0);
         }
         // the procedural floor: lit / wire in the camera view; an ortho view shows it as lines only when wireframe
-        // (a solid plane would hide everything in the top view)
-        if (pc.view.studioFloor && (!vd.ortho || wire)) {
+        // (a solid plane would hide everything in the top view). A transparent-background export keeps only the
+        // dancer: the default floor is skipped (a stage model stays and is the user's to remove).
+        if (pc.view.studioFloor && !pc.settings.exportAlpha && (!vd.ortho || wire)) {
             cmd->SetPipelineState(wire ? psoWireFloor_.Get() : (rt ? psoFloorRt_.Get() : psoFloor_.Get()));
             cmd->DrawInstanced(6, 1, 0, 0);
         }
@@ -1094,7 +1112,7 @@ void PathTracePass::Execute(PassContext& pc) {
     t.depth.Transition(cmd, kUav);
     const float c0[8] = {(float)std::clamp(pc.settings.ptSamples, 1u, 4u),
                          (float)std::clamp(pc.settings.ptBounces, 1u, 6u),
-                         pc.view.studioFloor ? 1.0f : 0.0f,
+                         (pc.view.studioFloor && !pc.settings.exportAlpha) ? 1.0f : 0.0f,   // transparent export: no default floor
                          pc.settings.transparentBackground ? 1.0f : 0.0f,
                          (float)(pc.frame % 65536), 0, 0, 0};
     pipe->Dispatch(pc, {}, pc.transient.UavTable(pc.ctx, {&light_, &albedo_, &t.normal, &t.velocity, &t.depth}),

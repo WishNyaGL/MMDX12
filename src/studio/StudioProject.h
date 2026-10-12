@@ -54,6 +54,7 @@ struct ProjectModel {
     bool visible = true;
     PropAttach attach;                 // used for props only
     PropAttach place;                  // characters / stages: world placement (translation / rotationDeg / scale; parent unused)
+    bool physicsOff = false;           // P2.2: rigid-body physics off for this model ("physics": false, absent = on)
     ShaderChoice shader;               // characters: shader pack ("shader", absent = the default shading)
     MaterialChoice material;           // P5: per-material PBR source ("material", absent = Default)
     MotionData motion;                 // its keys; motion.modelName is written as the VMD header model name

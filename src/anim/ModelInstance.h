@@ -35,6 +35,7 @@ public:
     // Placement of the whole model in the world (parent of the root bones; identity by default).
     // Not touched by ResetPose. Physics follows it (call ResetPhysics after changing it).
     void SetRootTransform(const XMFLOAT4X4& m);
+    const XMFLOAT4X4& RootTransform() const { return root_; }
     // Uniform display scale about the model origin (feet), applied to the skinning matrices and
     // BoneWorldPosition only. Physics keeps simulating at the original size, so hair and skirts
     // behave the same at any scale. Takes effect at the next UpdatePose.

@@ -1,5 +1,7 @@
+#include "studio/AutoIk.h"
 #include "studio/StudioPose.h"
 #include <DirectXMath.h>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <filesystem>
@@ -228,6 +230,129 @@ static void TestSamePoseLayer() {
     Check(!SamePoseLayer(a, b), "SamePoseLayer adding a morph false");
 }
 
+// A synthetic right arm: 上半身 -> 右腕 -> 右ひじ -> 右手首, plus a 右腕捩 twist bone between 腕 and ひじ, and a
+// leg 右足 driven by 右足ＩＫ. `twist` inserts the twist bone into the wrist's parent chain (default off).
+static PmxModel MakeArmModel(bool twist = false) {
+    PmxModel m;
+    m.bones.resize(7);
+    auto bone = [&](int i, const char* name, int parent, DirectX::XMFLOAT3 pos, uint16_t flags) {
+        m.bones[i].name = name;
+        m.bones[i].parentIndex = parent;
+        m.bones[i].position = pos;
+        m.bones[i].flags = flags;
+    };
+    bone(0, "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB", -1, {0, 0, 0}, PmxBone_Rotatable);        // 上半身
+    bone(1, "\xE5\x8F\xB3\xE8\x85\x95", 0, {0, 0, 0}, PmxBone_Rotatable);                      // 右腕
+    bone(2, "\xE5\x8F\xB3\xE3\x81\xB2\xE3\x81\x98", 1, {1, 0, 0}, PmxBone_Rotatable);             // 右ひじ
+    bone(3, "\xE5\x8F\xB3\xE6\x89\x8B\xE9\xA6\x96", 2, {1, 1, 0}, PmxBone_Rotatable);           // 右手首
+    bone(4, "\xE5\x8F\xB3\xE8\x85\x95\xE6\x8D\xA9", 1, {0.5f, 0, 0}, PmxBone_Rotatable | PmxBone_FixedAxis);  // 右腕捩
+    bone(5, "\xE5\x8F\xB3\xE8\xB6\xB3", 0, {0, -1, 0}, PmxBone_Rotatable);                      // 右足
+    bone(6, "\xE5\x8F\xB3\xE8\xB6\xB3\xEF\xBC\xA9\xEF\xBC\xAB", -1, {0, -1, 0}, PmxBone_IK);   // 右足ＩＫ
+    m.bones[6].ikTargetIndex = 5;
+    m.bones[6].ikLinks.push_back(PmxIkLink{2, false, {}, {}});
+    if (twist) m.bones[2].parentIndex = 4;  // 腕捩 sits between 腕 and ひじ (wrist still hangs off ひじ)
+    return m;
+}
+
+static void TestFindAutoIkChain() {
+    {
+        const PmxModel m = MakeArmModel();
+        int root = -1, mid = -1;
+        Check(FindAutoIkChain(m, 3, root, mid) && mid == 2 && root == 1, "FindAutoIkChain arm: mid=ひじ root=腕");
+    }
+    {
+        const PmxModel m = MakeArmModel(true);
+        int root = -1, mid = -1;
+        Check(FindAutoIkChain(m, 3, root, mid) && mid == 2 && root == 1, "FindAutoIkChain skips the twist bone");
+    }
+    {
+        const PmxModel m = MakeArmModel();
+        int root = -1, mid = -1;
+        Check(!FindAutoIkChain(m, 5, root, mid), "FindAutoIkChain leg under PMX IK returns false");
+    }
+}
+
+static void TestSolveTwoBone() {
+    const XMVECTOR root = XMVectorSet(0, 0, 0, 1);
+    const XMVECTOR mid = XMVectorSet(1, 0, 0, 1);
+    const XMVECTOR end = XMVectorSet(1, 1, 0, 1);
+    const XMVECTOR bend = XMVectorSet(0, 0, 1, 0);
+    auto endAfter = [&](FXMVECTOR target, XMVECTOR qRoot, XMVECTOR qMid, XMVECTOR* out) {
+        const XMVECTOR mid2 = XMVectorAdd(root, XMVector3Rotate(XMVectorSubtract(mid, root), qRoot));
+        const XMVECTOR e2 = XMVectorAdd(mid2, XMVector3Rotate(XMVector3Rotate(XMVectorSubtract(end, mid), qRoot), qMid));
+        *out = e2;
+    };
+    {
+        XMVECTOR qRoot, qMid;
+        const XMVECTOR target = XMVectorSet(1.2f, 0.8f, 0, 1);
+        Check(SolveTwoBone(root, mid, end, target, bend, qRoot, qMid), "SolveTwoBone reachable returns true");
+        XMVECTOR got;
+        endAfter(target, qRoot, qMid, &got);
+        Check(XMVectorGetX(XMVector3Length(XMVectorSubtract(got, target))) < 0.01f,
+              "SolveTwoBone reachable within 0.01");
+    }
+    {
+        XMVECTOR qRoot, qMid;
+        const XMVECTOR target = XMVectorSet(5, 0, 0, 1);  // beyond lab + lbc = 2
+        Check(SolveTwoBone(root, mid, end, target, bend, qRoot, qMid), "SolveTwoBone unreachable returns true");
+        XMVECTOR got;
+        endAfter(target, qRoot, qMid, &got);
+        Check(XMVectorGetX(XMVector3Length(XMVectorSubtract(got, XMVectorSet(2, 0, 0, 1)))) < 0.01f,
+              "SolveTwoBone unreachable: chain straight toward the target");
+    }
+    {
+        XMVECTOR qRoot, qMid;
+        const XMVECTOR target = XMVectorSet(2, 0, 0, 1);  // exactly full extension
+        SolveTwoBone(root, mid, end, target, bend, qRoot, qMid);
+        const bool finite = std::isfinite(XMVectorGetX(qRoot)) && std::isfinite(XMVectorGetY(qRoot)) &&
+                            std::isfinite(XMVectorGetZ(qRoot)) && std::isfinite(XMVectorGetW(qRoot)) &&
+                            std::isfinite(XMVectorGetX(qMid)) && std::isfinite(XMVectorGetY(qMid)) &&
+                            std::isfinite(XMVectorGetZ(qMid)) && std::isfinite(XMVectorGetW(qMid));
+        Check(finite, "SolveTwoBone no NaN at full extension");
+    }
+}
+
+static void TestSolveAutoIkDrag() {
+    // start pose: chain along +X with a bend, identity parent world rotations, the wrist turned about X
+    AutoIkDrag drag;
+    drag.valid = true;
+    drag.root = 1; drag.mid = 2; drag.end = 3;
+    drag.rootPos = {0, 0, 0};
+    drag.midPos = {1, 0, 0};
+    drag.endPos = {1, 1, 0};
+    drag.rootParentWorld = {0, 0, 0, 1};
+    drag.midParentWorld = {0, 0, 0, 1};
+    drag.endParentWorld = {0, 0, 0, 1};
+    drag.rootWorld = {0, 0, 0, 1};
+    drag.midWorld = {0, 0, 0, 1};
+    XMStoreFloat4(&drag.endWorld, XMQuaternionRotationAxis(XMVectorSet(1, 0, 0, 0), 0.5f));  // wrist turned
+    drag.bendNormal = {0, 0, 1};
+
+    AutoIkResult r;
+    const XMFLOAT3 target{1.2f, 0.8f, 0.0f};
+    Check(SolveAutoIkDrag(drag, target, &r), "SolveAutoIkDrag ok");
+
+    // recover the solver's world deltas from the returned locals (world' = local' * parentWorld', parentWorld' = parent*q)
+    const XMVECTOR rootWorldNew = XMQuaternionMultiply(XMLoadFloat4(&r.rootLocal), XMLoadFloat4(&drag.rootParentWorld));
+    const XMVECTOR qRoot = XMQuaternionMultiply(rootWorldNew, XMQuaternionInverse(XMLoadFloat4(&drag.rootWorld)));
+    const XMVECTOR midParentNew = XMQuaternionMultiply(XMLoadFloat4(&drag.midParentWorld), qRoot);
+    const XMVECTOR midWorldNew = XMQuaternionMultiply(XMLoadFloat4(&r.midLocal), midParentNew);
+    const XMVECTOR qMid = XMQuaternionMultiply(XMQuaternionInverse(XMQuaternionMultiply(XMLoadFloat4(&drag.midWorld), qRoot)),
+                                               midWorldNew);
+    const XMVECTOR midPosNew = XMVectorAdd(XMLoadFloat3(&drag.rootPos),
+                                 XMVector3Rotate(XMVectorSubtract(XMLoadFloat3(&drag.midPos), XMLoadFloat3(&drag.rootPos)), qRoot));
+    const XMVECTOR endPosNew = XMVectorAdd(midPosNew,
+                                 XMVector3Rotate(XMVector3Rotate(XMVectorSubtract(XMLoadFloat3(&drag.endPos), XMLoadFloat3(&drag.midPos)), qRoot), qMid));
+    Check(XMVectorGetX(XMVector3Length(XMVectorSubtract(endPosNew, XMLoadFloat3(&target)))) < 0.01f,
+          "SolveAutoIkDrag reaches the target");
+
+    const XMVECTOR endParentNew = XMQuaternionMultiply(XMLoadFloat4(&drag.endParentWorld), XMQuaternionMultiply(qRoot, qMid));
+    const XMVECTOR endWorldFinal = XMQuaternionMultiply(XMLoadFloat4(&r.endLocal), endParentNew);
+    const float dot = std::fabs(XMVectorGetX(XMVector4Dot(XMQuaternionNormalize(endWorldFinal),
+                                                          XMQuaternionNormalize(XMLoadFloat4(&drag.endWorld)))));
+    Check(dot > 0.9999f, "SolveAutoIkDrag preserves the end bone's world orientation");
+}
+
 int main() {
     TestMirrorBoneName();
     TestMirrorPoseDouble();
@@ -236,6 +361,9 @@ int main() {
     TestVpd();
     TestApplyMissing();
     TestSamePoseLayer();
+    TestFindAutoIkChain();
+    TestSolveTwoBone();
+    TestSolveAutoIkDrag();
     
     std::printf("studio_pose_test: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed > 0 ? 1 : 0;

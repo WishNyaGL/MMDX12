@@ -2,6 +2,7 @@
 #include <chrono>
 #include "core/I18n.h"
 #include "app/App.h"
+#include "asset/ImageLoader.h"
 
 #include <ShlObj.h>
 #include <shellapi.h>
@@ -63,6 +64,8 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.quitAfterFrames = _wtoi(next().c_str());
         } else if (arg == L"--capture") {
             opt.capturePath = next();
+        } else if (arg == L"--capture-scene") {   // --capture saves the rendered scene only (no UI / overlays)
+            opt.captureSceneOnly = _wtoi(next().c_str()) != 0;
         } else if (arg == L"--ui-script") {
             opt.uiScript = next();
         } else if (arg == L"--width") {
@@ -126,8 +129,12 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.volumetricDensity = (float)_wtof(next().c_str());
         } else if (arg == L"--bloom-conv") {
             opt.bloomConv = _wtoi(next().c_str()) != 0 ? 1 : 0;
+        } else if (arg == L"--auto-luminous") {
+            opt.autoLuminous = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--lut") {
             opt.lut = WideToUtf8(next());
+        } else if (arg == L"--classic") {
+            opt.classic = true;   // vanilla-MMD look, this run only (never saved to the ini)
         } else if (arg == L"--motion-lighting") {
             opt.motionLighting = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--no-physics") {
@@ -192,6 +199,8 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             else if (v == "pt") opt.offlineRenderer = 2;
             else if (v == "gi") opt.offlineRenderer = 3;
             else LOG_WARN("unknown --offline-renderer value: %s (want raster|rt|pt|gi)", v.c_str());
+        } else if (arg == L"--offline-alpha") {
+            opt.offlineAlpha = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--offline-probe") {
             opt.offlineProbe = true;
         } else if (arg == L"--offline-size") {
@@ -216,6 +225,10 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.applyUpdate = true;
         } else if (arg == L"--apply-wait") {
             opt.applyWaitPid = (uint32_t)_wtoi(next().c_str());
+        } else if (arg == L"--component") {
+            opt.componentId = WideToUtf8(next());
+        } else if (arg == L"--download-component") {
+            opt.componentDownload = true;
         } else if (arg == L"--mcp") {
             opt.mcp = 1;
         } else if (arg == L"--no-mcp") {
@@ -248,6 +261,8 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     // A leftover staged update (the applier never ran, e.g. the machine was switched off mid
     // swap) is completed before anything else opens; --apply-update runs the applier directly.
     if (options_.applyUpdate) return updater::ApplyPendingUpdateAndRelaunch(options_.applyWaitPid, true);
+    // --download-component: headless optional-component fetch (tools/components_e2e.py); no window.
+    if (options_.componentDownload) return CliComponentE2e();
     if (updater::HasPendingUpdate()) {
         LOG_INFO("update: applying a staged update left by the previous run");
         return updater::ApplyPendingUpdateAndRelaunch(0, false);
@@ -272,8 +287,22 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.volumetric >= 0) settings_.volumetric = options_.volumetric != 0;
     if (options_.volumetricDensity > 0.0f) settings_.volumetricDensity = std::clamp(options_.volumetricDensity, 0.25f, 4.0f);
     if (options_.bloomConv >= 0) settings_.bloomConvolution = options_.bloomConv != 0;
+    if (options_.autoLuminous >= 0) settings_.autoLuminous = options_.autoLuminous != 0;
     if (options_.motionLighting >= 0) settings_.motionLighting = options_.motionLighting != 0;
     if (options_.effectSet) settings_.effectStack = options_.effectStack;   // --effect, this run only
+    if (options_.classic) {   // --classic: vanilla-MMD look for this run only (never saved to the ini)
+        settings_.ssao = false;
+        settings_.ssr = false;
+        settings_.bloom = false;
+        settings_.bloomConvolution = false;
+        settings_.autoLuminous = false;
+        settings_.dof = false;
+        settings_.volumetric = false;
+        settings_.colorLut.clear();
+        settings_.effectStack.clear();
+        classicLighting_ = true;   // BuildFrameView: hard sun shadow, no rim light
+        settings_.readOnly = true;  // a classic session never writes the ini (UI toggles save mid-run)
+    }
 
     ImGui_ImplWin32_EnableDpiAwareness();
     startupPhase("settle");
@@ -430,6 +459,7 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.volumetric >= 0) settings_.volumetric = persisted.volumetric;
     if (options_.volumetricDensity > 0.0f) settings_.volumetricDensity = persisted.volumetricDensity;
     if (options_.bloomConv >= 0) settings_.bloomConvolution = persisted.bloomConvolution;
+    if (options_.autoLuminous >= 0) settings_.autoLuminous = persisted.autoLuminous;
     if (options_.motionLighting >= 0) settings_.motionLighting = persisted.motionLighting;
     if (!options_.lut.empty()) settings_.colorLut = persisted.colorLut;
     if (options_.effectSet) settings_.effectStack = persisted.effectStack;   // --effect, that run only
@@ -577,7 +607,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
-    case WM_DROPFILES: {   // shader pack zips / folders (PollShaderPacks installs them)
+    case WM_DROPFILES: {   // dragged files: AppDrop.cpp routes model/motion/pose/audio/project, shader packs stay in PollShaderPacks
         HDROP drop = (HDROP)wParam;
         const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
         for (UINT i = 0; i < count; ++i) {
@@ -758,9 +788,11 @@ void App::RenderFrame() {
 
     PollScan();
     PollLoad();
+    PollDroppedFiles();
     PollShaderPacks();
     PollProbeScene();
     UpdateUpdate();
+    UpdateComponentUi();
 
     switch (screen_) {
     case Screen::Scanning: DrawScanning(); break;
@@ -830,6 +862,7 @@ void App::RenderFrame() {
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmd);
 
     bool quit = false;
+    bool sceneCapture = false;   // --capture-scene: read the final image once this frame is submitted
     const bool countFrame = options_.startScreen == "studio"
                                 ? screen_ != Screen::Scanning && screen_ != Screen::Loading
                                 : inScene || screen_ == Screen::Offline || !options_.startScreen.empty();
@@ -848,11 +881,26 @@ void App::RenderFrame() {
             ++gpuMsCount_;
         }
         if (options_.quitAfterFrames > 0 && framesInScene_ >= options_.quitAfterFrames) {
-            if (!options_.capturePath.empty()) ctx_.RequestCapture(options_.capturePath);
+            if (!options_.capturePath.empty()) {
+                if (options_.captureSceneOnly && inScene) sceneCapture = true;   // read after EndFrame
+                else {
+                    if (options_.captureSceneOnly) LOG_WARN("--capture-scene needs a play scene: capturing the window");
+                    ctx_.RequestCapture(options_.capturePath);
+                }
+            }
             quit = true;
         }
     }
     ctx_.EndFrame(renderer_.Settings().vsync);
+    if (sceneCapture) {
+        ImageRGBA8 img;
+        if (renderer_.ReadFinalImage(img) && !img.mips.empty() && !img.mips[0].pixels.empty() &&
+            SavePngRGBA8(options_.capturePath, img.mips[0].width, img.mips[0].height, img.mips[0].pixels.data(),
+                         img.mips[0].width * 4))
+            LOG_INFO("captured %s (scene only)", PathToUtf8(options_.capturePath).c_str());
+        else
+            LOG_ERROR("capture: no scene image for %s", PathToUtf8(options_.capturePath).c_str());
+    }
     if (screen_ == Screen::Offline || (offline_.background && screen_ == Screen::Select)) AfterOfflineFrame();
     else if (screen_ == Screen::BenchRender) AfterRenderBenchFrame();
 
@@ -1016,7 +1064,9 @@ void App::ApplyStartScreen() {
         lobbyTab_ = 2;
     } else if (options_.startScreen == "studio") {
         if (!options_.project.empty()) {
-            StartStudioProjectLoad(std::filesystem::absolute(options_.project), false);
+            const std::filesystem::path p = std::filesystem::absolute(options_.project);
+            if (ToLowerAscii(PathToUtf8(p.extension())) == ".pmm") StartStudioPmmImport(p);
+            else StartStudioProjectLoad(p, false);
             return;
         }
         if (options_.character.empty()) {  // no preselection asked for: a new empty project
@@ -1260,6 +1310,7 @@ void App::ApplyRenderSettings() {
     rs.ssao = settings_.ssao;
     rs.ssr = settings_.ssr;
     rs.bloom = settings_.bloom;
+    rs.autoLuminous = settings_.autoLuminous;
     rs.taa = settings_.taa;
     rs.exposure = settings_.exposure;
     rs.renderPath = (RenderPath)settings_.renderPath;
@@ -1702,6 +1753,11 @@ void App::BuildFrameView(float frame, FrameView& view) {
     }
     const LightingPreset preset = screen_ == Screen::BenchRun ? LightingPreset::Studio : (LightingPreset)settings_.lighting;
     BuildLighting(preset, playTime_, focus, view.light);
+    // --classic: vanilla-MMD shading (plain toon key light): a hard-edged sun shadow, no rim / specular rim light
+    if (classicLighting_) {
+        view.light.sunShadow = LightShadowType::Hard;
+        view.light.rimStrength = 0.0f;
+    }
     // the camera VMD's light / self-shadow tracks (MMD's own lighting of the song) replace the preset's key light
     if (settings_.motionLighting && screen_ != Screen::BenchRun)
         ApplyLightShadowTracks(scene_->lightTrack, scene_->shadowTrack, frame, view);

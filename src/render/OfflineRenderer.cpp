@@ -228,7 +228,8 @@ void OfflineRenderer::Impl::DispatchPost(PassContext& pc, const ComputePipeline&
     D3D12_GPU_DESCRIPTOR_HANDLE srv =
         pc.transient.SrvTable(*ctx, {&accum, &albedo, &moments, &gbuf, &edgeAccum, in5, in6, vol ? &volA : nullptr});
     D3D12_GPU_DESCRIPTOR_HANDLE uav = pc.transient.UavTable(*ctx, {target});
-    float c12[12] = {c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], vol ? 1.0f : 0.0f, lit, 0.0f, 0.0f};
+    float c12[12] = {c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], vol ? 1.0f : 0.0f, lit,
+                     job.exportAlpha ? 1.0f : 0.0f, 0.0f};   // c12[10] -> gP2.z: transparent-export coverage
     pipe.Dispatch(pc, srv, uav, c12, 12, groupsX, groupsY);
     UavBarrier(cmd);
 }
@@ -490,7 +491,7 @@ void OfflineRenderer::Impl::Work(ID3D12GraphicsCommandList* cmd, TransientDescri
     // outline accumulation tables (t5 = this iteration's layer, u0 = accumulation), also once per call
     D3D12_GPU_DESCRIPTOR_HANDLE edgeSrv = t.SrvTable(*ctx, {nullptr, nullptr, nullptr, nullptr, nullptr, &edgeLayer});
     D3D12_GPU_DESCRIPTOR_HANDLE edgeUav = t.UavTable(*ctx, {&edgeAccum});
-    const float studioFloor = view.studioFloor ? 1.0f : 0.0f;
+    const float studioFloor = (view.studioFloor && !job.exportAlpha) ? 1.0f : 0.0f;
     if (clearPending) {   // the prepass display wrote accum
         const float c[8] = {NextSeed(), studioFloor, 0.0f, (float)job.minSamples, (float)width, (float)height,
                             0.0f, job.errorThreshold};
@@ -596,7 +597,7 @@ void OfflineRenderer::Impl::Prepass(PassContext& pc, OfflineProgress& pg) {
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     const uint32_t k = pg.prepassStep;
     const uint32_t stride = prepassFine << (kOfflinePrepassLevels - 1 - k);
-    const float studioFloor = view.studioFloor ? 1.0f : 0.0f;
+    const float studioFloor = (view.studioFloor && !job.exportAlpha) ? 1.0f : 0.0f;
     Texture* E[kOfflinePrepassLevels];
     for (uint32_t l = 0; l < kOfflinePrepassLevels; ++l) E[l] = &preE[l];
 
@@ -1161,7 +1162,7 @@ void OfflineRenderer::Present(ID3D12GraphicsCommandList* cmd, TransientDescripto
 
 void OfflineRenderer::Cancel() { progress_ = {}; }
 
-bool OfflineRenderer::ReadImage(ImageRGBA8& out) {
+bool OfflineRenderer::ReadImage(ImageRGBA8& out, bool preserveAlpha) {
     if (!impl_ || progress_.phase != OfflinePhase::Done || !impl_->ldr) return false;
     Impl& m = *impl_;
     Dx12Context& ctx = *m.ctx;
@@ -1208,11 +1209,32 @@ bool OfflineRenderer::ReadImage(ImageRGBA8& out) {
         return false;
     }
     out = ImageRGBA8{};
-    out.mips.push_back({w, h, std::vector<uint8_t>((size_t)w * h * 4)});
-    for (uint32_t y = 0; y < h; ++y)
-        memcpy(out.mips[0].pixels.data() + (size_t)w * 4 * y, data + (size_t)fp.Footprint.RowPitch * y,
-               (size_t)w * 4);
-    out.hasAlpha = false;  // alpha is already 255 everywhere
+    out.mips.push_back({w, h, std::vector<uint8_t>((size_t)w * 4 * h)});
+    if (preserveAlpha) {
+        // CSFinalize wrote the alpha as a scaled coverage (a = 255 * coverage) and kept the colour premultiplied
+        // by the coverage. Give straight (non-premultiplied) colour: c = premultiplied / coverage, and an exact
+        // 0 where the pixel is fully transparent (its colour was scaled to black).
+        for (uint32_t y = 0; y < h; ++y) {
+            const uint8_t* srcRow = data + (size_t)fp.Footprint.RowPitch * y;
+            uint8_t* dstRow = out.mips[0].pixels.data() + (size_t)w * 4 * y;
+            for (uint32_t x = 0; x < w; ++x) {
+                const uint8_t a = srcRow[x * 4 + 3];
+                if (a == 0) {
+                    dstRow[x * 4 + 0] = dstRow[x * 4 + 1] = dstRow[x * 4 + 2] = dstRow[x * 4 + 3] = 0;
+                    continue;
+                }
+                for (int ch = 0; ch < 3; ++ch)
+                    dstRow[x * 4 + ch] = (uint8_t)std::min(255u, (uint32_t)srcRow[x * 4 + ch] * 255u / a);
+                dstRow[x * 4 + 3] = a;
+            }
+        }
+        out.hasAlpha = true;
+    } else {
+        for (uint32_t y = 0; y < h; ++y)
+            memcpy(out.mips[0].pixels.data() + (size_t)w * 4 * y, data + (size_t)fp.Footprint.RowPitch * y,
+                   (size_t)w * 4);
+        out.hasAlpha = false;  // alpha is already 255 everywhere
+    }
     D3D12_RANGE none{0, 0};
     readback->Unmap(0, &none);
     return true;

@@ -17,6 +17,10 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     sc.floorGloss = 0.35f;     // independent of the real-time settings
     sc.fog = 0.0f;
     sc.transparentBg = 0.0f;
+    // transparent export: the primary camera-ray miss colour (black). No bloom (black adds nothing) and the
+    // coverage alpha comes from the G-buffer (CSFinalize), giving a straight RGBA8 image.
+    sc.bgOverride = job.exportAlpha ? DirectX::XMFLOAT4{0.0f, 0.0f, 0.0f, 1.0f}
+                                    : DirectX::XMFLOAT4{0.0f, 0.0f, 0.0f, 0.0f};
     if (view.motionBlur)
         DirectX::XMStoreFloat4x4(&sc.prevInvView,
                                  DirectX::XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&view.prevCamera.view)));
@@ -66,8 +70,8 @@ const OfflineProgress& Renderer::OfflineStatus() const {
     return offline_ ? offline_->Progress() : idle;
 }
 
-bool Renderer::ReadOfflineImage(ImageRGBA8& out) {
-    return offline_ && offline_->ReadImage(out);
+bool Renderer::ReadOfflineImage(ImageRGBA8& out, bool preserveAlpha) {
+    return offline_ && offline_->ReadImage(out, preserveAlpha);
 }
 
 void Renderer::CancelOffline() {

@@ -88,4 +88,32 @@ $zip = Join-Path $dist "$name.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "packaged $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB)"
+
+# 3b. Lite zip: the full stage minus the optional components. THIS LIST MUST MATCH
+# src/app/Components.h (the app fetches exactly these from the update store on demand); keep both
+# copies in sync. Paths are relative to the stage root (forward slashes).
+$optional = @(
+    'nvngx_dlss.dll',
+    'amd_fidelityfx_loader_dx12.dll',
+    'amd_fidelityfx_upscaler_dx12.dll',
+    'libxess.dll',
+    'assets/fonts/NotoSansCJKjp-Regular.otf',
+    'assets/fonts/NotoSansCJKjp-Bold.otf',
+    'assets/fonts/NotoSansCJKsc-Regular.otf',
+    'assets/fonts/NotoSansCJKsc-Bold.otf'
+)
+$liteName = "$name-lite"
+$liteStage = Join-Path $dist $liteName
+if (Test-Path $liteStage) { Remove-Item -Recurse -Force $liteStage }
+Copy-Item -Recurse $stage $liteStage
+foreach ($rel in $optional) {
+    $f = Join-Path $liteStage ($rel -replace '/', '\')
+    if (Test-Path $f) { Remove-Item -Force $f }
+    else { Write-Warning "optional component missing from the stage: $rel" }
+}
+$liteZip = Join-Path $dist "$liteName.zip"
+if (Test-Path $liteZip) { Remove-Item -Force $liteZip }
+Compress-Archive -Path $liteStage -DestinationPath $liteZip -CompressionLevel Optimal
+Remove-Item -Recurse -Force $liteStage
+Write-Host "packaged $liteZip ($([math]::Round((Get-Item $liteZip).Length / 1MB, 1)) MB)"
 Write-Host "delta update: python tools\make_update.py `"$stage`" --version $Version --out dist\update --base-url <updates url>"

@@ -57,6 +57,7 @@ struct RenderSettings {
     float floorGloss = 0.35f;        // reflectivity of upward-facing stage surfaces
     bool taa = false;                // temporal AA (camera jitter + history), works with MSAA
     bool bloom = true;
+    bool autoLuminous = true;       // そぼろ AutoLuminous convention: materials marked black-specular/power>=100 glow
     float bloomIntensity = 0.35f;
     float bloomThreshold = 1.1f;    // linear HDR luminance where bloom starts
     bool bloomConvolution = false;  // FFT convolution bloom with a starburst kernel (falls back to the mip chain)
@@ -72,6 +73,10 @@ struct RenderSettings {
     float vignette = 0.22f;
     float fog = 0.35f;               // 0 = off; distance haze toward the horizon colour
     bool transparentBackground = false;  // thumbnails: no sky, alpha = coverage
+    // Transparent-background video/still export (P2.3): the scene is drawn with transparentBackground set (sky / no
+    // background contributes nothing, the resolved colour is premultiplied by the pixel's coverage alpha) and the
+    // default studio floor is skipped, so the read-back image gives straight RGBA with a soft coverage alpha.
+    bool exportAlpha = false;
     bool headless = false;               // render without touching the back buffer (background sample renders)
     // Effect packs ("type": "effect"), the user's ordered stack: PackEffectPass runs the enabled entries
     // (PackEffectStage from each pack's manifest) before Bloom / after Post. Empty = no cost, no targets.

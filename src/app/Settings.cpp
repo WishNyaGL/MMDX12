@@ -118,6 +118,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "ssao" && ParseBool(value, b)) ssao = b;
         else if (key == "ssr" && ParseBool(value, b)) ssr = b;
         else if (key == "bloom" && ParseBool(value, b)) bloom = b;
+        else if (key == "autoLuminous" && ParseBool(value, b)) autoLuminous = b;
         else if (key == "taa" && ParseBool(value, b)) taa = b;
         else if (key == "shadowMapSize" && ParseInt(value, i)) shadowMapSize = i;
         else if (key == "lighting" && ParseInt(value, i)) lighting = i;
@@ -145,6 +146,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "videoVolumetricDensity" && ParseFloat(value, f)) video.volumetricDensity = f;
         else if (key == "videoDof" && ParseBool(value, b)) video.dof = b;
         else if (key == "videoDofAperture" && ParseFloat(value, f)) video.dofAperture = f;
+        else if (key == "videoAlpha" && ParseBool(value, b)) video.alpha = b;
         else if (key == "videoProbe") {
             // "<key hex>:<seconds per frame>"
             const size_t colon = value.find(':');
@@ -392,6 +394,7 @@ void AppSettings::AddRecentProject(const std::string& path) {
 }
 
 bool AppSettings::Save(const std::filesystem::path& file) const {
+    if (readOnly) return true;   // --classic: the session's look must never reach the ini
     std::FILE* f = nullptr;
     if (_wfopen_s(&f, file.c_str(), L"w") != 0 || !f) return false;
 
@@ -409,6 +412,7 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     std::fprintf(f, "graphicsPreset=%d\n", graphicsPreset);
     std::fprintf(f, "shadows=%d\nssao=%d\nssr=%d\nbloom=%d\ntaa=%d\n", shadows ? 1 : 0, ssao ? 1 : 0, ssr ? 1 : 0,
                  bloom ? 1 : 0, taa ? 1 : 0);
+    std::fprintf(f, "autoLuminous=%d\n", autoLuminous ? 1 : 0);
     std::fprintf(f, "shadowMapSize=%d\n", shadowMapSize);
     std::fprintf(f, "lighting=%d\n", lighting);
     std::fprintf(f, "exposure=%.3f\n", exposure);
@@ -427,6 +431,7 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
                  video.bloom ? 1 : 0, video.bloomConvolution ? 1 : 0, video.volumetric ? 1 : 0);
     std::fprintf(f, "videoVolumetricDensity=%.3f\nvideoDof=%d\nvideoDofAperture=%.3f\n", video.volumetricDensity,
                  video.dof ? 1 : 0, video.dofAperture);
+    std::fprintf(f, "videoAlpha=%d\n", video.alpha ? 1 : 0);
     for (const VideoProbe& pr : videoProbes)
         std::fprintf(f, "videoProbe=%llx:%.4f\n", (unsigned long long)pr.key, pr.secondsPerFrame);
     std::fprintf(f, "leaderboardUrl=%s\n", leaderboardUrl.c_str());

@@ -313,11 +313,22 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         const float specLum = 0.299f * m.specular.x + 0.587f * m.specular.y + 0.114f * m.specular.z;
         const float tightness = std::clamp((m.specularPower - 5.0f) / 60.0f, 0.0f, 1.0f);
         c.reflectivity = std::clamp(specLum * tightness, 0.0f, 1.0f) * (role == ModelRole::Stage ? 0.5f : 0.12f);
+        // そぼろ AutoLuminous convention: the author marks a glowing material with a black specular colour
+        // (reflection colour 0,0,0) and a specular power (反射強度) of 100 or more (110 = the documented standard).
+        // The shaders then add the material colour x texture as HDR radiance (AutoLumEmission). A PBR record that
+        // already carries an emissive, or a Ray/glTF material, must not glow twice, so skip those.
+        const bool hasPbrRecord = mIdx < pbr.materials.size() && pbr.materials[mIdx].valid;
+        if (m.specularPower > 100.0f && specLum <= 1e-4f && !hasPbrRecord)
+            c.flags |= MatFlag_AutoLuminous;
     }
     for (MaterialConstants& c : consts) {
         c.texMul = c.sphereMul = c.toonMul = {1, 1, 1, 1};
         c.texAdd = c.sphereAdd = c.toonAdd = {0, 0, 0, 0};
     }
+    // Load-time AutoLuminous classification (kept so a shader pack turned off can restore it).
+    autoLum_.assign(pmx.materials.size(), 0);
+    for (size_t i = 0; i < consts.size(); ++i)
+        if (consts[i].flags & MatFlag_AutoLuminous) autoLum_[i] = 1;
     // Per-frame ring (material morphs rewrite the constants at run time), every entry starts at the base.
     const size_t matCount = std::max<size_t>(consts.size(), 1);
     materialCb_ = CreateUploadBuffer(ctx.Device(), (uint32_t)(matCount * sizeof(MaterialConstants) * kRing),
@@ -586,11 +597,13 @@ void GpuModel::UpdateMorphs(uint64_t frame, const std::vector<DirectX::XMFLOAT3>
 }
 
 void GpuModel::UpdateMaterials(uint64_t frame, const std::vector<PmxMorph::MaterialOffset>& mul,
-                               const std::vector<PmxMorph::MaterialOffset>& add, uint64_t version) {
+                               const std::vector<PmxMorph::MaterialOffset>& add, uint64_t version, float opacity) {
     if (!materialMapped_ || materials_.empty()) return;
     const size_t n = materials_.size();
     const bool identity = mul.size() != n || add.size() != n;
     if (identity) version = 0;
+    const bool alpha = opacity != 1.0f;
+    if (alpha) version |= (1ull << 63);  // fold the opacity into the version so a change re-uploads (1 stays untouched)
     if (version != materialVersion_) {
         // final = base * mul + add (PMX material morph); the texture factors go to the shaders as is
         for (size_t i = 0; i < n; ++i) {
@@ -619,6 +632,7 @@ void GpuModel::UpdateMaterials(uint64_t frame, const std::vector<PmxMorph::Mater
                 c.toonMul = m.toonFactor;
                 c.toonAdd = a.toonFactor;
             }
+            if (alpha) c.diffuse.w = std::clamp(c.diffuse.w * opacity, 0.0f, 1.0f);  // studio accessory opacity
             Material& mat = materials_[i];
             mat.visible = c.diffuse.w > 0.0f;
             mat.drawEdge = materialBase_[i].edgeFlag && c.edgeSize > 0 && c.edgeColor.w > 0 && mat.visible;
@@ -654,10 +668,15 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
     packOverrides_ = pack ? materials : MaterialClassOverrides{};
     if (!pack) {
         for (auto& m : materials_) m.packOff = false;
-        // no pack = no class and no alpha key (clears the encoding of a pack switched off)
+        // no pack = no class and no alpha key (clears the encoding of a pack switched off). A material the pack had
+        // claimed gets its AutoLuminous flag back (the packs own / replace shading; below clears it again).
         for (size_t i = 0; i < baseConsts_.size(); ++i) {
             baseConsts_[i].packClass = 0;
             materialConsts_[i].packClass = 0;
+            if (i < autoLum_.size() && autoLum_[i]) {
+                baseConsts_[i].flags |= MatFlag_AutoLuminous;
+                materialConsts_[i].flags |= MatFlag_AutoLuminous;
+            }
         }
         for (uint64_t& v : materialEntryVersion_) v = ~0ull;
         return;
@@ -684,6 +703,10 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
         if (i < materials_.size()) materials_[i].packOff = isOff;
         for (MaterialConstants* c : {&baseConsts_[i], &materialConsts_[i]}) {
             c->packClass = encodedClass;
+            // A pack owns the shading of the materials it shades, so their AutoLuminous flag is cleared (no double
+            // glow); a per-material "pack off" override (isOff) keeps the default shading and its glow.
+            if (!isOff) c->flags &= ~MatFlag_AutoLuminous;
+            else if (i < autoLum_.size() && autoLum_[i]) c->flags |= MatFlag_AutoLuminous;
             c->packHeadBone = headBone_ >= 0 ? (uint32_t)headBone_ : 0u;
             c->packHead = {headPos_.x, headPos_.y, headPos_.z, headBone_ >= 0 ? 1.0f : 0.0f};
             for (uint32_t k = 0; k < kPackMaxParams; ++k) (&c->packParams[0].x)[k] = params[k];

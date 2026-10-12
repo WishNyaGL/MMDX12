@@ -471,7 +471,7 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
         std::vector<std::wstring> modelVmdNames(data.models.size());  // empty = no VMD for this model
         for (size_t i = 0; i < data.models.size(); ++i) {
             const ProjectModel& m = data.models[i];
-            if (m.motion.Empty()) continue;
+            if (!m.motion.HasVmdKeys()) continue;
             modelVmdNames[i] = allocName(stem + L" - " + Utf8ToWide(SanitizeFileName(m.name)));
         }
 
@@ -523,6 +523,7 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
             jm["path"] = RelPath(m.path, dir);
             jm["libraryId"] = m.libraryId;
             jm["visible"] = m.visible;
+            if (m.physicsOff) jm["physics"] = false;  // P2.2: only written when off (absent = physics on)
             if (m.kind != ModelKind::Prop && !(m.place == PropAttach{})) {  // identity placement is not written
                 jm["place"] = {
                     {"t", {m.place.translation.x, m.place.translation.y, m.place.translation.z}},
@@ -569,6 +570,20 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                     {"r", {a.rotationDeg.x, a.rotationDeg.y, a.rotationDeg.z}},
                     {"s", a.scale},
                 };
+                // the accessory keys (no VMD equivalent); a parent is 1 + the model index (0 = the world origin)
+                if (!m.motion.accessory.empty()) {
+                    nlohmann::json acc = nlohmann::json::array();
+                    for (const AccessoryKf& k : m.motion.accessory)
+                        acc.push_back({{"frame", k.frame},
+                                       {"t", {k.translation.x, k.translation.y, k.translation.z}},
+                                       {"r", {k.rotationDeg.x, k.rotationDeg.y, k.rotationDeg.z}},
+                                       {"s", k.scale},
+                                       {"opacity", k.opacity},
+                                       {"visible", k.visible},
+                                       {"parent", (int)k.parentUid},
+                                       {"bone", k.bone}});
+                    jm["accessory"] = std::move(acc);
+                }
             }
             jm["motion"] = modelVmdNames[i].empty() ? nlohmann::json(nullptr)
                                                     : nlohmann::json(WideToUtf8(modelVmdNames[i]));
@@ -721,6 +736,7 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                 pm.path = ResolvePath(ReadString(m, "path", ""), dir);
                 pm.libraryId = ReadString(m, "libraryId", "");
                 pm.visible = ReadBool(m, "visible", true);
+                pm.physicsOff = !ReadBool(m, "physics", true);  // absent = physics on; false = baked / off
                 if (kind != ModelKind::Prop && m.contains("place") && m["place"].is_object()) {
                     const nlohmann::json& pl = m["place"];  // older projects have none: identity
                     pm.place.translation = ReadVec3(pl, "t", pm.place.translation);
@@ -767,11 +783,29 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                     pm.attach.rotationDeg = ReadVec3(a, "r", pm.attach.rotationDeg);
                     pm.attach.scale = (float)ReadDouble(a, "s", pm.attach.scale);
                 }
+                // the accessory keys (a parent is 1 + the project model index here; converted by the caller)
+                if (kind == ModelKind::Prop && m.contains("accessory") && m["accessory"].is_array()) {
+                    for (const nlohmann::json& jk : m["accessory"]) {
+                        if (!jk.is_object()) continue;
+                        AccessoryKf k;
+                        k.frame = std::max(0, ReadInt(jk, "frame", 0));
+                        k.translation = ReadVec3(jk, "t", k.translation);
+                        k.rotationDeg = ReadVec3(jk, "r", k.rotationDeg);
+                        k.scale = (float)ReadDouble(jk, "s", k.scale);
+                        k.opacity = std::clamp((float)ReadDouble(jk, "opacity", k.opacity), 0.0f, 1.0f);
+                        k.visible = ReadBool(jk, "visible", k.visible);
+                        k.parentUid = (uint32_t)std::max(0, ReadInt(jk, "parent", 0));
+                        k.bone = ReadString(jk, "bone", "");
+                        UpsertKey(pm.motion.accessory, k);
+                    }
+                }
                 if (m.contains("motion") && m["motion"].is_string()) {
                     const std::filesystem::path vmdPath = ResolvePath(m["motion"].get<std::string>(), dir);
                     VmdMotion vmd;
                     if (LoadVmd(vmdPath, vmd)) {
+                        std::vector<AccessoryKf> accessory = std::move(pm.motion.accessory);  // not in the VMD
                         pm.motion = MotionData::FromVmd(vmd);
+                        pm.motion.accessory = std::move(accessory);
                     } else {
                         if (warnings) warnings->push_back("motion missing: " + PathToUtf8(vmdPath));
                     }
@@ -915,6 +949,12 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
             if (pm.kind != ModelKind::Prop) continue;
             const auto it = remap.find(pm.attach.parent);
             pm.attach.parent = it == remap.end() ? -1 : it->second;
+            // accessory keys: a parent is 1 + the old model index (0 = the world); remap through the same map
+            for (AccessoryKf& k : pm.motion.accessory) {
+                if (k.parentUid == 0) continue;
+                const auto ai = remap.find((int)k.parentUid - 1);
+                k.parentUid = ai == remap.end() || ai->second < 0 ? 0 : (uint32_t)(ai->second + 1);
+            }
         }
         return true;
     } catch (const std::exception& e) {

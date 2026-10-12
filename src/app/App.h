@@ -21,7 +21,9 @@
 #include "render/ColorLut.h"
 #include "render/Dx12Context.h"
 #include "render/Renderer.h"
+#include "studio/AutoIk.h"
 #include "studio/Gizmo.h"
+#include "studio/PhysicsBake.h"
 #include "studio/StudioDoc.h"
 #include "studio/StudioFocus.h"
 #include <Windows.h>
@@ -71,6 +73,8 @@ namespace mmdx {
 //                          studioselect <model index|-1> | studioremove <model index> | studiorename <text> |
 //                          studiomaterial <default|ray> [emd path] (selected studio model's PBR material source) |
 //                          studioattach <parent index|-1> <bone|-> <tx ty tz rx ry rz s> (selected prop).
+//                          drop <file>[|<file>...] injects a drag-and-drop path list (models, .vmd/.vpd, audio,
+//                          .mmdxproj) into the Studio; '|' separates paths so they may contain spaces.
 //                          Coordinates in window pixels.
 //   --width <w> --height <h>  initial window client size
 //   --debug                enable the D3D12 debug layer
@@ -86,6 +90,7 @@ namespace mmdx {
 //   --upscale-quality <native|quality|balanced|performance|ultra>  upscaler quality for this run
 //   --no-physics           disable rigid-body physics for this run
 //   --dof <0|1>  --volumetric <0|1>  --bloom-conv <0|1>   post effects for this run
+//   --auto-luminous <0|1>  そぼろ AutoLuminous glow convention for this run
 //   --volumetric-density <0.25..4>  volumetric medium density for this run
 //   --lut <substr|none>    colour LUT for this run (first LUT whose id or name contains substr)
 //   --offline-still <file.png>   with --autoplay: render the --seek frame with the offline GI renderer,
@@ -98,6 +103,8 @@ namespace mmdx {
 //   --offline-bitrate <mbps>     video bit rate for this run
 //   --offline-quality <0..3>     video quality preset for this run (draft, standard, high, best)
 //   --offline-renderer <r>       video renderer for this run: raster, rt, pt or gi (default: the lobby dialog's)
+//   --offline-alpha 1            transparent-background export: --offline-video writes a straight-alpha RGBA8 PNG
+//                                sequence (<output stem>_frames/<stem>_00000.png), --offline-still one RGBA PNG
 //   --offline-probe              with --autoplay: sample render from the middle of the song (the lobby dialog's
 //                                time measurement) with the dialog's settings, log "VIDEO PROBE", then quit
 //                                Studio (--project / --screen studio): --offline-video renders the project once it is
@@ -109,6 +116,8 @@ namespace mmdx {
 //                                never reads Ray .md/.fx data
 //   --pbr-debug <ch>             with --material-source ray: output one PBR channel (none|albedo|normal|roughness|
 //                                metalness|ao|emissive|model) in the lit raster view
+//   --classic                    vanilla-MMD look for this run: SSAO, SSR, bloom, volumetric, DoF, LUT, effects and
+//                                soft shadows off (the plain toon key light stays); never saved to mmdx12.ini
 //   --ui-scale <f>              UI scale for this run instead of the monitor's DPI scale (1.5 = 144 dpi; captures)
 //   --update-feed <url-or-file>  auto-update feed override: an https URL, a file: URL or a local
 //                                latest.json path (testing); the zip url may also be file:/local
@@ -126,6 +135,7 @@ struct AppOptions {
     int benchSpp = 0;          // --bench-spp (0 = kRenderBenchSamples)
     int quitAfterFrames = 0;
     std::filesystem::path capturePath;
+    bool captureSceneOnly = false;   // --capture-scene 1: the capture is the rendered scene without UI
     std::filesystem::path uiScript;
     int width = 0, height = 0;
     bool debugLayer = false;
@@ -149,6 +159,8 @@ struct AppOptions {
     std::vector<EffectStackEntry> effectStack;  // --effect <id>[,<id>...] / none: the effect stack, this run
     bool effectSet = false;
     int dof = -1, volumetric = -1, bloomConv = -1;  // --dof/--volumetric/--bloom-conv <0|1>: override for this run
+    int autoLuminous = -1;     // --auto-luminous <0|1>: override for this run (-1 = settings)
+    bool classic = false;      // --classic: vanilla-MMD look for this run (SSAO/SSR/bloom/volumetric/DoF/LUT/effects/soft shadows off)
     int motionLighting = -1;   // --motion-lighting <0|1>: camera VMD light/self-shadow tracks in play mode, this run
     float volumetricDensity = -1.0f;                 // --volumetric-density (< 0 = settings)
     std::string lut;           // --lut <substr|none>: override for this run (resolved against the LUT list)
@@ -159,6 +171,7 @@ struct AppOptions {
     int offlineFps = 0, offlineBitrate = 0;            // --offline-fps / --offline-bitrate (0 = settings)
     int offlineQuality = -1;                           // --offline-quality (-1 = settings)
     int offlineRenderer = -1;                          // --offline-renderer <raster|rt|pt|gi> (-1 = settings)
+    int offlineAlpha = -1;                             // --offline-alpha <0|1>: transparent PNG sequence for --offline-video/still
     bool offlineProbe = false;                         // --offline-probe: sample render for the time estimate, then quit
     int theme = -1;     // --theme auto|light|dark for this run only (-1: keep the saved setting; 0 auto, 1 light, 2 dark)
     int language = -1;  // --lang auto|ko|en|ja|zh for this run only (-1: keep the saved setting)
@@ -170,6 +183,8 @@ struct AppOptions {
     int updateRelaunchFrames = 0;  // --update-relaunch-frames: relaunch the updated app with --frames (E2E)
     bool applyUpdate = false; // --apply-update (internal): apply a staged update, then exit
     uint32_t applyWaitPid = 0;        // --apply-wait (internal): pid the applier waits for
+    std::string componentId;   // --component <id>: optional component (Components.h) to act on
+    bool componentDownload = false;  // --download-component: fetch --component now, then exit (headless E2E)
     int mcp = -1;                     // --mcp (1), --no-mcp (0), auto (-1)
 };
 AppOptions ParseCommandLine(int argc, wchar_t** argv);  // unknown args are logged and ignored
@@ -402,6 +417,11 @@ private:
     void DrawStudioFocusSection(float w);            // camera panel: what is in focus + the segment picker at the playhead
     bool DrawStudioFocusKeyFields(float w, int frame);  // inspector fields of a selected focus key
     std::string StudioModelLabel(uint32_t uid) const;   // outliner name of a model uid ("" when gone)
+    // --- accessory (prop) key track (UiStudioAccessory.cpp)
+    studio::AccessoryKf StudioNewAccessoryKey(const studio::StudioModel& m, int frame) const;  // current placement as a key
+    void StudioSetAccessoryAtPlayhead(const studio::AccessoryKf& k, const char* undoName);      // upsert (undoable)
+    bool DrawStudioAccessoryKeyFields(float w, int frame);  // inspector fields of the accessory key at `frame`
+    void DrawStudioAccessorySection(float w);               // prop inspector: accessory key summary + key button
     studio::AutoFocus studioAutoFocus_;
     studio::AutoFocus playAutoFocus_;   // play mode: picks the performer the shot is about (reset per scene)
     float studioFocusShown_ = 0.0f;                  // the last frame's focus distance / aperture scale / auto subject
@@ -450,6 +470,7 @@ private:
     enum class StudioAction { None, Leave, New, Open, OpenFile };  // what the unsaved-changes prompt guards
     void StartStudioEmpty();                          // new empty project: camera/light tracks only (no loading)
     void StartStudioProjectLoad(const std::filesystem::path& file, bool recovery);  // -> Loading -> Studio
+    void StartStudioPmmImport(const std::filesystem::path& file);  // .pmm import -> a NEW unsaved project
     void StudioRequest(StudioAction a, const std::filesystem::path& file = {});  // prompts first when dirty
     void StudioRunAction(StudioAction a, const std::filesystem::path& file);
     bool StudioSave(bool saveAs);                     // dialog when untitled or saveAs; false: cancelled / failed
@@ -461,8 +482,11 @@ private:
     // replaceUid != 0: the loaded model replaces that model's file (StudioReplaceModel) instead of being added.
     // `material` (non-null) overrides the resolved material choice for the loaded model (P5: a material-source change
     // reloads the model's PBR data without touching the saved choice again).
+    // `queuedDrops` (drag and drop): VMD/VPD files meant for this model, applied once it finishes loading.
+    // `retryQueuedDrops`: when the load fails, these are handed to the next job added, so the motion still lands.
     void StudioAddModelFile(studio::ModelKind kind, const std::filesystem::path& file, uint32_t replaceUid = 0,
-                            const MaterialChoice* material = nullptr);  // async
+                            const MaterialChoice* material = nullptr,
+                            std::vector<std::filesystem::path> queuedDrops = {}, size_t retryQueuedDrops = 0);  // async
     void StudioAddModelDialog(studio::ModelKind kind, uint32_t replaceUid = 0);
     void StudioAddLibraryCharacter(int index, uint32_t replaceUid = 0);
     void StudioAddLibraryStage(int index, uint32_t replaceUid = 0);  // replace: the first part replaces, the rest are added
@@ -470,6 +494,13 @@ private:
     bool StudioSetAudio(const std::filesystem::path& file);  // empty: remove
     void StudioAudioDialog();
     void StudioPollJobs();                            // finished loads: GPU upload + append (main thread)
+    // --- drag and drop (AppDrop.cpp): WM_DROPFILES / the ui-script "drop" command -> the Studio
+    void PollDroppedFiles();                          // every frame: consume droppedFiles_ (shader packs keep their screens)
+    // The studio model kind a dropped model file becomes: `.x` -> prop; a PMX/PMD the library classified as a stage
+    // part -> stage; everything else -> character.
+    studio::ModelKind DropModelKind(const std::filesystem::path& file, const std::string& ext) const;
+    void ApplyStudioDrop(std::vector<std::filesystem::path> files);  // route a drop into the open studio project
+    void ApplyQueuedDrops(int modelIndex, const std::vector<std::filesystem::path>& files);  // VMD/VPD behind a model load
     void StudioRemoveModel(int index);                // waits for the GPU; clears the undo history
     // Swaps model `index`'s file for `pm` and keeps everything else (motion keys by name, placement, prop parent, shader,
     // visibility, uid). Waits for the GPU; clears the undo history (pose edits hold bone indices). False: GPU upload failed.
@@ -482,6 +513,25 @@ private:
     void StudioSeekAudio();                           // audio cursor <- timeline time (audio offset)
     void DrawStudioAddMenu();                         // the outliner's "+" popup (library / file)
     void DrawStudioModelMenu(int index);              // outliner row context menu
+    // --- physics bake (P2.2, UiStudioBake.cpp): turn a character's live physics into bone keys
+    void StudioOpenBakeDialog();                      // model menu: open the options modal (range / step / bones / off)
+    bool StudioStartBake(int start, int end, int step, bool selectedOnly, bool turnOff);  // start the worker / script
+    void StudioPollBake();                            // every frame: finish the worker, apply one undo step
+    void StudioBakeApply(const studio::BakeResult& result, int start, int end, bool turnOff);  // main thread apply
+    void DrawStudioBakeDialog();                      // the options / progress modal
+    std::future<bool> studioBakeFuture_;
+    studio::BakeResult studioBakeResult_;             // worker result (read on the main thread after the future is ready)
+    std::atomic<bool> studioBakeCancel_{false};       // cancel request (worker + progress modal)
+    std::atomic<float> studioBakeProgress_{0.0f};
+    bool studioBakeRunning_ = false;
+    int studioBakeModel_ = -1;                        // model index the running bake belongs to
+    int studioBakeStart_ = 0, studioBakeEnd_ = 0, studioBakeStep_ = 1;
+    bool studioBakeTurnOff_ = true;                   // "physics off after baking" of the running / pending bake
+    double studioBakeStartWall_ = 0;                  // for "is it taking a moment" (progress modal)
+    // options modal fields
+    bool studioBakeDialogOpen_ = false;
+    int studioBakeOptStart_ = 0, studioBakeOptEnd_ = 0, studioBakeOptStep_ = 1;
+    bool studioBakeOptSelectedOnly_ = false, studioBakeOptTurnOff_ = true;
     void DrawStudioPropPanel(float w);                // inspector: prop parent / bone / offset
     void DrawStudioUnsavedPrompt();
     void DrawStudioProjectMenu();                     // top bar file menu (new / open / recent / save as)
@@ -498,7 +548,8 @@ private:
     void DrawStudioRenderMenu();                      // top bar popup: video / still
     void DrawStudioEffectsPanel(float x0, float y0, float x1, float y1);  // the "효과" panel: screen effects + effect stack
     void DrawStudioHelp();                            // shortcut overlay (? key / top bar button)
-    bool StudioModal() const { return videoDialogOpen_ || studioHelpOpen_ || studioLeaveConfirm_ || studioLightPresetPending_ >= 0; }
+    bool StudioModal() const { return videoDialogOpen_ || studioHelpOpen_ || studioLeaveConfirm_ || studioLightPresetPending_ >= 0 ||
+                                       studioBakeDialogOpen_ || studioBakeRunning_; }
 
     // --- scripted UI input for tests (UiScript.cpp) and MCP
     void PumpUiScript();  // before ImGui::NewFrame: feeds the events due at framesInScene_
@@ -531,6 +582,10 @@ private:
     void StartUpdateInstall();   // "Update": stages and spawns the applier, then quits
     void UpdateCheckCommand();   // ui-script "updatecheck": synchronous check, logs the result
     void UpdateInstallCommand(); // ui-script "updateinstall": full flow, exits when staged
+    int CliComponentE2e();       // Run(): headless component fetch for tools/components_e2e.py
+    void UpdateComponentUi();    // every frame: drains component_
+    void DrawFontComponentRow(float width);              // lobby settings: offer the CJK fonts
+    void DrawUpscalerComponentRow(UpscalerKind kind, float width);  // upscaler picker: download hint
     bool HeadlessRun() const;    // --frames / --ui-script / benchmarks / offline renders
 
     // --- thumbnails (AppThumbnails.cpp)
@@ -703,11 +758,14 @@ private:
     bool newPackOpen_ = false, newPackEffect_ = false;
     char newPackId_[64] = {}, newPackName_[96] = {}, newPackAuthor_[96] = {};
     std::vector<std::filesystem::path> droppedFiles_;
+    std::vector<std::filesystem::path> pendingDrop_;  // a drop that arrived while scanning / loading: applied at the lobby
     void DrawStudioShaderRow(float w);                                   // inspector: the selected character's pack
     void DrawStudioMaterialRow(float w);                                 // inspector: the selected model's material source
     void CheckShaderPackErrors();                                        // compile failures -> error toast
     uint32_t shaderPackErrorsSeen_ = 0;
     std::filesystem::path OfflineOutputDir(bool video) const;  // Pictures\MMDX12 or Videos\MMDX12
+    // Transparent export: the PNG-sequence folder for a chosen output path ("<stem>_frames" next to it).
+    static std::filesystem::path AlphaSequenceDir(const std::filesystem::path& output);
     DirectX::XMFLOAT3 CharacterCenter() const;  // world position of the character's center bone (teleport detection)
     void OfflinePose(float frame);              // UpdateScene, or StudioPoseForRender for a studio job
     void OfflineView(float frame, FrameView& view);  // BuildFrameView, or BuildStudioFrameView for a studio job
@@ -716,6 +774,7 @@ private:
 
     AppOptions options_;
     int shadingOverride_ = -1;  // --shading (hidden): run-only raster ViewShading override, -1 = off
+    bool classicLighting_ = false;  // --classic: hard sun shadow, no rim light (vanilla-MMD look), never saved
     AppSettings settings_;
     std::filesystem::path settingsPath_;
     HWND hwnd_ = nullptr;
@@ -791,6 +850,9 @@ private:
         int frame = 0, frameCount = 1; // images done / total (still: 1)
         double avgImageSeconds = 0;    // wall time per finished image (ETA)
         std::unique_ptr<VideoEncoder> encoder;
+        bool alpha = false;                // transparent export: write a PNG sequence instead of an encoder
+        std::filesystem::path alphaDir;    // sequence folder (AlphaSequenceDir of the output path)
+        std::string alphaBase;             // frame file stem: "<alphaBase>_00000.png"
         bool background = false;       // a probe behind the select screen: screen_ stays Select, nothing is presented
         std::chrono::steady_clock::time_point imageStartClock;  // precise start of the current image
         double probeSum = 0;           // probe: seconds per image (render + encode) of the measured images
@@ -850,6 +912,7 @@ private:
     bool updateCheckQueued_ = false;   // the check starts once the window is up
     bool updateInstallingFromCli_ = false;  // ui-script "updateinstall": exit when staged/failed
     std::string updateRelaunchArgs_;   // argv for the restarted app (cli-triggered updates)
+    updater::ComponentFetcher component_;  // optional components (Components.h): on-demand fetch
 
     // studio
     std::unique_ptr<studio::StudioDoc> studio_;
@@ -870,6 +933,8 @@ private:
         uint32_t targetUid = 0;                    // song: the character it was started for (0: none)
         uint32_t replaceUid = 0;                   // model load: replaces this model (0: adds)
         bool materialReload = false;               // replace = the same file re-read for a material-source change
+        std::vector<std::filesystem::path> queuedDrops;  // drop VMD/VPD applied to this model once it is in the doc
+        size_t retryQueuedDrops = 0;                     // drop: on load failure, re-queue the first N onto the next job
         std::shared_ptr<McpPromise> mcp;           // studio_add_model: answered when the job ends
         LoadProgress progress;
         std::string error;
@@ -906,6 +971,8 @@ private:
     DirectX::XMFLOAT4 studioDragParentRot_{0, 0, 0, 1};
     float studioDragScale_ = 1.0f;
     int studioDragBone_ = -1;
+    studio::AutoIkDrag studioAutoIkDrag_;   // auto-IK chain state captured when a wrist drag started
+    bool studioAutoIkActive_ = false;       // the current gizmo drag is an auto-IK solve
     bool studioPoseFieldEdit_ = false;    // a numeric pose field / morph slider is being edited
     int studioHoverBone_ = -1;
     // camera inspector / path

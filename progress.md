@@ -1650,3 +1650,37 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   Evergreen 0:08 paused, sunset lighting, `--camera 0,9.0,0,0,3,58 --dof 0`, `--material-source default|ray`.
 - `docs/media/pbr-sonic-2.0.0.jpg` = the same crop left (OFF) / right (ON); `pbr-sonic-closeup-2.0.0.jpg` = pairs
   (head, gloves, shoes, stage gold trim). Old files removed; the GitHub v2.0.0 notes point at the new names (raw 200).
+
+## 2026-10-13 - Competitive plan P0..P2: drag and drop, lite zip, AutoLuminous, PMM import, physics bake, alpha export, auto-IK, accessory keys
+- Workflow: Claude architect / final QA; opencode (deepseek-v4.1-flash, level high, smoke review) implemented; phase-gate
+  QA by an antigravity read-only session after P0 and P1. Several workers stopped for over-exploring and were resumed
+  with decision notes; three P2 sessions survived a server transport error detached, were left to finish (6 quiet
+  minutes), exported and deleted, and their unfinished parts were completed by hand.
+- P0: drag and drop into the Studio (`app/AppDrop.cpp`, ui-script `drop a|b|c`; a VMD/VPD dropped without a model goes
+  onto the selected one); `-lite` release zip + optional components (`app/Components.h`, `updater::ComponentFetcher`,
+  delta updater keeps a lite install lite, lobby download rows, `tools/components_e2e.py`).
+- First-launch fix: FXC needed 332 s for mmd.hlsl PSMain since the 2.0.0 P3 PBR commit (eca748e; 12 s before PBR):
+  the lit / floor PSOs compile with DXC ps_6_0 on SM 6.0 devices (FXC fallback). Cold first launch 360 s -> 20.5 s;
+  raster output identical (2 px of 921k, PBR max diff 1/255). Slow compiles log `shader compile`.
+- P1: `tools/media_kit.py` (classic / raster / RT / PT / GI A/B composites), `--classic` (read-only settings session),
+  `--capture-scene 1` (scene-only PNG). Native AutoLuminous (`MatFlag_AutoLuminous`, `AutoLumEmission`, gain 4 so 110
+  blooms; `autoLuminous=` / `--auto-luminous`; lobby + studio toggles; raster / RT / PT / GI). SSAO no longer greys
+  translucent pixels (alpha < 0.98 writes nt.z = -1): the sheer curtain on `terrace` was grey-streaked in raster.
+- P2: accessory key track (`AccessoryKf`, `RowKind::Accessory`, opacity via material multipliers, `studioacckey`,
+  STUDIOACC; fix: a model's VMD load wiped its accessory keys on project load); transparent PNG-sequence export
+  (`--offline-alpha 1`, dialog switch; fixes: the readback dither removal was in 0..1 units -> black RGB, PT still
+  traced the default floor); auto-IK (`studio/AutoIk`, two-bone analytic, twist bones skipped, hand keeps its world
+  orientation, toolbar magnet / K, `studioautoik`); PMM import (`asset/PmmLoader`, `tools/pmm_probe` + fuzz, MME
+  controller table, open / recent / drop / `--project x.pmm`); physics bake (`studio/PhysicsBake`, "물리 굽기…",
+  per-model physics off saved as "physics": false, `studiobake`, `tools/bake_test` max error 0.0001).
+- Final QA (build/): studio_project 182/0, studio_edit 15/0, studio_pose 49/0, studio_gizmo 19/0, studio_focus 31/0,
+  studio_light 106/0, bake_test PASS, pmm_probe fuzz 686 variants no crash, vmd_roundtrip VPD OK, components_e2e and
+  update_e2e ALL CHECKS PASSED; captures in captures/qa_final (lobby dark/light + detail tab, video dialog alpha switch,
+  studio PMM open, drop + bake, RT / PT alpha). README (4 languages): new feature bullets, comparison image
+  `docs/media/compare-classic.jpg`, "UI is in Korean" caption and PMM lines updated.
+### Not verified / left
+- Real-time PT alpha export has hard edges (no partial alpha); RT shows speckle noise on skin; real-time PT stays grainy
+  on alpha-blended materials (curtains, leaves).
+- PMM: the only real file is camera-only; models / accessories / MME were verified on a synthetic fixture. PMM 0001 is
+  declined. Material morphs do not re-evaluate the AutoLuminous flag.
+- The lite zip's component download needs the installed version's manifest on the update server (first lite release).

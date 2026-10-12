@@ -2,6 +2,7 @@
 // failure / not-writable) and the App-side wiring of updater::Controller. The controller runs
 // its workers; everything here only polls and draws (UiKit, so it matches DESIGN.md).
 #include "app/App.h"
+#include "app/Components.h"
 #include "app/Icons.h"
 #include "app/UiHelpers.h"
 #include "app/UiKit.h"
@@ -9,6 +10,7 @@
 #include <shellapi.h>
 
 #include <cmath>
+#include <cstdio>
 
 #include "core/I18n.h"
 #include "core/Log.h"
@@ -18,6 +20,123 @@
 namespace mmdx {
 
 using namespace ui;
+
+namespace {
+
+// One "fetch this optional component (Components.h)" action: a download button, or the progress
+// strip while running, or the result line. Returns true when a fetch was started this frame.
+bool ComponentAction(updater::ComponentFetcher& fetcher, const components::Def& def, const char* label,
+                     float width, bool restartNote) {
+    using Phase = updater::ComponentFetcher::Phase;
+    const updater::ComponentFetcher::State s = fetcher.Get();
+    const bool active = s.id == def.id;
+    const Palette& p = P();
+    bool started = false;
+    ImGui::PushID(def.id);
+    if (active && s.phase == Phase::Running) {
+        char buf[192];
+        if (s.totalMb > 0.05)
+            std::snprintf(buf, sizeof(buf), "%s  ·  %.0f / %.0f MB", label, s.doneMb, s.totalMb);
+        else
+            std::snprintf(buf, sizeof(buf), "%s", label);
+        PushFont(Font::Regular, size::Small);
+        ImGui::TextUnformatted(buf);
+        PopFont();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 a = ImGui::GetCursorScreenPos();
+        ProgressBar(dl, a, ImVec2(a.x + width, a.y + Dp(8.0f)), s.fraction);
+        ImGui::Dummy(ImVec2(width, Dp(14.0f)));
+    } else if (active && s.phase == Phase::Done) {
+        PushFont(Font::Semibold, size::Small);
+        ImGui::TextUnformatted(label);
+        PopFont();
+        PushFont(Font::Regular, size::Caption);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+        ImGui::TextUnformatted(restartNote ? Tr("받았어요 · 재시작 후 적용돼요") : Tr("받았어요 · 사용할 수 있어요"));
+        ImGui::PopStyleColor();
+        PopFont();
+    } else {
+        const bool failed = active && s.phase == Phase::Failed;
+        if (Button("##compfetch", label, icon::DownloadSimple, ButtonKind::Secondary,
+                   ImVec2(width / Dpi(), 32.0f))) {
+            fetcher.Start(def);
+            started = true;
+        }
+        if (failed) {
+            PushFont(Font::Regular, size::Caption);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.warn));
+            ImGui::TextWrapped("%s", s.error.c_str());
+            ImGui::PopStyleColor();
+            PopFont();
+        }
+    }
+    ImGui::PopID();
+    return started;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Optional components (Components.h)
+// ---------------------------------------------------------------------------
+
+void App::UpdateComponentUi() {
+    component_.Get();  // drains a finished fetch (its state feeds the rows below)
+}
+
+// Fetches one optional component with no window and exits (tools/components_e2e.py). Called from
+// App::Run before the updater is configured; the process must not leave the lobby otherwise.
+int App::CliComponentE2e() {
+    const components::Def* def = components::Find(options_.componentId);
+    if (!def) {
+        LOG_ERROR("COMPONENT ok=0 error='unknown component %s'", options_.componentId.c_str());
+        return 1;
+    }
+    const std::string feed = !options_.updateFeed.empty() ? options_.updateFeed : updater::kDefaultFeedUrl;
+    component_.Configure(feed, MMDX12_VERSION);
+    LOG_INFO("COMPONENT start id=%s feed=%s", def->id, feed.c_str());
+    component_.Start(*def);
+    for (int i = 0; i < 9000; ++i) {  // up to ~3 min; the caller's timeout is the real guard
+        const auto phase = component_.Get().phase;
+        if (phase != updater::ComponentFetcher::Phase::Running) break;
+        Sleep(20);
+    }
+    const updater::ComponentFetcher::State& s = component_.Get();
+    if (s.phase == updater::ComponentFetcher::Phase::Done) {
+        LOG_INFO("COMPONENT ok=1 id=%s", def->id);
+        return 0;
+    }
+    LOG_ERROR("COMPONENT ok=0 id=%s error='%s'", def->id, s.error.c_str());
+    return 1;
+}
+
+// The upscaler picker (UiSelect, "업스케일러"): offer the runtime DLL when it is the only reason the
+// upscaler is unavailable (a matching GPU with the file missing), never when the GPU is unsupported.
+void App::DrawUpscalerComponentRow(UpscalerKind kind, float width) {
+    const components::Def* def = components::ForUpscaler((int)kind);
+    // Present: hidden, except right after this session fetched it (the "restart to apply" line).
+    if (!def || (components::Present(*def) && component_.Get().id != def->id)) return;
+    if (kind == UpscalerKind::DLSS && ctx_.Caps().vendorId != 0x10DE) return;  // a missing DLL is not the cause
+    Gap(6.0f);
+    char label[128];
+    std::snprintf(label, sizeof(label), Tr("%s 다운로드"), def->label);
+    ComponentAction(component_, *def, label, width, true);
+}
+
+// The lobby's settings panel (UiSelect, fonts): offer the Noto CJK fonts in a Japanese / Chinese UI
+// where they are missing (without them the UI falls back to system fonts). Applies after a restart.
+void App::DrawFontComponentRow(float width) {
+    const Language lang = ActiveLanguage();
+    if (lang != Language::Japanese && lang != Language::Chinese) return;
+    if (components::Present(components::kCjk) && component_.Get().id != components::kCjk.id) return;
+    Gap(14.0f);
+    SectionLabel(Tr("글꼴"));
+    ComponentAction(component_, components::kCjk, Tr("고품질 CJK 글꼴 받기"), width, true);
+}
+
+// ---------------------------------------------------------------------------
+// The notice (select screen)
+// ---------------------------------------------------------------------------
 
 // Width ui::Button gives itself for `label` (+ optional icon) with size.x == 0 (same helper as
 // UiOffline.cpp's; kept local so UiHelpers.h stays free of UiKit includes).
@@ -37,6 +156,7 @@ void App::InitUpdater() {
     std::string feed = !options_.updateFeed.empty() ? options_.updateFeed
                        : !settings_.updateFeedUrl.empty() ? settings_.updateFeedUrl
                                                           : updater::kDefaultFeedUrl;
+    component_.Configure(feed, MMDX12_VERSION);
     update_.Configure(std::move(feed), MMDX12_VERSION);
 }
 

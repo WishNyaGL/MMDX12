@@ -285,6 +285,8 @@ bool TraceScene(float3 o, float3 d, float tMin, inout uint rng, float lod, out S
         s.refl = r;
         s.rough = clamp(sqrt(2.0 / (g.specularPower + 2.0)), 0.03, 0.6);
         s.emission = s.character ? 0.0 : SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
+        // AutoLuminous (そぼろ): a marked material emits its own colour (added once per hit, like the PBR emissive).
+        s.emission += AutoLumEmission(g.flags, g.diffuse, g.specularPower, SrgbToLinear(saturate(tex.rgb)));
         bool canPbr = (g.pbrIndex != 0xFFFFFFFFu);
 #ifdef MMDX_PT_PACK
         // a PT pack wins over the record (raster rule): keep the plain surface the pack expects
@@ -1101,7 +1103,9 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
         Surf s;
         float t;
         if (!TraceScene(o, d, depth == 0u ? gNearZ : tMinNext, rng, specChain ? 0.0 : 1.0, s, t)) {
-            radiance += T * Background(d);
+            // transparent export: a primary camera ray (still before its first opaque hit, glass included) that
+            // leaves the scene outputs the background override; indirect / bounce misses keep the real sky.
+            radiance += T * ((gBgOverride.w > 0.5 && specChain) ? gBgOverride.xyz : Background(d));
             break;
         }
         if (s.emitter) {   // softboxes are seen by rays only (no light sampling), so every hit counts

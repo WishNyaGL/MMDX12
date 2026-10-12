@@ -229,6 +229,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 }
                 if (g.flags & MAT_STAGE) {
                     radiance += throughput * SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
+                    radiance += throughput * AutoLumEmission(g.flags, g.diffuse, g.specularPower, SrgbToLinear(saturate(tex.rgb)));
                 } else {
 #ifdef MMDX_PT_PACK
                     bool isPtPackHit = (g.flags & RTG_PT_PACK) != 0;
@@ -337,6 +338,8 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                                 sh = TraceShadowRay(OffsetRayOrigin(pos, faceN), sd, 1e5);
                             }
                             radiance += throughput * ToonSun(g, tex, sf.uv, n, -dir, sh);
+                            // AutoLuminous (そぼろ): marked (non-PBR, non-pack) materials emit their colour.
+                            radiance += throughput * AutoLumEmission(g.flags, g.diffuse, g.specularPower, SrgbToLinear(saturate(tex.rgb)));
 #ifdef PT_PACK_HAS_LIGHTING
                             if (flatIndirect > 0.5) {
 #else
