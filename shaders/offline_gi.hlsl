@@ -781,11 +781,10 @@ float3 GlassGlint(Surf s, float3 V, inout uint rng) {
 float3 CameraDirect(Surf s, float3 V, float pSpec, inout uint rng) {
     float3 c = s.emission;
     if (s.pbr) {
-        // PBR record: MMD sun structure with GGX (characters keep the soft skin visibility).
-        float skin = SkinWeight(s);
-        float3 sh = (skin > 0.01) ? SkinSunVisibility(s, skin, rng) : SunVisibility(s, rng);
-        c += PbrSunDirect(s, V, sh) + s.pb.emissive;
-        if (skin > 0.01) c += SkinTranslucency(s, skin, rng);
+        // PBR record: MMD sun structure with GGX, like the raster / PT. No texture-hue skin heuristic here
+        // (SkinWeight thresholds the mip-filtered base texture: blocky translucency patches on mapped skin); the
+        // record's SKIN model carries its own SSS term.
+        c += PbrSunDirect(s, V, SunVisibility(s, rng)) + s.pb.emissive;
     } else if (s.character) {
         float skin = SkinWeight(s);
         if (skin > 0.01) {
