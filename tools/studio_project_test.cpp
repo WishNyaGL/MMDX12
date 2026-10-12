@@ -311,6 +311,9 @@ static void TestRoundTrip() {
         m.place.translation = {0.0f, 0.0f, 5.0f};  // world placement of a stage
         m.place.rotationDeg = {0.0f, 180.0f, 0.0f};
         m.place.scale = 2.0f;
+        m.libraryId = "stage-1";                                                      // P5: a stage's material choice key
+        m.material.ray = true;                                                        // ... saved for every kind
+        m.material.emd = (kTemp / "models" / "stage.emd").lexically_normal().string();
         data.models.push_back(m);
     }
     // 3: prop with attach and one bone key
@@ -401,6 +404,7 @@ static void TestRoundTrip() {
         Check(text.find("\"textureFolder\"") != std::string::npos, "stored shader textureFolder key");
         Check(text.find("\"material\"") != std::string::npos && text.find("miku.emd") != std::string::npos,
               "stored material choice (ray + relative .emd path)");
+        Check(text.find("stage.emd") != std::string::npos, "stored stage material choice (every kind)");
     }
 
     ProjectData loaded;
@@ -442,6 +446,8 @@ static void TestRoundTrip() {
         Check(st.name == data.models[1].name && st.kind == ModelKind::Stage && !st.visible &&
                   st.motion.Empty() && st.place == data.models[1].place,
               "stage kept: name, kind, visible=false, no keys, placement");
+        Check(st.libraryId == data.models[1].libraryId, "stage library id kept");
+        Check(st.material == data.models[1].material, "stage material choice kept (ray + explicit .emd)");
 
         const ProjectModel& p = loaded.models[2];
         Check(p.kind == ModelKind::Prop && p.attach == data.models[2].attach,

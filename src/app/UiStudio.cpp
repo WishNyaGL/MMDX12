@@ -1921,6 +1921,7 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
             if (m->IsProp()) DrawStudioPropPanel(w);
             else DrawStudioPlacePanel(w);
             if (m->kind == ModelKind::Character) DrawStudioShaderRow(w);
+            DrawStudioMaterialRow(w);
         } else {
             char counts[96];
             std::snprintf(counts, sizeof(counts), Tr("카메라 %d · 조명 %d · 섀도 %d · 초점 %d"), (int)d.camera.camera.size(),

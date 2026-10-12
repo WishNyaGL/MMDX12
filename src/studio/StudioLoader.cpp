@@ -31,6 +31,7 @@ bool LoadModel(const std::filesystem::path& path, ModelRole role, const std::str
     out.pmx = cpu.pmx;
     out.textures = std::move(cpu.textures);
     out.pbr = std::move(cpu.pbr);
+    out.material = choice;   // the choice the PBR data was built with (the inspector / project show it)
     out.name = label;
     if (role == ModelRole::Character) out.defaultPackTextureFolder = ModelPackTextureFolder(path);
     return true;
@@ -55,9 +56,10 @@ bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage,
                 if (progress) progress->SetStatus(Tr("스테이지 로드: ") + label);
                 StudioPackageModel part;
                 part.kind = ModelKind::Stage;
+                part.libraryId = stage->id;   // P5: a stage's material choice is keyed by its library id
                 std::string err;
                 const float f0 = 0.05f + 0.35f * (float)k / (float)n, f1 = 0.05f + 0.35f * (float)(k + 1) / (float)n;
-                if (!LoadModel(stage->parts[k], ModelRole::Stage, label, progress, f0, f1, part, &err, choiceFor(""))) {
+                if (!LoadModel(stage->parts[k], ModelRole::Stage, label, progress, f0, f1, part, &err, choiceFor(stage->id))) {
                     LOG_WARN("studio: stage part load failed: %s: %s", PathToUtf8(stage->parts[k]).c_str(), err.c_str());
                     continue;
                 }
@@ -140,6 +142,7 @@ bool LoadStudioStage(const StageAsset& stage, std::vector<StudioPackageModel>& o
             if (progress) progress->SetStatus(Tr("스테이지 로드: ") + label);
             StudioPackageModel part;
             part.kind = ModelKind::Stage;
+            part.libraryId = stage.id;   // P5: a stage's material choice is keyed by its library id
             std::string err;
             const float f0 = 0.05f + 0.9f * (float)k / (float)n;
             const float f1 = 0.05f + 0.9f * (float)(k + 1) / (float)n;

@@ -638,11 +638,15 @@ private:
                             const MaterialChoice& choice);
     bool DrawMaterialSelector(const char* id, MaterialChoice& choice, const std::string& cacheKey,
                               const std::filesystem::path& modelPath, int pmxMaterialCount, float width);
+    // P5: the material count of a model file, read once and cached per key (the lobby stage selector needs it; a
+    // stage carries none). A cheap PMX/PMD header probe; an imported model with PBR data answers non-zero.
+    int ModelMaterialCount(const std::string& key, const std::filesystem::path& modelPath);
     // One toast per character id when a character with no saved material choice has a Ray .emd candidate (never
     // applies). Imitates SuggestShaderPack; skipped in headless / scripted runs and with --material-source.
     void SuggestRayMaterial(const std::string& characterId, const std::filesystem::path& modelPath, int pmxMaterialCount);
     std::map<std::string, std::vector<RayEmdCandidate>> materialCandidates_;   // session cache (see MaterialCandidates)
     std::map<std::string, bool> importedPbrCandidates_;                         // P6 session cache (ImportedPbrCandidates)
+    std::map<std::string, int> materialCountCache_;                            // session cache (ModelMaterialCount)
     std::map<std::string, bool> materialSuggestChecked_;                        // ids checked this session
     // Play character: the saved settings choice or the --shader-pack override. A character with no saved choice also
     // gets SuggestShaderPack (a toast only; the choice is never set by the app).
@@ -700,6 +704,7 @@ private:
     char newPackId_[64] = {}, newPackName_[96] = {}, newPackAuthor_[96] = {};
     std::vector<std::filesystem::path> droppedFiles_;
     void DrawStudioShaderRow(float w);                                   // inspector: the selected character's pack
+    void DrawStudioMaterialRow(float w);                                 // inspector: the selected model's material source
     void CheckShaderPackErrors();                                        // compile failures -> error toast
     uint32_t shaderPackErrorsSeen_ = 0;
     std::filesystem::path OfflineOutputDir(bool video) const;  // Pictures\MMDX12 or Videos\MMDX12

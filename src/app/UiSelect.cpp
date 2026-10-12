@@ -813,6 +813,27 @@ void App::DrawSelect() {
                         settings_.Save(settingsPath_);
                     }
                 }
+
+                // P5: PBR material source (Default / Ray-MMD) of the selected stage. A stage's key is its library id.
+                // Imported stages (glTF/GLB/FBX) show "기본 / PBR".
+                if (st && !st->parts.empty()) {
+                    MaterialChoice lobbyStageMaterial = settings_.CharacterMaterial(st->id);
+                    const int stageMaterialCount = ModelMaterialCount(st->id, st->parts[0]);
+                    if (HasMaterialOptions(st->id, st->parts[0], stageMaterialCount, lobbyStageMaterial)) {
+                        Gap(14.0f);
+                        SectionLabel(Tr("스테이지 재질 데이터"));
+                        if (options_.materialSourceSet) {
+                            PushFont(Font::Regular, size::Caption);
+                            ImGui::TextDisabled("%s", Tr("--material-source 가 이번 실행 동안 우선합니다"));
+                            PopFont();
+                        }
+                        if (DrawMaterialSelector("##lobbyStageMat", lobbyStageMaterial, st->id, st->parts[0],
+                                                 stageMaterialCount, colW)) {
+                            settings_.SetCharacterMaterial(st->id, lobbyStageMaterial);
+                            settings_.Save(settingsPath_);
+                        }
+                    }
+                }
             }
             {
                 Gap(4.0f);

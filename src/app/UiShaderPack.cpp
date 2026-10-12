@@ -745,6 +745,22 @@ bool App::ImportedPbrCandidates(const std::string& key, const std::filesystem::p
     return importedPbrCandidates_.emplace(key, has).first->second;
 }
 
+int App::ModelMaterialCount(const std::string& key, const std::filesystem::path& modelPath) {
+    auto it = materialCountCache_.find(key);
+    if (it != materialCountCache_.end()) return it->second;
+    // A cheap header read for PMX/PMD (ProbePmx/ProbePmd skip geometry); an imported model with PBR data has no PMX
+    // material count, so any positive count lets the "기본 / PBR" segment show (the count is only used for Ray .emd
+    // matching, which imported models do not use).
+    int count = 0;
+    std::string err;
+    PmxProbe probe;
+    if (ProbePmx(modelPath, probe, &err) || ProbePmd(modelPath, probe, &err))
+        count = (int)probe.materialCount;
+    else if (ImportedPbrCandidates(key, modelPath))
+        count = 1;
+    return materialCountCache_.emplace(key, count).first->second;
+}
+
 bool App::HasMaterialOptions(const std::string& cacheKey, const std::filesystem::path& modelPath, int pmxMaterialCount,
                              const MaterialChoice& choice) {
     if (modelPath.empty() || pmxMaterialCount <= 0) return false;
@@ -916,32 +932,40 @@ void App::DrawStudioShaderRow(float w) {
         m->shader = choice;
         ++d.projectVersion;   // saved with the project (no undo step)
     }
+}
 
-    // P5: PBR material source (Default / Ray-MMD). Changing it reloads this model's PBR data through the
-    // replace-model path (same uid / motion / placement / shader), on a worker thread.
-    if (m->kind == studio::ModelKind::Character &&
-        HasMaterialOptions(m->libraryId, m->path, (int)m->pmx->materials.size(), m->material)) {
-        ImGui::Dummy(ImVec2(w, Dp(10.0f)));
-        {
-            const ImVec2 c = ImGui::GetCursorScreenPos();
-            Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("재질 데이터"));
-            ImGui::Dummy(ImVec2(w, Dp(20.0f)));
+void App::DrawStudioMaterialRow(float w) {
+    studio::StudioDoc& d = *studio_;
+    studio::StudioModel* m = d.Selected();
+    if (!m) return;
+    const Palette& p = P();
+    ImDrawList* cdl = ImGui::GetWindowDrawList();
+
+    // P5: PBR material source (Default / Ray-MMD) of the selected model (character, stage or prop). Changing it
+    // reloads this model's PBR data through the replace-model path (same uid / motion / placement / shader), on a
+    // worker thread. A stage's key is its library id, like a character's.
+    const std::string key = m->libraryId.empty() ? PathToUtf8(m->path) : m->libraryId;
+    const int materialCount = (int)m->pmx->materials.size();
+    if (!HasMaterialOptions(key, m->path, materialCount, m->material)) return;
+    ImGui::Dummy(ImVec2(w, Dp(10.0f)));
+    {
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("재질 데이터"));
+        ImGui::Dummy(ImVec2(w, Dp(20.0f)));
+    }
+    MaterialChoice material = m->material;
+    if (options_.materialSourceSet) {
+        PushFont(Font::Regular, size::Caption);
+        ImGui::TextDisabled("%s", Tr("--material-source 가 이번 실행 동안 우선합니다"));
+        PopFont();
+    }
+    if (DrawMaterialSelector("##studiomat", material, key, m->path, materialCount, w)) {
+        m->material = material;
+        if (!m->libraryId.empty()) {   // the same model in play mode remembers it too
+            settings_.SetCharacterMaterial(m->libraryId, material);
+            settings_.Save(settingsPath_);
         }
-        MaterialChoice material = m->material;
-        if (options_.materialSourceSet) {
-            PushFont(Font::Regular, size::Caption);
-            ImGui::TextDisabled("%s", Tr("--material-source 가 이번 실행 동안 우선합니다"));
-            PopFont();
-        }
-        if (DrawMaterialSelector("##studiomat", material, m->libraryId.empty() ? PathToUtf8(m->path) : m->libraryId,
-                                 m->path, (int)m->pmx->materials.size(), w)) {
-            m->material = material;
-            if (!m->libraryId.empty()) {   // the same character in play mode remembers it too
-                settings_.SetCharacterMaterial(m->libraryId, material);
-                settings_.Save(settingsPath_);
-            }
-            StudioAddModelFile(m->kind, m->path, m->uid, &m->material);   // reload this model's PBR data
-        }
+        StudioAddModelFile(m->kind, m->path, m->uid, &m->material);   // reload this model's PBR data
     }
 }
 

@@ -369,12 +369,16 @@ void App::StudioAddModelFile(ModelKind kind, const std::filesystem::path& file, 
     // A material-source change (P5) passes the model's exact new choice; else a character uses the saved choice
     // (a replaced model keeps its library id, so its saved per-character choice survives the file swap).
     MaterialChoice choice = material ? *material : ResolveMaterialChoice(std::string());
-    if (!material && replaceUid && studio_) {
+    std::string replaceLibraryId;   // a replaced model keeps its library id (a stage's material key survives the reload)
+    if (replaceUid && studio_) {
         const int at = studio_->IndexOfUid(replaceUid);
-        if (at >= 0) choice = ResolveMaterialChoice(studio_->models[(size_t)at]->libraryId);
+        if (at >= 0) replaceLibraryId = studio_->models[(size_t)at]->libraryId;
+        if (!material && at >= 0) choice = ResolveMaterialChoice(replaceLibraryId);
     }
-    job->future = std::async(std::launch::async, [j, kind, file, label, choice] {
-        return LoadStudioModel(file, kind, label, j->models[0], &j->progress, &j->error, choice);
+    job->future = std::async(std::launch::async, [j, kind, file, label, choice, replaceLibraryId] {
+        const bool ok = LoadStudioModel(file, kind, label, j->models[0], &j->progress, &j->error, choice);
+        if (ok && j->models[0].libraryId.empty()) j->models[0].libraryId = replaceLibraryId;
+        return ok;
     });
     studioJobs_.push_back(std::move(job));
 }
@@ -408,7 +412,7 @@ void App::StudioAddLibraryStage(int index, uint32_t replaceUid) {
     job->label = s.displayName;
     job->replaceUid = replaceUid;
     StudioJob* j = job.get();
-    const MaterialChoice choice = ResolveMaterialChoice(std::string());
+    const MaterialChoice choice = ResolveMaterialChoice(s.id);
     job->future = std::async(std::launch::async, [j, s, choice] {
         return LoadStudioStage(s, j->models, &j->progress, &j->error, choice);
     });
@@ -560,6 +564,7 @@ void App::StudioPollJobs() {
                 auto sm = std::make_unique<StudioModel>();
                 sm->name = pm.name;
                 sm->libraryId = pm.libraryId;
+                sm->material = pm.material;
                 sm->defaultPackTextureFolder = pm.defaultPackTextureFolder;
                 sm->kind = pm.kind;
                 sm->visible = pm.visible;

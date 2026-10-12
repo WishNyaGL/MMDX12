@@ -986,6 +986,7 @@ const Entry kEnglish[] = {
     {"재질", "Materials"},
     {"재질 데이터를 바꿨어요", "Material data changed"},
     {"재질 데이터", "Material data"},
+    {"스테이지 재질 데이터", "Stage material data"},
     {"재질마다 분류를 바꾸거나 팩을 끕니다", "Change the class of each material or switch the pack off for it"},
     {"재질별 셰이딩", "Per-material shading"},
     {"개 지정", " set"},

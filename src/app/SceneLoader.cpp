@@ -234,7 +234,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
                     }
                     float begin = (curUnit + (float)k / (float)std::max<size_t>(n, 1)) / totalUnits;
                     float end = (curUnit + (float)(k + 1) / (float)std::max<size_t>(n, 1)) / totalUnits;
-                    DecodeModelTextures(part, progress, begin, end, label.c_str(), choiceFor(""));
+                    DecodeModelTextures(part, progress, begin, end, label.c_str(), choiceFor(stage->id));
                     out.stageParts.push_back(std::move(part));
                 }
             }
@@ -309,7 +309,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
                 }
                 float begin = 0.45f + 0.35f * (float)k / (float)std::max<size_t>(n, 1);
                 float end = 0.45f + 0.35f * (float)(k + 1) / (float)std::max<size_t>(n, 1);
-                DecodeModelTextures(part, progress, begin, end, label.c_str(), choiceFor(""));
+                DecodeModelTextures(part, progress, begin, end, label.c_str(), choiceFor(stage->id));
                 out.stageParts.push_back(std::move(part));
             }
         }

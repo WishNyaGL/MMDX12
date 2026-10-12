@@ -554,8 +554,9 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                     jm["shader"]["remembered"] = rem;
                 }
             }
-            // P5: the per-model PBR material source (Default is not written); the .emd path is relative to the project
-            if (m.kind == ModelKind::Character && m.material.ray) {
+            // P5: the per-model PBR material source (Default is not written); the .emd path is relative to the project.
+            // Written for every kind (character, stage, prop).
+            if (m.material.ray) {
                 jm["material"] = {{"ray", true}};
                 if (!m.material.emd.empty()) jm["material"]["emd"] = RelPath(Utf8ToPath(m.material.emd), dir);
             }
@@ -749,8 +750,8 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                         }
                     }
                 }
-                // P5: the per-model PBR material source (absent = Default)
-                if (kind == ModelKind::Character && m.contains("material") && m["material"].is_object()) {
+                // P5: the per-model PBR material source (absent = Default); read for every kind
+                if (m.contains("material") && m["material"].is_object()) {
                     const nlohmann::json& mt = m["material"];
                     pm.material.ray = ReadBool(mt, "ray", false);
                     if (pm.material.ray) {
