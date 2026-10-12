@@ -1592,3 +1592,35 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 - Verified: tests pass; BoomBox studio prop default vs PBR renders right; Alcander raster vs PT gold. EthanShax's arm
   "gloss" is the texture's tattoo stripes. Found (pre-existing): coplanar alpha decals vanish in PT (`TraceClosest`).
   Not verified: glTF normal sign up close, imported-model selector UI, FBX PBR, glTF in PT / GI.
+
+## 2026-10-12 (9) - 2.0.0 P7: QA, stage / prop material source, PT decals, GI skin fixes, release 2.0.0
+- Delegation (opencode, deepseek-v4.1-flash, smoke review): PT decal fix (level high), website guide page + README /
+  release-notes drafts (level high), stage / studio-prop material source (level default). Claude: renders, review, fixes,
+  release.
+- PT / offline GI / RT reflections: coplanar alpha decals (Alcander's chest tattoo) vanished; `TraceClosest` now runs a
+  short `RAY_FLAG_CULL_OPAQUE` query around an opaque hit (same instance, later material wins). Architect fix: a fixed
+  0.5 alpha test for the decal (the stochastic threshold gave speckles + a bright denoiser fringe). Cost ~+0.4 ms at 720p PT.
+- Gap found: stages always loaded Default (`choiceFor("")`) and the studio drew the material row for characters only,
+  so Ray stages / imported props could get PBR only through `--material-source`. Now: lobby "스테이지 재질 데이터"
+  (keyed by the stage library id, same ini map), studio inspector row for every kind, projects save it for every kind.
+  Architect fix (P5 bug): studio models added from the library / files never copied the load choice into
+  `StudioModel::material` (PBR loaded, inspector + project said Default).
+- Offline GI fixes found while making the release shots: the GI SKIN SSS used its own band (no curvature, x
+  SunIrradiance/pi) = hard white / cyan streaks on Ray skin -> the raster / PT term; GI's texture-hue skin heuristic
+  (SkinWeight / SkinTranslucency) ran on PBR hits and painted blocky patches (it thresholds the mip-filtered base texture)
+  -> PBR hits light like raster / PT.
+- QA (final build): 10 test tools pass (studio_project 179), pack_check --compile both built-in packs, render_smoke,
+  VPD self test, pack_suggest scan 243 models / 0 failures; canonical raster capture vs a v1.10.0 build (b6fd591 worktree,
+  same ini) = differences only in the FPS overlay; PT at noise level; raster benchmark 383 vs 386 fps avg; GI quick
+  bench OK; 7 Ray characters raster / PT + the Ray stage raster / PT / GI with no `[E]`; pack + PBR (pack wins);
+  material UI in 4 languages, light / dark, Ray row (.emd combo + file pick), stage row, studio stage; suggestion toast
+  seen on screen (MCP run); packaged exe (fresh library, v2.0.0, no `[E]`); `update_e2e.py` all checks pass.
+- Release 2.0.0: GitHub v2.0.0 (notes dist/notes_2.0.0.md, 4 languages, PBR off / on images docs/media/compare-2.0.0.jpg +
+  detail-2.0.0.jpg; asset SHA-256 c6d76f75... = local zip), delta manifest 2.0.0 (13 new objects) uploaded, live
+  manifest hash matches; website deployed (/latest.json -> 2.0.0 with manifest fields, /<lang>/docs/materials/ 200),
+  web commit f10d0f4 pushed.
+### Not verified / left
+- Ray PBR albedo reads paler than the default skin in some sets (BeeNic +12 raster, +20 PT luminance): data-driven, not changed.
+- Imported glTF stage / prop selector in the lobby / studio not clicked (BoomBox as a studio prop row only by code).
+- Decals across instances (base single-sided, decal double-sided) are still not resolved in PT.
+- `IsFlatFaceMaterial` (name-based flat faces) is still there (handoff section 9).
