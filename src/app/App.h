@@ -885,6 +885,7 @@ private:
     std::string studioLoadTitle_;                  // Loading screen title while a project opens (empty: library scene)
     char studioRenameBuf_[128] = {};
     char studioAddFilter_[64] = {};
+    bool studioThumbsShown_ = false;               // the add popup's thumbnail grid was drawn (pump thumbnails)
     int studioAddPage_ = 0;                        // "+" popup page: 0 menu, 1 characters, 2 stages, 3 songs
     uint32_t studioReplaceUid_ = 0;                // "+" popup in replace mode: the model whose file is swapped (0: add)
     bool studioOpenAdd_ = false;                   // the outliner opens the "+" popup next frame (model menu's replace)

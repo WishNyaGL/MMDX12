@@ -774,7 +774,10 @@ void App::DrawStudioAddMenu() {
     using namespace ui;
     StudioDoc& d = *studio_;
     const Palette& p = P();
-    ImGui::SetNextWindowSize(ImVec2(Dp(300.0f), 0));
+    const bool gridPage = studioAddPage_ == 1 || studioAddPage_ == 2;   // thumbnail pages are wider
+    const float popupW = gridPage ? 520.0f : 300.0f;
+    const float bodyW = gridPage ? 496.0f : 276.0f;                     // popup width minus the 12 dp padding
+    ImGui::SetNextWindowSize(ImVec2(Dp(popupW), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(12.0f), Dp(12.0f)));
     if (ImGui::BeginPopup("##studioadd")) {
         // replace mode (the model menu's "모델 바꾸기"): the library lists swap that model's file instead of adding
@@ -788,7 +791,7 @@ void App::DrawStudioAddMenu() {
             const ImVec2 c = ImGui::GetItemRectMin();
             Text(ImGui::GetWindowDrawList(), Font::Semibold, size::Small, ImVec2(c.x + Dp(36.0f), c.y + Dp(5.0f)), p.ink, title);
             Gap(6.0f);
-            SearchField("##addfilter", studioAddFilter_, sizeof(studioAddFilter_), Tr("검색"), 276.0f);
+            SearchField("##addfilter", studioAddFilter_, sizeof(studioAddFilter_), Tr("검색"), bodyW);
             Gap(6.0f);
         };
         const std::string needle = ToLowerAscii(studioAddFilter_);
@@ -826,7 +829,7 @@ void App::DrawStudioAddMenu() {
             if (replaceUid) {
                 PushFont(Font::Regular, size::Caption);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
-                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Dp(276.0f));
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Dp(bodyW));
                 ImGui::TextWrapped("%s", Tr("모션 키 · 배치 · 셰이더 · 소품 연결은 그대로 두고 모델만 바꿔요"));
                 ImGui::PopTextWrapPos();
                 ImGui::PopStyleColor();
@@ -834,31 +837,84 @@ void App::DrawStudioAddMenu() {
                 Gap(4.0f);
             }
             ImGui::BeginChild("##addlist", ImVec2(0, Dp(300.0f)), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-            int shown = 0;
-            const int n = chars ? (int)library_.characters.size() : (int)library_.stages.size();
-            for (int i = 0; i < n; ++i) {
-                const std::string& name = chars ? library_.characters[(size_t)i].displayName : library_.stages[(size_t)i].displayName;
-                const std::string& id = chars ? library_.characters[(size_t)i].id : library_.stages[(size_t)i].id;
-                if (!match(name, id)) continue;
-                ++shown;
-                ImGui::PushID(i);
-                if (MenuItemChip("##libitem", name.c_str(), chars ? icon::PersonSimple : icon::Mountains)) {
-                    ImGui::CloseCurrentPopup();
-                    if (chars) StudioAddLibraryCharacter(i, replaceUid);
-                    else StudioAddLibraryStage(i, replaceUid);
+            studioThumbsShown_ = true;
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const float inset = Dp(4.0f);
+                const float availW = ImGui::GetContentRegionAvail().x - inset * 2.0f - Dp(10.0f);
+                const ImVec2 origin(ImGui::GetCursorScreenPos().x + inset, ImGui::GetCursorScreenPos().y + inset);
+                const int cols = 3;
+                const float cgap = Dp(10.0f);
+                const float cw = (availW - cgap * (cols - 1)) / cols;
+                const float boxH = cw * 0.75f;                          // thumbnail surface box
+                const float capH = Dp(34.0f);                           // room for the name below
+                const float r = Dp(12.0f);
+                const int n = chars ? (int)library_.characters.size() : (int)library_.stages.size();
+                float contentH = 0;
+                int shown = 0;
+                for (int i = 0; i < n; ++i) {
+                    const std::string& name = chars ? library_.characters[(size_t)i].displayName : library_.stages[(size_t)i].displayName;
+                    const std::string& id = chars ? library_.characters[(size_t)i].id : library_.stages[(size_t)i].id;
+                    if (!match(name, id)) continue;
+                    const int col = shown % cols, row = shown / cols;
+                    ++shown;
+                    const ImVec2 cardPos(origin.x + col * (cw + cgap), origin.y + row * (boxH + capH + cgap));
+                    const ImVec2 cardEnd(cardPos.x + cw, cardPos.y + boxH + capH);
+                    contentH = std::max(contentH, cardEnd.y - origin.y);
+                    if (!ImGui::IsRectVisible(ImVec2(cardPos.x, cardPos.y - Dp(20.0f)), ImVec2(cardEnd.x, cardEnd.y + Dp(20.0f)))) continue;
+                    ImGui::PushID(i);
+                    const std::string key = (chars ? "c:" : "s:") + id;
+                    const uint64_t tex = chars ? CharacterThumb(i) : StageThumb(i);
+                    uint32_t iw = 0, ih = 0;
+                    thumbs_.Size(key, iw, ih);
+                    const ImVec2 ta(cardPos.x, cardPos.y), tb(cardPos.x + cw, cardPos.y + boxH);
+                    ImGui::SetCursorScreenPos(cardPos);
+                    const bool clicked = ImGui::InvisibleButton("##card", ImVec2(cw, boxH + capH));
+                    const bool hovered = ImGui::IsItemHovered();
+                    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    const float hv = Anim(ImGui::GetID("##hv"), hovered);
+                    dl->AddRectFilled(ta, tb, p.sunken, r);             // subtle surface background while loading
+                    if (tex) {
+                        const float aspect = (iw && ih) ? (float)iw / (float)ih : cw / boxH;
+                        const float boxAspect = cw / boxH;
+                        const float dw = aspect > boxAspect ? cw : boxH * aspect;
+                        const float dh = aspect > boxAspect ? cw / aspect : boxH;
+                        const ImVec2 ia(ta.x + (cw - dw) * 0.5f, ta.y + (boxH - dh) * 0.5f);
+                        dl->AddImageRounded(ImTextureRef(tex), ia, ImVec2(ia.x + dw, ia.y + dh), ImVec2(0, 0), ImVec2(1, 1),
+                                            IM_COL32_WHITE, r);
+                    } else {   // placeholder icon until the render finishes
+                        Icon(dl, chars ? icon::PersonSimple : icon::Mountains, std::clamp(cw * 0.22f / Dpi(), 12.0f, 40.0f),
+                             ImVec2((ta.x + tb.x) * 0.5f, (ta.y + tb.y) * 0.5f), WithAlpha(p.ink3, 0.7f));
+                    }
+                    if (hv > 0.01f) {
+                        dl->AddRectFilled(ta, tb, WithAlpha(p.accent, 0.10f * hv), r);
+                        dl->AddRect(ta, tb, WithAlpha(p.accent, 0.55f * hv), r, 0, Dp(1.5f));
+                    }
+                    // single-line name, ellipsized
+                    TextEllipsis(dl, Font::Regular, size::Small, ImVec2(cardPos.x + Dp(2.0f), cardEnd.y - Dp(22.0f)),
+                                 cardEnd.x - Dp(2.0f), hovered ? p.ink : p.ink2, name.c_str());
+                    ImGui::PopID();
+                    if (clicked) {
+                        ImGui::CloseCurrentPopup();
+                        if (chars) StudioAddLibraryCharacter(i, replaceUid);
+                        else StudioAddLibraryStage(i, replaceUid);
+                    }
                 }
-                ImGui::PopID();
-            }
-            if (shown == 0) {
-                PushFont(Font::Regular, size::Small);
-                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
-                ImGui::TextUnformatted(n == 0 ? Tr("라이브러리에 없어요") : Tr("검색 결과가 없습니다"));
-                ImGui::PopStyleColor();
-                PopFont();
+                if (shown == 0) {
+                    PushFont(Font::Regular, size::Small);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+                    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + Dp(40.0f)));
+                    ImGui::TextUnformatted(n == 0 ? Tr("라이브러리에 없어요") : Tr("검색 결과가 없습니다"));
+                    ImGui::PopStyleColor();
+                    PopFont();
+                    contentH = Dp(120.0f);
+                }
+                ImGui::SetCursorScreenPos(origin);
+                ImGui::Dummy(ImVec2(availW, contentH + inset * 2.0f));
             }
             ImGui::EndChild();
             MenuSeparator();
-            if (Button("##addfile", Tr("파일에서 열기…"), icon::FolderOpen, ButtonKind::Secondary, ImVec2(276.0f, 36.0f))) {
+            if (Button("##addfile", Tr("파일에서 열기…"), icon::FolderOpen, ButtonKind::Secondary, ImVec2(bodyW, 36.0f))) {
                 ImGui::CloseCurrentPopup();
                 StudioAddModelDialog(chars ? ModelKind::Character : ModelKind::Stage, replaceUid);
             }

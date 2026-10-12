@@ -733,13 +733,16 @@ void App::RenderFrame() {
 
     if (screen_ == Screen::BenchRun) UpdateBenchRun(); // frame timing first thing in the frame
 
-    // Thumbnails: renders/uploads happen outside frame recording, only on menu screens.
+    // Thumbnails: renders/uploads happen outside frame recording, only on menu screens (and in the studio while the
+    // add popup's card grid is open: a render waits for the GPU and borrows the scene targets).
     if (thumbsClearPending_) {
         thumbs_.Clear();
         thumbsClearPending_ = false;
     }
-    if (screen_ == Screen::Select || screen_ == Screen::BenchLobby || screen_ == Screen::Loading || screen_ == Screen::Shaders)
+    if (screen_ == Screen::Select || screen_ == Screen::BenchLobby || screen_ == Screen::Loading || screen_ == Screen::Shaders ||
+        (screen_ == Screen::Studio && studioThumbsShown_))
         thumbs_.Pump();
+    studioThumbsShown_ = false;
 
     ImGui_ImplDX12_NewFrame();
     if (themeDirty_) {

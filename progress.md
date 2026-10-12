@@ -1624,3 +1624,21 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 - Imported glTF stage / prop selector in the lobby / studio not clicked (BoomBox as a studio prop row only by code).
 - Decals across instances (base single-sided, decal double-sided) are still not resolved in PT.
 - `IsFlatFaceMaterial` (name-based flat faces) is still there (handoff section 9).
+
+## 2026-10-12 (10) - Studio add popup: thumbnail card grid
+- Delegation (opencode, deepseek-v4.1-flash, level full, smoke + visual review): the studio "+" popup's character /
+  stage pages are a 3-column thumbnail card grid (`DrawStudioAddMenu`, 520 dp wide on those pages, 300 dp elsewhere;
+  icon placeholder until the thumbnail is ready; only visible cards request thumbnails). Also used by the 2.0.0
+  "replace model" mode (clicks pass `replaceUid`).
+- Architect fix: `thumbs_.Pump()` ran only on menu screens, so studio thumbnails never loaded. It now also runs in the
+  studio while the grid was drawn the previous frame (`studioThumbsShown_`; a thumbnail render waits for the GPU and
+  borrows the scene targets, so it stays off otherwise).
+- The work started on a stale checkout (68 commits behind, pre-2.0.0); stashed, pulled, conflicts in App.h /
+  UiStudioProject.cpp resolved by hand. Note: the first launch after a pull with a cold `shader_cache` took 354 s in
+  "shaders+upscalers" (looks like a hang; the second launch took 3.1 s).
+- Verified (scripted captures, 2.0.0 dark theme): character grid with 6 thumbnails, stage grid (pre-merge), clicking a
+  card adds the model (toast + outliner), no `[E]`.
+### Not verified / left
+- The replace-model popup with the grid was not opened (no script command opens it).
+- `--ui-scale 1.5` not captured.
+- Props classified as stages (GlowStick, kamKnife) get near-empty stage thumbnails (the fixed stage camera; same in the lobby).
