@@ -1642,3 +1642,11 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 - The replace-model popup with the grid was not opened (no script command opens it).
 - `--ui-scale 1.5` not captured.
 - Props classified as stages (GlowStick, kamKnife) get near-empty stage thumbnails (the fixed stage camera; same in the lobby).
+
+## 2026-10-12 (11) - 2.0.0 release images: a Ray-MMD character, same-crop side by side
+- The release preview showed PBR on the stage only (Sour Miku has no Ray data) as a split. Re-shot with a character that
+  carries Ray-MMD material data and a modest look: MovieSonic Ver2.0 (29/30 records; Alcander Cloth / Ross rejected for
+  exposure, Moritaka / Noku / DELGA / Zabivaka load with no records). Offline GI 2560x1440 768 spp, moonlit_waves,
+  Evergreen 0:08 paused, sunset lighting, `--camera 0,9.0,0,0,3,58 --dof 0`, `--material-source default|ray`.
+- `docs/media/pbr-sonic-2.0.0.jpg` = the same crop left (OFF) / right (ON); `pbr-sonic-closeup-2.0.0.jpg` = pairs
+  (head, gloves, shoes, stage gold trim). Old files removed; the GitHub v2.0.0 notes point at the new names (raw 200).
