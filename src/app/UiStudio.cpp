@@ -82,7 +82,7 @@ void App::StartStudioLoad(const CharacterAsset* ch, const StageAsset* st, const 
     const SongAsset so = hasSong ? SongAsChosen(*song) : SongAsset{};
     loadFuture_ = std::async(std::launch::async, [=, pkg = studioPackage_.get(), this] {
         return LoadStudioPackage(c, hasStage ? &s : nullptr, hasSong ? &so : nullptr, *pkg, &loadProgress_,
-                                 &loadError_, options_.materialSource == 1);
+                                 &loadError_, MaterialChoiceResolver());
     });
 }
 
@@ -102,6 +102,7 @@ bool App::FinishStudioLoad() {
         sm->attach = m.attach;
         sm->place = sm->placeApplied = m.place;
         sm->shader = m.shader;
+        sm->material = m.material;
         sm->uid = doc->nextUid++;
         sm->path = m.pmx->sourcePath;
         sm->pmx = m.pmx;

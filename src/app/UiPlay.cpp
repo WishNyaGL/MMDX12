@@ -505,6 +505,29 @@ void App::DrawPlayOverlay() {
                 settings_.SetCharacterShader(s->characterId, choice);
                 settings_.Save(settingsPath_);
             }
+            // P5: PBR material source of the current character. Changing it reloads the scene at the current time (a
+            // unit-song formation scene applies it at the next load instead).
+            if (s->character && !s->characterId.empty() &&
+                HasMaterialOptions(s->characterId, s->character->Model().sourcePath,
+                                   (int)s->character->Model().materials.size(),
+                                   settings_.CharacterMaterial(s->characterId))) {
+                Gap(6.0f);
+                SectionLabel(Tr("재질 데이터"));
+                MaterialChoice material = settings_.CharacterMaterial(s->characterId);
+                if (options_.materialSourceSet) {
+                    PushFont(Font::Regular, size::Caption);
+                    ImGui::TextDisabled("%s", Tr("--material-source 가 이번 실행 동안 우선합니다"));
+                    PopFont();
+                }
+                if (DrawMaterialSelector("##playmat", material, s->characterId,
+                                         s->character->Model().sourcePath, (int)s->character->Model().materials.size(),
+                                         ImGui::GetContentRegionAvail().x)) {
+                    settings_.SetCharacterMaterial(s->characterId, material);
+                    settings_.Save(settingsPath_);
+                    ReloadPlaySceneForMaterial();
+                    ImGui::CloseCurrentPopup();
+                }
+            }
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar();

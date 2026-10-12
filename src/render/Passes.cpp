@@ -821,12 +821,12 @@ void ScenePass::Execute(PassContext& pc) {
                 }
                 cmd->SetGraphicsRootConstantBufferView(1, m.constants);
                 cmd->SetGraphicsRootDescriptorTable(3, ctx.SrvHeap().Gpu(m.srvTable));
-                // Per-material PBR record (P3): a draw with a Ray record (and no pack) selects it so PSMain shades
-                // with its PBR data (the --pbr-debug channel is passed along and wins inside PSMain). Any other draw
-                // keeps gPbrActive 0, i.e. the default look.
+                // Per-material PBR record (P5): a model loaded with Ray records renders PBR per material (no global
+                // setting), unless a pack owns that draw. The --pbr-debug channel is passed along and wins inside
+                // PSMain. Any other draw keeps gPbrActive 0, i.e. the default look.
                 const size_t matIndex = (size_t)(&m - model->Materials().data());
-                const bool pbrRecord = pc.settings.materialSource == MaterialSource::Ray && !(pack && !m.packOff) &&
-                                       model->HasPbr() && model->PbrIndex(matIndex) != DescriptorHeap::kInvalid;
+                const bool pbrRecord = model->HasPbrRecords() && !(pack && !m.packOff) && model->HasPbr() &&
+                                       model->PbrIndex(matIndex) != DescriptorHeap::kInvalid;
                 if (pbrRecord) {
                     const uint32_t c[4] = {model->PbrSrv(), model->PbrIndex(matIndex), pbrDebugChannel, 1u};
                     cmd->SetGraphicsRoot32BitConstants(14, 4, c, 0);

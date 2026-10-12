@@ -22,6 +22,16 @@ void AppSettings::SetCharacterShader(const std::string& id, const ShaderChoice& 
     else characterShaders[id] = choice;
 }
 
+MaterialChoice AppSettings::CharacterMaterial(const std::string& id) const {
+    auto it = characterMaterials.find(id);
+    return it == characterMaterials.end() ? MaterialChoice{} : it->second;
+}
+
+void AppSettings::SetCharacterMaterial(const std::string& id, const MaterialChoice& choice) {
+    if (!choice.ray) characterMaterials.erase(id);   // Default removes the entry
+    else characterMaterials[id] = choice;
+}
+
 namespace {
 
 std::string Trim(const std::string& s) {
@@ -225,6 +235,21 @@ bool AppSettings::Load(const std::filesystem::path& file) {
             // characterShaderSuggested=<pack id>|<character id>: this pack was already suggested for the character
             const size_t bar = value.find('|');
             if (bar != std::string::npos && bar > 0 && bar + 1 < value.size()) characterShaderSuggested.insert(value);
+        }
+        else if (key == "characterMaterial") {
+            // characterMaterial=<ray|default>|<emd path or empty>|<character id> (the id last, like the other lines)
+            const size_t a = value.find('|');
+            const size_t b = a == std::string::npos ? a : value.find('|', a + 1);
+            if (b != std::string::npos && b + 1 < value.size()) {
+                MaterialChoice c;
+                c.ray = value.compare(0, a, "ray") == 0;
+                c.emd = value.substr(a + 1, b - a - 1);
+                if (c.ray) characterMaterials[value.substr(b + 1)] = c;
+            }
+        }
+        else if (key == "characterMaterialSuggested") {
+            // characterMaterialSuggested=<character id>: Ray-MMD material data was already suggested
+            if (!value.empty()) characterMaterialSuggested.insert(value);
         }
         else if (key == "characterShaderAuto") {
             // retired (the app no longer auto-applies packs): ignored
@@ -435,6 +460,10 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     for (const auto& [id, dir] : packTextureFolders)
         std::fprintf(f, "packTextureFolder=%s|%s\n", id.c_str(), dir.c_str());
     for (const std::string& key : characterShaderSuggested) std::fprintf(f, "characterShaderSuggested=%s\n", key.c_str());
+    for (const auto& [id, m] : characterMaterials)
+        if (m.ray) std::fprintf(f, "characterMaterial=ray|%s|%s\n", m.emd.c_str(), id.c_str());
+    for (const std::string& id : characterMaterialSuggested)
+        std::fprintf(f, "characterMaterialSuggested=%s\n", id.c_str());
     for (const EffectStackEntry& e : effectStack) {
         std::string list;
         for (const auto& [k, v] : e.params) {

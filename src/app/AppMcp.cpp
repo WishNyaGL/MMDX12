@@ -642,6 +642,9 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             const ShaderChoice sc = settings_.CharacterShader(scene_->characterId);
             r["shader_pack"] = sc.pack;
             r["shader_texture_folder"] = sc.textureFolder;
+            const MaterialChoice mc = settings_.CharacterMaterial(scene_->characterId);
+            r["material_source"] = mc.ray ? "ray" : "default";
+            r["material_emd"] = mc.emd;
         }
         promise->Resolve(r);
         return;
@@ -700,6 +703,29 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
                 return;
             }
             shaderTextureFolder = args["shader_texture_folder"].get<std::string>();
+        }
+        // P5: the character's PBR material source ("default" / "ray") and an optional explicit .emd path.
+        int materialSource = -1;   // -1 = not given
+        std::string materialEmd;
+        if (args.contains("material_source")) {
+            if (!(screen_ == Screen::Play && scene_)) {
+                promise->Reject("material_source applies to the character in play mode (load_scene first)");
+                return;
+            }
+            const std::string v = args["material_source"].get<std::string>();
+            if (v == "ray") materialSource = 1;
+            else if (v == "default" || v == "none") materialSource = 0;
+            else {
+                promise->Reject("Invalid material_source: " + v + " (want default|ray)");
+                return;
+            }
+            if (args.contains("material_emd")) {
+                if (!args["material_emd"].is_string()) {
+                    promise->Reject("material_emd must be a string");
+                    return;
+                }
+                materialEmd = args["material_emd"].get<std::string>();
+            }
         }
         std::vector<EffectStackEntry> effects;
         if (args.contains("effects")) {  // the whole stack, in order ("none" / "" clears it)
@@ -808,6 +834,14 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             settings_.SetCharacterShader(scene_->characterId, sc);
         }
         if (args.contains("effects") || args.contains("effect_stack")) settings_.effectStack = std::move(effects);
+        if (materialSource >= 0) {   // P5: the character's PBR material source, then reload the scene at this time
+            MaterialChoice mc;
+            mc.ray = materialSource == 1;
+            mc.emd = materialEmd;
+            settings_.SetCharacterMaterial(scene_->characterId, mc);
+            settings_.Save(settingsPath_);
+            ReloadPlaySceneForMaterial();
+        }
         ApplyRenderSettings();
         settings_.Save(settingsPath_);
         ExecuteMcp("get_render_settings", {}, promise);  // answers with the settings now in effect

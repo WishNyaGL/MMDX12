@@ -140,9 +140,10 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.shaderPackSet = true;
         } else if (arg == L"--material-source") {
             const std::string v = ToLowerAscii(WideToUtf8(next()));
+            opt.materialSourceSet = true;
             if (v == "default") opt.materialSource = 0;
             else if (v == "ray") opt.materialSource = 1;
-            else LOG_WARN("unknown --material-source value: %s (want default|ray)", v.c_str());
+            else { opt.materialSourceSet = false; LOG_WARN("unknown --material-source value: %s (want default|ray)", v.c_str()); }
         } else if (arg == L"--pbr-debug") {
             const std::string v = ToLowerAscii(WideToUtf8(next()));
             if (v == "none") opt.pbrDebug = 0;
@@ -1259,7 +1260,6 @@ void App::ApplyRenderSettings() {
     rs.taa = settings_.taa;
     rs.exposure = settings_.exposure;
     rs.renderPath = (RenderPath)settings_.renderPath;
-    rs.materialSource = options_.materialSource == 1 ? MaterialSource::Ray : MaterialSource::Default;
     rs.pbrDebug = (PbrDebug)std::clamp(options_.pbrDebug, 0, 7);
     if (shadingOverride_ >= 0) rs.shading = (ViewShading)std::clamp(shadingOverride_, 0, 2);
     rs.upscaler = (UpscalerKind)settings_.upscaler;
@@ -1356,7 +1356,7 @@ void App::StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsse
     const std::vector<PerformerCast> form = hasFormation ? *formation : std::vector<PerformerCast>{};
     loadFuture_ = std::async(std::launch::async, [=, pkg = loadPackage_.get(), this] {
         return LoadScenePackage(c, hasStage ? &s : nullptr, so, *pkg, &loadProgress_, &loadError_,
-                                hasFormation ? &form : nullptr, options_.materialSource == 1);
+                                hasFormation ? &form : nullptr, MaterialChoiceResolver());
     });
 }
 
@@ -1484,6 +1484,28 @@ void App::PollLoad() {
     screen_ = Screen::BenchRun;
 }
 
+void App::ReloadPlaySceneForMaterial() {
+    if (screen_ != Screen::Play || !scene_) return;
+    if (!scene_->extras.empty()) {   // a unit-song formation scene: reloaded at the next load (the UI says so)
+        toast_ = {Tr("재질을 저장했어요"),
+                  Tr("여러 명이 함께 추는 곡은 다음 로드 때 반영돼요"), {}, false, timeSeconds_ + 6.0};
+        return;
+    }
+    const int ci = selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size() ? selCharacter_ : -1;
+    const int si = selSong_ >= 0 && (size_t)selSong_ < library_.songs.size() ? selSong_ : -1;
+    if (ci < 0 || si < 0) {   // no library scene to reload (benchmark / studio): apply at the next load
+        toast_ = {Tr("재질을 저장했어요"), Tr("다음 로드 때 반영돼요"), {}, false, timeSeconds_ + 6.0};
+        return;
+    }
+    const StageAsset* st = selStage_ >= 0 && (size_t)selStage_ < library_.stages.size() ? &library_.stages[(size_t)selStage_]
+                                                                                      : nullptr;
+    const bool wasPlaying = playing_;
+    options_.seekSeconds = playTime_;   // the scene-load path consumes it: same time
+    options_.paused = !wasPlaying;      // keep the play / pause state across the reload
+    playing_ = false;
+    StartLoad(LoadTarget::Play, &library_.characters[(size_t)ci], st, &library_.songs[(size_t)si]);
+}
+
 bool App::BuildSceneRuntime(ScenePackage& pkg) {
     auto s = std::make_unique<SceneRuntime>();
     UploadBatch batch(ctx_);
@@ -1597,6 +1619,10 @@ void App::UpdateScene(float frame) {
                                        scene_->character->MorphVersion());
     ApplyShaderChoice(*scene_->characterGpu, PlayShaderChoice(*scene_->characterGpu, scene_->characterId));
     scene_->characterGpu->UpdateMaterials(slot, ch.MaterialMul(), ch.MaterialAdd(), ch.MaterialVersion());
+    // P5: suggest Ray-MMD material data once per character that has a Ray .emd candidate and no saved choice.
+    if (scene_->character)
+        SuggestRayMaterial(scene_->characterId, scene_->character->Model().sourcePath,
+                           (int)scene_->character->Model().materials.size());
     for (size_t i = 0; i < scene_->stages.size(); ++i) {
         scene_->stageGpu[i]->UpdateSkinning(slot, scene_->stages[i]->SkinMatrices());
         scene_->stageGpu[i]->UpdateMorphs(slot, scene_->stages[i]->VertexMorphDeltas(),

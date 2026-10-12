@@ -258,7 +258,6 @@ void App::StartOfflineVideo(double startSeconds, double endSeconds, bool fromLob
         RenderSettings rs = renderer_.Settings();
         rs.viewportX = rs.viewportY = rs.viewportW = rs.viewportH = 0;
         rs.shading = ViewShading::Lit;  // the studio shading mode is an editing view only
-        rs.materialSource = options_.materialSource == 1 ? MaterialSource::Ray : MaterialSource::Default;
         renderer_.SetSettings(rs);
         // the project's camera motion when there is one, else the view the editor shows
         if (!studio_->camera.camera.empty()) studio_->useMotionCamera = true;   // StudioPoseForRender builds the evaluator
@@ -841,8 +840,7 @@ RenderSettings App::VideoRealtimeSettings(const VideoRenderConfig& cfg) const {
     rs.ssr = true;
     rs.ptSamples = q.ptSamples;
     rs.ptBounces = q.ptBounces;
-    // PBR (work unit P2): a run-wide source; the debug view is a raster lit-only aid (the video renderer uses the same).
-    rs.materialSource = options_.materialSource == 1 ? MaterialSource::Ray : MaterialSource::Default;
+    // PBR (work unit P2/P5): per-model records drive the look; the debug view is a raster lit-only aid.
     rs.pbrDebug = (PbrDebug)std::clamp(options_.pbrDebug, 0, 7);
     rs.bloom = cfg.bloom;
     rs.bloomConvolution = cfg.bloomConvolution;
@@ -976,7 +974,7 @@ void App::UpdateVideoProbe() {
         const SongAsset so = song;
         bgProbe_.loadFuture = std::async(std::launch::async, [=, pkg = bgProbe_.package.get(), this] {
             return LoadScenePackage(c, hasStage ? &st : nullptr, so, *pkg, &bgProbe_.progress, &bgProbe_.error,
-                                    nullptr, options_.materialSource == 1);
+                                    nullptr, MaterialChoiceResolver());
         });
         return;
     }

@@ -114,6 +114,11 @@ public:
     // the model has none, e.g. with --material-source default). pbrIndexOfMaterial = material index or 0xFFFFFFFF.
     uint32_t PbrSrv() const { return pbrSrv_; }
     bool HasPbr() const { return pbrSrv_ != DescriptorHeap::kInvalid; }
+    // The model was created from a PbrModelData with at least one valid Ray record (its PBR payload was not empty
+    // when the model loaded). Per-model PBR gate for the scene pass (P5): a model renders PBR when it was loaded
+    // with records, whatever the global setting. Set by Renderer::CreateModel.
+    bool HasPbrRecords() const { return hasPbrRecords_; }
+    void SetHasPbrRecords(bool v) { hasPbrRecords_ = v; }
     uint32_t PbrIndex(size_t material) const {
         return material < pbrIndex_.size() ? pbrIndex_[material] : DescriptorHeap::kInvalid;
     }
@@ -190,6 +195,7 @@ private:
     std::vector<uint32_t> pbrTextureSrvs_;              // SRV heap index per pbrTextures_ entry
     uint32_t pbrSrv_ = DescriptorHeap::kInvalid;
     std::vector<uint32_t> pbrIndex_;
+    bool hasPbrRecords_ = false;
     ModelRole role_ = ModelRole::Character;
     DirectX::XMFLOAT3 boundsMin_{}, boundsMax_{};
     ComPtr<ID3D12Resource> boneBuf_[kRing];

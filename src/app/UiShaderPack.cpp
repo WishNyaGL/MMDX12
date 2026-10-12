@@ -13,11 +13,13 @@
 
 #include "app/Icons.h"
 #include "asset/PmxModel.h"
+#include "asset/RayMaterial.h"
 #include "app/UiKit.h"
 #include "core/I18n.h"
 #include "core/TextUtil.h"
 #include "render/ShaderPack.h"
 #include "render/GpuModel.h"
+#include "studio/FileDialog.h"
 #include "studio/StudioDoc.h"
 #include "ui_probe/UiProbe.h"
 #include "imgui.h"
@@ -712,6 +714,133 @@ bool App::DrawShaderPackParams(ShaderChoice& choice) {
     return changed;
 }
 
+// ---- PBR material source (P5) ---------------------------------------------------------------------------------------
+
+MaterialChoice App::ResolveMaterialChoice(const std::string& characterId) const {
+    // --material-source wins over saved choices: Ray for every model, Default for none.
+    if (options_.materialSourceSet) {
+        MaterialChoice c;
+        c.ray = options_.materialSource == 1;
+        return c;
+    }
+    return characterId.empty() ? MaterialChoice{} : settings_.CharacterMaterial(characterId);
+}
+
+const std::vector<RayEmdCandidate>& App::MaterialCandidates(const std::string& key,
+                                                            const std::filesystem::path& modelPath, int pmxMaterialCount) {
+    auto it = materialCandidates_.find(key);
+    if (it != materialCandidates_.end()) return it->second;
+    std::vector<RayEmdCandidate> cands = FindRayEmdCandidates(modelPath, pmxMaterialCount);  // ~10 ms, cached per session
+    return materialCandidates_.emplace(key, std::move(cands)).first->second;
+}
+
+bool App::HasMaterialOptions(const std::string& cacheKey, const std::filesystem::path& modelPath, int pmxMaterialCount,
+                             const MaterialChoice& choice) {
+    if (modelPath.empty() || pmxMaterialCount <= 0) return false;
+    const std::vector<RayEmdCandidate>& cands = MaterialCandidates(cacheKey, modelPath, pmxMaterialCount);
+    return std::any_of(cands.begin(), cands.end(),
+                       [](const RayEmdCandidate& c) { return !c.readFailed && c.rayEntries > 0; }) ||
+           !choice.emd.empty();
+}
+
+bool App::DrawMaterialSelector(const char* id, MaterialChoice& choice, const std::string& cacheKey,
+                               const std::filesystem::path& modelPath, int pmxMaterialCount, float width) {
+    if (modelPath.empty() || pmxMaterialCount <= 0) return false;
+    bool changed = false;
+    const std::vector<RayEmdCandidate>& cands = MaterialCandidates(cacheKey, modelPath, pmxMaterialCount);
+    // The widget only exists when there is something to choose: at least one Ray candidate, or an explicit .emd.
+    const bool hasRayCandidate = std::any_of(cands.begin(), cands.end(), [](const RayEmdCandidate& c) {
+        return !c.readFailed && c.rayEntries > 0;
+    });
+    if (!hasRayCandidate && choice.emd.empty()) return false;
+
+    // Default / Ray-MMD selector (imitate DrawShaderSelector's option control).
+    {
+        const char* labels[] = {Tr("기본"), "Ray-MMD"};
+        int mode = choice.ray ? 1 : 0;
+        if (ui::Segmented((std::string(id) + "_src").c_str(), labels, 2, &mode, width / Dpi(), 34.0f)) {
+            choice.ray = mode == 1;
+            changed = true;
+        }
+    }
+    if (!choice.ray) return changed;   // Default: no .emd row
+
+    // Candidate combo: relative to the model folder; an explicit path shows its file name. "파일 선택…" opens a dialog.
+    const std::filesystem::path modelDir = modelPath.parent_path();
+    const auto relLabel = [&](const std::filesystem::path& emd) {
+        std::error_code ec;
+        const std::filesystem::path rel = emd.lexically_relative(modelDir);
+        const std::string s = PathToUtf8(rel.empty() ? emd.filename() : rel);
+        return s.empty() ? PathToUtf8(emd.filename()) : s;
+    };
+    std::filesystem::path chosen = choice.emd.empty() ? std::filesystem::path() : Utf8ToPath(choice.emd);
+    Gap(6.0f);
+    const std::string preview =
+        chosen.empty() ? std::string(Tr("자동 (가장 알맞은 .emd)"))
+                       : relLabel(chosen) + (std::filesystem::exists(chosen) ? "" : std::string("  ·  ") + Tr("파일 없음"));
+    ImGui::SetNextItemWidth(width);
+    PushFont(Font::Regular, size::Small);
+    bool comboChanged = false;
+    const bool emdOpen = ImGui::BeginCombo((std::string(id) + "_emd").c_str(), preview.c_str(),
+                                           ImGuiComboFlags_HeightLarge | ImGuiComboFlags_NoArrowButton);
+    {   // a quiet caret instead of ImGui's arrow box (as the material class dropdown)
+        const ImVec2 cmax = ImGui::GetItemRectMax(), cmin = ImGui::GetItemRectMin();
+        Icon(ImGui::GetWindowDrawList(), icon::CaretDown, 12.0f, ImVec2(cmax.x - Dp(12.0f), (cmin.y + cmax.y) * 0.5f),
+             P().ink3);
+    }
+    if (emdOpen) {
+        if (ImGui::Selectable(Tr("자동 (가장 알맞은 .emd)"), chosen.empty())) {
+            choice.emd.clear();
+            comboChanged = true;
+        }
+        for (size_t i = 0; i < cands.size(); ++i) {
+            const RayEmdCandidate& c = cands[i];
+            if (c.readFailed || c.rayEntries == 0) continue;
+            ImGui::PushID((int)i);
+            const bool sel = !chosen.empty() && c.path == chosen;
+            if (ImGui::Selectable(relLabel(c.path).c_str(), sel)) {
+                choice.emd = PathToUtf8(c.path);
+                comboChanged = true;
+            }
+            if (c.rayEntries < c.objCount)
+                ImGui::SetItemTooltip("%s", (std::to_string(c.rayEntries) + "/" + std::to_string(c.objCount) + " Ray").c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    PopFont();
+    if (comboChanged) {
+        choice.ray = true;
+        changed = true;
+    }
+    Gap(4.0f);
+    if (Button((std::string(id) + "_pick").c_str(), Tr("파일 선택…"), icon::FolderOpen, ButtonKind::Ghost)) {
+        const std::filesystem::path picked =
+            studio::OpenFileDialog(hwnd_, {{L"Ray-MMD material (.emd)", L"*.emd"}}, modelDir);
+        if (!picked.empty()) {
+            choice.ray = true;
+            choice.emd = PathToUtf8(picked);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+void App::SuggestRayMaterial(const std::string& characterId, const std::filesystem::path& modelPath, int pmxMaterialCount) {
+    if (characterId.empty() || options_.materialSourceSet || HeadlessRun()) return;
+    if (!materialSuggestChecked_.emplace(characterId, true).second) return;
+    if (settings_.CharacterMaterial(characterId).ray || settings_.MaterialSuggested(characterId)) return;
+    const std::vector<RayEmdCandidate>& cands = MaterialCandidates(characterId, modelPath, pmxMaterialCount);
+    const bool anyRay = std::any_of(cands.begin(), cands.end(), [](const RayEmdCandidate& c) {
+        return !c.readFailed && c.rayEntries > 0;
+    });
+    if (!anyRay) return;
+    settings_.SetMaterialSuggested(characterId);
+    settings_.Save(settingsPath_);
+    toast_ = {Tr("Ray-MMD 재질 추천"),
+              Tr("이 캐릭터에 Ray-MMD 재질 데이터가 있어요 · 셰이더 탭의 재질 데이터에서 켤 수 있어요"), {}, false, timeSeconds_ + 6.0};
+}
+
 void App::DrawStudioShaderRow(float w) {
     studio::StudioDoc& d = *studio_;
     studio::StudioModel* m = d.Selected();
@@ -770,6 +899,33 @@ void App::DrawStudioShaderRow(float w) {
     if (changed) {
         m->shader = choice;
         ++d.projectVersion;   // saved with the project (no undo step)
+    }
+
+    // P5: PBR material source (Default / Ray-MMD). Changing it reloads this model's PBR data through the
+    // replace-model path (same uid / motion / placement / shader), on a worker thread.
+    if (m->kind == studio::ModelKind::Character &&
+        HasMaterialOptions(m->libraryId, m->path, (int)m->pmx->materials.size(), m->material)) {
+        ImGui::Dummy(ImVec2(w, Dp(10.0f)));
+        {
+            const ImVec2 c = ImGui::GetCursorScreenPos();
+            Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("재질 데이터"));
+            ImGui::Dummy(ImVec2(w, Dp(20.0f)));
+        }
+        MaterialChoice material = m->material;
+        if (options_.materialSourceSet) {
+            PushFont(Font::Regular, size::Caption);
+            ImGui::TextDisabled("%s", Tr("--material-source 가 이번 실행 동안 우선합니다"));
+            PopFont();
+        }
+        if (DrawMaterialSelector("##studiomat", material, m->libraryId.empty() ? PathToUtf8(m->path) : m->libraryId,
+                                 m->path, (int)m->pmx->materials.size(), w)) {
+            m->material = material;
+            if (!m->libraryId.empty()) {   // the same character in play mode remembers it too
+                settings_.SetCharacterMaterial(m->libraryId, material);
+                settings_.Save(settingsPath_);
+            }
+            StudioAddModelFile(m->kind, m->path, m->uid, &m->material);   // reload this model's PBR data
+        }
     }
 }
 

@@ -284,6 +284,8 @@ static void TestRoundTrip() {
         m.shader.SwitchPack("test_pack");
         m.shader.materials["\xE9\xAB\xAA"] = (int)PackClass::Hair;                   // 髪: per-material class
         m.shader.materials["body|01"] = kMaterialPackOff;                              // ... and a material with the pack off
+        m.material.ray = true;                                                        // P5: Ray-MMD material source
+        m.material.emd = (kTemp / "models" / "miku.emd").lexically_normal().string();  // ... with an explicit .emd
         b0 = BoneKf{};
         b0.frame = 0;
         b0.t = {1, 2, 3};
@@ -397,6 +399,8 @@ static void TestRoundTrip() {
         Check(text.find("\"\\u521D\\u97F3\\u30DF\\u30AF\"") == std::string::npos,
               "JSON is UTF-8, not \\u escaped");
         Check(text.find("\"textureFolder\"") != std::string::npos, "stored shader textureFolder key");
+        Check(text.find("\"material\"") != std::string::npos && text.find("miku.emd") != std::string::npos,
+              "stored material choice (ray + relative .emd path)");
     }
 
     ProjectData loaded;
@@ -431,6 +435,7 @@ static void TestRoundTrip() {
                   b.motion.ik.at("\xE5\x8F\xB3\xE8\x85\x95")[1].enabled == false,
               "IK track kept");
         Check(b.shader == a.shader, "shader choice kept (pack, params, textureFolder)");
+        Check(b.material == a.material, "material choice kept (ray + explicit .emd)");
 
         Check(b.place == data.models[0].place, "character placement kept (t/r/s)");
         const ProjectModel& st = loaded.models[1];

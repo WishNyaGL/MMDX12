@@ -98,8 +98,7 @@ void App::StartStudioProjectLoad(const std::filesystem::path& file, bool recover
     studioLoadTitle_ = recovery ? std::string(Tr("자동 저장에서 복구")) : StemUtf8(file);
     studioPackage_ = std::make_unique<StudioPackage>();
     loadFuture_ = std::async(std::launch::async, [=, pkg = studioPackage_.get(), this] {
-        return LoadStudioProjectPackage(file, recovery, *pkg, &loadProgress_, &loadError_,
-                                        options_.materialSource == 1);
+        return LoadStudioProjectPackage(file, recovery, *pkg, &loadProgress_, &loadError_);
     });
 }
 
@@ -150,6 +149,7 @@ ProjectData App::StudioProjectData() const {
         pm.visible = m.visible;
         pm.place = m.place;
         pm.shader = m.shader;
+        pm.material = m.material;
         if (m.IsProp()) {
             pm.attach = m.attach;
             pm.attach.parent = m.attach.parent >= 0 ? d.IndexOfUid((uint32_t)m.attach.parent) : -1;  // uid -> index
@@ -357,16 +357,24 @@ void App::DrawRecoveryPrompt() {
 // Adding models / songs / audio
 // ---------------------------------------------------------------------------
 
-void App::StudioAddModelFile(ModelKind kind, const std::filesystem::path& file, uint32_t replaceUid) {
+void App::StudioAddModelFile(ModelKind kind, const std::filesystem::path& file, uint32_t replaceUid,
+                             const MaterialChoice* material) {
     auto job = std::make_unique<StudioJob>();
     job->label = StemUtf8(file);
     job->replaceUid = replaceUid;
     job->models.resize(1);
     StudioJob* j = job.get();
+    j->materialReload = material != nullptr && replaceUid != 0;
     const std::string label = job->label;
-    const bool ray = options_.materialSource == 1;
-    job->future = std::async(std::launch::async, [j, kind, file, label, ray] {
-        return LoadStudioModel(file, kind, label, j->models[0], &j->progress, &j->error, ray);
+    // A material-source change (P5) passes the model's exact new choice; else a character uses the saved choice
+    // (a replaced model keeps its library id, so its saved per-character choice survives the file swap).
+    MaterialChoice choice = material ? *material : ResolveMaterialChoice(std::string());
+    if (!material && replaceUid && studio_) {
+        const int at = studio_->IndexOfUid(replaceUid);
+        if (at >= 0) choice = ResolveMaterialChoice(studio_->models[(size_t)at]->libraryId);
+    }
+    job->future = std::async(std::launch::async, [j, kind, file, label, choice] {
+        return LoadStudioModel(file, kind, label, j->models[0], &j->progress, &j->error, choice);
     });
     studioJobs_.push_back(std::move(job));
 }
@@ -384,9 +392,9 @@ void App::StudioAddLibraryCharacter(int index, uint32_t replaceUid) {
     job->replaceUid = replaceUid;
     job->models.resize(1);
     StudioJob* j = job.get();
-    const bool ray = options_.materialSource == 1;
-    job->future = std::async(std::launch::async, [j, c, ray] {
-        const bool ok = LoadStudioModel(c.modelPath, ModelKind::Character, c.displayName, j->models[0], &j->progress, &j->error, ray);
+    const MaterialChoice choice = ResolveMaterialChoice(c.id);
+    job->future = std::async(std::launch::async, [j, c, choice] {
+        const bool ok = LoadStudioModel(c.modelPath, ModelKind::Character, c.displayName, j->models[0], &j->progress, &j->error, choice);
         j->models[0].libraryId = c.id;
         return ok;
     });
@@ -400,8 +408,10 @@ void App::StudioAddLibraryStage(int index, uint32_t replaceUid) {
     job->label = s.displayName;
     job->replaceUid = replaceUid;
     StudioJob* j = job.get();
-    const bool ray = options_.materialSource == 1;
-    job->future = std::async(std::launch::async, [j, s, ray] { return LoadStudioStage(s, j->models, &j->progress, &j->error, ray); });
+    const MaterialChoice choice = ResolveMaterialChoice(std::string());
+    job->future = std::async(std::launch::async, [j, s, choice] {
+        return LoadStudioStage(s, j->models, &j->progress, &j->error, choice);
+    });
     studioJobs_.push_back(std::move(job));
 }
 
@@ -526,6 +536,12 @@ void App::StudioPollJobs() {
                     const std::string before = d.models[(size_t)replaceAt]->name;
                     if (StudioReplaceModel(replaceAt, pm, &note)) {
                         replaced = true;
+                        if (job.materialReload)
+                            toast_ = {std::string(Tr("재질 데이터를 바꿨어요")) + "  ·  " + pm.name,
+                                      std::string(pm.material.ray ? "Ray-MMD" : Tr("기본")) + "  ·  " +
+                                          Tr("실행 취소 기록을 비웠어요"),
+                                      {}, false, timeSeconds_ + 5.0};
+                        else
                         toast_ = {std::string(Tr("모델을 바꿨어요")) + "  ·  " + before + " → " + pm.name,
                                   (note.empty() ? std::string(Tr("모션 · 배치 · 셰이더는 그대로예요")) : note) + "  ·  " +
                                       Tr("실행 취소 기록을 비웠어요"),
@@ -706,8 +722,10 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
 }
 
 void App::StudioSuggestShader(studio::StudioModel& m) {
-    if (m.shader.pack.empty() && m.kind == studio::ModelKind::Character && m.gpu && !m.libraryId.empty())
-        SuggestShaderPack(*m.gpu, m.libraryId);
+    if (m.kind != studio::ModelKind::Character) return;
+    if (m.shader.pack.empty() && m.gpu && !m.libraryId.empty()) SuggestShaderPack(*m.gpu, m.libraryId);
+    if (!m.material.ray && m.pmx && !m.libraryId.empty())   // P5: Ray-MMD material data suggestion
+        SuggestRayMaterial(m.libraryId, m.pmx->sourcePath, (int)m.pmx->materials.size());
 }
 
 void App::StudioSelectModel(int index) {

@@ -4,6 +4,7 @@
 // Motions are keyed by bone/morph name (StudioMotion.h) and re-bound to the model after every edit.
 #include "anim/Motion.h"
 #include "asset/ImageLoader.h"
+#include "asset/MaterialChoice.h"
 #include "asset/PbrMaterial.h"
 #include "asset/PmxModel.h"
 #include "studio/CommandStack.h"
@@ -48,6 +49,7 @@ struct StudioModel {
     PropAttach placeApplied;       // the placement the instance was last posed with (physics resets when it changes)
     bool visible = true;
     ShaderChoice shader;           // characters: shader pack (render/ShaderPack.h); empty = the default shading
+    MaterialChoice material;       // P5: per-material PBR source (Default / Ray-MMD + optional explicit .emd)
     std::shared_ptr<const PmxModel> pmx;
     std::unique_ptr<ModelInstance> inst;
     std::unique_ptr<GpuModel> gpu;
@@ -371,6 +373,7 @@ struct StudioPackageModel {
     PropAttach attach;                       // props: parent = index into StudioPackage::models (-1 world)
     PropAttach place;                        // characters / stages: world placement
     ShaderChoice shader;                     // characters: shader pack
+    MaterialChoice material;                 // P5: per-material PBR source (Default / Ray-MMD)
     MotionData motion;                       // names canonicalised to pmx
 };
 struct StudioPackage {
@@ -388,14 +391,16 @@ struct StudioPackage {
 // `character` is required, `stage` and `song` may be null. The song's dance + facial VMDs become the
 // character's motion (names canonicalised to the model), its camera VMD the camera track.
 bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset* song,
-                       StudioPackage& out, LoadProgress* progress, std::string* error, bool rayMaterials = false);
+                       StudioPackage& out, LoadProgress* progress, std::string* error,
+                       const MaterialChoiceFn& materialChoice = {});
 // One model file (PMX, glTF/GLB/VRM, FBX/OBJ) as a character, stage or prop. Characters import with
 // asset ModelRole::Character, stages and props with ModelRole::Stage. `out.motion` stays empty.
 bool LoadStudioModel(const std::filesystem::path& path, ModelKind kind, const std::string& label,
-                     StudioPackageModel& out, LoadProgress* progress, std::string* error, bool rayMaterials = false);
+                     StudioPackageModel& out, LoadProgress* progress, std::string* error,
+                     const MaterialChoice& choice = {});
 // Every part of a library stage (failed parts are skipped with a warning; false only when none loads).
 bool LoadStudioStage(const StageAsset& stage, std::vector<StudioPackageModel>& out, LoadProgress* progress,
-                     std::string* error, bool rayMaterials = false);
+                     std::string* error, const MaterialChoice& choice = {});
 // A library song as studio motions: dance + facial VMDs merged into `dance` (camera/light/shadow cleared, names NOT
 // canonicalised), the camera VMD's camera/light/shadow keys into `camera`. False when no VMD could be read.
 bool LoadStudioSong(const SongAsset& song, MotionData& dance, MotionData& camera, std::string* error);
@@ -403,6 +408,6 @@ bool LoadStudioSong(const SongAsset& song, MotionData& dance, MotionData& camera
 // becomes its recoveryOf and `recovered` is set. Models whose file fails to load are skipped with a warning (prop
 // parents pointing at them become -1, later indices are remapped).
 bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, StudioPackage& out,
-                              LoadProgress* progress, std::string* error, bool rayMaterials = false);
+                              LoadProgress* progress, std::string* error);
 
 } // namespace mmdx::studio

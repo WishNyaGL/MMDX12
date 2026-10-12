@@ -554,6 +554,11 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                     jm["shader"]["remembered"] = rem;
                 }
             }
+            // P5: the per-model PBR material source (Default is not written); the .emd path is relative to the project
+            if (m.kind == ModelKind::Character && m.material.ray) {
+                jm["material"] = {{"ray", true}};
+                if (!m.material.emd.empty()) jm["material"]["emd"] = RelPath(Utf8ToPath(m.material.emd), dir);
+            }
             if (m.kind == ModelKind::Prop) {  // "attach" is written for props only
                 const PropAttach& a = m.attach;
                 jm["attach"] = {
@@ -742,6 +747,15 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                             memo.textureFolder = ReadString(mv, "textureFolder", "");
                             pm.shader.remembered[packId] = std::move(memo);
                         }
+                    }
+                }
+                // P5: the per-model PBR material source (absent = Default)
+                if (kind == ModelKind::Character && m.contains("material") && m["material"].is_object()) {
+                    const nlohmann::json& mt = m["material"];
+                    pm.material.ray = ReadBool(mt, "ray", false);
+                    if (pm.material.ray) {
+                        const std::string emd = ReadString(mt, "emd", "");
+                        if (!emd.empty()) pm.material.emd = PathToUtf8(ResolvePath(emd, dir));
                     }
                 }
                 if (kind == ModelKind::Prop && m.contains("attach") && m["attach"].is_object()) {

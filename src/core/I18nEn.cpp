@@ -984,6 +984,8 @@ const Entry kEnglish[] = {
     {"선택한 재질 모두에 적용", "Applies to every selected material"},
     {"Ctrl · Shift + 클릭으로 여러 재질을 골라 한 번에 바꿀 수 있어요. 기본 셰이딩은 그 재질만 팩 없이 그립니다.", "Ctrl / Shift + click picks several materials to change at once. Default shading draws just that material without the pack."},
     {"재질", "Materials"},
+    {"재질 데이터를 바꿨어요", "Material data changed"},
+    {"재질 데이터", "Material data"},
     {"재질마다 분류를 바꾸거나 팩을 끕니다", "Change the class of each material or switch the pack off for it"},
     {"재질별 셰이딩", "Per-material shading"},
     {"개 지정", " set"},
@@ -1015,6 +1017,16 @@ const Entry kEnglish[] = {
     {"셰이더가 이 모델에 잘 맞아 보여요 · 셰이더 메뉴에서 켜 보세요",
      "The shader looks like a good fit for this model · turn it on in the shader menu"},
     {"추천", "Suggested"},
+    {"Ray-MMD 재질 추천", "Ray-MMD materials suggestion"},
+    {"이 캐릭터에 Ray-MMD 재질 데이터가 있어요 · 셰이더 탭의 재질 데이터에서 켤 수 있어요",
+     "This character has Ray-MMD material data · turn it on under Shader > Material data"},
+    {"--material-source 가 이번 실행 동안 우선합니다", "--material-source takes priority for this run"},
+    {"파일 없음", "file missing"},
+    {"자동 (가장 알맞은 .emd)", "Auto (the best .emd)"},
+    {"파일 선택…", "Choose file…"},
+    {"재질을 저장했어요", "Material saved"},
+    {"다음 로드 때 반영돼요", "It applies at the next load"},
+    {"여러 명이 함께 추는 곡은 다음 로드 때 반영돼요", "A multi-performer song applies it at the next load"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

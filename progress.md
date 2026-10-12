@@ -1562,3 +1562,20 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
   shaders: 80.8k px at 1 LSB, ~4.6k above (noise floor of two identical runs: 2.2k px) = codegen level. Alcander Ray PT
   and offline GI still (960x540, 256 spp): no `[E]`, skin matte, no fireflies. Not verified: PBR + PT pack render, Ray
   stage in PT / GI, GI video, EthanShax arm, the other sets.
+
+## 2026-10-12 (7) - 2.0.0: PBR maps sampled too coarse (sampler MinLOD) + P5 per-character material source UI
+- Fix: the scene root signature's s4 static sampler (`gPbrWrap`) passed the shader visibility as `MinLOD` (PIXEL = 5) to
+  `CD3DX12_STATIC_SAMPLER_DESC::Init`, so every PBR map sampled mip 5 or coarser (2048 maps looked 64 px; P3's "the bake
+  albedo is soft" was wrong). s1/s2 written the same way. DeepSeek narrowed it to the sampler before timing out; the
+  architect fixed it. New `tools/pbr_tex_probe`. Default path vs before: <= 3 LSB.
+- P5 (DeepSeek, level high, smoke-reviewed + render-checked): per-character `MaterialChoice` (Default / Ray-MMD + optional
+  .emd), ini `characterMaterial=` / `characterMaterialSuggested=`, `.mmdxproj` "material", per-model PBR gate
+  (`GpuModel::HasPbrRecords`, `RenderSettings::materialSource` removed), `--material-source` = run-wide override, shared
+  `App::DrawMaterialSelector` in the lobby shader tab / play bar / studio inspector, studio reload via the replace path,
+  play reload at the current time (`ReloadPlaySceneForMaterial`), one-time suggestion toast, `studiomaterial` script
+  command, MCP `material_source`. Architect: section renamed "재질 데이터", quiet-caret combo, material-reload toast,
+  duplicate i18n keys removed, suggestion text points at the right tab.
+- Verified: saved choice renders like the CLI (3 LSB), lobby UI, studio switch, play-mode MCP switch keeps 0:20 paused.
+  Not verified: the toast on screen, the file dialog, forced-.emd fallback, unit songs, dark theme / other languages.
+  Now visible: metallic gold on Alcander renders dark (to check next).
+

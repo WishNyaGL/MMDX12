@@ -90,7 +90,11 @@ void DecodePbrTextures(PbrModelData& data, const char* label);
 // referenced file textures. `out` is filled in place; when the model has no Ray data `out.materialsWithRecord`
 // stays 0 and nothing is logged. Runs on the loader worker thread. Logs the per-model measurement line when the
 // model has at least one record.
+// `forcedEmd` (P5): when non-empty, that .emd is used instead of the best auto candidate. It is validated (it must
+// be readable and reach at least one Ray material .fx, i.e. Obj count / Ray share); on failure it warns and falls
+// back to the default candidate, or to no records when none exists.
 void BuildPbrModelData(const std::filesystem::path& modelPath, const std::vector<PmxMaterial>& pmxMaterials,
-                       const std::string& modelName, PbrModelData& out);
+                       const std::string& modelName, PbrModelData& out,
+                       const std::filesystem::path& forcedEmd = {});
 
 } // namespace mmdx

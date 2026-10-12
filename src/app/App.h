@@ -15,6 +15,8 @@
 #include "app/Updater.h"
 #include "app/VideoEncoder.h"
 #include "asset/AssetLibrary.h"
+#include "asset/MaterialChoice.h"
+#include "asset/RayMaterial.h"
 #include "audio/AudioPlayer.h"
 #include "render/ColorLut.h"
 #include "render/Dx12Context.h"
@@ -67,6 +69,7 @@ namespace mmdx {
 //                          (library song onto the selected model + camera + audio) | studioaudio <file|none> [offset s] |
 //                          studioreplace <index> <file> | studioreplacelib <index> <substr> (swap a model's file) |
 //                          studioselect <model index|-1> | studioremove <model index> | studiorename <text> |
+//                          studiomaterial <default|ray> [emd path] (selected studio model's PBR material source) |
 //                          studioattach <parent index|-1> <bone|-> <tx ty tz rx ry rz s> (selected prop).
 //                          Coordinates in window pixels.
 //   --width <w> --height <h>  initial window client size
@@ -140,6 +143,7 @@ struct AppOptions {
     std::string shaderPack;    // --shader-pack <id|none>: the character's shader pack for this run (play and studio)
     bool shaderPackSet = false;
     int materialSource = 0;    // --material-source <default|ray>: per-material PBR source for this run (0 default, 1 ray)
+    bool materialSourceSet = false;   // --material-source was given: it wins over the saved per-character choices
     int pbrDebug = 0;          // --pbr-debug <none|albedo|...>: PBR debug channel for this run (0 none .. 7 model)
     std::string packIndex;     // --pack-index <url|path>: the online shader pack gallery index (testing)
     std::vector<EffectStackEntry> effectStack;  // --effect <id>[,<id>...] / none: the effect stack, this run
@@ -254,6 +258,9 @@ private:
     }
     void StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsset* st, const SongAsset* song,
                    const std::vector<PerformerCast>* formation);
+    // P5: a play-mode material-source change reloads the scene at the current time (single character; a unit-song
+    // formation scene applies it at the next load instead, and the UI says so).
+    void ReloadPlaySceneForMaterial();
     void PollLoad();
     bool BuildSceneRuntime(ScenePackage& pkg);  // GPU upload on the main thread
     void UnloadScene();                          // WaitForGpu, release runtime + audio
@@ -451,8 +458,11 @@ private:
     std::filesystem::path StudioRecoveryFile() const; // <exe>/recovery/autosave.mmdxproj
     void StudioAutosave(bool force, bool wait);       // timer: writes the recovery file on a worker thread
     void StudioDiscardRecovery();                     // waits for a running autosave, deletes the recovery files
-    // replaceUid != 0: the loaded model replaces that model's file (StudioReplaceModel) instead of being added
-    void StudioAddModelFile(studio::ModelKind kind, const std::filesystem::path& file, uint32_t replaceUid = 0);  // async
+    // replaceUid != 0: the loaded model replaces that model's file (StudioReplaceModel) instead of being added.
+    // `material` (non-null) overrides the resolved material choice for the loaded model (P5: a material-source change
+    // reloads the model's PBR data without touching the saved choice again).
+    void StudioAddModelFile(studio::ModelKind kind, const std::filesystem::path& file, uint32_t replaceUid = 0,
+                            const MaterialChoice* material = nullptr);  // async
     void StudioAddModelDialog(studio::ModelKind kind, uint32_t replaceUid = 0);
     void StudioAddLibraryCharacter(int index, uint32_t replaceUid = 0);
     void StudioAddLibraryStage(int index, uint32_t replaceUid = 0);  // replace: the first part replaces, the rest are added
@@ -608,6 +618,28 @@ private:
     void DrawToast();           // completion / error toast (Select, Play)
     // shader packs (UiShaderPack.cpp)
     void ApplyShaderChoice(GpuModel& gpu, const ShaderChoice& choice);   // every frame, before UpdateMaterials
+    // P5: the per-character PBR material source. A saved choice, or the run-wide --material-source override when
+    // given (wins over saved choices). Default when nothing applies.
+    MaterialChoice ResolveMaterialChoice(const std::string& characterId) const;
+    MaterialChoiceFn MaterialChoiceResolver() const {
+        return [this](const std::string& id) { return ResolveMaterialChoice(id); };
+    }
+    // The model's .emd candidates (asset/RayMaterial.h), cached per key (character id / library id / "<path>") for
+    // the session so the detail panel never repeats the ~10 ms scan. Empty = none found.
+    const std::vector<RayEmdCandidate>& MaterialCandidates(const std::string& key,
+                                                           const std::filesystem::path& modelPath, int pmxMaterialCount);
+    // The shared "재질" widget (Default / Ray-MMD + candidate combo + file picker). Shown only when the model has a
+    // Ray candidate or an explicit .emd is saved. Writes `choice`; true = changed. `modelPath`/`count` come from the
+    // model (PMX or a loaded-only copy); `cacheKey` names the candidate cache entry.
+    bool HasMaterialOptions(const std::string& cacheKey, const std::filesystem::path& modelPath, int pmxMaterialCount,
+                            const MaterialChoice& choice);
+    bool DrawMaterialSelector(const char* id, MaterialChoice& choice, const std::string& cacheKey,
+                              const std::filesystem::path& modelPath, int pmxMaterialCount, float width);
+    // One toast per character id when a character with no saved material choice has a Ray .emd candidate (never
+    // applies). Imitates SuggestShaderPack; skipped in headless / scripted runs and with --material-source.
+    void SuggestRayMaterial(const std::string& characterId, const std::filesystem::path& modelPath, int pmxMaterialCount);
+    std::map<std::string, std::vector<RayEmdCandidate>> materialCandidates_;   // session cache (see MaterialCandidates)
+    std::map<std::string, bool> materialSuggestChecked_;                        // ids checked this session
     // Play character: the saved settings choice or the --shader-pack override. A character with no saved choice also
     // gets SuggestShaderPack (a toast only; the choice is never set by the app).
     ShaderChoice PlayShaderChoice(const GpuModel& gpu, const std::string& characterId);
@@ -828,6 +860,7 @@ private:
         std::filesystem::path audio;
         uint32_t targetUid = 0;                    // song: the character it was started for (0: none)
         uint32_t replaceUid = 0;                   // model load: replaces this model (0: adds)
+        bool materialReload = false;               // replace = the same file re-read for a material-source change
         std::shared_ptr<McpPromise> mcp;           // studio_add_model: answered when the job ends
         LoadProgress progress;
         std::string error;

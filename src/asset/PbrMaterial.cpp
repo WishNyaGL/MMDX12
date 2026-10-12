@@ -269,7 +269,7 @@ void DecodePbrTextures(PbrModelData& data, const char* label) {
 }
 
 void BuildPbrModelData(const std::filesystem::path& modelPath, const std::vector<PmxMaterial>& pmxMaterials,
-                       const std::string& modelName, PbrModelData& out) {
+                       const std::string& modelName, PbrModelData& out, const std::filesystem::path& forcedEmd) {
     out = PbrModelData{};
     out.modelName = modelName;
     if (pmxMaterials.empty()) return;
@@ -279,7 +279,22 @@ void BuildPbrModelData(const std::filesystem::path& modelPath, const std::vector
     std::filesystem::path chosenEmd;
     RayParseStats stats;
     std::string error;
-    if (!FindAndParseRayMaterials(modelPath, (int)pmxMaterials.size(), descs, &chosenEmd, &stats, &error)) {
+    bool have = false;
+    if (!forcedEmd.empty()) {
+        // An explicit user choice (P5): parse it and require at least one reading Ray material. A malformed or
+        // non-Ray .emd warns and falls back to the best auto candidate (or to no records at all).
+        if (ParseRayEmd(forcedEmd, (int)pmxMaterials.size(), descs, &stats, &error) &&
+            std::any_of(descs.begin(), descs.end(), [](const RayMaterialDesc& d) { return d.valid && d.ray; })) {
+            chosenEmd = forcedEmd;
+            have = true;
+        } else {
+            if (error.empty()) error = "no Ray materials in the file";
+            LOG_WARN("PBR: the chosen .emd for '%s' is not usable (%s); falling back: %s", modelName.c_str(),
+                     PathToUtf8(forcedEmd).c_str(), error.c_str());
+            error.clear();
+        }
+    }
+    if (!have && !FindAndParseRayMaterials(modelPath, (int)pmxMaterials.size(), descs, &chosenEmd, &stats, &error)) {
         if (!error.empty())
             LOG_WARN("PBR: no Ray materials for '%s': %s", modelName.c_str(), error.c_str());
         return;

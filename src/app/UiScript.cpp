@@ -166,11 +166,12 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 }
                 const int parent = mm.attach.parent >= 0 ? d.IndexOfUid((uint32_t)mm.attach.parent) : -1;
                 LOG_INFO("STUDIOMODEL %zu kind=%s name=%s visible=%d keys=%zu parent=%d bone=%s t=(%.3f,%.3f,%.3f) "
-                         "r=(%.2f,%.2f,%.2f) s=%.3f pos=(%.3f,%.3f,%.3f) file=%s",
+                         "r=(%.2f,%.2f,%.2f) s=%.3f pos=(%.3f,%.3f,%.3f) material=%s emd=%s file=%s",
                          i, studio::ModelKindName(mm.kind), mm.name.c_str(), (int)mm.visible, keys, parent,
                          mm.attach.bone.empty() ? "-" : mm.attach.bone.c_str(), mm.attach.translation.x,
                          mm.attach.translation.y, mm.attach.translation.z, mm.attach.rotationDeg.x,
                          mm.attach.rotationDeg.y, mm.attach.rotationDeg.z, mm.attach.scale, pos.x, pos.y, pos.z,
+                         mm.material.ray ? "ray" : "default", mm.material.emd.empty() ? "-" : mm.material.emd.c_str(),
                          PathToUtf8(mm.path.filename()).c_str());
             }
             const LightAnchors anchors = StudioBuildLightAnchors();
@@ -511,6 +512,21 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             m->attach.translation = {num(2), num(3), num(4)};
             m->attach.rotationDeg = {num(5), num(6), num(7)};
             m->attach.scale = num(8);
+            ++studio_->projectVersion;
+        }
+    } else if (cmd == "studiomaterial") {  // studiomaterial <default|ray> [emd path] (selected studio model)
+        studio::StudioModel* m = studio_ ? studio_->Selected() : nullptr;
+        if (m && !args.empty()) {
+            MaterialChoice c;
+            c.ray = args[0] != "default";
+            if (c.ray && args.size() > 1 && !args[1].empty() && args[1] != "-")
+                c.emd = PathToUtf8(std::filesystem::absolute(Utf8ToPath(args[1])));
+            m->material = c;
+            if (!m->libraryId.empty()) {
+                settings_.SetCharacterMaterial(m->libraryId, c);
+                settings_.Save(settingsPath_);
+            }
+            StudioAddModelFile(m->kind, m->path, m->uid, &m->material);   // reload this model's PBR data
             ++studio_->projectVersion;
         }
     } else if (cmd == "log") {

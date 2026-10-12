@@ -356,6 +356,14 @@ inline nlohmann::json GetMcpToolDefinitions() {
                     {"type", "string"},
                     {"description", "Per-character texture folder for the selected character's shader pack (empty string clears)"}
                 }},
+                {"material_source", {
+                    {"type", "string"},
+                    {"description", "PBR material source for the selected character: 'default' or 'ray' (Ray-MMD). Changing it reloads the scene at the current time"}
+                }},
+                {"material_emd", {
+                    {"type", "string"},
+                    {"description", "Explicit Ray-MMD .emd path for material_source 'ray' (empty = the best auto candidate)"}
+                }},
                 {"effects", {
                     {"type", "string"},
                     {"description", "Comma-separated effect pack IDs in stack order, or 'none'. Effects already in the stack keep their parameters; new ones start at the pack defaults"}

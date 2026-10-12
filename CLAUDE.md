@@ -15,8 +15,10 @@ progress.md is the session log. Read its latest entry first.
   Raster shaders use FXC (`*_5_1`); ray-query shaders use DXC (`*_6_5`, `-HV 2018` because common.hlsli uses vector ternaries that HLSL 2021 rejects). `dxcompiler.dll`/`dxil.dll` are copied from the Windows SDK.
 - Upscaler runtime DLLs are git-ignored: run `tools/fetch_sdks.ps1` once (DLSS 310.9.1, XeSS 3.0.2, FidelityFX 2.3.0), then rebuild. Missing DLLs only disable that upscaler.
 - Render path / upscaler from the CLI: `--render raster|rt|pt`, `--upscaler none|dlss|fsr|xess`, `--upscale-quality native|quality|balanced|performance|ultra`.
-- PBR material data (2.0.0, temporary until the UI): `--material-source default|ray` (Ray-MMD `.emd` data for every model),
-  `--pbr-debug none|albedo|normal|roughness|metalness|ao|emissive|model` (lit raster outputs that channel; `asset/PbrMaterial`, `shaders/pbr_common.hlsli`).
+- PBR material data (2.0.0): per-character material source (기본 / Ray-MMD, saved as `characterMaterial=` ini lines and
+  `.mmdxproj` "material"), `--material-source default|ray` overrides it for a run, and
+  `--pbr-debug none|albedo|normal|roughness|metalness|ao|emissive|model` shows one channel (`asset/PbrMaterial`,
+  `shaders/pbr_common.hlsli`).
 - No debugger is installed (no cdb). For crashes, use the dbghelp `CrashFilter` in `tools/render_smoke.cpp`.
 - Visual verification without a human: render a frame headlessly, then Read the PNG. First read "Running MMDX12.exe from the CLI" below.
   - Play scene: `MMDX12.exe --character <s> --stage <s|none> --song <s> --autoplay --seek <sec> --frames N --capture out.png`
@@ -46,7 +48,7 @@ progress.md is the session log. Read its latest entry first.
     part; `studiostate` also logs `STUDIOPOSE`, `STUDIOPROJ` (including `aspect=`) and one `STUDIOMODEL` line per model). Projects/models
     without dialogs: `studionew`, `studiosave`/`studioopen <file>`, `studioautosave`, `studioadd <character|stage|prop> <file>`,
     `studioaddlib <character|stage> <substr>`, `studiosong <substr>`, `studioaudio <file|none> [offset]`,
-    `studioselect`/`studioremove <index>`, `studioreplace <index> <file>` / `studioreplacelib <index> <substr>` (swap a model's file), `studiorename <text>`, `studioattach <parent|-1> <bone|-> tx ty tz rx ry rz s`,
+    `studioselect`/`studioremove <index>`, `studioreplace <index> <file>` / `studioreplacelib <index> <substr>` (swap a model's file), `studiorename <text>`, `studiomaterial <default|ray> [emd path]` (PBR material source of the selected model), `studioattach <parent|-1> <bone|-> tx ty tz rx ry rz s`,
     `studioaspect <w:h>` (frame aspect preset, e.g. `9:16`, `16:9`, `2.39:1`).
     Focus: `studiofocus <frame> <auto|target|manual> [model index|distance] [aperture] [transition] [head|upper|center]`
     upserts a focus key (`studiostate` logs a `STUDIOFOCUS` line: distance, aperture, subject).

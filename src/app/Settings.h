@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "app/VideoConfig.h"
+#include "asset/MaterialChoice.h"
 #include "render/ShaderPack.h"
 
 namespace mmdx {
@@ -64,6 +65,21 @@ struct AppSettings {
     }
     void SetShaderSuggested(const std::string& packId, const std::string& characterId) {
         characterShaderSuggested.insert(packId + "|" + characterId);
+    }
+    // P5 per-character PBR material source (Default / Ray-MMD + optional explicit .emd). Persisted as
+    // "characterMaterial=<ray|default>|<emd path or empty>|<character id>" lines (the id last, like the other
+    // lines). Absent = Default.
+    std::map<std::string, MaterialChoice> characterMaterials;  // character id -> material source
+    MaterialChoice CharacterMaterial(const std::string& id) const;
+    void SetCharacterMaterial(const std::string& id, const MaterialChoice& choice);  // Default removes the entry
+    // Character ids the app already suggested Ray-MMD material data for (a Ray .emd candidate exists, no saved
+    // choice): never suggested again. Persisted as "characterMaterialSuggested=<character id>" lines.
+    std::set<std::string> characterMaterialSuggested;
+    bool MaterialSuggested(const std::string& characterId) const {
+        return characterMaterialSuggested.count(characterId) != 0;
+    }
+    void SetMaterialSuggested(const std::string& characterId) {
+        characterMaterialSuggested.insert(characterId);
     }
     // Persisted as "characterShaderTextures=<utf-8 folder>|<character id>" ini lines: the choice's
     // per-character texture folder (a separate line: the ids in characterShader= are already last).

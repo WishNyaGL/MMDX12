@@ -796,6 +796,23 @@ void App::DrawSelect() {
                     settings_.SetCharacterShader(ch->id, choice);
                     settings_.Save(settingsPath_);
                 }
+
+                // P5: PBR material source (Default / Ray-MMD) of the selected character. Saved here; applied at the
+                // next play / studio load (the lobby holds no scene).
+                MaterialChoice lobbyMaterial = settings_.CharacterMaterial(ch->id);
+                if (HasMaterialOptions(ch->id, ch->modelPath, (int)ch->materialCount, lobbyMaterial)) {
+                    Gap(14.0f);
+                    SectionLabel(Tr("재질 데이터"));
+                    if (options_.materialSourceSet) {
+                        PushFont(Font::Regular, size::Caption);
+                        ImGui::TextDisabled("%s", Tr("--material-source 가 이번 실행 동안 우선합니다"));
+                        PopFont();
+                    }
+                    if (DrawMaterialSelector("##lobbyMat", lobbyMaterial, ch->id, ch->modelPath, (int)ch->materialCount, colW)) {
+                        settings_.SetCharacterMaterial(ch->id, lobbyMaterial);
+                        settings_.Save(settingsPath_);
+                    }
+                }
             }
             {
                 Gap(4.0f);

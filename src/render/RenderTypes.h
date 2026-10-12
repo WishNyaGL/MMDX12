@@ -25,8 +25,8 @@ inline constexpr uint32_t kMaxExtraViews = 3;
 // ignore the setting and always render Lit.
 enum class ViewShading : uint8_t { Lit = 0, Unlit, Wireframe };
 
-// Per-material PBR data source (work unit P2; CLI --material-source). Default never parses Ray data and renders
-// as before; Ray uploads the model's parsed Ray records and shades the lit raster / RT paths with the debug view.
+// Per-material PBR data source (work unit P2; CLI --material-source override, P5 per-character choice). Default
+// never parses Ray data and renders as before; Ray uploads the model's parsed Ray records.
 enum class MaterialSource : uint8_t { Default = 0, Ray = 1 };
 // PBR debug channel (CLI --pbr-debug): a material with a PBR record outputs one channel in the lit raster PS.
 enum class PbrDebug : uint8_t { None = 0, Albedo, Normal, Roughness, Metalness, Ao, Emissive, Model };
@@ -44,7 +44,6 @@ struct RenderSettings {
     RenderPath renderPath = RenderPath::Raster;
     uint32_t ptSamples = 1;          // path tracer samples per pixel per frame (1..4)
     uint32_t ptBounces = 3;          // path tracer bounces after the primary hit (1..6)
-    MaterialSource materialSource = MaterialSource::Default;  // P2: per-material PBR data source (CLI --material-source)
     PbrDebug pbrDebug = PbrDebug::None;                       // P2: debug channel (CLI --pbr-debug)
 
     // --- lighting / effects (every one can be switched off for an honest benchmark)

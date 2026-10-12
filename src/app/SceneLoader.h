@@ -4,6 +4,7 @@
 #include "anim/Motion.h"
 #include "asset/AssetLibrary.h"
 #include "asset/ImageLoader.h"
+#include "asset/MaterialChoice.h"
 #include "asset/PbrMaterial.h"
 #include "asset/PmxModel.h"
 #include <atomic>
@@ -58,10 +59,10 @@ struct LoadProgress {
 };
 
 // Decodes every texture referenced by m.pmx's materials into m.textures (parallel).
-// `progress` may be null. When `rayMaterials` is set, the model's Ray-MMD PBR data is parsed and decoded too
-// (asset/PbrMaterial.h) and stored in m.pbr.
+// `progress` may be null. When `choice` selects Ray-MMD, the model's Ray-MMD PBR data is parsed and decoded too
+// (asset/PbrMaterial.h) and stored in m.pbr; a non-empty `choice.emd` forces that file.
 void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBegin, float fracEnd,
-                         const char* label, bool rayMaterials = false);
+                         const char* label, const MaterialChoice& choice = {});
 
 // The character's model without textures (material names for the library's per-material shader list); null on failure.
 std::shared_ptr<PmxModel> LoadCharacterModelOnly(const std::filesystem::path& path);
@@ -70,9 +71,11 @@ std::shared_ptr<PmxModel> LoadCharacterModelOnly(const std::filesystem::path& pa
 // a stage part or texture that fails to load only logs a warning.
 // Textures are decoded in parallel (std::for_each with std::execution::par).
 // If `formation` is provided and non-empty, loads the cast performers into character (center) and extraCharacters.
+// `materialChoice` resolves each model's PBR material source by library id (work unit P5); empty = Default for all.
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
                       ScenePackage& out, LoadProgress* progress, std::string* error,
-                      const std::vector<PerformerCast>* formation = nullptr, bool rayMaterials = false);
+                      const std::vector<PerformerCast>* formation = nullptr,
+                      const MaterialChoiceFn& materialChoice = {});
 
 // Render benchmark scene: characters[i] posed by the dance of songs[i] (sizes equal, >= 1).
 // out.character / out.motion = index 0, out.extraCharacters / out.extraMotions = the rest.

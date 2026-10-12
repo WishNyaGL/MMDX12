@@ -233,6 +233,7 @@ std::unique_ptr<GpuModel> Renderer::CreateModel(UploadBatch& batch, const PmxMod
     auto model = std::make_unique<GpuModel>();
     static const PbrModelData kEmptyPbr;
     if (!model->Create(*ctx_, batch, pmx, textures, builtin_, role, pbr ? *pbr : kEmptyPbr)) return nullptr;
+    model->SetHasPbrRecords(pbr && pbr->materialsWithRecord > 0);
     return model;
 }
 

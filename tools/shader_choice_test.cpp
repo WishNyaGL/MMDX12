@@ -67,6 +67,22 @@ int main() {
           "a character on the default shading keeps its memos");
     Check(t.characterShaders.count("model/empty.pmx") == 0, "an empty choice is not stored");
     Check(a.materials.size() == 2 && a.materials.at("skirt|lace 2") == kMaterialPackOff, "material overrides survive the ini");
+
+    // P5: the per-character PBR material source (ini lines)
+    MaterialChoice ray;
+    ray.ray = true;
+    ray.emd = "F:/lib/char/Alcander/MaterialMap.emd";
+    s.SetCharacterMaterial("model/felix.pmx", ray);
+    s.SetCharacterMaterial("model/empty.pmx", MaterialChoice{});  // Default removes the entry
+    s.SetMaterialSuggested("model/felix.pmx");
+    Check(s.Save(file), "saved with a material choice");
+    AppSettings u;
+    Check(u.Load(file), "loaded with a material choice");
+    Check(u.CharacterMaterial("model/felix.pmx") == ray, "Ray material choice (explicit .emd) survives the ini");
+    Check(!u.CharacterMaterial("model/empty.pmx").ray, "an unset material choice is Default");
+    Check(u.MaterialSuggested("model/felix.pmx") && !u.MaterialSuggested("model/darko.pmx"),
+          "the material suggestion flag survives the ini");
+
     std::error_code ec;
     std::filesystem::remove(file, ec);
     std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
