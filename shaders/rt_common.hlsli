@@ -212,6 +212,56 @@ struct RtHit {
     bool frontFace;
 };
 
+// Decal priority. A PMX often layers an alpha-blended decal (tattoo, mask, makeup, emblem) exactly
+// on top of an opaque material: the same triangles / positions, drawn later in material order. The
+// closest query commits the opaque triangle, and the decal's candidate arrives at the same (or a
+// numerically equal) t so it is never reported and the decal disappears. This short second query
+// restricted to non-opaque geometry (RAY_FLAG_CULL_OPAQUE, same back-face culling as the caller)
+// looks for an accepted candidate within a small window around the committed hit t and returns the
+// one that raster would show: the higher geometry index within the same instance, which is material
+// order in the RtScene geometry table (see src/render/RayTracing.cpp EnsureModelResources).
+// `hit` carries the opaque committed hit and is overwritten only when a decal is accepted. The
+// window is relative to t (a fixed world-space epsilon is wrong across the ~+-500 unit scene span)
+// with a small floor for very close hits.
+// Cost: one extra inline ray query per primary/mirror hit whose committed geometry is opaque; the
+// query is empty (and cheap) when the instance has no non-opaque geometry.
+bool CommitDecalNear(float3 origin, float3 dir, float tMin, float tHit, uint opaqueInstance,
+                     uint opaqueGeom, float alphaThreshold, inout RtHit hit) {
+    const float kWindowRel = 2e-4;   // window half-width relative to t
+    const float kWindowMin = 5e-4;   // floor so an almost-zero t still has a usable window
+    const float eps = max(tHit * kWindowRel, kWindowMin);
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_CULL_BACK_FACING_TRIANGLES |
+             RAY_FLAG_CULL_OPAQUE> q;
+    RayDesc r;
+    r.Origin = origin;
+    r.Direction = dir;
+    r.TMin = max(tMin, tHit - eps);
+    r.TMax = tHit + eps;
+    q.TraceRayInline(gTlas, RAY_FLAG_NONE, 0xFF, r);
+    uint bestGeom = opaqueGeom;
+    bool found = false;
+    while (q.Proceed()) {
+        if (q.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
+        // Only the same instance (same model / BLAS part) can decal the opaque hit, and raster
+        // draws materials in ascending order: a candidate at a lower geometry index sits under
+        // the opaque surface, so it must not win.
+        if (q.CandidateInstanceID() != opaqueInstance || q.CandidateGeometryIndex() <= bestGeom) continue;
+        RtGeometry g = LoadGeometry(q.CandidateInstanceID(), q.CandidateGeometryIndex());
+        if (CandidateAlpha(g, q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()) < alphaThreshold)
+            continue;
+        // Among coplanar candidates the later-drawn one wins; keep the highest geometry index.
+        found = true;
+        bestGeom = q.CandidateGeometryIndex();
+        hit.instanceId = q.CandidateInstanceID();
+        hit.geometryIndex = q.CandidateGeometryIndex();
+        hit.prim = q.CandidatePrimitiveIndex();
+        hit.bary = q.CandidateTriangleBarycentrics();
+        hit.t = tHit;
+        hit.frontFace = q.CandidateTriangleFrontFace();
+    }
+    return found;
+}
+
 // Closest hit. Non-opaque candidates are accepted when their alpha >= alphaThreshold
 // (0.5 for a binary alpha test, a random number in (0,1] for stochastic transparency).
 // Back faces of single-sided materials are culled like the raster pass does (stages are often
@@ -246,6 +296,12 @@ bool TraceClosest(float3 origin, float3 dir, float tMin, float tMax, float alpha
     hit.bary = q.CommittedTriangleBarycentrics();
     hit.t = q.CommittedRayT();
     hit.frontFace = q.CommittedTriangleFrontFace();
+    // The committed hit is opaque (RTG_ALPHA_TEST unset => opaque in the BLAS): a coplanar decal at
+    // the same t was not reported by the loop above, so let it win here. Decals are alpha-tested at a
+    // fixed 0.5, not the caller's stochastic threshold: a decal that flickers per sample hands the
+    // denoiser a different albedo than the radiance it demodulates (speckles + a bright fringe).
+    if ((LoadGeometry(hit.instanceId, hit.geometryIndex).flags & RTG_ALPHA_TEST) == 0)
+        CommitDecalNear(origin, dir, tMin, hit.t, hit.instanceId, hit.geometryIndex, 0.5, hit);
     return true;
 }
 
