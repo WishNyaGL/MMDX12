@@ -726,9 +726,10 @@ float3 PbrSunDirect(Surf s, float3 V, float3 sh) {
     }
     float3 color = SrgbToLinear(saturate(c)) * gSunIntensity;
 
-    if (p.model == 1u) {   // SKIN: soft SSS tint (per-channel visibility, like ToonSun's skin path)
-        float band = smoothstep(-0.35, -0.02, ndl) * (1.0 - smoothstep(-0.02, 0.25, ndl)) * (1.0 - flat);
-        color += p.customB * (band * 0.7) * SunIrradiance() / PI * sh;
+    if (p.model == 1u) {   // SKIN: soft SSS tint, the raster / PT term (customA curvature, customB transmittance)
+        float ss = pow(1.0 - saturate(ndl), 2.0) * pow(1.0 - saturate(-ndl), 3.0 / (p.customA + 0.001)) *
+                   saturate(p.customA - 0.04);
+        color += p.customB * (ss * 0.7) * SrgbToLinear(saturate(gLightColor)) * gSunIntensity * sh;
     }
     if (p.specOn)   // MMD Blinn replaced by GGX (per-model lobe), scaled by the sun visibility
         color += PtPbrEvalSpecular(p, V, L) * sh * SrgbToLinear(saturate(gLightColor)) * gSunIntensity * saturate(ndl) * p.specScale;
