@@ -574,6 +574,34 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     return true;
 }
 
+void GpuModel::SetMaterialBlendHints(const std::vector<uint8_t>& hints, uint8_t def) {
+    if (materials_.empty()) return;
+    materialBlend_.assign(materials_.size(), 0);
+    for (size_t i = 0; i < materials_.size(); ++i) {
+        const uint8_t h = i < hints.size() ? hints[i] : def;  // slots past the vector use the bare Obj default
+        materialBlend_[i] = h;
+        Material& mat = materials_[i];
+        mat.additive = h == 2;
+        mat.noDepthWrite = h >= 1;
+        // A hinted material draws no edge (outline) and casts no shadow-map shadow. The base flags are cleared too,
+        // so UpdateMaterials (which re-derives drawEdge / castShadow each frame) keeps them off. An ordinary (h == 0)
+        // material is left untouched: models without .emd or with only ordinary effects render exactly as before.
+        if (h >= 1) {
+            mat.drawEdge = false;
+            mat.castShadow = false;
+            materialBase_[i].edgeFlag = false;
+            materialBase_[i].castFlag = false;
+        }
+        for (MaterialConstants* c : {&baseConsts_[i], &materialConsts_[i]}) {
+            c->flags &= ~(MatFlag_Additive | MatFlag_NoDepthWrite);
+            if (h == 2) c->flags |= MatFlag_Additive | MatFlag_NoDepthWrite;   // additive implies no depth write
+            else if (h == 1) c->flags |= MatFlag_NoDepthWrite;
+        }
+    }
+    for (uint64_t& v : materialEntryVersion_) v = ~0ull;   // re-upload the constants on the next UpdateMaterials
+    for (size_t i = 0; i < materials_.size(); ++i) materials_[i].constants = materialCb_->GetGPUVirtualAddress() + i * sizeof(MaterialConstants);
+}
+
 void GpuModel::UpdateSkinning(uint64_t frame, const std::vector<DirectX::XMFLOAT4X4>& skin) {
     const size_t count = std::min(skin.size(), (size_t)(boneCount_ == 0 ? 1u : boneCount_));
     const uint32_t r = (uint32_t)(frame % kRing);

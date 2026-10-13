@@ -86,13 +86,25 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
     }
 }
 
-// The model's default shader-pack texture folder: the directory of the face texture its own MME files reference (the
-// pack's face SDF / light maps). Dependency-free: only the references the asset files carry are followed.
-static std::filesystem::path ModelPackTextureFolder(const std::filesystem::path& modelPath) {
+// The model's MME hints: the default shader-pack texture folder (the directory of the face texture its own MME
+// files reference) and the per-material blend hints from its .emd. Dependency-free: only the references the asset
+// files carry are followed.
+struct ModelMmeHints {
+    std::filesystem::path packTextureFolder;
+    std::vector<uint8_t> materialBlend;
+    uint8_t materialBlendDefault = 0;
+};
+static ModelMmeHints ModelHints(const std::filesystem::path& modelPath) {
     const MmeHints hints = ReadMmeHints(modelPath);
+    ModelMmeHints out;
     for (const MmeTexRef& t : hints.textures)
-        if (ToLowerAscii(t.variable).find("face") != std::string::npos) return t.file.parent_path();
-    return {};
+        if (ToLowerAscii(t.variable).find("face") != std::string::npos) {
+            out.packTextureFolder = t.file.parent_path();
+            break;
+        }
+    out.materialBlend = hints.materialBlend;
+    out.materialBlendDefault = hints.materialBlendDefault;
+    return out;
 }
 
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
@@ -141,7 +153,10 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
                 }
                 out.characterId = centerPerf.character.id;
                 out.characterDisplayName = centerPerf.character.displayName;
-                out.character.defaultPackTextureFolder = ModelPackTextureFolder(centerPerf.character.modelPath);
+                const ModelMmeHints chHints = ModelHints(centerPerf.character.modelPath);
+                out.character.defaultPackTextureFolder = chHints.packTextureFolder;
+                out.character.materialBlend = chHints.materialBlend;
+                out.character.materialBlendDefault = chHints.materialBlendDefault;
 
                 float frac0 = curUnit / totalUnits;
                 float frac1 = (curUnit + 0.8f) / totalUnits;
@@ -208,7 +223,12 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
                     epStorage.push_back(std::move(vmd));
                 }
                 auto epMotion = BoundMotion::Bind(*extraM.pmx, epLayers);
-                extraM.defaultPackTextureFolder = ModelPackTextureFolder(ep.character.modelPath);
+                {
+                    const ModelMmeHints eh = ModelHints(ep.character.modelPath);
+                    extraM.defaultPackTextureFolder = eh.packTextureFolder;
+                    extraM.materialBlend = eh.materialBlend;
+                    extraM.materialBlendDefault = eh.materialBlendDefault;
+                }
                 out.extraCharacters.push_back(std::move(extraM));
                 out.extraCharacterIds.push_back(ep.character.id);
                 out.extraCharacterDisplayNames.push_back(ep.character.displayName);
@@ -261,6 +281,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
             }
             if (out.camera) endFrame = std::max(endFrame, out.camera->EndFrame());
             out.endFrame = endFrame;
+            out.motionFps = song.motionFps;
 
             if (progress) {
                 progress->fraction.store(1.0f, std::memory_order_relaxed);
@@ -284,7 +305,10 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
             }
             out.characterId = character.id;
             out.characterDisplayName = character.displayName;
-            out.character.defaultPackTextureFolder = ModelPackTextureFolder(character.modelPath);
+            const ModelMmeHints chHints = ModelHints(character.modelPath);
+            out.character.defaultPackTextureFolder = chHints.packTextureFolder;
+            out.character.materialBlend = chHints.materialBlend;
+            out.character.materialBlendDefault = chHints.materialBlendDefault;
         }
 
         // 2. Character textures.
@@ -357,6 +381,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
         float endFrame = out.motion->EndFrame();
         if (out.camera) endFrame = std::max(endFrame, out.camera->EndFrame());
         out.endFrame = endFrame;
+        out.motionFps = song.motionFps;
 
         // 7. Done (GPU upload happens on the main thread).
         if (progress) {
@@ -395,7 +420,12 @@ bool LoadRenderBenchPackage(const std::vector<CharacterAsset>& characters, const
                 if (error) *error = Tr("캐릭터를 불러오지 못했습니다: ") + err;
                 return false;
             }
-            m.defaultPackTextureFolder = ModelPackTextureFolder(characters[i].modelPath);
+            {
+                const ModelMmeHints mh = ModelHints(characters[i].modelPath);
+                m.defaultPackTextureFolder = mh.packTextureFolder;
+                m.materialBlend = mh.materialBlend;
+                m.materialBlendDefault = mh.materialBlendDefault;
+            }
 
             // 2. Character textures.
             DecodeModelTextures(m, progress, fraction, (i + 0.8f) / (float)n, characters[i].displayName.c_str());

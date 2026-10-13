@@ -4,6 +4,7 @@
 // same stem as the model) lists the effects it loads (".fx" files, paths relative to the .emd); each .fx and its
 // #include chain declares textures with MME's ResourceName and a #define NAME "string"|number table. Nothing here
 // depends on where the user keeps the model: only the references the asset files themselves contain are followed.
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -20,6 +21,11 @@ struct MmeHints {
     std::vector<MmeTexRef> textures;
     std::map<std::string, std::string> defines;   // NAME -> literal value (strings unquoted)
     bool found = false;                           // a .emd was read and at least one effect followed
+    // Per-PMX-material blend hint: materialBlend[i] is the Obj[i] effect's class; its size is
+    // max(Obj index) + 1 (empty when the .emd has no indexed Obj entry). Materials past the end
+    // with no own entry use materialBlendDefault (the bare `Obj =` line).
+    std::vector<uint8_t> materialBlend;
+    uint8_t materialBlendDefault = 0;             // MmeBlendHint of the bare `Obj =` entry (0 when absent)
 };
 
 // Reads the model's .emd ("<stem>.emd" next to the model), follows its [Effect] Obj / Obj[n] .fx entries and each

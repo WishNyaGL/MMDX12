@@ -222,7 +222,7 @@ void App::StartOfflineVideo(double startSeconds, double endSeconds, bool fromLob
     }
     if (studio) StudioSetPlaying(false);
     else if (!background) SetPlaying(false);
-    const double duration = studio ? studio_->EndFrame() / (double)kMmdFps : scene_->endFrame / kMmdFps;
+    const double duration = studio ? studio_->EndFrame() / (double)kMmdFps : scene_->endFrame / scene_->motionFps;
     startSeconds = std::clamp(startSeconds, 0.0, duration);
     endSeconds = std::clamp(endSeconds, startSeconds, duration);
     offline_ = OfflineJob{};
@@ -405,7 +405,7 @@ void App::UpdateOffline() {
         } else if (options_.offlineVideo.empty()) {
             StartOfflineProbe();
         } else {
-            const double duration = scene_->endFrame / kMmdFps;
+            const double duration = scene_->endFrame / scene_->motionFps;
             const double a = options_.offlineRange[0] >= 0 ? options_.offlineRange[0] : 0.0;
             const double b = options_.offlineRange[1] >= 0 ? options_.offlineRange[1] : duration;
             StartOfflineVideo(a, b);
@@ -435,7 +435,7 @@ void App::RecordRealtimeVideoFrame(ID3D12GraphicsCommandList* cmd) {
     if (newFrame) {
         // a new video frame: pose it once; its further passes (path tracer history) re-upload the same pose
         playTime_ = offline_.startSeconds + (double)offline_.frame / offline_.video.fps;
-        offline_.frameMmd = (float)(playTime_ * kMmdFps);
+        offline_.frameMmd = (float)(playTime_ * (offline_.studio ? kMmdFps : scene_->motionFps));
         OfflinePose(offline_.frameMmd);
         offline_.iter = 0;
         offline_.beginPending = false;
@@ -491,10 +491,10 @@ void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
     const bool probe = offline_.mode == OfflineMode::Probe;
     const bool video = offline_.mode == OfflineMode::Video || probe;
     playTime_ = offline_.startSeconds + (video ? (double)offline_.frame / offline_.video.fps : 0.0);
-    const float frame = (float)(playTime_ * kMmdFps);
+    const float frame = (float)(playTime_ * (offline_.studio ? kMmdFps : scene_->motionFps));
     if (probe) {
         // a sample frame from the middle of a video: the shutter opens at the previous video frame's pose
-        const float prevFrame = frame - kMmdFps / (float)offline_.video.fps;
+        const float prevFrame = frame - (offline_.studio ? kMmdFps : scene_->motionFps) / (float)offline_.video.fps;
         UpdateScene(prevFrame);
         FrameView pv;
         BuildFrameView(prevFrame, pv);
@@ -913,7 +913,7 @@ void App::StartVideoRenderLoad() {
 
 void App::StartOfflineProbe() {
     if (!scene_) return;
-    const double t = scene_->endFrame / kMmdFps * 0.45;   // a representative moment: neither the intro nor the outro
+    const double t = scene_->endFrame / scene_->motionFps * 0.45;   // a representative moment: neither the intro nor the outro
     StartOfflineVideo(t, t + 1.0 / std::max(1, ActiveVideoConfig().fps), /*fromLobby*/ false, /*probe*/ true);
 }
 
@@ -976,7 +976,7 @@ void App::StartBackgroundProbe(uint64_t key) {
     (void)key;
     if (!scene_ || offline_.mode != OfflineMode::None) return;
     useMotionCamera_ = scene_->camera != nullptr && !options_.freeCamera;
-    const double t = scene_->endFrame / kMmdFps * 0.45;
+    const double t = scene_->endFrame / scene_->motionFps * 0.45;
     StartOfflineVideo(t, t + 1.0 / std::max(1, ActiveVideoConfig().fps), /*fromLobby*/ false, /*probe*/ true,
                       /*background*/ true);
 }

@@ -13,13 +13,25 @@
 namespace mmdx::studio {
 
 namespace {
-// The model's default shader-pack texture folder: the directory of the face texture the model's own MME files
-// reference (e.g. a face SDF a pack samples). Never guesses names: only the asset's references are followed.
-std::filesystem::path ModelPackTextureFolder(const std::filesystem::path& modelPath) {
+// The model's MME hints: the default shader-pack texture folder (the directory of the face texture the model's own
+// MME files reference, e.g. a face SDF a pack samples) and the per-material blend hints from its .emd. Never
+// guesses names: only the asset's references are followed.
+struct StudioMmeHints {
+    std::filesystem::path packTextureFolder;
+    std::vector<uint8_t> materialBlend;
+    uint8_t materialBlendDefault = 0;
+};
+StudioMmeHints ModelHints(const std::filesystem::path& modelPath) {
     const MmeHints hints = ReadMmeHints(modelPath);
+    StudioMmeHints out;
     for (const MmeTexRef& t : hints.textures)
-        if (ToLowerAscii(t.variable).find("face") != std::string::npos) return t.file.parent_path();
-    return {};
+        if (ToLowerAscii(t.variable).find("face") != std::string::npos) {
+            out.packTextureFolder = t.file.parent_path();
+            break;
+        }
+    out.materialBlend = hints.materialBlend;
+    out.materialBlendDefault = hints.materialBlendDefault;
+    return out;
 }
 
 bool LoadModel(const std::filesystem::path& path, ModelRole role, const std::string& label, LoadProgress* progress,
@@ -33,7 +45,12 @@ bool LoadModel(const std::filesystem::path& path, ModelRole role, const std::str
     out.pbr = std::move(cpu.pbr);
     out.material = choice;   // the choice the PBR data was built with (the inspector / project show it)
     out.name = label;
-    if (role == ModelRole::Character) out.defaultPackTextureFolder = ModelPackTextureFolder(path);
+    if (role == ModelRole::Character) {
+        const StudioMmeHints hints = ModelHints(path);
+        out.defaultPackTextureFolder = hints.packTextureFolder;
+        out.materialBlend = hints.materialBlend;
+        out.materialBlendDefault = hints.materialBlendDefault;
+    }
     return true;
 }
 } // namespace

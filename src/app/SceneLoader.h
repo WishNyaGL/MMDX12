@@ -21,6 +21,11 @@ struct LoadedModelCpu {
     // The model's default shader-pack texture folder (found through its own MME files by asset/MmeHints): the
     // directory of the face texture the pack needs. Empty when none was found. Filled on the loader worker thread.
     std::filesystem::path defaultPackTextureFolder;
+    // Per-material blend hint from the model's own .emd Obj[n] effects (asset/MmeHints::MmeBlendHint; 0 = normal,
+    // 1 = no depth write, 2 = additive). Parallel to pmx->materials where present; materialBlendDefault applies to
+    // materials past its end that have no own Obj entry. Filled on the loader worker thread.
+    std::vector<uint8_t> materialBlend;
+    uint8_t materialBlendDefault = 0;
     // Per-material Ray-MMD PBR records + decoded map textures (work unit P2); empty when the model has none.
     PbrModelData pbr;
 };
@@ -42,6 +47,7 @@ struct ScenePackage {
     std::vector<VmdShadowKey> shadowKeys;
     std::filesystem::path audioPath;          // may be empty
     float endFrame = 0;                       // max(motion end, camera end)
+    float motionFps = 30.0f;                   // the played motion's time base (60 for 60 fps VMDs)
     // Performers after `character`, each with its own bound dance
     // (parallel vectors).
     std::vector<LoadedModelCpu> extraCharacters;

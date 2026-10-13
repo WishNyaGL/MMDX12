@@ -406,6 +406,8 @@ struct StudioPackageModel {
     bool visible = true;
     bool physicsOff = false;                 // P2.2: physics off for this model (project files)
     std::filesystem::path defaultPackTextureFolder;  // model's MME face texture folder (shader pack default)
+    std::vector<uint8_t> materialBlend;              // per-material .emd blend hint (asset/MmeHints::MmeBlendHint)
+    uint8_t materialBlendDefault = 0;                // hint for materials with no own Obj entry
     PbrModelData pbr;                        // per-material Ray PBR records + decoded maps (work unit P2)
     PropAttach attach;                       // props: parent = index into StudioPackage::models (-1 world)
     PropAttach place;                        // characters / stages: world placement

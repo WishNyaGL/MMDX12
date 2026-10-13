@@ -851,7 +851,7 @@ void App::RenderFrame() {
             BuildStudioFrameView(view);
             StudioAddQuadViews(view);
         } else if (inScene) {
-            const float frame = (float)(playTime_ * kMmdFps);
+            const float frame = (float)(playTime_ * scene_->motionFps);
             UpdateScene(frame);
             BuildFrameView(frame, view);
             lastLiveCamera_ = view.camera;
@@ -1458,6 +1458,7 @@ void App::PollLoad() {
             audio_.Play();
         }
         framesInScene_ = 0;
+        playEditPerformer_ = 0;   // a freshly loaded scene edits the center performer
         screen_ = Screen::Play;
         // --offline-still renders exactly the --seek frame: hold playback there.
         if (!options_.offlineStill.empty() && !cliOfflineStarted_) options_.paused = true;
@@ -1476,7 +1477,7 @@ void App::PollLoad() {
         useMotionCamera_ = scene_->camera != nullptr && !options_.freeCamera;
         framesInScene_ = 0;
         screen_ = Screen::Play;
-        const double duration = scene_->endFrame / kMmdFps;
+        const double duration = scene_->endFrame / scene_->motionFps;
         StartOfflineVideo(options_.offlineRange[0] >= 0 ? options_.offlineRange[0] : 0.0,
                           options_.offlineRange[1] >= 0 ? options_.offlineRange[1] : duration, true);
         return;
@@ -1538,6 +1539,26 @@ void App::PollLoad() {
     screen_ = Screen::BenchRun;
 }
 
+App::PlayPerformerRef App::PlayPerformerAt(int index) {
+    PlayPerformerRef r;
+    if (!scene_) return r;
+    if (index < 0 || (size_t)index > scene_->extras.size()) {   // out of range: clamp back to the center
+        index = 0;
+        playEditPerformer_ = 0;
+    }
+    if (index == 0) {
+        r.id = scene_->characterId;
+        r.gpu = scene_->characterGpu.get();
+        r.instance = scene_->character.get();
+        return r;
+    }
+    SceneRuntime::Performer& e = scene_->extras[(size_t)(index - 1)];
+    r.id = e.characterId;
+    r.gpu = e.gpu.get();
+    r.instance = e.instance.get();
+    return r;
+}
+
 void App::ReloadPlaySceneForMaterial() {
     if (screen_ != Screen::Play || !scene_) return;
     if (!scene_->extras.empty()) {   // a unit-song formation scene: reloaded at the next load (the UI says so)
@@ -1575,6 +1596,7 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
                                             ModelRole::Character, &pkg.character.pbr);
     if (!s->characterGpu) return false;
     s->characterGpu->SetDefaultPackTextureFolder(pkg.character.defaultPackTextureFolder);
+    s->characterGpu->SetMaterialBlendHints(pkg.character.materialBlend, pkg.character.materialBlendDefault);
 
     for (size_t i = 0; i < pkg.extraCharacters.size(); ++i) {
         SceneRuntime::Performer perf;
@@ -1583,6 +1605,7 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
                                          ModelRole::Character, &pkg.extraCharacters[i].pbr);
         if (!perf.gpu) return false;
         perf.gpu->SetDefaultPackTextureFolder(pkg.extraCharacters[i].defaultPackTextureFolder);
+        perf.gpu->SetMaterialBlendHints(pkg.extraCharacters[i].materialBlend, pkg.extraCharacters[i].materialBlendDefault);
         perf.motion = i < pkg.extraMotions.size() ? pkg.extraMotions[i] : nullptr;
         if (i < pkg.extraCharacterIds.size()) perf.characterId = pkg.extraCharacterIds[i];
         if (i < pkg.extraCharacterDisplayNames.size()) perf.displayName = pkg.extraCharacterDisplayNames[i];
@@ -1597,6 +1620,7 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
             LOG_WARN("stage part GPU upload failed: %s", part.pmx->name.c_str());
             continue;
         }
+        gpu->SetMaterialBlendHints(part.materialBlend, part.materialBlendDefault);
         s->stages.push_back(std::move(inst));
         s->stageGpu.push_back(std::move(gpu));
     }
@@ -1612,8 +1636,9 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     if (!s->lightTrack.empty() || !s->shadowTrack.empty())
         LOG_INFO("camera vmd: light track %zu keys, self-shadow track %zu keys", s->lightTrack.size(), s->shadowTrack.size());
     s->endFrame = pkg.endFrame;
+    s->motionFps = pkg.motionFps;
     s->hasAudio = !pkg.audioPath.empty() && audio_.Load(pkg.audioPath);
-    if (s->hasAudio) s->endFrame = std::max(s->endFrame, (float)(audio_.DurationSeconds() * kMmdFps));
+    if (s->hasAudio) s->endFrame = std::max(s->endFrame, (float)(audio_.DurationSeconds() * s->motionFps));
 
     scene_ = std::move(s);
     return true;
@@ -1632,6 +1657,7 @@ void App::UnloadScene() {
     haveLastLiveCamera_ = false;
     scene_.reset();
     playAutoFocus_.Reset();
+    playEditPerformer_ = 0;
     audio_.Unload();
     playing_ = false;
 }
@@ -1659,7 +1685,7 @@ void App::UpdateScene(float frame) {
     const float wallDt = std::chrono::duration<float>(now - scene_->physicsClock).count();
     scene_->physicsClock = now;
     float physicsDt = 0.0f;
-    if (scene_->physicsFrame >= 0.0f) physicsDt = (frame - scene_->physicsFrame) / kMmdFps;
+    if (scene_->physicsFrame >= 0.0f) physicsDt = (frame - scene_->physicsFrame) / scene_->motionFps;
     const bool resetPhysics = scene_->physicsFrame < 0.0f || physicsDt < 0.0f ||
                               (physicsDt > 0.25f && physicsDt > wallDt * 1.5f + 0.1f);
     if (resetPhysics) {
@@ -1677,6 +1703,11 @@ void App::UpdateScene(float frame) {
     if (scene_->character)
         SuggestRayMaterial(scene_->characterId, scene_->character->Model().sourcePath,
                            (int)scene_->character->Model().materials.size());
+    for (auto& extra : scene_->extras) {   // P5: the same suggestion per extra performer
+        if (extra.instance)
+            SuggestRayMaterial(extra.characterId, extra.instance->Model().sourcePath,
+                               (int)extra.instance->Model().materials.size());
+    }
     for (size_t i = 0; i < scene_->stages.size(); ++i) {
         scene_->stageGpu[i]->UpdateSkinning(slot, scene_->stages[i]->SkinMatrices());
         scene_->stageGpu[i]->UpdateMorphs(slot, scene_->stages[i]->VertexMorphDeltas(),
@@ -1803,7 +1834,7 @@ void App::BuildFrameView(float frame, FrameView& view) {
             const ImVec2 ds = ImGui::GetIO().DisplaySize;
             fv.aspect = ds.y > 0.0f ? ds.x / ds.y : 16.0f / 9.0f;
             fv.nearZ = view.camera.nearZ;
-            z = playAutoFocus_.Update(frame / kMmdFps, subjects, fv);
+            z = playAutoFocus_.Update(frame / scene_->motionFps, subjects, fv);
         }
         if (z <= view.camera.nearZ) z = viewZ(subjectOf(*scene_->character, 1).head);
         view.focusDistance = z > view.camera.nearZ ? z : 0.0f;

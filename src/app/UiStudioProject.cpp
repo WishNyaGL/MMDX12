@@ -626,6 +626,7 @@ void App::StudioPollJobs() {
                     continue;
                 }
                 sm->gpu->SetDefaultPackTextureFolder(pm.defaultPackTextureFolder);
+                sm->gpu->SetMaterialBlendHints(pm.materialBlend, pm.materialBlendDefault);
                 StudioSuggestShader(*sm);   // character with no shader choice: maybe suggest a pack
                 sm->BuildRowGroups();
                 sm->inst->UpdatePose();
@@ -715,6 +716,7 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
         LOG_WARN("studio: GPU upload failed: %s", pm.name.c_str());
         return false;
     }
+    gpu->SetMaterialBlendHints(pm.materialBlend, pm.materialBlendDefault);
     // the GPU may still read the old model's buffers from frames in flight
     ctx_.WaitForGpu();
     const std::shared_ptr<const PmxModel> old = m.pmx;

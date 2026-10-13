@@ -589,7 +589,7 @@ void App::UpdateBenchRun() {
     ++benchFrameCounter_;
 
     playTime_ = benchFrameCounter_ * kBenchSimStep;
-    const double endSec = scene_ ? (double)(scene_->endFrame / kMmdFps) : 0.0;
+    const double endSec = scene_ ? (double)(scene_->endFrame / scene_->motionFps) : 0.0;
     if (endSec > 0) playTime_ = std::fmod(playTime_, endSec);
 
     const int target = options_.benchFrames > 0 ? options_.benchFrames : kBenchMeasuredFrames;

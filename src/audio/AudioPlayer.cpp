@@ -14,6 +14,11 @@ struct AudioPlayer::Impl {
     bool soundOk = false;
     float volume = 0.8f;
     bool muted = false;
+    // After the sound reached its end, miniaudio's at-end flag makes the node stop and ignore seek
+    // targets; only ma_sound_start clears it, and that rewinds to 0 while at end. Seek records the
+    // target here so the next Play can move the cursor back to it.
+    bool restartPending = false;
+    ma_uint64 restartFrame = 0;
 };
 
 AudioPlayer::AudioPlayer() : impl_(std::make_unique<Impl>()) {}
@@ -61,12 +66,20 @@ void AudioPlayer::ReleasePreload(const std::filesystem::path& path) {
 void AudioPlayer::Unload() {
     if (impl_->soundOk) ma_sound_uninit(&impl_->sound);
     impl_->soundOk = false;
+    impl_->restartPending = false;
 }
 
 bool AudioPlayer::IsLoaded() const { return impl_->soundOk; }
 
 void AudioPlayer::Play() {
-    if (impl_->soundOk) ma_sound_start(&impl_->sound);
+    if (!impl_->soundOk) return;
+    ma_sound_start(&impl_->sound);
+    // ma_sound_start rewinds to 0 when the sound was at its end: reapply the seek target recorded by
+    // Seek so playback resumes at the requested position.
+    if (impl_->restartPending) {
+        ma_sound_seek_to_pcm_frame(&impl_->sound, impl_->restartFrame);
+        impl_->restartPending = false;
+    }
 }
 
 void AudioPlayer::Pause() {
@@ -94,7 +107,16 @@ void AudioPlayer::Seek(double seconds) {
     double duration = DurationSeconds();
     if (seconds < 0) seconds = 0;
     if (duration > 0 && seconds > duration) seconds = duration;
-    ma_sound_seek_to_pcm_frame(&impl_->sound, (ma_uint64)(seconds * sampleRate));
+    const ma_uint64 targetFrame = (ma_uint64)(seconds * sampleRate);
+    if (ma_sound_at_end(&impl_->sound) != 0) {
+        // The sound stopped at its end and ignores seek targets until restarted: stop it and record
+        // the target; the next Play clears the ended state and reapplies the position.
+        ma_sound_stop(&impl_->sound);
+        impl_->restartPending = true;
+        impl_->restartFrame = targetFrame;
+        return;
+    }
+    ma_sound_seek_to_pcm_frame(&impl_->sound, targetFrame);
 }
 
 double AudioPlayer::PositionSeconds() const {

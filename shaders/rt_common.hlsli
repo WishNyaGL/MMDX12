@@ -28,6 +28,12 @@
 #ifndef MAT_AUTO_LUMINOUS
 #define MAT_AUTO_LUMINOUS 512u    // そぼろ AutoLuminous: this material emits (see AutoLumEmission in common.hlsli)
 #endif
+#ifndef MAT_ADDITIVE
+#define MAT_ADDITIVE      1024u   // the model's own .emd effect is additive (ScenePass uses an additive PSO)
+#endif
+#ifndef MAT_NO_DEPTH_WRITE
+#define MAT_NO_DEPTH_WRITE 2048u  // the model's own .emd effect draws with ZWriteEnable = false (no depth write)
+#endif
 #define RTG_CAST_SHADOW (1u << 16)
 #define RTG_ALPHA_TEST  (1u << 17)
 #define RTG_CHARACTER   (1u << 18)

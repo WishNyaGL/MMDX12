@@ -43,6 +43,8 @@ public:
         bool visible = true;         // diffuse alpha > 0 (MMD skips invisible materials, edges included)
         bool morphable = false;      // a material morph targets it (constants change at run time)
         bool packOff = false;        // shader pack switched off for this material (ShaderChoice::materials): default shading
+        bool additive = false;       // the model's own .emd effect is additive: ScenePass uses the additive PSO
+        bool noDepthWrite = false;   // the model's own .emd effect draws with ZWriteEnable = false (no depth write)
         float edgeSize = 0;
     };
 
@@ -60,6 +62,10 @@ public:
     bool Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
                 const std::vector<ImageRGBA8>& textures, const BuiltinTextures& builtin, ModelRole role,
                 const PbrModelData& pbr);
+    // Per-material .emd blend hints (asset/MmeHints::MmeBlendHint: 0 normal, 1 no depth write, 2 additive). Call
+    // after Create; sets Material::additive / Material::noDepthWrite and the MatFlag_* bits in the constants.
+    // `def` applies to materials past the end of `hints` that have no own entry. Never changes ordinary models.
+    void SetMaterialBlendHints(const std::vector<uint8_t>& hints, uint8_t def);
     // Frees descriptors. Caller must ensure the GPU no longer uses the model (WaitForGpu).
     void Destroy();
 
@@ -182,6 +188,7 @@ private:
     std::vector<char> autoLum_;                 // per material: AutoLuminous convention matched at load (packs clear it)
     struct MaterialBase { bool edgeFlag = false, castFlag = false; };
     std::vector<MaterialBase> materialBase_;
+    std::vector<uint8_t> materialBlend_;        // per material: 0 normal, 1 no-depth-write, 2 additive (MmeBlendHint)
     std::vector<ComPtr<ID3D12Resource>> textures_;  // parallel to pmx.textures (null if unused)
     D3D12_VERTEX_BUFFER_VIEW vbv_{};
     D3D12_INDEX_BUFFER_VIEW ibv_{};

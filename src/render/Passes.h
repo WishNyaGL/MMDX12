@@ -74,8 +74,12 @@ public:
 private:
     ComPtr<ID3D12PipelineState> psoCullBack_, psoNoCull_, psoEdge_, psoSky_, psoFloor_;
     ComPtr<ID3D12PipelineState> psoWireBack_, psoWireNoCull_, psoWireFloor_, psoFlatBg_;
+    // model .emd blend hints (MatFlag_Additive / MatFlag_NoDepthWrite): additive (SrcAlpha/One, no depth write)
+    // and no-depth-write (same blend, depth write off) variants of the lit PSOs. Normal/velocity MRT writes off.
+    ComPtr<ID3D12PipelineState> psoAddBack_, psoAddNoCull_, psoNdBack_, psoNdNoCull_;
     // RayTracing variants (DXC, ps_6_5, RT_SHADOWS=1); null when DXC/DXR is unavailable
     ComPtr<ID3D12PipelineState> psoCullBackRt_, psoNoCullRt_, psoFloorRt_;
+    ComPtr<ID3D12PipelineState> psoAddBackRt_, psoAddNoCullRt_, psoNdBackRt_, psoNdNoCullRt_;
     // path tracer outlines: depth-only pre-pass (PSDepthAlpha, colour writes off); null = PT draws no outlines
     ComPtr<ID3D12PipelineState> psoDepthBack_, psoDepthNoCull_;
     ComPtr<ID3D12RootSignature> rootSig_;

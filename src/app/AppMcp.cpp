@@ -230,7 +230,12 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         s["playing"] = (screen_ == Screen::Play ? playing_ : (studio_ ? studio_->playing : false));
         s["play_time"] = (screen_ == Screen::Play ? playTime_ : (studio_ ? studio_->time : 0.0));
         s["frame"] = (screen_ == Screen::Play ? framesInScene_ : (studio_ ? studio_->Frame() : framesInScene_));
-        s["duration"] = (scene_ ? (double)scene_->endFrame / 30.0 : (studio_ ? (double)studio_->EndFrame() / 30.0 : 0.0));
+        s["duration"] = (scene_ ? (double)scene_->endFrame / scene_->motionFps
+                                : (studio_ ? (double)studio_->EndFrame() / 30.0 : 0.0));
+        if (scene_ && scene_->hasAudio) {
+            s["audio_playing"] = audio_.IsPlaying();
+            s["audio_time"] = audio_.PositionSeconds();
+        }
         // the lobby selection = what play mode shows (MCP loads keep it in sync)
         s["character"] = selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size()
                              ? library_.characters[(size_t)selCharacter_].displayName
@@ -599,8 +604,11 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
     if (tool == "seek") {
         double sec = args.value("seconds", 0.0);
         if (screen_ == Screen::Play && scene_) {
-            playTime_ = std::clamp(sec, 0.0, (double)(scene_->endFrame / kMmdFps));  // like the play bar
-            if (scene_->hasAudio) audio_.Seek(playTime_);
+            playTime_ = std::clamp(sec, 0.0, (double)(scene_->endFrame / scene_->motionFps));  // like the play bar
+            if (scene_->hasAudio) {
+                audio_.Seek(playTime_);
+                if (playing_ && playTime_ < audio_.DurationSeconds() && !audio_.IsPlaying()) audio_.Play();
+            }
             sec = playTime_;
         } else if (screen_ == Screen::Studio && studio_) {
             StudioSeek(sec);
@@ -1176,7 +1184,7 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             if (fps != 24 && fps != 30 && fps != 60) { promise->Reject("fps must be 24, 30 or 60"); return; }
         }
         if (video) {
-            const double duration = studio ? studio_->EndFrame() / (double)kMmdFps : scene_->endFrame / kMmdFps;
+            const double duration = studio ? studio_->EndFrame() / (double)kMmdFps : scene_->endFrame / scene_->motionFps;
             const double a = args.value("start", 0.0), b = args.value("end", duration);
             if (a < 0.0 || b <= a || a >= duration) {
                 promise->Reject("Invalid range: start " + std::to_string(a) + ", end " + std::to_string(b) + " (duration " +
@@ -1210,7 +1218,7 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             if (studio) StartStudioRender(false);
             else StartOfflineStill();
         } else {
-            const double duration = studio ? studio_->EndFrame() / (double)kMmdFps : scene_->endFrame / kMmdFps;
+            const double duration = studio ? studio_->EndFrame() / (double)kMmdFps : scene_->endFrame / scene_->motionFps;
             StartOfflineVideo(args.value("start", 0.0), args.value("end", duration));
         }
         mcpOfflineOutput_.clear();

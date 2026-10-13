@@ -119,6 +119,7 @@ bool App::FinishStudioLoad() {
             return false;
         }
         sm->gpu->SetDefaultPackTextureFolder(m.defaultPackTextureFolder);
+        sm->gpu->SetMaterialBlendHints(m.materialBlend, m.materialBlendDefault);
         if (!pkg.fromProject) StudioSuggestShader(*sm);   // added character with no shader choice: maybe suggest a pack
         sm->motion = std::move(m.motion);
         sm->BuildRowGroups();

@@ -93,6 +93,8 @@ enum MaterialShaderFlags : uint32_t {
     MatFlag_FlatShade     = 1u << 7,  // no N.L modelling (faces): only cast shadows darken
     MatFlag_HasSphereTex  = 1u << 8,  // a real sphere-slot texture is bound (not the white fallback)
     MatFlag_AutoLuminous  = 1u << 9,  // そぼろ AutoLuminous convention: this material glows (black specular, power >= 100)
+    MatFlag_Additive      = 1u << 10, // the model's own .emd effect is additive (SrcBlend SRC_ALPHA, DestBlend ONE, no depth write)
+    MatFlag_NoDepthWrite  = 1u << 11, // the model's own .emd effect draws with ZWriteEnable = false (alpha blend, no depth write)
 };
 
 struct MaterialConstants {            // b1, one 256-byte slot per material

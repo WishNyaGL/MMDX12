@@ -33,6 +33,7 @@ bool App::RenderThumbnail(ThumbnailKind kind, std::vector<LoadedModelCpu>& model
             auto gpu = renderer_.CreateModel(batch, *m.pmx, m.textures,
                                              kind == ThumbnailKind::Stage ? ModelRole::Stage : ModelRole::Character);
             if (!gpu) continue;
+            gpu->SetMaterialBlendHints(m.materialBlend, m.materialBlendDefault);
             instances.push_back(std::move(inst));
             gpus.push_back(std::move(gpu));
         }

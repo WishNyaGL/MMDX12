@@ -39,6 +39,8 @@ cbuffer PbrRoot : register(b3) {
 #define MAT_FLAT        128u
 #define MAT_HAS_SPHERE_TEX 256u
 #define MAT_AUTO_LUMINOUS 512u
+#define MAT_ADDITIVE      1024u
+#define MAT_NO_DEPTH_WRITE 2048u
 #endif
 
 // Shader-pack material class: the PackClass lives in bits 0..7 of gPackClass, bits 8..15 hold the class's alpha key

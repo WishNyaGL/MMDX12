@@ -173,6 +173,109 @@ void ParseFile(const std::filesystem::path& file, int depth, const std::filesyst
     }
 }
 
+// ---- blend-hint classification (model's own .emd Obj[n] effects) ------------------------
+
+// Strips // and /* */ comments (string literals kept) so tokens inside comments do not classify.
+std::string StripComments(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    size_t i = 0;
+    const size_t n = s.size();
+    while (i < n) {
+        const char c = s[i];
+        if (c == '"') {
+            out += c; ++i;
+            while (i < n && s[i] != '"') {
+                if (s[i] == '\\' && i + 1 < n) { out += s[i++]; out += s[i++]; continue; }
+                out += s[i++];
+            }
+            if (i < n) out += s[i++];
+            continue;
+        }
+        if (c == '/' && i + 1 < n && s[i + 1] == '/') { while (i < n && s[i] != '\n') ++i; continue; }
+        if (c == '/' && i + 1 < n && s[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) ++i;
+            i = std::min(n, i + 2);
+            continue;
+        }
+        out += c; ++i;
+    }
+    return out;
+}
+
+// True when `keyword` is assigned the bare identifier `value` (case-insensitive, optional whitespace
+// around '='). Used for `DestBlend = one` and `ZWriteEnable = false`.
+bool AssignedTo(const std::string& code, const char* keyword, const char* value) {
+    const std::string low = Lower(code);
+    const std::string kw = Lower(keyword);
+    const std::string val = Lower(value);
+    size_t pos = 0;
+    while ((pos = low.find(kw, pos)) != std::string::npos) {
+        size_t j = pos + kw.size();
+        if (j < low.size() && IsIdentChar(low[j])) { pos = j; continue; }   // not a full keyword match
+        while (j < low.size() && std::isspace((unsigned char)low[j])) ++j;
+        if (j < low.size() && low[j] == '=') {
+            ++j;
+            while (j < low.size() && std::isspace((unsigned char)low[j])) ++j;
+            if (low.compare(j, val.size(), val) == 0) {
+                const size_t k = j + val.size();
+                if (k >= low.size() || !IsIdentChar(low[k])) return true;
+            }
+        }
+        pos = j;
+    }
+    return false;
+}
+
+// #include targets of a file (comment-stripped), using the same resolution rules as ParseFile.
+std::vector<std::string> ExtractIncludes(const std::string& code) {
+    std::vector<std::string> out;
+    for (const std::string& line : SplitLines(code)) {
+        const std::string t = Trim(line);
+        if (t.size() < 8 || t[0] != '#') continue;
+        std::string rest = Trim(t.substr(1));
+        if (rest.size() < 7 || Lower(rest.substr(0, 7)) != "include") continue;
+        rest = Trim(rest.substr(7));
+        if (rest.empty()) continue;
+        char open = rest[0], close = '>';
+        if (open == '"') close = '"';
+        else if (open != '<') continue;
+        const size_t end = rest.find(close, 1);
+        if (end == std::string::npos) continue;
+        out.push_back(rest.substr(1, end - 1));
+    }
+    return out;
+}
+
+struct FxClass {
+    bool additive = false;       // DestBlend = one, or the full_ex additive family (AddtiveAlphaColor / ReviseDestRate)
+    bool noDepthWrite = false;   // ZWriteEnable = false in an object pass
+};
+
+// Classifies one .fx and its #include chain: additive if an object pass / #define state sets DestBlend = one
+// (any spacing/case) or the file is the full_ex additive family; NoDepthWrite if ZWriteEnable = false appears.
+void ClassifyFile(const std::filesystem::path& file, int depth, const std::filesystem::path& rootFxDir,
+                  std::set<std::string>& visited, FxClass& out) {
+    if (depth > kMaxIncludeDepth) return;
+    const std::string key = Lower(PathToUtf8(file));
+    if (!visited.insert(key).second) return;   // cycle-safe
+    std::string content;
+    if (!ReadTextFile(file, content)) return;
+    const std::string code = StripComments(content);
+    const std::string low = Lower(code);
+    if (low.find("addtivealphacolor") != std::string::npos || low.find("revisedestrate") != std::string::npos)
+        out.additive = true;
+    if (AssignedTo(code, "destblend", "one")) out.additive = true;
+    if (AssignedTo(code, "zwriteenable", "false")) out.noDepthWrite = true;
+    for (const std::string& rel : ExtractIncludes(code)) {
+        std::filesystem::path inc;
+        if (ResolveRel(file.parent_path(), rel, inc) ||
+            (!rootFxDir.empty() && ResolveRel(rootFxDir, rel, inc)))
+            ClassifyFile(inc, depth + 1, rootFxDir, visited, out);
+    }
+}
+
 } // namespace
 
 MmeHints ReadMmeHints(const std::filesystem::path& modelFile) {
@@ -204,6 +307,10 @@ MmeHints ReadMmeHints(const std::filesystem::path& modelFile) {
         // [Effect] Obj / Obj[n] entries -> the .fx files the model loads (paths relative to the .emd)
         bool inEffect = false;
         std::vector<std::filesystem::path> fxFiles;
+        // Obj[n] = <fx> (n = PMX material index): collected so each material's effect can be classified. An
+        // explicit `Obj[n] = none` is recorded as an empty path (no hint) distinct from a gap (uses the default).
+        std::map<int, std::filesystem::path> materialFx;
+        std::filesystem::path defaultFx;
         for (const std::string& line : SplitLines(content)) {
             const std::string t = Trim(line);
             if (t.empty()) continue;
@@ -212,12 +319,61 @@ MmeHints ReadMmeHints(const std::filesystem::path& modelFile) {
             if (Lower(t).rfind("obj", 0) != 0) continue;
             const size_t eq = t.find('=');
             if (eq == std::string::npos) continue;
+            // `Obj[n]` selects one PMX material; a dot after `Obj` (`Obj.show`) is not an entry.
+            int objIndex = -1;
+            size_t p = 3;
+            while (p < t.size() && std::isspace((unsigned char)t[p])) ++p;
+            if (p < t.size() && t[p] == '[') {
+                size_t e = t.find(']', p + 1);
+                if (e == std::string::npos) continue;
+                try {
+                    objIndex = std::stoi(Trim(t.substr(p + 1, e - p - 1)));
+                } catch (...) {
+                    continue;
+                }
+            } else if (p < t.size() && t[p] != '=') {
+                continue;   // "Obj.show" and the like
+            }
             const std::string value = Trim(t.substr(eq + 1));
-            if (value.empty() || Lower(value) == "none") continue;
+            if (value.empty() || Lower(value) == "none") {
+                if (objIndex >= 0) materialFx[objIndex] = std::filesystem::path();   // explicit none: no hint
+                continue;
+            }
             std::filesystem::path fx;
-            if (ResolveRel(emd.parent_path(), value, fx)) fxFiles.push_back(fx);
+            if (!ResolveRel(emd.parent_path(), value, fx)) continue;
+            if (objIndex >= 0) materialFx[objIndex] = fx;
+            else defaultFx = fx;
+            fxFiles.push_back(fx);
         }
         if (fxFiles.empty()) return hints;
+
+        // Per-material blend hints: classify each distinct .fx (with its #include chain) once.
+        std::map<std::string, FxClass> fxClasses;
+        const auto classify = [&](const std::filesystem::path& fx) -> FxClass {
+            const std::string key = Lower(PathToUtf8(fx));
+            const auto cached = fxClasses.find(key);
+            if (cached != fxClasses.end()) return cached->second;
+            FxClass cls;
+            std::set<std::string> cv;
+            ClassifyFile(fx, 1, fx.parent_path(), cv, cls);
+            fxClasses[key] = cls;
+            return cls;
+        };
+        const auto hintOf = [](const FxClass& c) -> uint8_t {
+            if (c.additive) return (uint8_t)2;
+            if (c.noDepthWrite) return (uint8_t)1;
+            return (uint8_t)0;
+        };
+        uint8_t defaultHint = 0;
+        if (!defaultFx.empty()) defaultHint = hintOf(classify(defaultFx));
+        hints.materialBlendDefault = defaultHint;
+        if (!materialFx.empty()) {
+            int maxIdx = 0;
+            for (const auto& [idx, fx] : materialFx) maxIdx = std::max(maxIdx, idx);
+            hints.materialBlend.assign((size_t)maxIdx + 1, defaultHint);   // gaps use the bare Obj default
+            for (const auto& [idx, fx] : materialFx)
+                if (idx >= 0) hints.materialBlend[(size_t)idx] = fx.empty() ? 0 : hintOf(classify(fx));
+        }
 
         const std::filesystem::path rootFxDir = fxFiles.front().parent_path();
         std::map<std::string, std::string> defs;

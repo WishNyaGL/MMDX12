@@ -406,6 +406,32 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     if (!CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&psoNoCull_)), "ScenePass: PSO no cull"))
         return false;
+
+    // Model .emd blend-hint variants of the lit PSOs (MatFlag_Additive / MatFlag_NoDepthWrite; see GpuModel).
+    // NoDepthWrite: the lit blend with depth write OFF. Additive: SrcBlend SRC_ALPHA / DestBlend ONE / ADD (MMD
+    // additive), depth write OFF. Both write neither the normal (MRT1) nor the velocity (MRT2) target, so
+    // SSAO / SSR / TAA / DoF keep reading the underlying surface. `base` supplies the VS / PS (lit, or the RT pair).
+    const auto makeBlendVariant = [&](const D3D12_GRAPHICS_PIPELINE_STATE_DESC& base, bool additive,
+                                      ComPtr<ID3D12PipelineState>& back, ComPtr<ID3D12PipelineState>& noCull,
+                                      const char* what) -> bool {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC d = base;
+        auto& rt0 = d.BlendState.RenderTarget[0];
+        rt0.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        if (additive) {
+            rt0.SrcBlend = D3D12_BLEND_SRC_ALPHA;   // MMD additive colour blend; the alpha channel keeps the base
+            rt0.DestBlend = D3D12_BLEND_ONE;
+            rt0.BlendOp = D3D12_BLEND_OP_ADD;
+        }
+        d.BlendState.RenderTarget[1].RenderTargetWriteMask = 0;   // normal target
+        d.BlendState.RenderTarget[2].RenderTargetWriteMask = 0;   // velocity target
+        d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        d.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+        if (!CheckHr(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&back)), what)) return false;
+        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        return CheckHr(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&noCull)), what);
+    };
+    if (!makeBlendVariant(pso, false, psoNdBack_, psoNdNoCull_, "ScenePass: PSO no-depth-write")) return false;
+    if (!makeBlendVariant(pso, true, psoAddBack_, psoAddNoCull_, "ScenePass: PSO additive")) return false;
     pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};   // FXC: the descs derived below pair it with FXC PSs
 
     // Floor desc: needed by both the raster and RT floor PSOs; built here so the RT block below
@@ -440,10 +466,20 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
             floorRt.PS = {psFloorRt->GetBufferPointer(), psFloorRt->GetBufferSize()};
             okRt = okRt && CheckHr(device->CreateGraphicsPipelineState(&floorRt, IID_PPV_ARGS(&psoFloorRt_)),
                                    "ScenePass: PSO floor rt");
+            // additive / no-depth-write lit variants (same ps_6_5 RT_SHADOWS pair)
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC litRt = rasterPso;
+            litRt.VS = {vsRt->GetBufferPointer(), vsRt->GetBufferSize()};
+            litRt.PS = {psRt->GetBufferPointer(), psRt->GetBufferSize()};
+            okRt = okRt && makeBlendVariant(litRt, false, psoNdBackRt_, psoNdNoCullRt_, "ScenePass: PSO no-depth-write rt");
+            okRt = okRt && makeBlendVariant(litRt, true, psoAddBackRt_, psoAddNoCullRt_, "ScenePass: PSO additive rt");
             if (!okRt) {
                 psoCullBackRt_.Reset();
                 psoNoCullRt_.Reset();
                 psoFloorRt_.Reset();
+                psoAddBackRt_.Reset();
+                psoAddNoCullRt_.Reset();
+                psoNdBackRt_.Reset();
+                psoNdNoCullRt_.Reset();
             }
         }
         if (!psoCullBackRt_ || !psoNoCullRt_ || !psoFloorRt_)
@@ -701,6 +737,7 @@ void ScenePass::DrawPtEdges(PassContext& pc) {
                 if (m.indexCount == 0) continue;
                 if (p == 0) {
                     if (!m.visible) continue;
+                    if (m.additive || m.noDepthWrite) continue;   // .emd blend hints: no edge draw (See ScenePass::Execute)
                     ID3D12PipelineState* want = m.doubleSided ? psoDepthNoCull_.Get() : psoDepthBack_.Get();
                     if (want != curPso) {
                         cmd->SetPipelineState(want);
@@ -825,9 +862,19 @@ void ScenePass::Execute(PassContext& pc) {
             for (const GpuModel::Material& m : model->Materials()) {
                 if (m.indexCount == 0 || !m.visible) continue;   // MMD skips materials with alpha 0
                 ID3D12PipelineState* want;
+                // Model .emd blend hints: an additive / no-depth-write material uses the matching lit PSO and the
+                // default (no-pack) shading, so a shader pack does not own that draw.
+                const bool blendHint = m.additive || m.noDepthWrite;
+                const bool usePack = pack && !m.packOff && !blendHint;
                 if (wire)
                     want = m.doubleSided ? psoWireNoCull_.Get() : psoWireBack_.Get();
-                else if (pack && !m.packOff)
+                else if (m.additive)
+                    want = m.doubleSided ? (rt && psoAddNoCullRt_ ? psoAddNoCullRt_.Get() : psoAddNoCull_.Get())
+                                         : (rt && psoAddBackRt_ ? psoAddBackRt_.Get() : psoAddBack_.Get());
+                else if (m.noDepthWrite)
+                    want = m.doubleSided ? (rt && psoNdNoCullRt_ ? psoNdNoCullRt_.Get() : psoNdNoCull_.Get())
+                                         : (rt && psoNdBackRt_ ? psoNdBackRt_.Get() : psoNdBack_.Get());
+                else if (usePack)
                     want = m.doubleSided ? (packRt ? pack->noCullRt.Get() : pack->noCull.Get())
                                          : (packRt ? pack->backRt.Get() : pack->back.Get());
                 else
@@ -843,7 +890,7 @@ void ScenePass::Execute(PassContext& pc) {
                 // setting), unless a pack owns that draw. The --pbr-debug channel is passed along and wins inside
                 // PSMain. Any other draw keeps gPbrActive 0, i.e. the default look.
                 const size_t matIndex = (size_t)(&m - model->Materials().data());
-                const bool pbrRecord = model->HasPbrRecords() && !(pack && !m.packOff) && model->HasPbr() &&
+                const bool pbrRecord = model->HasPbrRecords() && !usePack && model->HasPbr() &&
                                        model->PbrIndex(matIndex) != DescriptorHeap::kInvalid;
                 if (pbrRecord) {
                     const uint32_t c[4] = {model->PbrSrv(), model->PbrIndex(matIndex), pbrDebugChannel, 1u};

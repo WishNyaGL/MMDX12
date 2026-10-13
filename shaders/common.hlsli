@@ -146,6 +146,14 @@ float3 ShadowTransmission(float vis, float density, float3 shadowColor) {
 #ifndef MAT_AUTO_LUMINOUS
 #define MAT_AUTO_LUMINOUS 512u
 #endif
+// The model's own .emd blend hints (render/ShaderInterop.h MaterialShaderFlags; a hinted material uses an additive
+// / no-depth-write PSO). The raster PSO already carries the blend / write-mask / depth state.
+#ifndef MAT_ADDITIVE
+#define MAT_ADDITIVE 1024u
+#endif
+#ifndef MAT_NO_DEPTH_WRITE
+#define MAT_NO_DEPTH_WRITE 2048u
+#endif
 float3 AutoLumEmission(uint flags, float4 diffuse, float specPower, float3 texLinear) {
     if ((flags & MAT_AUTO_LUMINOUS) == 0u || gAutoLumParams.x < 0.5) return 0.0;
     float strength = clamp((specPower - 100.0) * 0.1, 0.0, 20.0);   // 110 -> 1.0 (documented standard), 100 -> 0

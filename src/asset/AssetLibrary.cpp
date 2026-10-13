@@ -276,6 +276,7 @@ struct VmdEntry {
     const VmdProbe* probe = nullptr;
     std::string rel;
     double sec = 0;
+    double fps = 30.0;   // motion time base: 60 when the file name says so, else 30
 };
 
 struct AudioEntry {
@@ -366,6 +367,7 @@ bool SaveLibraryScanResult(const LibraryScanResult& result) {
         js["cameraVmd"] = PathToUtf8(s.cameraVmd);
         js["audioPath"] = PathToUtf8(s.audioPath);
         js["durationSec"] = s.durationSec;
+        js["motionFps"] = s.motionFps;
         nlohmann::json jparts = nlohmann::json::array();
         for (const auto& p : s.parts) {
             nlohmann::json jp;
@@ -452,6 +454,7 @@ bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult&
             s.cameraVmd = Utf8ToPath(js.value("cameraVmd", ""));
             s.audioPath = Utf8ToPath(js.value("audioPath", ""));
             s.durationSec = js.value("durationSec", 0.0f);
+            s.motionFps = js.value("motionFps", 30.0f);
             if (js.contains("parts") && js["parts"].is_array()) {
                 for (const auto& jp : js["parts"]) {
                     if (!jp.is_object()) continue;
@@ -1118,7 +1121,10 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             e.path = &vmdFiles[i];
             e.probe = &*vmdProbes[i];
             e.rel = RelKey(vmdFiles[i], root);
-            e.sec = e.probe->maxFrame / 30.0;
+            // VMD has no fps field: a file named "...60fps..." is authored at 60 frames/s (a key on
+            // nearly every frame), everything else at the 30 frames/s MMD default.
+            e.fps = ToLowerAscii(FileStemUtf8(vmdFiles[i])).find("60fps") != std::string::npos ? 60.0 : 30.0;
+            e.sec = e.probe->maxFrame / e.fps;
             vmds.push_back(e);
         }
         std::map<std::filesystem::path, const VmdEntry*> vmdByPath;
@@ -1156,6 +1162,13 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             if (!s.camera.empty()) {
                 if (vmdByPath.count(s.camera)) song.cameraVmd = s.camera, claimedVmd.insert(s.camera);
                 else result.warnings.push_back(RelKey(s.dir, root) + "/mmdx.json: camera not found: " + RelKey(s.camera, root));
+            }
+            {
+                const auto cam = song.cameraVmd.empty() ? vmdByPath.end() : vmdByPath.find(song.cameraVmd);
+                const bool fps60 = d->second->fps == 60.0 || (cam != vmdByPath.end() && cam->second->fps == 60.0);
+                song.motionFps = fps60 ? 60.0f : 30.0f;
+                if (fps60)
+                    LOG_INFO("library: %s uses a 60 fps motion time base (60fps file name)", song.id.c_str());
             }
             if (!s.audio.empty()) {
                 if (audioByPath.count(s.audio)) song.audioPath = s.audio, claimedAudio.insert(s.audio);
@@ -1494,6 +1507,11 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             }
             for (auto& d : drafts) {
                 if (d.song.audioPath.empty()) result.notes.push_back("no audio found for " + d.song.id);
+                const auto cam = d.song.cameraVmd.empty() ? vmdByPath.end() : vmdByPath.find(d.song.cameraVmd);
+                const bool fps60 = d.dance->fps == 60.0 || (cam != vmdByPath.end() && cam->second->fps == 60.0);
+                d.song.motionFps = fps60 ? 60.0f : 30.0f;
+                if (fps60)
+                    LOG_INFO("library: %s uses a 60 fps motion time base (60fps file name)", d.song.id.c_str());
                 result.songs.push_back(std::move(d.song));
             }
         }

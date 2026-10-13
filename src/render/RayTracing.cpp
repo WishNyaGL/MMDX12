@@ -174,12 +174,16 @@ bool RtScene::EnsureModelResources(GpuModel& model) {
     device->CreateShaderResourceView(model.IndexBuffer(), &srv, ctx_->SrvHeap().Cpu(rt.srv + 1));
 
     // One geometry per drawable material: single-sided ones first (part 0), then double-sided.
+    // Materials the model's own .emd marks additive / no-depth-write (GpuModel::Material::additive /
+    // noDepthWrite) do not occlude: they are left out of the BLAS, so ray-query sun shadows, RTAO,
+    // RT reflections, the path tracer and GI never hit them (they are invisible in PT / GI).
     for (int part = 0; part < 2; ++part) {
         if (part == 1) rt.partSplit = (uint32_t)rt.geometryMaterials.size();
         for (size_t i = 0; i < model.Materials().size(); ++i) {
             const GpuModel::Material& m = model.Materials()[i];
             const MaterialConstants& c = model.MaterialConstantsCpu()[i];
-            if (m.indexCount > 0 && (c.diffuse.w > 0.001f || m.morphable) && m.doubleSided == (part == 1))
+            if (m.indexCount > 0 && !m.additive && !m.noDepthWrite &&
+                (c.diffuse.w > 0.001f || m.morphable) && m.doubleSided == (part == 1))
                 rt.geometryMaterials.push_back((uint32_t)i);
         }
     }

@@ -27,8 +27,13 @@ void App::UpdatePlay(double dt) {
     if (!s) return;
 
     const auto seekTo = [&](double t) {
-        playTime_ = std::clamp(t, 0.0, (double)(s->endFrame / kMmdFps));
-        if (s->hasAudio) audio_.Seek(playTime_);
+        playTime_ = std::clamp(t, 0.0, (double)(s->endFrame / s->motionFps));
+        if (s->hasAudio) {
+            audio_.Seek(playTime_);
+            // after the sound reached its end miniaudio's at-end state stops it; seeking back into the
+            // song while playing must resume audio there.
+            if (playing_ && playTime_ < audio_.DurationSeconds() && !audio_.IsPlaying()) audio_.Play();
+        }
     };
 
     if (!io.WantCaptureKeyboard) {
@@ -57,8 +62,8 @@ void App::UpdatePlay(double dt) {
         } else {
             playTime_ += dt;
         }
-        if (playTime_ * kMmdFps >= (double)s->endFrame) {
-            playTime_ = s->endFrame / kMmdFps;
+        if (playTime_ * s->motionFps >= (double)s->endFrame) {
+            playTime_ = s->endFrame / s->motionFps;
             playing_ = false;
             audio_.Pause();
         }
@@ -75,7 +80,7 @@ void App::UpdatePlay(double dt) {
 void App::SetPlaying(bool play) {
     const SceneRuntime* s = scene_.get();
     if (!s) return;
-    if (play && playTime_ * kMmdFps >= s->endFrame) playTime_ = 0;
+    if (play && playTime_ * s->motionFps >= s->endFrame) playTime_ = 0;
     playing_ = play;
     if (s->hasAudio) {
         if (playing_) {
@@ -111,7 +116,7 @@ void App::SetPlayMotionCamera(bool on) {
     const SceneRuntime* s = scene_.get();
     if (on == useMotionCamera_) return;
     if (!on && s && s->camera) {  // continue from the shot on screen instead of jumping to the last free view
-        freeCam_ = FreeFromPose(s->camera->Evaluate((float)(playTime_ * kMmdFps)));
+        freeCam_ = FreeFromPose(s->camera->Evaluate((float)(playTime_ * s->motionFps)));
     }
     useMotionCamera_ = on;
 }
@@ -332,12 +337,15 @@ void App::DrawPlayOverlay() {
     ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(20.0f)));
     if (IconButton("##restart", icon::SkipBack, Tr("처음부터"), false, 40.0f)) {
         playTime_ = 0;
-        if (s->hasAudio) audio_.Seek(playTime_);
+        if (s->hasAudio) {
+            audio_.Seek(playTime_);
+            if (playing_ && !audio_.IsPlaying()) audio_.Play();
+        }
     }
     x += Dp(40.0f) + Dp(12.0f);
 
     // time
-    const double duration = s->endFrame / kMmdFps;
+    const double duration = s->endFrame / s->motionFps;
     {
         const std::string cur = MinSec(playTime_), tot = " / " + MinSec(duration);
         const ImVec2 cs = TextSize(Font::Semibold, size::Body, cur.c_str());
@@ -355,7 +363,10 @@ void App::DrawPlayOverlay() {
     double t = playTime_;
     if (SeekBar("##seek", seekW, Dp(28.0f), &t, duration)) {
         playTime_ = t;
-        if (s->hasAudio) audio_.Seek(playTime_);
+        if (s->hasAudio) {
+            audio_.Seek(playTime_);
+            if (playing_ && playTime_ < audio_.DurationSeconds() && !audio_.IsPlaying()) audio_.Play();
+        }
     }
     x += seekW + Dp(20.0f);
 
@@ -444,7 +455,9 @@ void App::DrawPlayOverlay() {
     }
     // character size (saved per character; for models whose height does not suit the song's camera)
     if (!s->characterId.empty()) {
-        const float scale = settings_.CharacterScale(s->characterId);
+        const bool hasExtras = !s->extras.empty();   // formation scene: the popup picks the edited performer
+        const PlayPerformerRef shown = PlayPerformerAt(playEditPerformer_);
+        const float scale = settings_.CharacterScale(shown.id);
         ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(20.0f)));
         const ImVec2 btn = ImGui::GetCursorScreenPos();
         if (IconButton("##size", icon::ArrowsOut, Tr("캐릭터 크기"), std::fabs(scale - 1.0f) > 0.005f, 40.0f))
@@ -453,16 +466,42 @@ void App::DrawPlayOverlay() {
         ImGui::SetNextWindowSize(ImVec2(Dp(260.0f), 0));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(16.0f), Dp(14.0f)));
         if (ImGui::BeginPopup("##sizepopup")) {
-            float v = scale;
+            if (hasExtras) {   // performer selector (center / extras); stable id for the UI probe
+                SectionLabel(Tr("캐릭터"));
+                const int cur = playEditPerformer_;
+                std::string curLabel = cur == 0 ? s->characterDisplayName
+                                                : s->extras[(size_t)(cur - 1)].displayName;
+                if (cur == 0) curLabel += " " + std::string(Tr("(센터)"));
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                PushFont(Font::Regular, size::Small);
+                if (ImGui::BeginCombo("##playperformer", curLabel.c_str())) {
+                    std::string centerName = s->characterDisplayName.empty() ? std::string(Tr("센터"))
+                                                                            : s->characterDisplayName;
+                    centerName += " " + std::string(Tr("(센터)"));
+                    if (ImGui::Selectable(centerName.c_str(), cur == 0)) playEditPerformer_ = 0;
+                    for (size_t i = 0; i < s->extras.size(); ++i) {
+                        const std::string& n = s->extras[i].displayName;
+                        const std::string name = n.empty() ? s->extras[i].characterId : n;
+                        ImGui::PushID((int)i);
+                        if (ImGui::Selectable(name.c_str(), cur == (int)i + 1)) playEditPerformer_ = (int)i + 1;
+                        ImGui::PopID();
+                    }
+                    ImGui::EndCombo();
+                }
+                PopFont();
+                Gap(8.0f);
+            }
+            const PlayPerformerRef perf = PlayPerformerAt(playEditPerformer_);
+            float v = settings_.CharacterScale(perf.id);
             if (SliderRow("##charscale", Tr("캐릭터 크기"), &v, 0.5f, 2.0f, "%.2fx")) {
                 v = std::round(v * 100.0f) / 100.0f;
                 if (std::fabs(v - 1.0f) < 0.03f) v = 1.0f;  // snap to the original size
-                settings_.SetCharacterScale(s->characterId, v);
+                settings_.SetCharacterScale(perf.id, v);
                 settings_.Save(settingsPath_);
             }
             Gap(8.0f);
             if (Button("##charscalereset", Tr("원래 크기"), icon::Refresh, ButtonKind::Ghost)) {
-                settings_.SetCharacterScale(s->characterId, 1.0f);
+                settings_.SetCharacterScale(perf.id, 1.0f);
                 settings_.Save(settingsPath_);
             }
             ImGui::EndPopup();
@@ -472,11 +511,13 @@ void App::DrawPlayOverlay() {
     }
     // shader pack (saved per character; render/ShaderPack.h)
     if (!s->characterId.empty()) {
-        ShaderChoice choice = settings_.CharacterShader(s->characterId);
+        const bool hasExtras = !s->extras.empty();
+        const PlayPerformerRef shown = PlayPerformerAt(playEditPerformer_);
+        ShaderChoice choice = settings_.CharacterShader(shown.id);
         ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(20.0f)));
         const ImVec2 btn = ImGui::GetCursorScreenPos();
         if (IconButton("##shader", icon::Diamond, Tr("셰이더"),
-                       !PlayShaderChoice(*scene_->characterGpu, s->characterId).pack.empty(), 40.0f))
+                       shown.gpu && !PlayShaderChoice(*shown.gpu, shown.id).pack.empty(), 40.0f))
             ImGui::OpenPopup("##shaderpopup");
         ImGui::SetNextWindowPos(ImVec2(btn.x + Dp(20.0f), btn.y - Dp(10.0f)), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
         ImGui::SetNextWindowSize(ImVec2(PackParamsPopupWidth(choice), 0));
@@ -485,46 +526,79 @@ void App::DrawPlayOverlay() {
         ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, maxH));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(16.0f), Dp(14.0f)));
         if (ImGui::BeginPopup("##shaderpopup")) {
+            if (hasExtras) {   // performer selector, shared with the size popup (same state)
+                SectionLabel(Tr("캐릭터"));
+                const int cur = playEditPerformer_;
+                std::string curLabel = cur == 0 ? s->characterDisplayName
+                                                : s->extras[(size_t)(cur - 1)].displayName;
+                if (cur == 0) curLabel += " " + std::string(Tr("(센터)"));
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                PushFont(Font::Regular, size::Small);
+                if (ImGui::BeginCombo("##playperformer", curLabel.c_str())) {
+                    std::string centerName = s->characterDisplayName.empty() ? std::string(Tr("센터"))
+                                                                            : s->characterDisplayName;
+                    centerName += " " + std::string(Tr("(센터)"));
+                    if (ImGui::Selectable(centerName.c_str(), cur == 0)) playEditPerformer_ = 0;
+                    for (size_t i = 0; i < s->extras.size(); ++i) {
+                        const std::string& n = s->extras[i].displayName;
+                        const std::string name = n.empty() ? s->extras[i].characterId : n;
+                        ImGui::PushID((int)i);
+                        if (ImGui::Selectable(name.c_str(), cur == (int)i + 1)) playEditPerformer_ = (int)i + 1;
+                        ImGui::PopID();
+                    }
+                    ImGui::EndCombo();
+                }
+                PopFont();
+                Gap(8.0f);
+            }
+            const PlayPerformerRef perf = PlayPerformerAt(playEditPerformer_);
+            choice = settings_.CharacterShader(perf.id);
             SectionLabel(Tr("셰이더"));
-            const ModelTraits playTraits = scene_->characterGpu ? scene_->characterGpu->Traits() : ModelTraits{};
+            const ModelTraits playTraits = perf.gpu ? perf.gpu->Traits() : ModelTraits{};
             bool changed = DrawShaderSelector("##playshader", choice, ImGui::GetContentRegionAvail().x,
-                                           scene_->characterGpu ? &playTraits : nullptr);
+                                           perf.gpu ? &playTraits : nullptr);
             Gap(8.0f);
             changed |= DrawShaderPackParams(choice);
-            if (!choice.pack.empty() && s->character) {   // per-material classes, folded away until asked for
+            if (!choice.pack.empty() && perf.instance) {   // per-material classes, folded away until asked for
                 Gap(8.0f);
                 const int n = MaterialOverrideCount(choice);
                 const std::string label = std::string(Tr("재질별 셰이딩")) + (n ? "  ·  " + std::to_string(n) + Tr("개 지정") : std::string());
                 if (Button("##playmats", label.c_str(), playMaterialsOpen_ ? icon::CaretDown : icon::CaretRight, ButtonKind::Ghost))
                     playMaterialsOpen_ = !playMaterialsOpen_;
                 if (playMaterialsOpen_)
-                    changed |= DrawMaterialShaderList("##playmats_list", choice, s->character->Model(),
+                    changed |= DrawMaterialShaderList("##playmats_list", choice, perf.instance->Model(),
                                                       ImGui::GetContentRegionAvail().x, Dp(260.0f));
             }
             if (changed) {
-                settings_.SetCharacterShader(s->characterId, choice);
+                settings_.SetCharacterShader(perf.id, choice);
                 settings_.Save(settingsPath_);
             }
-            // P5: PBR material source of the current character. Changing it reloads the scene at the current time (a
-            // unit-song formation scene applies it at the next load instead).
-            if (s->character && !s->characterId.empty() &&
-                HasMaterialOptions(s->characterId, s->character->Model().sourcePath,
-                                   (int)s->character->Model().materials.size(),
-                                   settings_.CharacterMaterial(s->characterId))) {
+            // P5: PBR material source of the edited performer. The center reloads the scene at the current time (a
+            // unit-song formation scene applies it at the next load instead); an extra keeps the next-load behaviour
+            // (the saved choice is keyed by its own id).
+            if (perf.instance && !perf.id.empty() &&
+                HasMaterialOptions(perf.id, perf.instance->Model().sourcePath,
+                                   (int)perf.instance->Model().materials.size(),
+                                   settings_.CharacterMaterial(perf.id))) {
                 Gap(6.0f);
                 SectionLabel(Tr("재질 데이터"));
-                MaterialChoice material = settings_.CharacterMaterial(s->characterId);
+                MaterialChoice material = settings_.CharacterMaterial(perf.id);
                 if (options_.materialSourceSet) {
                     PushFont(Font::Regular, size::Caption);
                     ImGui::TextDisabled("%s", Tr("--material-source 가 이번 실행 동안 우선합니다"));
                     PopFont();
                 }
-                if (DrawMaterialSelector("##playmat", material, s->characterId,
-                                         s->character->Model().sourcePath, (int)s->character->Model().materials.size(),
+                if (DrawMaterialSelector("##playmat", material, perf.id,
+                                         perf.instance->Model().sourcePath, (int)perf.instance->Model().materials.size(),
                                          ImGui::GetContentRegionAvail().x)) {
-                    settings_.SetCharacterMaterial(s->characterId, material);
+                    settings_.SetCharacterMaterial(perf.id, material);
                     settings_.Save(settingsPath_);
-                    ReloadPlaySceneForMaterial();
+                    if (playEditPerformer_ == 0) {
+                        ReloadPlaySceneForMaterial();
+                    } else {   // an extra: a contained reload is not possible, apply at the next scene load
+                        toast_ = {Tr("재질을 저장했어요"),
+                                  Tr("여러 명이 함께 추는 곡은 다음 로드 때 반영돼요"), {}, false, timeSeconds_ + 6.0};
+                    }
                     ImGui::CloseCurrentPopup();
                 }
             }

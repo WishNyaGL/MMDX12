@@ -224,6 +224,7 @@ private:
         std::vector<studio::LightKf> lightTrack;
         std::vector<studio::ShadowKf> shadowTrack;
         float endFrame = 0;
+        float motionFps = kMmdFps;  // play scene's motion time base (60 for 60 fps VMDs)
         bool hasAudio = false;
         float physicsFrame = -1;  // motion frame of the last physics step (-1: reset on next update)
         std::chrono::steady_clock::time_point physicsClock;  // wall time of the last physics step
@@ -290,6 +291,14 @@ private:
     void DrawLoading();
     void UpdatePlay(double dt);
     void DrawPlayOverlay();
+    // Play mode: the performer the per-character popups edit (0 = center, i+1 = extras[i]); reset per scene.
+    int playEditPerformer_ = 0;
+    struct PlayPerformerRef {
+        std::string id;              // library id (settings CharacterScale / CharacterShader / CharacterMaterial)
+        GpuModel* gpu = nullptr;     // traits for pack suggestions / shader button state (null when out of range)
+        ModelInstance* instance = nullptr;  // material list, HasMaterialOptions
+    };
+    PlayPerformerRef PlayPerformerAt(int index);
     void DrawBenchLobby();
     void UpdateBenchRun();
     void DrawBenchRunOverlay();

@@ -48,7 +48,8 @@ struct SongAsset {
     std::vector<std::filesystem::path> extraVmds;   // facial/morph-only vmds of the same set
     std::filesystem::path cameraVmd;                // may be empty
     std::filesystem::path audioPath;                // may be empty (.wav/.mp3/.flac/.ogg)
-    float durationSec = 0;        // dance maxFrame / 30
+    float durationSec = 0;        // dance maxFrame / 30 (or / 60 for a 60 fps motion)
+    float motionFps = 30.0f;      // the motion's time base: 30, or 60 for 60 fps VMDs (VMD has no fps field)
     std::vector<SongPart> parts;  // performer parts, stage left to right (>= 1 for playable songs; one holds danceVmd)
     int centerPart = -1;          // the part that dances in the middle most of the song (-1: unknown / one part)
     std::vector<std::filesystem::path> cameraVmds;  // every camera of the song, the default (cameraVmd) first
@@ -86,7 +87,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& root, ScanProgress* p
 bool CreateLibrarySkeleton(const std::filesystem::path& root, const std::filesystem::path& templateDir);
 
 // Persistent library scan result and probe cache (Requirements B.5, B.6, B.7)
-inline constexpr uint32_t kLibraryScanResultVersion = 3;
+inline constexpr uint32_t kLibraryScanResultVersion = 4;
 inline constexpr uint32_t kProbeCacheVersion = 3;
 
 bool SaveLibraryScanResult(const LibraryScanResult& result);
