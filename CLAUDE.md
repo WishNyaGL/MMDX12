@@ -92,7 +92,9 @@ progress.md is the session log. Read its latest entry first.
     strictly sequential, backs up/restores `mmdx12.ini`. Captures use `--capture-scene 1` (the rendered scene only, no
     play bar / stats overlay; works for any `--capture` in a scene) and `--classic` (vanilla-MMD look for one run).
   - `make_update.py <stage> --version X --out d [--base-url u]`: delta-update manifest + content-addressed objects (+ .gz)
-    for the smart updater (feed `manifest` / `manifestSha256`); `update_e2e.py`: headless updater E2E (delta + corrupt-object fallback)
+    for the smart updater (feed `manifest` / `manifestSha256`); `update_e2e.py`: headless updater E2E (delta + corrupt-object fallback);
+    `components_e2e.py`: headless optional-component (app/Components.h) fetch E2E - the lite zip's upscaler DLLs / CJK fonts,
+    fetched from the installed version's manifest via `--component <id> --download-component`
   - `mcp_pipe.py` / `mcp_x.py`: talk to a running app's pipe without the bridge (`python tools/mcp_x.py "click 플레이" "wait 30" "shot out.png" "items 셰이더"`)
 - The play bar auto-hides while playing with no mouse movement, so captures usually don't show it.
 
