@@ -1684,3 +1684,36 @@ smoke review); Claude did the review, publish, the engine fixes and both outline
 - PMM: the only real file is camera-only; models / accessories / MME were verified on a synthetic fixture. PMM 0001 is
   declined. Material morphs do not re-evaluate the AutoLuminous flag.
 - The lite zip's component download needs the installed version's manifest on the update server (first lite release).
+
+## 2026-10-14 - Play fixes: 60 fps VMDs, audio after song end, performer picker, .emd additive materials
+Investigation split over opencode/deepseek (issues 1-2) and antigravity/gemini (3-4), implementation by deepseek workers,
+review + E2E by Claude (commit 89fc858). The MME session (docs/mme, src/asset/Mme*) worked in the same tree; coordinated
+over cross-session messages, files kept disjoint.
+- 60 fps VMDs: `library/MLTD/Amaterasu_v1.1` (MillionDance output) keys every frame, 7680 frames = 128 s at 60 fps vs
+  125.8 s audio; VMD has no fps field, so it played at half speed. Per-song `SongAsset::motionFps` (file name contains
+  "60fps"; library cache v4) -> `ScenePackage` / `SceneRuntime::motionFps`, used by every play-mode seconds<->frame site
+  (studio stays 30). Also Cherry Colored Love and relations. Play bar 2:02 / 2:08 (was 4:16).
+- Audio after the song ended: miniaudio's at-end flag drops seek targets until `ma_sound_start` (which rewinds to 0).
+  `AudioPlayer::Seek` records the target when at end, `Play` restarts there; play-mode seek sites restart audio while
+  playing. MCP `get_state`: duration uses the time base, new `audio_playing` / `audio_time`. Verified both cases (seek +
+  play after the end -> 102.07 s in sync; seek back during the motion tail -> audio resumes).
+- Multi-performer play: "캐릭터" combo (`##playperformer`) at the top of the size / shader popups; scale, shader pack,
+  per-material list and material source follow the selected performer (`App::PlayPerformerAt`); an extra's material
+  source applies on the next load (only the center reloads live); `SuggestRayMaterial` for extras. Verified: a pack set
+  on the non-center performer changed only her.
+- Alcander fire tail (`AlcanderMMD/Alcander 180cm.pmx` materials 44-51): the model's own .emd assigns FireFog.fx
+  (ZWriteEnable = false) and TailLight / FireLight.fx (full_ex additive); drawn as normal alpha + depth write they were a
+  dark smoke shell over the tail. `MmeHints::materialBlend` (0 normal / 1 no-depth-write / 2 additive, from Obj[n]) ->
+  `GpuModel::SetMaterialBlendHints` -> `MatFlag_Additive` (1<<10) / `MatFlag_NoDepthWrite` (1<<11): ScenePass PSO
+  variants (no depth write, MRT1/2 masked, no edge / shadow cast / pack), excluded from BLAS. Raster and RT + Ray-MMD
+  verified (captures/issue_tail). Ordinary model A/B vs the pre-change build = run-to-run noise (130 px, 1 level).
+  The MME runtime will own such materials later (docs/mme/mme_design.md 2.12).
+### Not verified / left
+- Flagged .emd effect materials are invisible in PT / offline GI (out of BLAS); FireFog's soft depth fade and FireLight's
+  background darkening are not reproduced (the MME runtime's job).
+- 60 fps follow-up (deferred by the user). Research: no tool stores fps in a VMD; MMD / nanoem "再生時フレームレート 60"
+  only interpolates a 30 frames/s timeline; MillionDance defaults to 30 and says 60 fps output needs player setup, so
+  stock MMD also plays these at half speed. Plan: (1) per-VMD fps instead of per-song (a 30 fps camera with a 60 fps
+  dance), (2) content fallback (keys on ~every frame + length ~2x audio), (3) per-song override auto / 30 / 60 in the
+  library card menu (`library_overrides.json`, `mmdx.json`), (4) studio import of a 60 fps VMD resamples to the 30 fps
+  timeline with a toast (saves an ordinary 30 fps VMD).
