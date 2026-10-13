@@ -125,6 +125,8 @@ namespace mmdx {
 //                                (headless E2E; the restarted version quits on its own)
 //   --apply-update               internal: apply a staged update with no window, then exit
 //   --apply-wait <pid>           internal: process id the applier waits for before the swap
+//   --component <id>             optional component (app/Components.h) to act on
+//   --download-component         with --component: fetch it now with no window, then exit (headless E2E)
 struct AppOptions {
     std::filesystem::path libraryOverride;
     std::string character, stage, song;
