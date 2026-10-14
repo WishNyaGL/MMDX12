@@ -119,7 +119,7 @@ void App::DrawUpscalerComponentRow(UpscalerKind kind, float width) {
     if (kind == UpscalerKind::DLSS && ctx_.Caps().vendorId != 0x10DE) return;  // a missing DLL is not the cause
     Gap(6.0f);
     char label[128];
-    std::snprintf(label, sizeof(label), Tr("%s 다운로드"), def->label);
+    std::snprintf(label, sizeof(label), Tr("%s 다운로드"), Tr(def->label));
     ComponentAction(component_, *def, label, width, true);
 }
 
