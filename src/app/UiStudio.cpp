@@ -585,14 +585,14 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
         }
         ApplyShaderChoice(*m.gpu, shader);
     }
-    // M6a: the model's MME choice (project field; characters default None, stages Auto), with the run-wide CLI overrides.
+    // M6a: the model's MME choice (project field; characters default None, stages Auto), resolved through the global
+    // switch / workflow and the run-wide CLI overrides. A project choice still shows in the inspector, but the
+    // renderer uses ResolveMmeChoice.
     {
-        MmeChoice mme = m.mme;
         const bool isStage = m.kind == ModelKind::Stage;
-        if (isStage && options_.stageMmeSet) mme = {options_.stageMme != 0 ? MmeChoice::Auto : MmeChoice::None, {}};
-        else if (options_.mmeAutoSet) mme = {options_.mmeAuto != 0 ? MmeChoice::Auto : MmeChoice::None, {}};
-        if (m.IsEffect() && !m.fx.empty()) mme = {MmeChoice::File, m.fx};  // M5c: the effect object's own .fx
-        ApplyMmeEffect(*m.gpu, mme, m.path);
+        MmeChoice mme = ResolveMmeChoiceFor(m.mme, isStage, m.path);
+        if (MmeGlobalEnabled() && m.IsEffect() && !m.fx.empty()) mme = {MmeChoice::File, m.fx};  // M5c: the effect object's own .fx
+        ApplyMmeEffect(*m.gpu, mme, m.path, MmeAutoSkipApplies(mme, isStage));
     }
     m.gpu->UpdateMaterials(slot, inst.MaterialMul(), inst.MaterialAdd(), inst.MaterialVersion(),
                            m.IsProp() ? AccessoryOpacity(m, frame) : 1.0f);
@@ -676,6 +676,7 @@ void App::BuildStudioFrameView(FrameView& view) {
     // post chain with the accessory key's panel as `(self)`; its object part draws the mesh (drawn here through the
     // MME object path). The mesh is added to `view.models` (via AppendMmeObject) so every draw path covers it.
     for (const auto& m : d.models) {
+        if (!MmeGlobalEnabled()) break;   // global MME off: no effect objects drawn
         if (!m->visible || !m->IsEffect() || m->fx.empty() || !m->gpu) continue;
         if (!AccessoryVisible(*m, viewFrame)) continue;
         const PropAttach pl = AccessoryPlacement(*m, viewFrame);

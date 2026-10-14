@@ -407,12 +407,14 @@ void App::StudioAddModelFile(ModelKind kind, const std::filesystem::path& file, 
     const std::string label = job->label;
     // A material-source change (P5) passes the model's exact new choice; else a character uses the saved choice
     // (a replaced model keeps its library id, so its saved per-character choice survives the file swap).
-    MaterialChoice choice = material ? *material : ResolveMaterialChoice(std::string());
+    MaterialChoice choice = material ? *material : ResolveMaterialChoice(std::string(), file);
     std::string replaceLibraryId;   // a replaced model keeps its library id (a stage's material key survives the reload)
     if (replaceUid && studio_) {
         const int at = studio_->IndexOfUid(replaceUid);
-        if (at >= 0) replaceLibraryId = studio_->models[(size_t)at]->libraryId;
-        if (!material && at >= 0) choice = ResolveMaterialChoice(replaceLibraryId);
+        if (at >= 0) {
+            replaceLibraryId = studio_->models[(size_t)at]->libraryId;
+            if (!material) choice = ResolveMaterialChoice(replaceLibraryId, studio_->models[(size_t)at]->path);
+        }
     }
     job->future = std::async(std::launch::async, [j, kind, file, label, choice, replaceLibraryId] {
         const bool ok = LoadStudioModel(file, kind, label, j->models[0], &j->progress, &j->error, choice);
@@ -451,7 +453,7 @@ void App::StudioAddLibraryCharacter(int index, uint32_t replaceUid) {
     job->replaceUid = replaceUid;
     job->models.resize(1);
     StudioJob* j = job.get();
-    const MaterialChoice choice = ResolveMaterialChoice(c.id);
+    const MaterialChoice choice = ResolveMaterialChoice(c.id, c.modelPath);
     job->future = std::async(std::launch::async, [j, c, choice] {
         const bool ok = LoadStudioModel(c.modelPath, ModelKind::Character, c.displayName, j->models[0], &j->progress, &j->error, choice);
         j->models[0].libraryId = c.id;
@@ -467,7 +469,7 @@ void App::StudioAddLibraryStage(int index, uint32_t replaceUid) {
     job->label = s.displayName;
     job->replaceUid = replaceUid;
     StudioJob* j = job.get();
-    const MaterialChoice choice = ResolveMaterialChoice(s.id);
+    const MaterialChoice choice = ResolveMaterialChoice(s.id, s.parts.empty() ? std::filesystem::path() : s.parts[0]);
     job->future = std::async(std::launch::async, [j, s, choice] {
         return LoadStudioStage(s, j->models, &j->progress, &j->error, choice);
     });

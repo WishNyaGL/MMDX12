@@ -164,6 +164,12 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "ssr" && ParseBool(value, b)) ssr = b;
         else if (key == "bloom" && ParseBool(value, b)) bloom = b;
         else if (key == "autoLuminous" && ParseBool(value, b)) autoLuminous = b;
+        else if (key == "mmeEnabled" && ParseBool(value, b)) mmeEnabled = b;
+        else if (key == "mmeWorkflow") {
+            const std::string v = ToLowerAscii(value);
+            if (v == "manual") mmeWorkflow = 0;
+            else if (v == "auto") mmeWorkflow = 1;
+        }
         else if (key == "taa" && ParseBool(value, b)) taa = b;
         else if (key == "shadowMapSize" && ParseInt(value, i)) shadowMapSize = i;
         else if (key == "lighting" && ParseInt(value, i)) lighting = i;
@@ -384,6 +390,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
                 shaderType[0] = std::clamp(i, 0, 2);
             }
         }
+        else if (key == "playPanelTab" && ParseInt(value, i)) playPanelTab = std::clamp(i, 0, 2);
         else if (key == "lastCharacter") lastCharacter = value;
         else if (key == "lastStage") lastStage = value;
         else if (key == "lastSong") lastSong = value;
@@ -509,6 +516,8 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     std::fprintf(f, "shadows=%d\nssao=%d\nssr=%d\nbloom=%d\ntaa=%d\n", shadows ? 1 : 0, ssao ? 1 : 0, ssr ? 1 : 0,
                  bloom ? 1 : 0, taa ? 1 : 0);
     std::fprintf(f, "autoLuminous=%d\n", autoLuminous ? 1 : 0);
+    std::fprintf(f, "mmeEnabled=%d\n", mmeEnabled ? 1 : 0);
+    std::fprintf(f, "mmeWorkflow=%s\n", mmeWorkflow == 1 ? "auto" : "manual");
     std::fprintf(f, "shadowMapSize=%d\n", shadowMapSize);
     std::fprintf(f, "lighting=%d\n", lighting);
     std::fprintf(f, "exposure=%.3f\n", exposure);
@@ -586,6 +595,7 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
         std::fprintf(f, "mmeEffect=%d|%s\n", e.enabled ? 1 : 0, PathToUtf8(e.file).c_str());
     std::fprintf(f, "shaderSort=%d,%d\n", shaderSort[0], shaderSort[1]);
     std::fprintf(f, "shaderType=%d,%d\n", shaderType[0], shaderType[1]);
+    std::fprintf(f, "playPanelTab=%d\n", playPanelTab);
     std::fprintf(f, "lastCharacter=%s\n", lastCharacter.c_str());
     std::fprintf(f, "lastStage=%s\n", lastStage.c_str());
     std::fprintf(f, "lastSong=%s\n", lastSong.c_str());

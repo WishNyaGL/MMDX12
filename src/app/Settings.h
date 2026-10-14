@@ -32,6 +32,13 @@ struct AppSettings {
     // そぼろ AutoLuminous convention: PMX materials the author marked (black specular, power >= 100) glow. Default on.
     bool autoLuminous = true;
     bool readOnly = false;     // runtime only, never saved: Save() is a no-op (--classic runs)
+    // Global MME / Ray-MMD switch (ini mmeEnabled=0|1, CLI --mme-global). Off = no MME object effect, no MME post
+    // stack, no MME effect objects, Ray-MMD material source treated as Default, everywhere (play / lobby / studio /
+    // offline). Saved per-model choices are kept, they just do not apply.
+    bool mmeEnabled = true;
+    // MME workflow (ini mmeWorkflow=manual|auto, CLI --mme-workflow). Manual (0) = today's per-model behaviour.
+    // Auto (1) = every model always gets the automatic choices, ignoring the saved per-model ones.
+    int mmeWorkflow = 0;       // 0 manual, 1 auto
     int shadowMapSize = 2048;
     int lighting = 0;          // LightingPreset (app/Lighting.h)
     float exposure = 1.0f;     // 0.5 .. 2.0
@@ -110,6 +117,7 @@ struct AppSettings {
     std::vector<MmeEffectEntry> mmeEffects;
     int shaderSort[2] = {0, 0};   // 0 recommended, 1 name, 2 updated, 3 params
     int shaderType[2] = {0, 0};   // 0 all, 1 surface, 2 effect
+    int playPanelTab = 0;         // play-mode 화면 효과 panel: last open tab (0 효과, 1 셰이더, 2 MME · Ray-MMD)
     int windowWidth = 1600, windowHeight = 900;
     std::vector<std::string> recentProjects;         // studio projects (UTF-8 absolute paths), newest first, max 8
     void AddRecentProject(const std::string& path);  // moves it to the front (case-insensitive match)

@@ -43,9 +43,13 @@ void App::UpdatePlay(double dt) {
             settings_.Save(settingsPath_);
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-            UnloadScene();
-            screen_ = Screen::Select;
-            return;
+            if (playPanelOpen_ && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
+                playPanelOpen_ = false;   // Esc closes the 화면 효과 panel first
+            } else {
+                UnloadScene();
+                screen_ = Screen::Select;
+                return;
+            }
         }
         if (ImGui::IsKeyPressed(ImGuiKey_F1)) overlayVisible_ ^= 1;
         if (s->camera && ImGui::IsKeyPressed(ImGuiKey_C)) SetPlayMotionCamera(!useMotionCamera_);
@@ -128,6 +132,8 @@ void App::UpdateFreeCamera() {
     // over the scene, so dragging a slider across the view does not turn it.
     ImGuiContext& g = *ImGui::GetCurrentContext();
     const ImGuiWindow* hovered = g.HoveredWindow ? g.HoveredWindow->RootWindow : nullptr;
+    // Hovering the 화면 효과 panel is "over UI" like any other window (its name is not ##playoverlay), so a drag
+    // there never turns the free camera; scrubbing only starts on the seek bar itself.
     const bool overUi = (hovered && std::strcmp(hovered->Name, "##playoverlay") != 0) || ImGui::IsAnyItemHovered() ||
                         ImGui::IsAnyItemActive() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     for (int b = 0; b < 3; ++b) {
@@ -225,7 +231,7 @@ void App::DrawPlayOverlay() {
     if (!s) return;
     const Palette& p = P();
 
-    const bool showBar = overlayVisible_ && (!playing_ || timeSeconds_ - lastMouseMoveTime_ < 3.0);
+    const bool showBar = overlayVisible_ && (!playing_ || playPanelOpen_ || timeSeconds_ - lastMouseMoveTime_ < 3.0);
     const float show = Anim(ImGui::GetID("##overlayShow"), showBar, 7.0f);
     if (show < 0.005f) return;
 
@@ -255,8 +261,9 @@ void App::DrawPlayOverlay() {
             char buf[64];
             std::snprintf(buf, sizeof(buf), Tr(" 외 %d명"), (int)s->extras.size());
             charDesc = centerName + buf;
-        } else {
-            charDesc = ch ? ch->displayName : std::string();
+        } else {   // the loaded performer (a one-performer formation is not the lobby's character)
+            charDesc = s && !s->characterDisplayName.empty() ? s->characterDisplayName
+                                                              : (ch ? ch->displayName : std::string());
         }
         const std::string sub =
             charDesc + "  ·  " + (st ? st->displayName : std::string(Tr("스튜디오")));
@@ -355,8 +362,8 @@ void App::DrawPlayOverlay() {
     }
 
     // right cluster: volume icon + slider, offline still, camera, lighting, divider, exit
-    // (volume, still, camera, light, [size], [shader], effects, divider, exit)
-    const int optionalButtons = s->characterId.empty() ? 1 : 3;   // size + shader only with a character; effects always
+    // (volume, still, camera, light, [size], [shader], effects, MME, divider, exit)
+    const int optionalButtons = s->characterId.empty() ? 3 : 4;   // size + shader only with a character; effects + MME always
     const float rightW = Dp(36.0f + 4.0f + 88.0f + 12.0f + 44.0f + 44.0f + 50.0f + 44.0f * optionalButtons + 11.0f + 40.0f + 16.0f);
     const float seekW = std::max(Dp(120.0f), bb.x - rightW - x - Dp(20.0f));
     ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(14.0f)));
@@ -509,149 +516,35 @@ void App::DrawPlayOverlay() {
         ImGui::PopStyleVar();
         x += Dp(44.0f);
     }
-    // shader pack (saved per character; render/ShaderPack.h)
-    if (!s->characterId.empty()) {
-        const bool hasExtras = !s->extras.empty();
+    // shader / effects: the 화면 효과 panel's entry buttons (the old ##shader and ##effects popups moved into its
+    // tabs; the MME button folded into the same panel). Clicking the button of the open tab closes the panel.
+    const auto panelEntry = [&](const char* id, const char* icon, const char* tip, bool extraActive, int tab) {
+        ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(20.0f)));
+        const bool active = (playPanelOpen_ && settings_.playPanelTab == tab) || extraActive;
+        if (IconButton(id, icon, tip, active, 40.0f)) {
+            if (playPanelOpen_ && settings_.playPanelTab == tab) {
+                playPanelOpen_ = false;
+            } else {
+                playPanelOpen_ = true;
+                settings_.playPanelTab = tab;
+                settings_.Save(settingsPath_);
+            }
+        }
+        x += Dp(44.0f);
+    };
+    if (!s->characterId.empty()) {   // shader pack (saved per character; render/ShaderPack.h)
         const PlayPerformerRef shown = PlayPerformerAt(playEditPerformer_);
-        ShaderChoice choice = settings_.CharacterShader(shown.id);
-        ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(20.0f)));
-        const ImVec2 btn = ImGui::GetCursorScreenPos();
-        if (IconButton("##shader", icon::Diamond, Tr("셰이더"),
-                       shown.gpu && !PlayShaderChoice(*shown.gpu, shown.id).pack.empty(), 40.0f))
-            ImGui::OpenPopup("##shaderpopup");
-        ImGui::SetNextWindowPos(ImVec2(btn.x + Dp(20.0f), btn.y - Dp(10.0f)), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-        ImGui::SetNextWindowSize(ImVec2(PackParamsPopupWidth(choice), 0));
-        // cap the height to the space above the button so the popup never runs off the top of the screen
-        const float maxH = std::max(Dp(60.0f), (btn.y - Dp(10.0f)) - ImGui::GetMainViewport()->WorkPos.y - Dp(12.0f));
-        ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, maxH));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(16.0f), Dp(14.0f)));
-        if (ImGui::BeginPopup("##shaderpopup")) {
-            if (hasExtras) {   // performer selector, shared with the size popup (same state)
-                SectionLabel(Tr("캐릭터"));
-                const int cur = playEditPerformer_;
-                std::string curLabel = cur == 0 ? s->characterDisplayName
-                                                : s->extras[(size_t)(cur - 1)].displayName;
-                if (cur == 0) curLabel += " " + std::string(Tr("(센터)"));
-                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-                PushFont(Font::Regular, size::Small);
-                if (ImGui::BeginCombo("##playperformer", curLabel.c_str())) {
-                    std::string centerName = s->characterDisplayName.empty() ? std::string(Tr("센터"))
-                                                                            : s->characterDisplayName;
-                    centerName += " " + std::string(Tr("(센터)"));
-                    if (ImGui::Selectable(centerName.c_str(), cur == 0)) playEditPerformer_ = 0;
-                    for (size_t i = 0; i < s->extras.size(); ++i) {
-                        const std::string& n = s->extras[i].displayName;
-                        const std::string name = n.empty() ? s->extras[i].characterId : n;
-                        ImGui::PushID((int)i);
-                        if (ImGui::Selectable(name.c_str(), cur == (int)i + 1)) playEditPerformer_ = (int)i + 1;
-                        ImGui::PopID();
-                    }
-                    ImGui::EndCombo();
-                }
-                PopFont();
-                Gap(8.0f);
-            }
-            const PlayPerformerRef perf = PlayPerformerAt(playEditPerformer_);
-            choice = settings_.CharacterShader(perf.id);
-            SectionLabel(Tr("셰이더"));
-            const ModelTraits playTraits = perf.gpu ? perf.gpu->Traits() : ModelTraits{};
-            bool changed = DrawShaderSelector("##playshader", choice, ImGui::GetContentRegionAvail().x,
-                                           perf.gpu ? &playTraits : nullptr);
-            Gap(8.0f);
-            changed |= DrawShaderPackParams(choice);
-            if (!choice.pack.empty() && perf.instance) {   // per-material classes, folded away until asked for
-                Gap(8.0f);
-                const int n = MaterialOverrideCount(choice);
-                const std::string label = std::string(Tr("재질별 셰이딩")) + (n ? "  ·  " + std::to_string(n) + Tr("개 지정") : std::string());
-                if (Button("##playmats", label.c_str(), playMaterialsOpen_ ? icon::CaretDown : icon::CaretRight, ButtonKind::Ghost))
-                    playMaterialsOpen_ = !playMaterialsOpen_;
-                if (playMaterialsOpen_)
-                    changed |= DrawMaterialShaderList("##playmats_list", choice, perf.instance->Model(),
-                                                      ImGui::GetContentRegionAvail().x, Dp(260.0f));
-            }
-            if (changed) {
-                settings_.SetCharacterShader(perf.id, choice);
-                settings_.Save(settingsPath_);
-            }
-            // M6b: the performer's MME object effect choice (없음 / 모델 동봉 효과 / 파일 선택…), saved as characterMme=.
-            if (perf.instance) {
-                Gap(10.0f);
-                SectionLabel(Tr("MME"));
-                MmeChoice mme = settings_.CharacterMme(perf.id);
-                if (DrawMmeRow("##playmme", mme, perf.id, perf.instance->Model().sourcePath,
-                               ImGui::GetContentRegionAvail().x)) {
-                    settings_.SetCharacterMme(perf.id, mme);
-                    settings_.Save(settingsPath_);
-                    if (playEditPerformer_ == 0) {
-                        ApplyMmeEffect(*perf.gpu, mme, perf.instance->Model().sourcePath);
-                    } else {
-                        toast_ = {Tr("MME 설정을 저장했어요"), Tr("여러 명이 함께 추는 곡은 다음 로드 때 반영돼요"), {}, false,
-                                  timeSeconds_ + 6.0};
-                    }
-                }
-            }
-            if (perf.instance && !perf.id.empty() &&
-                HasMaterialOptions(perf.id, perf.instance->Model().sourcePath,
-                                   (int)perf.instance->Model().materials.size(),
-                                   settings_.CharacterMaterial(perf.id))) {
-                Gap(6.0f);
-                SectionLabel(Tr("재질 데이터"));
-                MaterialChoice material = settings_.CharacterMaterial(perf.id);
-                if (options_.materialSourceSet) {
-                    PushFont(Font::Regular, size::Caption);
-                    ImGui::TextDisabled("%s", Tr("--material-source 가 이번 실행 동안 우선합니다"));
-                    PopFont();
-                }
-                if (DrawMaterialSelector("##playmat", material, perf.id,
-                                         perf.instance->Model().sourcePath, (int)perf.instance->Model().materials.size(),
-                                         ImGui::GetContentRegionAvail().x)) {
-                    settings_.SetCharacterMaterial(perf.id, material);
-                    settings_.Save(settingsPath_);
-                    if (playEditPerformer_ == 0) {
-                        ReloadPlaySceneForMaterial();
-                    } else {   // an extra: a contained reload is not possible, apply at the next scene load
-                        toast_ = {Tr("재질을 저장했어요"),
-                                  Tr("여러 명이 함께 추는 곡은 다음 로드 때 반영돼요"), {}, false, timeSeconds_ + 6.0};
-                    }
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            ImGui::EndPopup();
-        }
-        ImGui::PopStyleVar();
-        x += Dp(44.0f);
+        const bool hasPack = shown.gpu && !PlayShaderChoice(*shown.gpu, shown.id).pack.empty();
+        panelEntry("##shader", icon::Diamond, Tr("셰이더"), hasPack, 1);
     }
-    // screen effect packs (the ordered stack, render/ShaderPack.h "type": "effect")
-    {
-        ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(20.0f)));
-        const ImVec2 btn = ImGui::GetCursorScreenPos();
-        if (IconButton("##effects", icon::Sparkle, Tr("화면 효과"), !settings_.effectStack.empty(), 40.0f))
-            ImGui::OpenPopup("##effectspopup");
-        ImGui::SetNextWindowPos(ImVec2(btn.x + Dp(20.0f), btn.y - Dp(10.0f)), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-        ImGui::SetNextWindowSize(ImVec2(Dp(320.0f), 0));
-        ImGui::SetNextWindowSizeConstraints(
-            ImVec2(0, 0), ImVec2(FLT_MAX, std::max(Dp(60.0f), (btn.y - Dp(10.0f)) - ImGui::GetMainViewport()->WorkPos.y - Dp(12.0f))));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(16.0f), Dp(14.0f)));
-        if (ImGui::BeginPopup("##effectspopup")) {
-            if (DrawEffectStackEditor(settings_.effectStack)) {
-                settings_.Save(settingsPath_);
-                ApplyRenderSettings();
-            }
-            Gap(12.0f);
-            if (DrawMmePostStackEditor(settings_.mmeEffects)) {
-                settings_.Save(settingsPath_);
-                ApplyRenderSettings();
-            }
-            ImGui::EndPopup();
-        }
-        ImGui::PopStyleVar();
-        x += Dp(44.0f);
-    }
+    panelEntry("##effects", icon::Sparkle, Tr("화면 효과"), !settings_.effectStack.empty(), 0);
+    panelEntry("##mmepanel", icon::Sliders, Tr("MME · Ray-MMD"), !MmeGlobalEnabled() || MmeAutoWorkflow(), 2);
     dl->AddLine(ImVec2(x, cy - Dp(14.0f)), ImVec2(x, cy + Dp(14.0f)), WithAlpha(p.ink, 0.12f));
     x += Dp(11.0f);
     ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(20.0f)));
     const bool exit = IconButton("##exit", icon::X, Tr("라이브러리로 (Esc)"), false, 40.0f);
     ImGui::End();
+    DrawPlayFxPanel();   // the 화면 효과 side panel (slides in from the right; keeps the bar visible)
     if (exit) {
         UnloadScene();
         screen_ = Screen::Select;

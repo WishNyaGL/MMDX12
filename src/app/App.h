@@ -33,6 +33,7 @@
 #include <future>
 #include <set>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -80,8 +81,9 @@ namespace mmdx {
 //   --width <w> --height <h>  initial window client size
 //   --debug                enable the D3D12 debug layer
 //   --free-camera          start with the free orbit camera
-//   --screen <select|stages|songs|settings|video|bench|bench-gi|studio|shaders|shaders-online|shaders-mme> open that
-//                          screen after the scan (UI testing; shaders-mme: the shader manager's MME tab);
+//   --screen <select|stages|songs|settings|video|bench|bench-gi|studio|shaders|shaders-online|shaders-mme|mme> open
+//                          that screen after the scan (UI testing; shaders-mme: the shader manager's MME tab; mme: the
+//                          MME · Ray-MMD settings screen);
 //                          --frames counts all frames; studio: opens --character/--stage/--song in the Studio at
 //                          --seek and counts frames from the Studio on; without --character: a new empty project)
 //   --project <file.mmdxproj>  open that Studio project after the scan (implies --screen studio)
@@ -114,6 +116,8 @@ namespace mmdx {
 //                                whole project; motion camera; project audio) and quits; --offline-still renders the
 //                                --seek frame (GI).
 //   --theme <auto|light|dark>    colour theme for this run instead of the saved one (auto = follow Windows)
+//   --mme-global <0|1>          global MME / Ray-MMD switch for this run (0 = off everywhere; default: settings.mmeEnabled)
+//   --mme-workflow <auto|manual>  MME workflow for this run (auto = every model gets the automatic choices)
 //   --material-source <default|ray>  per-material PBR data source (work unit P2); default renders as before and
 //                                never reads Ray .md/.fx data
 //   --pbr-debug <ch>             with --material-source ray: output one PBR channel (none|albedo|normal|roughness|
@@ -158,6 +162,8 @@ struct AppOptions {
     bool shaderPackSet = false;
     int materialSource = 0;    // --material-source <default|ray>: per-material PBR source for this run (0 default, 1 ray)
     bool materialSourceSet = false;   // --material-source was given: it wins over the saved per-character choices
+    int mmeGlobal = -1;        // --mme-global <0|1>: global MME switch for this run (-1 = settings.mmeEnabled)
+    int mmeWorkflow = -1;      // --mme-workflow <auto|manual>: workflow for this run (-1 = settings.mmeWorkflow)
     int pbrDebug = 0;          // --pbr-debug <none|albedo|...>: PBR debug channel for this run (0 none .. 7 model)
     std::string packIndex;     // --pack-index <url|path>: the online shader pack gallery index (testing)
     std::vector<EffectStackEntry> effectStack;  // --effect <id>[,<id>...] / none: the effect stack, this run
@@ -222,7 +228,7 @@ void ResolveMmeObjectPair(const std::filesystem::path& path, std::filesystem::pa
 std::filesystem::path PickPackTextureFolder(HWND owner);
 
 // Popup width for the pack parameter grid (columns from the pack's param count), clamped to the viewport.
-// Defined in UiShaderPack.cpp, also used by UiPlay.cpp.
+// Defined in UiShaderPack.cpp, used by the studio shader popup.
 float PackParamsPopupWidth(const ShaderChoice& choice);
 
 class App {
@@ -233,7 +239,7 @@ public:
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 private:
-    enum class Screen { Scanning, Select, Loading, Play, BenchLobby, BenchRun, BenchResult, Offline, BenchRender, Studio, Shaders };
+    enum class Screen { Scanning, Select, Loading, Play, BenchLobby, BenchRun, BenchResult, Offline, BenchRender, Studio, Shaders, Mme };
     enum class LoadTarget { Play, Benchmark, RenderBench, OfflineVideo, Studio };
 
     struct SceneRuntime {
@@ -244,6 +250,9 @@ private:
         std::vector<std::unique_ptr<ModelInstance>> stages;
         std::vector<std::unique_ptr<GpuModel>> stageGpu;
         std::string stageId;   // M6a: the stage library id (key of the saved MME choice / display scale)
+        // The cast a formation (unit song) scene was loaded with; empty for a single-performer scene. Kept so a
+        // material-source change can reload the same formation (App::ReloadPlaySceneForMaterial).
+        std::vector<PerformerCast> formation;
         std::shared_ptr<BoundMotion> stageMotion;   // M8a: the bundled stage's motion (may be null)
         int stageMotionPart = -1;                   // index into `stages` / `stageGpu`
         std::shared_ptr<BoundMotion> motion;
@@ -342,6 +351,37 @@ private:
     void DrawPlayOverlay();
     // Play mode: the performer the per-character popups edit (0 = center, i+1 = extras[i]); reset per scene.
     int playEditPerformer_ = 0;
+    // Play-mode "화면 효과" side panel (effect / shader / MME tabs): slides in from the right edge while a play
+    // scene runs. Its MME tab is a draft copy of the MME-relevant settings taken when it opens; nothing is applied
+    // until 적용 (되돌리기 discards).
+    struct MmeDraft {
+        bool valid = false;
+        bool enabled = true;
+        int workflow = 0;
+        std::vector<MmeEffectEntry> mmeEffects;
+        std::map<std::string, MmeChoice> characterMmes;
+        std::map<std::string, MmeChoice> stageMmes;
+        std::map<std::string, MaterialChoice> characterMaterials;
+    };
+    bool playPanelOpen_ = false;
+    float playPanelT_ = 0.0f;   // slide progress 0 (closed) .. 1 (open), stepped with the frame time
+    bool playPanelReopen_ = false;   // an MME apply reloaded the scene: show the panel again after it
+    bool mmeScreenShowStages_ = false;  // MME screen list: show library stages instead of characters
+    char mmeFilter_[128] = {};          // MME screen list: search filter
+    // The panel's draft: SyncPlayMmeDraft captures the live settings into it when the panel opens (and again after an
+    // apply-triggered reload); ApplyPlayMmeDraft writes a draft back. The MME screen reads/writes the settings directly.
+    MmeDraft playMmeDraft_;
+    void SyncPlayMmeDraft();
+    void ApplyPlayMmeDraft(const MmeDraft& draft, bool reloadNeeded);
+    MmeDraft CaptureMmeDraft() const;
+    void WriteMmeDraft(const MmeDraft& d);
+    // The play-mode side panel (UiPlayPanel.cpp): the sliding window + tabs, and one method per tab body.
+    void DrawPlayFxPanel();
+    void DrawScreenEffectControls(float width);   // shared by the panel's 효과 tab and the lobby 세부 tab
+    void DrawPlayShaderTab(float width);          // the old ##shader popup body
+    void DrawPlayMmeTab(float width);             // the old play MME panel body (draft logic unchanged)
+    void DrawPlayMmeFooter(float width);          // 되돌리기 / 적용
+    bool PlayMmeDraftDirty() const;               // draft differs from the live settings
     struct PlayPerformerRef {
         std::string id;              // library id (settings CharacterScale / CharacterShader / CharacterMaterial)
         GpuModel* gpu = nullptr;     // traits for pack suggestions / shader button state (null when out of range)
@@ -751,29 +791,61 @@ private:
     // M6b: one-time suggestion when a character with no saved MME choice ships an .emd / same-name .fx (a toast
     // with an apply button; remembered per character id). Never applies it automatically.
     void SuggestMme(const std::string& characterId, const std::filesystem::path& modelPath);
-    // M6a: the per-model MME object effect choice (player + studio). Resolves the saved choice (or the run-wide CLI
-    // overrides: --mme-auto for every model, --stage-mme for stages) and calls gpu.SetMmeEffects. `isStage` picks the
-    // stage default / store. Applied right before UpdateMaterials, at the shader choice's site.
-    MmeChoice ResolveMmeChoice(const std::string& id, bool isStage) const;
+    // M6a: the per-model MME object effect choice (player + studio). Resolves the global switch / workflow, the saved
+    // choice (or the run-wide CLI overrides: --mme-auto for every model, --stage-mme for stages) and calls
+    // gpu.SetMmeEffects. `isStage` picks the stage default / store. `modelPath` drives the Auto workflow (it decides
+    // whether a character can take an MME object effect at all). Applied right before UpdateMaterials.
+    MmeChoice ResolveMmeChoice(const std::string& id, bool isStage, const std::filesystem::path& modelPath = {}) const;
+    // The same resolution for an explicit saved choice (a studio project model's own MmeChoice): the global switch /
+    // workflow / CLI overrides layered on top. Nothing here reads settings_, so a project choice stays authoritative in
+    // Manual mode.
+    MmeChoice ResolveMmeChoiceFor(const MmeChoice& saved, bool isStage,
+                                  const std::filesystem::path& modelPath = {}) const;
     // Applies a resolved choice: None = native, Auto = the model's own .emd / same-name .fx ([fx]), File = one effect
-    // for every material. `modelPath` drives Auto (FindModelEffects). Never throws.
-    void ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::filesystem::path& modelPath);
+    // for every material. `modelPath` drives Auto (FindModelEffects). `autoWorkflow` = the Auto choice came from the
+    // Auto workflow (완전 자동) and not from a run-wide CLI override: then an Auto assignment whose effect needs an
+    // external controller object that is not in the scene resolves to native shading for the whole model. Never throws.
+    void ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::filesystem::path& modelPath,
+                        bool autoWorkflow = false);
+    // True when a resolved Auto choice comes from the Auto workflow itself (완전 자동) and not from a run-wide CLI
+    // override (--mme-auto / --stage-mme / --mme-model): only then does the required-controller skip apply.
+    bool MmeAutoSkipApplies(const MmeChoice& mme, bool isStage) const;
+    // The lower-case file / display names the CONTROLOBJECT lookup (render/PassMmeOffscreen.cpp MmeSceneLookup) would
+    // match against: the loaded play scene (character, extras, stages, effect objects) or the studio project's models.
+    // Cached per scene / studio model set (count + pointers), never re-read per frame.
+    const std::vector<std::string>& MmeSceneNames();
+    // The required controller a model's Auto assignment needs but the scene lacks (lower case), cached by
+    // (model path, scene-names key); "" when nothing is missing / the model ships no such effect. Shared by the Auto
+    // skip and the UI caption (both the Auto-skipped row and the Manual "모델 동봉 효과" warning).
+    std::string MmeControllerSkip(const std::filesystem::path& modelPath);
+    // The controller an Auto workflow assignment skipped for this model path (ui: the "자동 제외" caption); empty when
+    // the model was not skipped. Keyed by (model path, scene-names key).
+    std::map<std::string, std::string> mmeAutoSkip_;
+    std::set<std::string> mmeSkipLogged_;   // (model path utf8 | controller) reasoned once
+    std::vector<std::string> mmeSceneNames_;        // MmeSceneNames cache
+    std::string mmeSceneNamesKey_;                  // inputs the cache was built from
     std::set<std::string> mmeHiddenWarned_;   // models whose .emd asked to hide (one [W] each)
     std::string mmeSuggestApply_;             // the character id the MME suggestion toast's apply button would set
     // M6b: the studio project's MME post stack as RenderSettings entries (empty outside the studio / without a project).
     std::vector<MmeEffectEntry> StudioMmeEntries() const;
     // M6b: applies a studio MME stack change (add / remove / toggle) to the project and the renderer.
     void StudioMmeChanged();
-    // P5: the per-character PBR material source. A saved choice, or the run-wide --material-source override when
-    // given (wins over saved choices). Default when nothing applies.
-    MaterialChoice ResolveMaterialChoice(const std::string& characterId) const;
+    // P5: the per-character PBR material source. The global switch off forces Default; the Auto workflow picks Ray for
+    // a model with a Ray .emd candidate (Default otherwise); --material-source wins over every mode.
+    MaterialChoice ResolveMaterialChoice(const std::string& characterId, const std::filesystem::path& modelPath = {}) const;
+    // The same resolution over an explicit saved map / switch / workflow (the MME panel's draft comparison).
+    MaterialChoice ResolveMaterialChoiceFrom(const std::map<std::string, MaterialChoice>& materials, bool enabled,
+                                             bool autoWorkflow, const std::string& id,
+                                             const std::filesystem::path& modelPath) const;
     MaterialChoiceFn MaterialChoiceResolver() const {
-        return [this](const std::string& id) { return ResolveMaterialChoice(id); };
+        return [this](const std::string& id, const std::filesystem::path& path) {
+            return ResolveMaterialChoice(id, path);
+        };
     }
     // The model's .emd candidates (asset/RayMaterial.h), cached per key (character id / library id / "<path>") for
     // the session so the detail panel never repeats the ~10 ms scan. Empty = none found.
     const std::vector<RayEmdCandidate>& MaterialCandidates(const std::string& key,
-                                                           const std::filesystem::path& modelPath, int pmxMaterialCount);
+                                                           const std::filesystem::path& modelPath, int pmxMaterialCount) const;
     // P6: does the imported model carry PBR data (asset/ModelImport.h ModelHasImportedPbr)? Cached per key like
     // MaterialCandidates; false for PMX/PMD.
     bool ImportedPbrCandidates(const std::string& key, const std::filesystem::path& modelPath);
@@ -790,10 +862,11 @@ private:
     // One toast per character id when a character with no saved material choice has a Ray .emd candidate (never
     // applies). Imitates SuggestShaderPack; skipped in headless / scripted runs and with --material-source.
     void SuggestRayMaterial(const std::string& characterId, const std::filesystem::path& modelPath, int pmxMaterialCount);
-    std::map<std::string, std::vector<RayEmdCandidate>> materialCandidates_;   // session cache (see MaterialCandidates)
+    mutable std::map<std::string, std::vector<RayEmdCandidate>> materialCandidates_;   // session cache (see MaterialCandidates)
+    mutable std::mutex materialCandidatesMutex_;        // MaterialCandidates is reachable from loader worker threads (Auto)
     std::map<std::string, bool> importedPbrCandidates_;                         // P6 session cache (ImportedPbrCandidates)
     std::map<std::string, int> materialCountCache_;                            // session cache (ModelMaterialCount)
-    std::map<std::string, bool> materialSuggestChecked_;                        // ids checked this session
+    std::map<std::string, bool> materialSuggestChecked_;                        // ids checked this session;
     // Play character: the saved settings choice or the --shader-pack override. A character with no saved choice also
     // gets SuggestShaderPack (a toast only; the choice is never set by the app).
     ShaderChoice PlayShaderChoice(const GpuModel& gpu, const std::string& characterId);
@@ -829,8 +902,23 @@ private:
                          PackCompareMode mode);
     // shader pack manager (UiShaders.cpp)
     void DrawShaders();
-    void DrawShaderPackDetail(float x0, float y0, float x1, float y1);
-    // M6b: the shader manager's MME tab detail pane (compile status per pass, unsupported features, missing textures).
+    // MME / Ray-MMD settings screen (UiMme.cpp, Screen::Mme, top tab "MME"): the global switch, the workflow, the
+    // MME post stack and the per-model list. The play-mode panel is the MME tab of DrawPlayFxPanel (UiPlayPanel.cpp).
+    void DrawMme();
+    // The resolved global MME switch / workflow (the run's CLI override wins over the settings). With the switch off
+    // every MME / Ray-MMD feature falls back to its off / Default state.
+    bool MmeGlobalEnabled() const { return options_.mmeGlobal >= 0 ? options_.mmeGlobal != 0 : settings_.mmeEnabled; }
+    bool MmeAutoWorkflow() const { return options_.mmeWorkflow >= 0 ? options_.mmeWorkflow == 1 : settings_.mmeWorkflow == 1; }
+    // True when a run-wide CLI override makes the saved MME switch / workflow not what this run uses (the UI shows a
+    // "명령줄 설정이 우선합니다" hint).
+    bool MmeCliOverrideActive() const { return options_.mmeGlobal >= 0 || options_.mmeWorkflow >= 0; }
+    // The material source the renderers use for a model: the saved / auto choice, forced to Default while MME is
+    // globally off.
+    MaterialChoice EffectiveMaterialChoice(const std::string& id) const {
+        if (!MmeGlobalEnabled()) return MaterialChoice{};
+        return ResolveMaterialChoice(id);
+    }
+    void DrawShaderPackDetail(float x0, float y0, float x1, float y1);    // M6b: the shader manager's MME tab detail pane (compile status per pass, unsupported features, missing textures).
     void DrawMmeDetail(float x0, float y0, float x1, float y1);
     void DrawRemotePackDetail(float x0, float y0, float x1, float y1);
     void DrawNewPackDialog();

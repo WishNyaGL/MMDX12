@@ -100,6 +100,7 @@ Full songs rendered with MMDX12's video mode, uploaded as-is.
 - **Any DirectX 12 graphics card.** The default renderer (soft shadows, ambient occlusion, reflections, bloom) needs no ray-tracing GPU; ray tracing, path tracing and offline GI switch on where the card supports them.
 - **Drag and drop.** Drop a model, a VMD and a song onto the window and they open in the Studio, posed and with music. MMD `.pmm` projects open too (read-only import).
 - **AutoLuminous built in.** Materials set up for そぼろ's AutoLuminous (black specular, power 100 or more) glow on their own in every renderer, no MME needed.
+- **MME · Ray-MMD tab.** Turn MME effects (a model's own bundled effect, the post-effect stack) and Ray-MMD material data on or off with one global switch, and choose them per model. Pick the **Fully automatic** workflow and every model gets the fitting effect and material on its own. The play bar's effect buttons open one **화면 효과** panel (slides in from the right) with three tabs — screen effects, shaders and MME · Ray-MMD; the MME tab edits everything loaded at once and only applies when you press **Apply**.
 - **Transparent video.** Export a PNG sequence with alpha for After Effects, Premiere or DaVinci.
 - **Studio extras**: auto-IK (drag a wrist and the arm follows), keyframed accessories (position, rotation, scale, opacity, parent bone), and baking hair/skirt physics into ordinary keys.
 - **A benchmark** with an online leaderboard, just for fun.

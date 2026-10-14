@@ -46,6 +46,9 @@ progress.md is the session log. Read its latest entry first.
   - High-DPI captures: `--ui-scale 1.5` replaces the monitor's DPI scale (1080p window + 1.5 = a 150 % laptop screen).
   - Scripted UI input: `--ui-script file.txt` (lines `<frame> <command> [args]`: move/down/up/click/dblclick/wheel/key,
     `capture <png>`, `text <chars>`, `mod ctrl|shift down|up`, `studiostate` logs a `STUDIOSTATE` line,
+    `mmeglobal 0|1` / `mmeworkflow auto|manual` set the saved MME switch / workflow and `mmestate` logs a `MMESTATE`
+    line (switch, workflow, per loaded model: id, resolved MME mode, resolved material ray 0|1),
+    `fxpanel <open|close> [effects|shader|mme]` opens / closes the play-mode 화면 효과 side panel on a tab,
     `studioexport`/`studioimport <vmd>` and `studiovpdexport`/`studiovpdimport <vpd>` skip the file dialogs; pose editing:
     `studiobone <name>` clicks that bone's joint, `studiogizmo <x|y|z|yz|zx|xy|rx|ry|rz> <dx> <dy> [steps]` drags a gizmo
     part; `studiostate` also logs `STUDIOPOSE`, `STUDIOPROJ` (including `aspect=`) and one `STUDIOMODEL` line per model). Projects/models
@@ -350,7 +353,16 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   bool false / items 0), passes `PassMme` (post chain), `PassMmeOffscreen` (DefaultEffect lists, MMD self-shadow),
   scene-pass object draws, PT / offline GI MME layer. Per-model choice None / Auto / File (characters None, stages Auto),
   post stack `mmeEffect=`, effect objects (`.x` + same-stem `.fx`, `--mme-object`). Ray-MMD material files stay with the
-  native PBR (Auto skips them; adding ray.x asks first). Compat harness: `python -I tools/mme/mme_compat_run.py
+  native PBR (Auto skips them; adding ray.x asks first). App-level controls: global switch `AppSettings::mmeEnabled`
+  (ini `mmeEnabled=`, `--mme-global 0|1`; off = no MME object effect / no post stack / no effect objects / Ray-MMD
+  material source treated as Default, everywhere) and workflow `AppSettings::mmeWorkflow` (ini `mmeWorkflow=manual|auto`,
+  `--mme-workflow`; Auto "완전 자동" = every model always gets the automatic choices, ignoring the saved per-model ones,
+  no suggestion toasts). `App::ResolveMmeChoice` / `ResolveMaterialChoice` centralise this (CLI `--mme-auto` /
+  `--stage-mme` / `--mme-model` / `--material-source` still win; `--mme-global 0` wins over everything); the MME tab
+  (app/UiMme.cpp, `--screen mme`) and the play-mode "화면 효과" side panel's MME · Ray-MMD tab (app/UiPlayPanel.cpp, a
+  draft: nothing applies until 적용; the same panel's 효과 / 셰이더 tabs apply live, and its effect block is shared
+  with the lobby's 세부 tab as `App::DrawScreenEffectControls`) edit the per-model choices, the post stack and the
+  global switch. Compat harness: `python -I tools/mme/mme_compat_run.py
   [--only ranks] [--no-static] [--sheet-only]` over `captures/mme_lib` (git-ignored downloads: never execute anything
   there). Song packages: bundled stage + stage motion, audio versions, `bg.avi` / overlay video layers (`PassVideo`).
 - MCP (docs/mcp.md): `tools/mmdx12_mcp.cpp` is the stdio MCP bridge; it forwards tool calls over the named pipe

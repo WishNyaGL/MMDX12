@@ -16,3 +16,5 @@ CLAUDE.local.md
 /dist/
 /library.zip
 __pycache__/
+# user studio projects saved inside the repo (personal data, not test fixtures)
+/projects/

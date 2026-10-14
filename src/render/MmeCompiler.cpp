@@ -406,6 +406,13 @@ std::string OctEncodeText() {
         "}\n"
         "float3 __mmdx_srgb_to_linear(float3 c) {\n"
         "    return c <= 0.04045 ? c / 12.92 : pow(max(c, 0.0) * (1.0 / 1.055) + 0.055 / 1.055, 2.4);\n"
+        "}\n"
+        // NaN / Inf -> 0 by the exponent bits (the compiler may fold `x == x` away). One bad pixel from an effect
+        // otherwise spreads through volumetric / convolution bloom until the whole frame is black.
+        "float4 __mmdx_finite(float4 v) { return ((asuint(v) & 0x7f800000u) == 0x7f800000u) ? 0.0 : v; }\n"
+        "float3 __mmdx_safe_normal(float3 n) {\n"
+        "    n = __mmdx_finite(float4(n, 0)).xyz;\n"
+        "    return dot(n, n) > 1e-12 ? normalize(n) : float3(0, 0, -1);\n"
         "}\n";
 }
 
@@ -811,12 +818,14 @@ public:
             s += "    __mmdx_ps_out __o;\n";
             // The effect's own alpha: it is the blend factor of the pass's alpha / additive blending (particles,
             // floors, sprites). Forcing 1 here made every translucent object draw opaque.
+            s += "    __c = __mmdx_finite(__c);\n";
             s += "    __o.c0 = (gMmdxParams.y != 0) ? float4(__mmdx_srgb_to_linear(saturate(__c.rgb)) * gMmdxParams.x, __c.a) : __c;\n";
-            s += "    float3 __n = normalize(IN." + nrmField + ".xyz);\n";
+            s += "    __o.c0 = float4(clamp(__o.c0.rgb, 0.0, 65000.0), saturate(__o.c0.a));\n";
+            s += "    float3 __n = __mmdx_safe_normal(IN." + nrmField + ".xyz);\n";
             s += "    __o.c1 = float4(__mmdx_oct_encode(__n), -1.0, 1.0);\n";
             s += "    float2 __uvc = IN." + curField + ".xy / IN." + curField + ".w * float2(0.5, -0.5) + 0.5;\n";
             s += "    float2 __uvp = IN." + prvField + ".xy / IN." + prvField + ".w * float2(0.5, -0.5) + 0.5;\n";
-            s += "    __o.c2 = float4(__uvc - __uvp, 0, 0);\n";
+            s += "    __o.c2 = __mmdx_finite(float4(__uvc - __uvp, 0, 0));\n";
             s += "    return __o;\n";
             s += "}\n";
         } else {

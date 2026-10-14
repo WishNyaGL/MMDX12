@@ -149,18 +149,44 @@ int App::MaterialOverrideCount(const ShaderChoice& choice) { return (int)choice.
 
 // M6a: the model's MME choice. The saved per-character / per-stage choice (unless a run-wide CLI override applies),
 // defaulting to None for characters and Auto for stages. `id` may be empty (no saved choice): then the CLI overrides
-// or the kind default decide.
-MmeChoice App::ResolveMmeChoice(const std::string& id, bool isStage) const {
+// or the kind default decide. The global MME switch off wins over everything (no MME object effect anywhere); the
+// Auto workflow forces the automatic choice (Auto) for every model regardless of what is saved. `modelPath` is
+// reserved for the Auto workflow (an object effect needs the model's own files).
+MmeChoice App::ResolveMmeChoice(const std::string& id, bool isStage, const std::filesystem::path& modelPath) const {
+    (void)modelPath;
+    if (!MmeGlobalEnabled()) return MmeChoice{};   // global off: nothing MME applies
     // --mme-auto forces None / Auto for every model; --stage-mme does the same for stages only (and wins for stages).
     if (isStage && options_.stageMmeSet) return {options_.stageMme != 0 ? MmeChoice::Auto : MmeChoice::None, {}};
     if (options_.mmeAutoSet) return {options_.mmeAuto != 0 ? MmeChoice::Auto : MmeChoice::None, {}};
+    if (MmeAutoWorkflow()) return MmeChoice{MmeChoice::Auto, {}};   // 완전 자동: every model gets its own files
     if (!id.empty()) return isStage ? settings_.StageMme(id) : settings_.CharacterMme(id);
     return isStage ? MmeChoice{MmeChoice::Auto, {}} : MmeChoice{};
 }
 
+// The same resolution around an explicit saved choice (a studio project model's MmeChoice).
+MmeChoice App::ResolveMmeChoiceFor(const MmeChoice& saved, bool isStage,
+                                   const std::filesystem::path& modelPath) const {
+    (void)modelPath;
+    if (!MmeGlobalEnabled()) return MmeChoice{};
+    if (isStage && options_.stageMmeSet) return {options_.stageMme != 0 ? MmeChoice::Auto : MmeChoice::None, {}};
+    if (options_.mmeAutoSet) return {options_.mmeAuto != 0 ? MmeChoice::Auto : MmeChoice::None, {}};
+    if (MmeAutoWorkflow()) return MmeChoice{MmeChoice::Auto, {}};
+    return saved;
+}
+
+// Auto (완전 자동) is the decider only when no run-wide CLI override (--mme-auto / --stage-mme) did: those force the
+// choice explicitly and are the user's own call (the required-controller skip is for the automatic assignment).
+bool App::MmeAutoSkipApplies(const MmeChoice& mme, bool isStage) const {
+    if (mme.mode != MmeChoice::Auto) return false;
+    if (options_.mmeAutoSet) return false;
+    if (isStage && options_.stageMmeSet) return false;
+    return MmeAutoWorkflow();
+}
+
 // M6a: the per-material effect files a choice assigns. None = native shading, Auto = the model's own files
 // (FindModelEffects: .emd / same-name .fx / name[fx].pmx), File = one effect for every material.
-void App::ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::filesystem::path& modelPath) {
+void App::ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::filesystem::path& modelPath,
+                         bool autoWorkflow) {
     const size_t count = gpu.Materials().size();
     if (choice.mode == MmeChoice::None) {
         gpu.SetMmeEffects({});
@@ -191,6 +217,23 @@ void App::ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::file
             perMaterial[(size_t)a.subset] = a.effect;
         }
     }
+    if (autoWorkflow && !modelPath.empty()) {
+        // Auto (완전 자동) only: an effect that reads a required external controller object which is not in the scene
+        // renders the whole model as a dark translucent silhouette (the binder uses the missing-object defaults). Such
+        // a model resolves to native shading for MME: no object effect on any of its materials (partial looks broken
+        // too). The decision is cached by (path, scene-names key); it re-evaluates when the scene model set changes,
+        // so the effect applies again once the controller appears.
+        const std::string skip = MmeControllerSkip(modelPath);
+        if (!skip.empty()) {
+            const std::string logKey = PathToUtf8(modelPath) + "|" + skip;
+            if (mmeSkipLogged_.insert(logKey).second)
+                LOG_INFO("MME auto: %s: skipped (needs controller '%s')", PathToUtf8(modelPath).c_str(),
+                         skip.c_str());
+            gpu.SetMmeEffects({});
+            return;
+        }
+    }
+
     if (hidden && !modelPath.empty() && mmeHiddenWarned_.insert(PathToUtf8(modelPath)).second)
         LOG_WARN("MME: %s asks to hide the model (Obj.show = false); ignored for now",
                  PathToUtf8(modelPath).c_str());
@@ -198,6 +241,91 @@ void App::ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::file
         LOG_INFO("MME: %s: %zu Ray-MMD material assignment(s) left to the native PBR", PathToUtf8(modelPath).c_str(),
                  raySkipped);
     gpu.SetMmeEffects(std::move(perMaterial));
+}
+
+// The lower-case names a CONTROLOBJECT lookup can match (render/PassMmeOffscreen.cpp MmeSceneLookup): each loaded
+// model's source file name and display name, plus the MME effect objects' file / display names. Play: center +
+// extras + stages + effect objects. Studio: the project's models. Cached per scene model set (count + pointers): the
+// cheap key is built every call, the name list only when it changed.
+const std::vector<std::string>& App::MmeSceneNames() {
+    std::string key;
+    if (studio_) {
+        for (const auto& m : studio_->models) {
+            key += 's';
+            key += std::to_string((uintptr_t)m.get());
+            key += '.';
+            key += std::to_string((uintptr_t)m->gpu.get());
+        }
+    } else if (scene_) {
+        if (scene_->character) {
+            key += 'c';
+            key += std::to_string((uintptr_t)scene_->characterGpu.get());
+        }
+        for (size_t i = 0; i < scene_->stages.size() && i < scene_->stageGpu.size(); ++i) {
+            key += 't';
+            key += std::to_string((uintptr_t)scene_->stageGpu[i].get());
+        }
+        for (const auto& e : scene_->extras) {
+            key += 'e';
+            key += std::to_string((uintptr_t)e.gpu.get());
+        }
+        for (const auto& o : scene_->effectObjects) {
+            key += 'o';
+            key += std::to_string((uintptr_t)o.mesh.get());
+        }
+    }
+    if (key == mmeSceneNamesKey_) return mmeSceneNames_;   // unchanged: no rebuild, no per-frame allocation
+    mmeSceneNamesKey_ = key;
+    std::vector<std::string> names;
+    const auto add = [&](const std::filesystem::path& p, const std::string& display) {
+        if (!p.empty()) names.push_back(ToLowerAscii(PathToUtf8(p.filename())));
+        if (!display.empty()) names.push_back(ToLowerAscii(display));
+    };
+    if (studio_) {
+        for (const auto& m : studio_->models)
+            add(m->path, m->pmx && !m->pmx->name.empty() ? m->pmx->name : m->name);
+    } else if (scene_) {
+        if (scene_->character) add(scene_->character->Model().sourcePath, scene_->characterDisplayName);
+        for (size_t i = 0; i < scene_->stages.size() && i < scene_->stageGpu.size(); ++i) {
+            // stages carry no motion instance: AppendMmeObject fills the display name only (no file name)
+            const std::string display = scene_->stageGpu[i]->Name();
+            if (!display.empty()) names.push_back(ToLowerAscii(display));
+        }
+        for (const auto& e : scene_->extras) {
+            if (!e.gpu) continue;
+            add(e.instance ? e.instance->Model().sourcePath : std::filesystem::path(),
+                !e.displayName.empty() ? e.displayName : e.gpu->Name());
+        }
+        for (const auto& o : scene_->effectObjects) {
+            if (!o.fileName.empty()) names.push_back(ToLowerAscii(o.fileName));
+            if (!o.displayName.empty()) names.push_back(ToLowerAscii(o.displayName));
+        }
+    }
+    mmeSceneNames_ = std::move(names);
+    // scene model set changed: the per-model auto decision cache no longer applies (re-evaluated, not latched)
+    mmeAutoSkip_.clear();
+    return mmeSceneNames_;
+}
+
+// The required controller a model's Auto assignment needs but the scene lacks (lower case), or "" when nothing is
+// missing. Cached by (model path, scene-names key) in mmeAutoSkip_ so ApplyMmeEffect's per-frame call is one lookup.
+std::string App::MmeControllerSkip(const std::filesystem::path& modelPath) {
+    if (modelPath.empty()) return {};
+    const std::vector<std::string>& names = MmeSceneNames();   // also refreshes the cache key
+    const std::string cacheKey = PathToUtf8(modelPath) + "|" + mmeSceneNamesKey_;
+    const auto it = mmeAutoSkip_.find(cacheKey);
+    if (it != mmeAutoSkip_.end()) return it->second;
+    // The Auto effects this model would use (Ray-MMD material files are left to the native PBR, as ApplyMmeEffect does).
+    std::string skip;
+    for (const MmeAssignment& a : FindModelEffects(modelPath)) {
+        if (a.effect.empty() || IsRayMaterialFx(a.effect)) continue;
+        for (const std::string& c : MmeRequiredControllers(a.effect)) {
+            if (std::find(names.begin(), names.end(), c) == names.end()) { skip = c; break; }
+        }
+        if (!skip.empty()) break;
+    }
+    mmeAutoSkip_[cacheKey] = skip;
+    return skip;
 }
 
 // Per-material class / default shading of a pack model. One row per material: name + a class dropdown ("자동" shows the
@@ -656,6 +784,7 @@ void App::DrawRayMmeConfirm() {
 // offers an apply button (DrawToast); never applied automatically. Remembered per character id.
 void App::SuggestMme(const std::string& characterId, const std::filesystem::path& modelPath) {
     if (characterId.empty() || options_.mmeAutoSet || options_.mmeModelSet || HeadlessRun()) return;
+    if (!MmeGlobalEnabled() || MmeAutoWorkflow()) return;   // no suggestions with MME off / in 완전 자동
     if (settings_.CharacterMme(characterId).mode != MmeChoice::None) return;
     if (settings_.MmeSuggested(characterId)) return;
     if (!ModelShipsMme(modelPath)) return;
@@ -692,8 +821,12 @@ bool App::DrawMmeRow(const char* id, MmeChoice& choice, const std::string& model
                           : choice.mode == MmeChoice::File  ? PathToUtf8(choice.file.filename())
                                                             : std::string(Tr("없음"));
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink));
-    const bool open = ImGui::BeginCombo(id, preview.c_str(), ImGuiComboFlags_HeightLarge | ImGuiComboFlags_NoArrowButton);
+    // the app style has no window padding: give the dropdown a margin so its first / last rows are not cut
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(6.0f), Dp(6.0f)));
+    const bool open = ImGui::BeginCombo(id, preview.c_str(), ImGuiComboFlags_HeightLargest | ImGuiComboFlags_NoArrowButton);
+    ImGui::PopStyleVar();
     ImGui::PopStyleColor();
+    uiprobe::Info(ImGui::GetItemID(), id, preview.c_str());   // MCP / guide scripts find the dropdown by its id
     {
         const ImVec2 cmax = ImGui::GetItemRectMax(), cmin = ImGui::GetItemRectMin();
         Icon(dl, icon::CaretDown, 12.0f, ImVec2(cmax.x - Dp(12.0f), (cmin.y + cmax.y) * 0.5f), p.ink3);
@@ -981,18 +1114,43 @@ bool App::DrawShaderPackParams(ShaderChoice& choice) {
 
 // ---- PBR material source (P5) ---------------------------------------------------------------------------------------
 
-MaterialChoice App::ResolveMaterialChoice(const std::string& characterId) const {
-    // --material-source wins over saved choices: Ray for every model, Default for none.
+MaterialChoice App::ResolveMaterialChoice(const std::string& characterId, const std::filesystem::path& modelPath) const {
+    return ResolveMaterialChoiceFrom(settings_.characterMaterials, MmeGlobalEnabled(), MmeAutoWorkflow(), characterId,
+                                     modelPath);
+}
+
+// The resolution over an explicit saved map / switch / workflow: the MME panel's draft comparison uses it.
+MaterialChoice App::ResolveMaterialChoiceFrom(const std::map<std::string, MaterialChoice>& materials, bool enabled,
+                                              bool autoWorkflow, const std::string& characterId,
+                                              const std::filesystem::path& modelPath) const {
+    // --mme-global 0 wins over everything: Ray-MMD material data is treated as Default.
+    if (!enabled) return MaterialChoice{};
+    // --material-source wins over saved choices and the workflow: Ray for every model, Default for none.
     if (options_.materialSourceSet) {
         MaterialChoice c;
         c.ray = options_.materialSource == 1;
         return c;
     }
-    return characterId.empty() ? MaterialChoice{} : settings_.CharacterMaterial(characterId);
+    // 완전 자동: Ray (auto candidate, empty .emd) for every model that has a Ray .emd candidate, Default otherwise.
+    if (autoWorkflow) {
+        if (modelPath.empty()) return MaterialChoice{};
+        const std::string key = (characterId.empty() ? PathToUtf8(modelPath) : characterId) + "|auto";
+        const std::vector<RayEmdCandidate>& cands = MaterialCandidates(key, modelPath, 0);
+        MaterialChoice c;
+        c.ray = std::any_of(cands.begin(), cands.end(),
+                            [](const RayEmdCandidate& e) { return !e.readFailed && e.rayEntries > 0; });
+        return c;
+    }
+    const auto it = materials.find(characterId);
+    return (characterId.empty() || it == materials.end()) ? MaterialChoice{} : it->second;
 }
 
 const std::vector<RayEmdCandidate>& App::MaterialCandidates(const std::string& key,
-                                                            const std::filesystem::path& modelPath, int pmxMaterialCount) {
+                                                            const std::filesystem::path& modelPath,
+                                                            int pmxMaterialCount) const {
+    // Reachable from loader worker threads too (the Auto workflow calls it through the material resolver), so the
+    // session cache is guarded; the returned reference outlives the lock (the map is never erased).
+    std::lock_guard<std::mutex> lock(materialCandidatesMutex_);
     auto it = materialCandidates_.find(key);
     if (it != materialCandidates_.end()) return it->second;
     std::vector<RayEmdCandidate> cands = FindRayEmdCandidates(modelPath, pmxMaterialCount);  // ~10 ms, cached per session
@@ -1073,8 +1231,10 @@ bool App::DrawMaterialSelector(const char* id, MaterialChoice& choice, const std
     ImGui::SetNextItemWidth(width);
     PushFont(Font::Regular, size::Small);
     bool comboChanged = false;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(6.0f), Dp(6.0f)));
     const bool emdOpen = ImGui::BeginCombo((std::string(id) + "_emd").c_str(), preview.c_str(),
                                            ImGuiComboFlags_HeightLarge | ImGuiComboFlags_NoArrowButton);
+    ImGui::PopStyleVar();
     {   // a quiet caret instead of ImGui's arrow box (as the material class dropdown)
         const ImVec2 cmax = ImGui::GetItemRectMax(), cmin = ImGui::GetItemRectMin();
         Icon(ImGui::GetWindowDrawList(), icon::CaretDown, 12.0f, ImVec2(cmax.x - Dp(12.0f), (cmin.y + cmax.y) * 0.5f),
@@ -1120,6 +1280,7 @@ bool App::DrawMaterialSelector(const char* id, MaterialChoice& choice, const std
 
 void App::SuggestRayMaterial(const std::string& characterId, const std::filesystem::path& modelPath, int pmxMaterialCount) {
     if (characterId.empty() || options_.materialSourceSet || HeadlessRun()) return;
+    if (!MmeGlobalEnabled() || MmeAutoWorkflow()) return;   // no suggestions with MME off / in 완전 자동
     if (ImportedPbrCandidates(characterId, modelPath)) return;   // P6: imported models get no suggestion toast
     if (!materialSuggestChecked_.emplace(characterId, true).second) return;
     if (settings_.CharacterMaterial(characterId).ray || settings_.MaterialSuggested(characterId)) return;
@@ -1214,6 +1375,20 @@ void App::DrawStudioMaterialRow(float w) {
         Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("재질 데이터"));
         ImGui::Dummy(ImVec2(w, Dp(20.0f)));
     }
+    // The global switch off / the Auto workflow decide the material source: show what applies, disabled.
+    if (!MmeGlobalEnabled() || MmeAutoWorkflow()) {
+        const MaterialChoice resolved = ResolveMaterialChoice(m->libraryId, m->path);
+        PushFont(Font::Regular, size::Caption);
+        ImGui::TextDisabled("%s", Tr("완전 자동 / MME 꺼짐: 재질 소스가 자동으로 정해집니다"));
+        PopFont();
+        const std::string label = std::string(Tr("적용: ")) + (resolved.ray ? "Ray-MMD" : Tr("기본"));
+        ImGui::BeginDisabled(true);
+        PushFont(Font::Regular, size::Small);
+        ImGui::TextUnformatted(label.c_str());
+        PopFont();
+        ImGui::EndDisabled();
+        return;
+    }
     MaterialChoice material = m->material;
     if (options_.materialSourceSet) {
         PushFont(Font::Regular, size::Caption);
@@ -1242,6 +1417,23 @@ void App::DrawStudioMmeRow(float w) {
         const ImVec2 c = ImGui::GetCursorScreenPos();
         Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("MME"));
         ImGui::Dummy(ImVec2(w, Dp(20.0f)));
+    }
+    // The global switch off / the Auto workflow override the project's own choice: show what applies, disabled.
+    if (!MmeGlobalEnabled() || MmeAutoWorkflow()) {
+        const MmeChoice mme = ResolveMmeChoiceFor(m->mme, m->kind == studio::ModelKind::Stage, m->path);
+        PushFont(Font::Regular, size::Caption);
+        ImGui::TextDisabled("%s", Tr("완전 자동 / MME 꺼짐: 저장한 설정 대신 자동 효과를 씁니다"));
+        PopFont();
+        const std::string label = std::string(Tr("적용: ")) +
+            (mme.mode == MmeChoice::Auto ? Tr("모델 동봉 효과")
+             : mme.mode == MmeChoice::File ? PathToUtf8(mme.file.filename())
+                                           : Tr("없음"));
+        ImGui::BeginDisabled(true);
+        PushFont(Font::Regular, size::Small);
+        ImGui::TextUnformatted(label.c_str());
+        PopFont();
+        ImGui::EndDisabled();
+        return;
     }
     MmeChoice mme = m->mme;
     if (DrawMmeRow("##studiomme", mme, m->libraryId, m->path, w)) {

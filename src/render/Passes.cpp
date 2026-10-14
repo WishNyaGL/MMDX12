@@ -1874,6 +1874,12 @@ void ScenePass::Execute(PassContext& pc) {
             if (mmeView && model->HasMmeEffects() && pc.mme && pc.mmeSkin) {
                 DrawMmeModel(pc, *model, rt, mmeHandled);
                 bindSceneRoot();
+                // the root signature switch dropped every root argument: the view's scene constants too (stale ones
+                // projected the remaining native materials through the MME constants: black wedges / frames)
+                cmd->SetGraphicsRootConstantBufferView(0, vd.constants);
+                cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                cmd->RSSetViewports(1, &viewport);
+                cmd->RSSetScissorRects(1, &scissor);
                 if (pack) {
                     const auto pset = pack->sets.find(PackSetKey(model->ShaderTextureFolder()));
                     if (pset != pack->sets.end() && pset->second.srv != DescriptorHeap::kInvalid)
@@ -1937,6 +1943,10 @@ void ScenePass::Execute(PassContext& pc) {
                     // edge (it may bind and then find no edge technique for any material).
                     const bool drewEdge = DrawMmeEdges(pc, *model);
                     bindSceneRoot();
+                    cmd->SetGraphicsRootConstantBufferView(0, vd.constants);
+                    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                    cmd->RSSetViewports(1, &viewport);
+                    cmd->RSSetScissorRects(1, &scissor);
                     BindModelBuffers(cmd, *model, pc.frame);
                     cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
                     cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));

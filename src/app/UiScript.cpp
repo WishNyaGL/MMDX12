@@ -673,6 +673,49 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 StudioMmeChanged();
             }
         }
+    } else if (cmd == "mmeglobal") {  // mmeglobal <0|1>: the saved global MME switch
+        if (!args.empty()) {
+            settings_.mmeEnabled = std::atoi(args[0].c_str()) != 0;
+            settings_.Save(settingsPath_);
+            ApplyRenderSettings();
+        }
+    } else if (cmd == "mmeworkflow") {  // mmeworkflow <auto|manual>: the saved MME workflow
+        if (!args.empty()) {
+            const std::string v = ToLowerAscii(args[0]);
+            if (v == "auto") settings_.mmeWorkflow = 1;
+            else if (v == "manual") settings_.mmeWorkflow = 0;
+            settings_.Save(settingsPath_);
+            ApplyRenderSettings();
+        }
+    } else if (cmd == "fxpanel") {  // fxpanel <open|close> [effects|shader|mme]: the play-mode 화면 효과 panel
+        if (!args.empty()) playPanelOpen_ = args[0] != "close";
+        if (args.size() > 1) {
+            const std::string tab = ToLowerAscii(args[1]);
+            if (tab == "effects") settings_.playPanelTab = 0;
+            else if (tab == "shader") settings_.playPanelTab = 1;
+            else if (tab == "mme") settings_.playPanelTab = 2;
+        }
+    } else if (cmd == "mmestate") {  // mmestate: logs an MMESTATE line (global switch + workflow + per loaded model)
+        std::string models;
+        const auto addModel = [&](const std::string& id, const std::filesystem::path& path, bool isStage) {
+            const MmeChoice mme = ResolveMmeChoice(id, isStage, path);
+            const MaterialChoice mc = ResolveMaterialChoice(id, path);
+            const char* mode = mme.mode == MmeChoice::Auto ? "auto" : mme.mode == MmeChoice::File ? "file" : "none";
+            std::string entry = id + ":" + mode + ":ray" + (mc.ray ? "1" : "0");
+            if (MmeAutoSkipApplies(mme, isStage)) {
+                const std::string skip = MmeControllerSkip(path);
+                if (!skip.empty()) entry += ":skip=" + skip;
+            }
+            models += (models.empty() ? "" : ",") + entry;
+        };
+        if (scene_) {
+            if (scene_->character) addModel(scene_->characterId, scene_->character->Model().sourcePath, false);
+            for (const auto& e : scene_->extras)
+                if (e.instance) addModel(e.characterId, e.instance->Model().sourcePath, false);
+            for (const auto& st : scene_->stages) addModel(scene_->stageId, st->Model().sourcePath, true);
+        }
+        LOG_INFO("MMESTATE enabled=%d workflow=%s models=%s", (int)MmeGlobalEnabled(),
+                 MmeAutoWorkflow() ? "auto" : "manual", models.empty() ? "-" : models.c_str());
     } else if (cmd == "log") {
         LOG_INFO("UISCRIPT %s", args.empty() ? "" : args[0].c_str());
     } else if (cmd == "updatecheck") {  // synchronous update-feed check, logs UPDATECHECK

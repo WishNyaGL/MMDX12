@@ -63,6 +63,9 @@ struct ScenePackage {
     // M8b: the song's video layers (background + overlay), resolved by the App from the song / ini override and
     // passed through the (copyable) package so the loader worker does not need the App.
     std::vector<VideoLayerDesc> videos;
+    // The cast a formation scene was loaded with (empty for a single performer): kept so a material-source change can
+    // reload the same formation (App::ReloadPlaySceneForMaterial).
+    std::vector<PerformerCast> formation;
 };
 
 struct LoadProgress {

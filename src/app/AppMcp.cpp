@@ -34,6 +34,7 @@ const char* App::ScreenName(Screen s) const {
     case Screen::BenchResult: return "bench_result";
     case Screen::BenchRender: return "bench_render";
     case Screen::Studio: return "studio";
+    case Screen::Mme: return "mme";
     }
     return "unknown";
 }
@@ -236,8 +237,9 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             s["audio_playing"] = audio_.IsPlaying();
             s["audio_time"] = audio_.PositionSeconds();
         }
-        // the lobby selection = what play mode shows (MCP loads keep it in sync)
-        s["character"] = selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size()
+        // the loaded center performer when a scene runs (a formation is not the lobby's character)
+        s["character"] = scene_ && !scene_->characterDisplayName.empty() ? scene_->characterDisplayName
+                         : selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size()
                              ? library_.characters[(size_t)selCharacter_].displayName
                              : std::string(scene_ ? scene_->characterId : "");
         if (scene_ && !scene_->extras.empty()) {

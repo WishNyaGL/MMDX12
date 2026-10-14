@@ -104,13 +104,17 @@ void App::DrawAppBar(int activeNav) {
 
     // Primary navigation.
     ImGui::SetCursorScreenPos(ImVec2(navX, (h - Dp(38.0f)) * 0.5f));
-    const char* nav[] = {Tr("라이브러리"), Tr("셰이더"), Tr("벤치마크")};
-    const char* navIcons[] = {icon::Stack, icon::Diamond, icon::Gauge};
+    const char* nav[] = {Tr("라이브러리"), Tr("셰이더"), Tr("MME"), Tr("벤치마크")};
+    const char* navIcons[] = {icon::Stack, icon::Diamond, icon::Sparkle, icon::Gauge};
     int sel = activeNav;
-    if (Segmented("##nav", nav, 3, &sel, 0.0f, 38.0f, navIcons)) {
-        if (sel == 2) {
+    const bool navChanged = Segmented("##nav", nav, 4, &sel, 0.0f, 38.0f, navIcons);
+    const float navEnd = ImGui::GetItemRectMax().x;   // the right cluster must not run into the tabs
+    if (navChanged) {
+        if (sel == 3) {
             screen_ = Screen::BenchLobby;
             RefreshLeaderboard();
+        } else if (sel == 2) {
+            screen_ = Screen::Mme;
         } else if (sel == 1) {
             screen_ = Screen::Shaders;
         } else {
@@ -120,11 +124,20 @@ void App::DrawAppBar(int activeNav) {
 
     // Library folder (right side): opens a small editor popup.
     const std::string path = PathToUtf8(library_.root.empty() ? ResolveLibraryPath() : library_.root);
-    const float pillW = Dp(300.0f);
+    // The path pill takes what is left between the tabs and the icon buttons (narrow windows / large UI scales):
+    // full width when it fits, a folder icon alone when it does not, and the MCP badge only when it still fits.
     const float right = W - Dp(kPad);
-    const ImVec2 pa(right - pillW - Dp(166.0f), (h - Dp(36.0f)) * 0.5f);
+    const float pillRight = right - Dp(166.0f);
+    const bool mcpShown = mcpServer_ && mcpServer_->IsConnected();
+    const float mcpSpace = mcpShown ? Dp(68.0f + 12.0f) : 0.0f;
+    float room = pillRight - (navEnd + Dp(16.0f));
+    const bool mcpFits = mcpShown && room - mcpSpace >= Dp(36.0f);
+    if (mcpFits) room -= mcpSpace;
+    const bool compactPath = room < Dp(160.0f);
+    const float pillW = compactPath ? Dp(36.0f) : std::min(Dp(300.0f), room);
+    const ImVec2 pa(pillRight - pillW, (h - Dp(36.0f)) * 0.5f);
 
-    if (mcpServer_ && mcpServer_->IsConnected()) {
+    if (mcpFits) {
         const float mcpW = Dp(68.0f);
         const ImVec2 mcpPos(pa.x - mcpW - Dp(12.0f), (h - Dp(28.0f)) * 0.5f);
         dl->AddRectFilled(mcpPos, ImVec2(mcpPos.x + mcpW, mcpPos.y + Dp(28.0f)), WithAlpha(p.accent, 0.15f), Dp(14.0f));
@@ -145,10 +158,11 @@ void App::DrawAppBar(int activeNav) {
     const float hv = Anim(ImGui::GetID("##libpathanim"), hovered);
     dl->AddRectFilled(pa, ImVec2(pa.x + pillW, pa.y + Dp(36.0f)), Mix(p.sunken, Mix(p.sunken, p.lineStrong, 0.5f), hv),
                       Dp(18.0f));
-    Icon(dl, icon::FolderOpen, 16.0f, ImVec2(pa.x + Dp(20.0f), pa.y + Dp(18.0f)), p.ink2);
-    TextEllipsis(dl, Font::Regular, size::Small, ImVec2(pa.x + Dp(36.0f), pa.y + Dp(9.0f)), pa.x + pillW - Dp(14.0f),
-                 p.ink2, path.c_str());
-    if (hovered) Tooltip(Tr("라이브러리 폴더 변경"));
+    Icon(dl, icon::FolderOpen, 16.0f, ImVec2(pa.x + (compactPath ? pillW * 0.5f : Dp(20.0f)), pa.y + Dp(18.0f)), p.ink2);
+    if (!compactPath)
+        TextEllipsis(dl, Font::Regular, size::Small, ImVec2(pa.x + Dp(36.0f), pa.y + Dp(9.0f)),
+                     pa.x + pillW - Dp(14.0f), p.ink2, path.c_str());
+    if (hovered) Tooltip(compactPath ? path.c_str() : Tr("라이브러리 폴더 변경"));
     if (clicked) ImGui::OpenPopup("##libpopup");
     ImGui::SetCursorScreenPos(ImVec2(right - Dp(76.0f), (h - Dp(36.0f)) * 0.5f));
     if (IconButton("##lang", icon::Globe, Tr("언어"))) ImGui::OpenPopup("##langpopup");
@@ -1062,9 +1076,7 @@ void App::DrawSelect() {
                 changed |= Switch("##shadows", Tr("그림자"), &settings_.shadows);
                 changed |= Switch("##ssao", Tr("앰비언트 오클루전"), &settings_.ssao);
                 changed |= Switch("##ssr", Tr("화면 공간 반사"), &settings_.ssr);
-                changed |= Switch("##bloom", Tr("블룸"), &settings_.bloom);
-                changed |= Switch("##autolum", Tr("오토루미너스 발광"), &settings_.autoLuminous,
-                                  Tr("AutoLuminous 규격 재질의 자체 발광"));
+                // 블룸 / 오토루미너스 are drawn by the shared effect block below (DrawScreenEffectControls).
                 changed |= Switch("##taa", "TAA", &settings_.taa, Tr("시간 누적 안티에일리어싱"));
                 changed |= Switch("##edges", Tr("외곽선"), &settings_.drawEdges);
                 changed |= Switch("##motionlight", Tr("모션 조명·그림자"), &settings_.motionLighting,
@@ -1110,32 +1122,9 @@ void App::DrawSelect() {
                     else ShutdownMcp();
                 }
                 Gap(14.0f);
-                SectionLabel(Tr("효과"));
-                bool fx = false;
-                fx |= Switch("##dof", Tr("피사계 심도"), &settings_.dof, Tr("캐릭터에 초점을 맞추고 배경을 흐림"));
-                if (settings_.dof) { Gap(6.0f); fx |= SliderRow("##dofap", Tr("조리개"), &settings_.dofAperture, 0.2f, 3.0f, "%.2f"); Gap(6.0f); }
-                fx |= Switch("##vol", Tr("볼류메트릭 라이트"), &settings_.volumetric, Tr("빛줄기와 조명 산란"));
-                if (settings_.volumetric) { Gap(6.0f); fx |= SliderRow("##vold", Tr("안개 밀도"), &settings_.volumetricDensity, 0.25f, 4.0f, "%.2f"); Gap(6.0f); }
-                fx |= Switch("##bloomconv", Tr("컨볼루션 블룸"), &settings_.bloomConvolution, Tr("FFT 스타버스트 블룸"));
-                Gap(10.0f);
-                SectionLabel(Tr("컬러 LUT"));
-                int lutCount = 1 + (int)luts_.size();
-                for (int i = 0; i < lutCount; ++i) {
-                    if (i % 2) ImGui::SameLine(0, Dp(8.0f));
-                    ImGui::PushID(i);
-                    const ColorLutEntry* e = i > 0 ? &luts_[(size_t)i - 1] : nullptr;
-                    if (Chip("##lut", e ? Tr(e->displayName.c_str()) : Tr("없음"), icon::Image,
-                             settings_.colorLut == (e ? e->id : std::string()), chipW)) {
-                        settings_.colorLut = e ? e->id : std::string();
-                        fx = true;
-                    }
-                    ImGui::PopID();
-                }
-                if (!settings_.colorLut.empty()) fx |= SliderRow("##lutint", Tr("LUT 강도"), &settings_.lutIntensity, 0.0f, 1.0f, "%.2f");
-                if (fx) {
-                    ApplyRenderSettings();
-                    settings_.Save(settingsPath_);
-                }
+                // The effect block is shared with the play panel's 효과 tab (App::DrawScreenEffectControls): it
+                // draws, applies and saves, and leaves the named presets like the toggles below.
+                DrawScreenEffectControls(colW);
                 if (changed) {
                     // touching an effect toggle leaves the named presets
                     settings_.graphicsPreset = 4;

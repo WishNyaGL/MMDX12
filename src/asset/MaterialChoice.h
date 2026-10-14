@@ -4,6 +4,7 @@
 //   Default            : no Ray-MMD material data, the model renders exactly as before (choice.ray == false).
 //   Ray-MMD            : the model's Ray-MMD material data is parsed and decoded (choice.ray == true). The .emd
 //                        is either the best content-based candidate (empty `emd`) or the user's explicit file.
+#include <filesystem>
 #include <functional>
 #include <string>
 
@@ -15,8 +16,9 @@ struct MaterialChoice {
     bool operator==(const MaterialChoice&) const = default;
 };
 
-// Resolves a model's saved material choice by its library character id (empty id = a stage / no id). Returns an
+// Resolves a model's effective material choice by its library id and model path (empty id = a stage / no id).
+// The path is needed by the Auto workflow (it picks Ray-MMD for a model with a Ray .emd candidate). Returns an
 // empty (Default) choice when nothing was saved. Built by the App from AppSettings; used on the loader worker.
-using MaterialChoiceFn = std::function<MaterialChoice(const std::string& libraryId)>;
+using MaterialChoiceFn = std::function<MaterialChoice(const std::string& libraryId, const std::filesystem::path& modelPath)>;
 
 } // namespace mmdx

@@ -73,8 +73,8 @@ bool LoadModel(const std::filesystem::path& path, ModelRole role, const std::str
 bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset* song,
                        StudioPackage& out, LoadProgress* progress, std::string* error,
                        const MaterialChoiceFn& materialChoice) {
-    const auto choiceFor = [&](const std::string& id) {
-        return materialChoice ? materialChoice(id) : MaterialChoice{};
+    const auto choiceFor = [&](const std::string& id, const std::filesystem::path& path) {
+        return materialChoice ? materialChoice(id, path) : MaterialChoice{};
     };
     try {
         out = StudioPackage{};
@@ -92,7 +92,8 @@ bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage,
                 part.libraryId = stage->id;   // P5: a stage's material choice is keyed by its library id
                 std::string err;
                 const float f0 = 0.05f + 0.35f * (float)k / (float)n, f1 = 0.05f + 0.35f * (float)(k + 1) / (float)n;
-                if (!LoadModel(stage->parts[k], ModelRole::Stage, label, progress, f0, f1, part, &err, choiceFor(stage->id))) {
+                if (!LoadModel(stage->parts[k], ModelRole::Stage, label, progress, f0, f1, part, &err,
+                               choiceFor(stage->id, stage->parts[k]))) {
                     LOG_WARN("studio: stage part load failed: %s: %s", PathToUtf8(stage->parts[k]).c_str(), err.c_str());
                     continue;
                 }
@@ -105,7 +106,7 @@ bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage,
         ch.libraryId = character.id;
         std::string err;
         if (!LoadModel(character.modelPath, ModelRole::Character, character.displayName, progress, 0.4f, 0.85f, ch, &err,
-                       choiceFor(character.id))) {
+                       choiceFor(character.id, character.modelPath))) {
             if (error) *error = Tr("캐릭터를 불러오지 못했습니다: ") + err;
             return false;
         }

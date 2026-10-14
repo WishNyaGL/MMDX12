@@ -1759,3 +1759,31 @@ opencode/deepseek workers from Claude's specs; Claude reviewed, did the E2E / vi
   via its .x (0 programs), NCHLShader2 (needs its controller). B: WorkingFloorAL reflection darker than MMD, WorkingRay
   plane too high, RealFigureShader blocky hair shadow, Hg lights unverified without a placed light.
 - The compat harness's 60-frame capture can race a cold shader compile (re-run with a warm cache).
+
+## 2026-10-15 - MME / Ray-MMD global switch, Auto / Manual workflow, play-mode "화면 효과" side panel
+Implemented by opencode/deepseek workers from Claude's plans (3 runs; two resumed after over-exploring / memory-pressure
+kills), reviewed and QA'd by Claude over MCP user paths (antigravity QA run stopped by the user; Claude took it over).
+- Global switch `AppSettings::mmeEnabled` (ini `mmeEnabled=`, `--mme-global 0|1`): off = no MME object effects, post
+  stack, effect objects or Ray-MMD materials anywhere; saved per-model choices stay. Workflow `mmeWorkflow=manual|auto`
+  (`--mme-workflow`): Manual = the per-model None / Auto / File + material source as before; 완전 자동 = every model gets
+  its own MME effects and Ray material when it has a Ray .emd candidate, no suggestion toasts. All consumers go through
+  `ResolveMmeChoice*` / `ResolveMaterialChoice` (material resolver now takes the model path; candidate cache mutexed).
+- 완전 자동 safety: `MmeRequiredControllers` (asset/MmeAssign) lists non-bool CONTROLOBJECT reads of other objects; a
+  model whose auto effects need a controller missing from the scene (ps_luka's `Rim_Luka.pmx`: dark silhouette) falls
+  back to native (`App::MmeControllerSkip`, cached by scene-name key), captioned "자동 제외 · 컨트롤러 필요".
+- UI: top nav tab "MME" (`Screen::Mme`, app/UiMme.cpp, `--screen mme`): switch, workflow cards, MME post stack,
+  searchable per-model list. Play mode: one right-edge sliding panel (app/UiPlayPanel.cpp, `###fxpanel`) with tabs
+  효과 (effect stack + DoF / volumetric / bloom / conv bloom / auto-luminous / LUT / exposure, shared with the lobby via
+  `DrawScreenEffectControls`) / 셰이더 (former popup) / MME · Ray-MMD (draft, 되돌리기 / 적용, "적용 (씬 다시 로드)" when
+  a material source changes; reload keeps time, play state and the formation; the panel reopens after it). Ini
+  `playPanelTab=`. Script commands `mmeglobal`, `mmeworkflow`, `mmestate` (MMESTATE line), `fxpanel`.
+- Fixes found on the way: black wedge / fully black frame with MME on in unit songs - after an MME object / edge draw
+  the raster scene pass restored the root signature but not root CBV 0 (scene constants), viewport, scissor, topology
+  (Passes.cpp; PT already did); MME host MRT outputs sanitized (NaN / Inf -> 0, normal guard, MmeCompiler); formation
+  reload read the freed scene's cast; play header / MCP `character` showed the lobby character for formations; app bar
+  overlapped at 1280 x 1.5 (path pill shrinks to an icon, MCP chip hides); dropdown popups padded (app WindowPadding 0);
+  MME / performer combos registered with uiprobe; play bar width for the extra button.
+### Not verified / left
+- 완전 자동 with ps_luka inside a unit song, the studio inspector MME rows in Auto / off, persistence across a restart.
+- Lobby at 1280x720 x 1.5 (~853x480 logical): the play button overlaps the stage dropdown (pre-existing layout).
+- antigravity-launched app windows are invisible (its runner passes SW_HIDE; the first ShowWindow obeys it).

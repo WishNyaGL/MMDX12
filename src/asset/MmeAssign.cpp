@@ -4,9 +4,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <map>
+#include <mutex>
 #include <system_error>
 
+#include "asset/MmeEffect.h"
 #include "asset/MmeText.h"
 #include "core/TextUtil.h"
 
@@ -127,6 +130,57 @@ std::vector<MmeAssignment> FindModelEffects(const std::filesystem::path& model) 
         // never throw
     }
     return out;
+}
+
+namespace {
+
+// Auto workflow (docs/mme/mme_design.md §2.12): an effect whose CONTROLOBJECT scalar / vector / matrix reads a
+// separate controller object the MMD user loads next to the character renders as a dark silhouette without it. A
+// bool CONTROLOBJECT is only an existence check (`if (light_check)`), never "required".
+struct ControllerCacheEntry {
+    std::filesystem::file_time_type stamp{};
+    std::vector<std::string> controllers;
+};
+std::mutex gControllerCacheMutex;
+std::map<std::string, ControllerCacheEntry> gControllerCache;
+
+std::vector<std::string> RequiredControllersUncached(const std::filesystem::path& fx) {
+    std::vector<std::string> out;
+    const MmeEffectDesc desc = LoadMmeEffect(fx);
+    if (!desc.ok) return out;
+    for (const MmeParam& p : desc.params) {
+        if (p.semantic != "CONTROLOBJECT") continue;
+        if (Lower(p.type) == "bool") continue;   // existence check
+        const MmeAnnotation* a = FindAnnotation(p.annotations, "name");
+        std::string name = a ? Lower(Trim(a->value.str)) : std::string();
+        if (name.empty() || name == "(self)" || name == "(offscreenowner)") continue;
+        if (std::find(out.begin(), out.end(), name) == out.end()) out.push_back(std::move(name));
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<std::string> MmeRequiredControllers(const std::filesystem::path& fx) {
+    if (fx.empty()) return {};
+    try {
+        const std::string key = PathToUtf8(fx);
+        std::error_code ec;
+        const std::filesystem::file_time_type stamp = std::filesystem::last_write_time(fx, ec);
+        {
+            std::lock_guard<std::mutex> lock(gControllerCacheMutex);
+            const auto it = gControllerCache.find(key);
+            if (it != gControllerCache.end() && !ec && it->second.stamp == stamp) return it->second.controllers;
+        }
+        std::vector<std::string> controllers = RequiredControllersUncached(fx);
+        {
+            std::lock_guard<std::mutex> lock(gControllerCacheMutex);
+            gControllerCache[key] = ControllerCacheEntry{stamp, controllers};
+        }
+        return controllers;
+    } catch (...) {
+        return {};   // includes / macros failing to resolve: do not block the effect
+    }
 }
 
 } // namespace mmdx

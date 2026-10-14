@@ -292,6 +292,15 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             // --mme-auto <0|1>: force None(0) / Auto(1) for every model of this run (not saved)
             opt.mmeAuto = _wtoi(next().c_str()) != 0 ? 1 : 0;
             opt.mmeAutoSet = true;
+        } else if (arg == L"--mme-global") {
+            // --mme-global <0|1>: global MME / Ray-MMD switch for this run (not saved). 0 wins over everything.
+            opt.mmeGlobal = _wtoi(next().c_str()) != 0 ? 1 : 0;
+        } else if (arg == L"--mme-workflow") {
+            // --mme-workflow <auto|manual>: MME workflow for this run (not saved)
+            const std::string v = ToLowerAscii(WideToUtf8(next()));
+            if (v == "auto") opt.mmeWorkflow = 1;
+            else if (v == "manual") opt.mmeWorkflow = 0;
+            else LOG_WARN("unknown --mme-workflow value: %s (want auto|manual)", v.c_str());
         } else if (arg == L"--stage-mme") {
             // --stage-mme <0|1>: force None(0) / Auto(1) for the stage(s) of this run only
             opt.stageMme = _wtoi(next().c_str()) != 0 ? 1 : 0;
@@ -904,7 +913,7 @@ void App::RenderFrame() {
         thumbsClearPending_ = false;
     }
     if (screen_ == Screen::Select || screen_ == Screen::BenchLobby || screen_ == Screen::Loading || screen_ == Screen::Shaders ||
-        (screen_ == Screen::Studio && studioThumbsShown_))
+        screen_ == Screen::Mme || (screen_ == Screen::Studio && studioThumbsShown_))
         thumbs_.Pump();
     studioThumbsShown_ = false;
 
@@ -956,6 +965,7 @@ void App::RenderFrame() {
         break;
     case Screen::BenchLobby: DrawBenchLobby(); break;
     case Screen::Shaders: DrawShaders(); DrawRayMmeConfirm(); break;
+    case Screen::Mme: DrawMme(); DrawRayMmeConfirm(); break;
     case Screen::BenchRun: DrawBenchRunOverlay(); break;
     case Screen::BenchResult: DrawBenchResult(); break;
     case Screen::BenchRender: DrawRenderBenchOverlay(); break;
@@ -1198,6 +1208,8 @@ void App::ApplyStartScreen() {
                options_.startScreen == "shaders-mme") {
         screen_ = Screen::Shaders;
         shaderTab_ = options_.startScreen == "shaders-online" ? 1 : options_.startScreen == "shaders-mme" ? 2 : 0;
+    } else if (options_.startScreen == "mme") {
+        screen_ = Screen::Mme;
     } else if (options_.startScreen == "settings") {
         lobbyTab_ = 2;
     } else if (options_.startScreen == "studio") {
@@ -1466,8 +1478,9 @@ void App::ApplyRenderSettings() {
     rs.lutIntensity = settings_.lutIntensity;
     rs.packEffects = settings_.effectStack;   // effect packs (the shader screens edit it)
     // M6b: the MME post stack. --mme overrides for one run; while the studio is open the project's own stack
-    // replaces the play-mode one (docs/mme/mme_design.md §2.10).
-    rs.mmeEffects = options_.mmeSet ? options_.mmeEffects
+    // replaces the play-mode one (docs/mme/mme_design.md §2.10). The global MME switch off disables it everywhere.
+    rs.mmeEffects = !MmeGlobalEnabled() ? std::vector<MmeEffectEntry>{}
+                   : options_.mmeSet ? options_.mmeEffects
                    : studio_        ? StudioMmeEntries()
                                     : settings_.mmeEffects;
     // M5c: a `.x` stack entry is an effect object (its `.fx` runs via FrameView::mmeEffectObjects, its mesh via the
@@ -1569,6 +1582,7 @@ void App::StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsse
         const bool ok = LoadScenePackage(c, hasStage ? &s : nullptr, so, *pkg, &loadProgress_, &loadError_,
                                          hasFormation ? &form : nullptr, MaterialChoiceResolver());
         pkg->videos = videos;   // M8b: LoadScenePackage resets the package; re-apply the resolved video layers
+        pkg->formation = form;  // the cast a material-source reload reuses (unit songs)
         return ok;
     });
 }
@@ -1721,11 +1735,6 @@ App::PlayPerformerRef App::PlayPerformerAt(int index) {
 
 void App::ReloadPlaySceneForMaterial() {
     if (screen_ != Screen::Play || !scene_) return;
-    if (!scene_->extras.empty()) {   // a unit-song formation scene: reloaded at the next load (the UI says so)
-        toast_ = {Tr("재질을 저장했어요"),
-                  Tr("여러 명이 함께 추는 곡은 다음 로드 때 반영돼요"), {}, false, timeSeconds_ + 6.0};
-        return;
-    }
     const int ci = selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size() ? selCharacter_ : -1;
     const int si = selSong_ >= 0 && (size_t)selSong_ < library_.songs.size() ? selSong_ : -1;
     if (ci < 0 || si < 0) {   // no library scene to reload (benchmark / studio): apply at the next load
@@ -1738,6 +1747,14 @@ void App::ReloadPlaySceneForMaterial() {
     options_.seekSeconds = playTime_;   // the scene-load path consumes it: same time
     options_.paused = !wasPlaying;      // keep the play / pause state across the reload
     playing_ = false;
+    // A unit-song formation scene reloads the same cast (the song's parts need every performer re-loaded).
+    if (!scene_->formation.empty()) {
+        // a copy: StartLoad unloads scene_ (and its formation) before it reads the cast
+        const std::vector<PerformerCast> cast = scene_->formation;
+        StartLoad(LoadTarget::Play, &cast[0].character, ResolveSongStage(library_.songs[(size_t)si]),
+                  &library_.songs[(size_t)si], &cast);
+        return;
+    }
     StartLoad(LoadTarget::Play, &library_.characters[(size_t)ci], st, &library_.songs[(size_t)si]);
 }
 
@@ -1790,19 +1807,21 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     // stack's `.x` entries (mmeEffect= lines). Each accessory becomes a prop-role mesh drawn through the MME object
     // path with its controller panel as the world transform.
     std::vector<std::pair<std::filesystem::path, std::filesystem::path>> objectPairs;
-    if (options_.mmeObjectSet) {
-        objectPairs = options_.mmeObjects;
-    }
-    // Persisted / CLI stack `.x` entries are effect objects too (the dialog now offers `.x` files).
-    const std::vector<MmeEffectEntry>& stackEntries =
-        options_.mmeSet ? options_.mmeEffects : settings_.mmeEffects;
-    for (const MmeEffectEntry& e : stackEntries) {
-        std::wstring ext = e.file.extension().wstring();
-        for (wchar_t& c : ext) c = (wchar_t)towlower(c);
-        if (ext != L".x") continue;
-        std::filesystem::path fx, mesh;
-        ResolveMmeObjectPair(e.file, fx, mesh);
-        if (!fx.empty()) objectPairs.emplace_back(fx, mesh);
+    if (MmeGlobalEnabled()) {
+        if (options_.mmeObjectSet) {
+            objectPairs = options_.mmeObjects;
+        }
+        // Persisted / CLI stack `.x` entries are effect objects too (the dialog now offers `.x` files).
+        const std::vector<MmeEffectEntry>& stackEntries =
+            options_.mmeSet ? options_.mmeEffects : settings_.mmeEffects;
+        for (const MmeEffectEntry& e : stackEntries) {
+            std::wstring ext = e.file.extension().wstring();
+            for (wchar_t& c : ext) c = (wchar_t)towlower(c);
+            if (ext != L".x") continue;
+            std::filesystem::path fx, mesh;
+            ResolveMmeObjectPair(e.file, fx, mesh);
+            if (!fx.empty()) objectPairs.emplace_back(fx, mesh);
+        }
     }
     for (const auto& [fx, meshFile] : objectPairs) {
         SceneRuntime::EffectObject obj;
@@ -1853,6 +1872,7 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     s->motion = pkg.motion;
     s->camera = pkg.camera;
     s->videos = std::move(pkg.videos);   // M8b: the song's video layers
+    s->formation = std::move(pkg.formation);   // the cast of a unit-song formation scene (material-source reload)
     // M8a: the loaded stage's library id (a bundled stage loaded for a song), for the MME choice / display scale keys.
     if (!pkg.stageId.empty()) s->stageId = pkg.stageId;
     for (const VmdLightKey& k : pkg.lightKeys) studio::UpsertKey(s->lightTrack, studio::LightKf{(int)k.frame, k.color, k.direction});
@@ -1888,6 +1908,10 @@ void App::UnloadScene() {
     scene_.reset();
     playAutoFocus_.Reset();
     playEditPerformer_ = 0;
+    playPanelOpen_ = playPanelReopen_;   // the 화면 효과 panel does not carry into the next scene, except
+    playPanelReopen_ = false;            // after its own MME apply reloaded this one (the user sees the result)
+    playPanelT_ = 0.0f;
+    playMmeDraft_.valid = false;     // a fresh scene re-captures the MME draft when its tab opens
     audio_.Unload();
     playing_ = false;
 }
@@ -1928,11 +1952,14 @@ void App::UpdateScene(float frame) {
     scene_->characterGpu->UpdateMorphs(slot, scene_->character->VertexMorphDeltas(),
                                        scene_->character->MorphVersion());
     ApplyShaderChoice(*scene_->characterGpu, PlayShaderChoice(*scene_->characterGpu, scene_->characterId));
-    // M6a: the character's MME object effect: --mme-model (File) wins for this run, else the saved / default choice.
+    // M6a: the character's MME object effect: --mme-model (File) wins for this run, else the resolved choice.
     {
-        const MmeChoice mme = options_.mmeModelSet ? MmeChoice{MmeChoice::File, options_.mmeModel}
-                                                   : ResolveMmeChoice(scene_->characterId, /*isStage=*/false);
-        ApplyMmeEffect(*scene_->characterGpu, mme, scene_->character->Model().sourcePath);
+        const MmeChoice mme = !MmeGlobalEnabled() ? MmeChoice{}
+                              : options_.mmeModelSet ? MmeChoice{MmeChoice::File, options_.mmeModel}
+                                                     : ResolveMmeChoice(scene_->characterId, /*isStage=*/false,
+                                                                        scene_->character->Model().sourcePath);
+        ApplyMmeEffect(*scene_->characterGpu, mme, scene_->character->Model().sourcePath,
+                       MmeAutoSkipApplies(mme, /*isStage=*/false));
     }
     scene_->characterGpu->UpdateMaterials(slot, ch.MaterialMul(), ch.MaterialAdd(), ch.MaterialVersion());
     // P5: suggest Ray-MMD material data once per character that has a Ray .emd candidate and no saved choice.
@@ -1954,8 +1981,9 @@ void App::UpdateScene(float frame) {
         scene_->stageGpu[i]->UpdateSkinning(slot, st.SkinMatrices());
         scene_->stageGpu[i]->UpdateMorphs(slot, st.VertexMorphDeltas(), st.MorphVersion());
         // M6a: the stage MME choice (default Auto: a stage package ships its .emd for exactly this).
-        const MmeChoice stageMme = ResolveMmeChoice(scene_->stageId, /*isStage=*/true);
-        ApplyMmeEffect(*scene_->stageGpu[i], stageMme, st.Model().sourcePath);
+        const MmeChoice stageMme = ResolveMmeChoice(scene_->stageId, /*isStage=*/true, st.Model().sourcePath);
+        ApplyMmeEffect(*scene_->stageGpu[i], stageMme, st.Model().sourcePath,
+                       MmeAutoSkipApplies(stageMme, /*isStage=*/true));
         scene_->stageGpu[i]->UpdateMaterials(slot, st.MaterialMul(), st.MaterialAdd(), st.MaterialVersion());
     }
     // M5c: MME effect objects. An accessory `.x` is drawn in MODEL space in MMD (unlike a CPU-skinned PMX model):
@@ -1998,10 +2026,13 @@ void App::UpdateScene(float frame) {
             ApplyShaderChoice(*extra.gpu, choice);
             // M6a: the extra performer's MME choice (--mme-model-all makes them all use --mme-model).
             {
-                const MmeChoice mme = (options_.mmeModelSet && options_.mmeModelAll)
+                const MmeChoice mme = !MmeGlobalEnabled() ? MmeChoice{}
+                                      : (options_.mmeModelSet && options_.mmeModelAll)
                                           ? MmeChoice{MmeChoice::File, options_.mmeModel}
-                                          : ResolveMmeChoice(extra.characterId, /*isStage=*/false);
-                ApplyMmeEffect(*extra.gpu, mme, extra.instance->Model().sourcePath);
+                                          : ResolveMmeChoice(extra.characterId, /*isStage=*/false,
+                                                             extra.instance->Model().sourcePath);
+                ApplyMmeEffect(*extra.gpu, mme, extra.instance->Model().sourcePath,
+                               MmeAutoSkipApplies(mme, /*isStage=*/false));
             }
             extra.gpu->UpdateMaterials(slot, extra.instance->MaterialMul(), extra.instance->MaterialAdd(),
                                        extra.instance->MaterialVersion());

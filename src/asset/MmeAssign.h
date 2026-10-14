@@ -22,4 +22,10 @@ std::vector<MmeAssignment> ReadEmd(const std::filesystem::path& emd);
 // else a `name[effect.fx].pmx` embedding (effect resolved in the model's folder). Empty when none applies.
 std::vector<MmeAssignment> FindModelEffects(const std::filesystem::path& model);
 
+// The effect file's required external controllers: the names (lower case, as written) of its CONTROLOBJECT
+// parameters that are a scalar / vector / matrix read (type not bool) and whose `name` annotation is not `(self)`
+// or `(OffscreenOwner)`, after preprocessing (macros resolved, includes followed). A bool CONTROLOBJECT is an
+// existence check, never required. Cached by path + file write time. An unreadable / unparseable file yields {}.
+std::vector<std::string> MmeRequiredControllers(const std::filesystem::path& fx);
+
 } // namespace mmdx

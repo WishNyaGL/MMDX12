@@ -238,7 +238,9 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
         mmeDl->AddLine(ImVec2(ImGui::GetWindowPos().x + Dp(14.0f), mmeSepY),
                        ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x - Dp(14.0f), mmeSepY), p.line);
         Gap(8.0f);
+        ImGui::BeginDisabled(!MmeGlobalEnabled());
         changed |= DrawStudioMmeStackEditor();
+        ImGui::EndDisabled();
 
         if (changed) {
             ApplyRenderSettings();
