@@ -1809,3 +1809,28 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - Studio inspector Ray toggle interaction, `rayMmdEnabled=` persistence across a restart, slow-disk TTL spikes.
 - Remaining main-thread cost is Bullet physics (~10 ms for 5 performers, same with MME off); 60 fps at this size is
   GPU-limited (~20-25 ms) on both paths.
+
+## 2026-10-15 (3) - Release 2.1.0: i18n gap fix, MME showcase images (offline GI 4K), guide refresh, deploy
+- i18n check: tokenised every Korean string literal in `src/` against the en / ja / zh tables (ad-hoc script; tables must
+  stay in key parity): 46 UI strings were missing (MME screen, play panel, song stage, components label), added to all
+  three tables; `UiUpdate` now runs the component label through `Tr`. Left on purpose: wide-string file-dialog filters,
+  default light names, library classifier keywords. Note: the last entry of `I18nJa/Zh` had no trailing comma (build break
+  until fixed). Heads-up for tooling here: bash heredocs / `sed` ate backslashes in regex literals (use `\x5c` / chr(92)).
+- Release 2.1.0: version 2.1.0, `tools/package_release.ps1` (full 170 MB + lite 15 MB zips), GitHub v2.1.0 (notes
+  `dist/notes_2.1.0.md`, 4 languages; asset digests = local zips), delta manifest 2.1.0 (104 new objects, uploaded; sha
+  2f8460a8...), website deployed (`/latest.json` -> 2.1.0, `/<lang>/docs/mme/` 200 in all languages).
+- Marketing images are now offline GI 4K (user request): `docs/media/mme-2.1.0.jpg` (MME off / on) and
+  `mme-closeup-2.1.0.jpg` (3 close-ups) from Sour Miku / theater / catch_the_wave @ 62 s, effects Diffusion7 + o_LikeHDR
+  (`--mme a.fx,b.fx` takes a comma list; repeated `--mme` keeps only the last). README x4 got an "MME effects" section.
+- Guide (MMDX12_Web): new `mme` page + updates to playback / shaders / quality / library / install / studio / studio-pose /
+  studio-project / video / materials in 4 languages (antigravity workers from contract specs, smoke review: popup wording
+  grep clean, build OK); screenshots re-shot from a packaged copy at `F:\guide_app\MMDX12` (library: Sour Miku White,
+  Theater, Catch the Wave; `MMDX12_REPO=F:\repos\MMDX12`): new `mme_screen`, `play_mme` (= `mme_play_panel`), `play_light`,
+  `quality_upscaler`, `about`, `studio_toolbar`, `studio_model_inspector`, `studio_model_menu`, `mme_compare`.
+### Not verified / left
+- The studio pose screenshots (`studio_bone_*`, `studio_pose_edit`, `studio_key_*`, `studio_curve`) were NOT re-shot: the
+  scripted `studiobone` click no longer selects a bone (STUDIOSTATE `hoveredWindow=-`, selection stays empty) and the
+  timeline starts with the morph group expanded; the old 2.0.0 images are kept. Needs a look (possible input regression).
+- `mme_effect_object` capture (drop of a `.x` via `studio_command drop`) added nothing to the outliner; the mme page uses
+  the inspector shot instead. Studio PMM / bake / auto-IK / alpha export have no dedicated screenshots beyond the menus.
+- Release gate tests (update_e2e etc.) were not re-run for 2.1.0; the packaged exe ran the whole guide capture without a crash.
