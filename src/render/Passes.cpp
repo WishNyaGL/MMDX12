@@ -7,6 +7,11 @@
 #include "render/Upscaler.h"
 #include "render/ShaderInterop.h"
 #include "render/ShaderPack.h"
+#include "render/MmeRuntime.h"
+#include "render/MmeSemantics.h"
+#include "render/MmeSkin.h"
+#include "render/MmeScriptVM.h"
+#include "asset/MmeText.h"
 #include "asset/ImageLoader.h"
 #include "core/TextUtil.h"
 #include "core/Log.h"
@@ -273,6 +278,8 @@ void ShadowPass::Execute(PassContext& pc) {
 }
 
 // ---- ScenePass ---------------------------------------------------------------------------
+
+ScenePass::~ScenePass() = default;
 
 bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) {
     ID3D12Device* device = ctx.Device();
@@ -681,7 +688,15 @@ bool ScenePass::EnsurePackTextures(Dx12Context& ctx, const ShaderPack& pack, Pac
 // cleared to zero, with the same jittered camera the tracer uses. PathTracePass composites the layer over its
 // denoised colour (pt_edge.hlsl). Camera view only (PT has no extra views).
 void ScenePass::DrawPtEdges(PassContext& pc) {
-    if (!pc.settings.drawEdges || !psoDepthBack_ || !psoDepthNoCull_) return;
+    if (!psoDepthBack_ || !psoDepthNoCull_) return;
+    // M5b: MME-owned materials are rasterised into this same layer, so it is produced even with outlines off when an
+    // MME object effect exists (the depth pre-pass occludes both the outlines and the MME layer).
+    bool mmeAny = false;
+    if (pc.mme && pc.mmeSkin)
+        for (GpuModel* model : pc.view.models)
+            if (model && model->HasMmeEffects()) { mmeAny = true; break; }
+    if (!pc.settings.drawEdges && !mmeAny) return;
+
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     Dx12Context& ctx = pc.ctx;
     RenderTargets& t = pc.targets;
@@ -698,31 +713,84 @@ void ScenePass::DrawPtEdges(PassContext& pc) {
     cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
     cmd->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
 
-    cmd->SetGraphicsRootSignature(rootSig_.Get());
-    cmd->SetGraphicsRootDescriptorTable(5, pc.transient.SrvTable(ctx, {&t.shadowMap}));
-    cmd->SetGraphicsRootDescriptorTable(11, pc.transient.SrvTable(ctx, {&t.spotShadowMap}));
-    cmd->SetGraphicsRootDescriptorTable(13, pc.transient.SrvTable(ctx, {&t.pointShadowMap}));
-    cmd->SetGraphicsRootShaderResourceView(6, pc.lights);
-    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    const D3D12_GPU_DESCRIPTOR_HANDLE shadowTable = pc.transient.SrvTable(ctx, {&t.shadowMap});
+    const D3D12_GPU_DESCRIPTOR_HANDLE spotTable = pc.transient.SrvTable(ctx, {&t.spotShadowMap});
+    const D3D12_GPU_DESCRIPTOR_HANDLE pointTable = pc.transient.SrvTable(ctx, {&t.pointShadowMap});
     const float* r = pc.view.mainRect;
     const float px = std::floor(r[0] * (float)t.width), py = std::floor(r[1] * (float)t.height);
     const float pw = std::floor((r[0] + r[2]) * (float)t.width) - px;
     const float ph = std::floor((r[1] + r[3]) * (float)t.height) - py;
     D3D12_VIEWPORT viewport{px, py, pw, ph, 0.0f, 1.0f};
     D3D12_RECT scissor{(LONG)px, (LONG)py, (LONG)(px + pw), (LONG)(py + ph)};
-    cmd->RSSetViewports(1, &viewport);
-    cmd->RSSetScissorRects(1, &scissor);
-    cmd->SetGraphicsRootConstantBufferView(0, pc.sceneConstants);
+    // ScenePass's own root state for this layer; the MME draws switch root signature + heaps, so it is re-bound after
+    // them (the same pattern Execute uses around DrawMmeModel / DrawMmeEdges).
+    const auto bindLayerRoot = [&]() {
+        cmd->SetGraphicsRootSignature(rootSig_.Get());
+        cmd->SetGraphicsRootDescriptorTable(5, shadowTable);
+        cmd->SetGraphicsRootDescriptorTable(11, spotTable);
+        cmd->SetGraphicsRootDescriptorTable(13, pointTable);
+        cmd->SetGraphicsRootShaderResourceView(6, pc.lights);
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmd->RSSetViewports(1, &viewport);
+        cmd->RSSetScissorRects(1, &scissor);
+        cmd->SetGraphicsRootConstantBufferView(0, pc.sceneConstants);
+    };
+    bindLayerRoot();
 
-    for (int p = 0; p < 2; ++p) {   // pass 0: depth pre-pass of every model, pass 1: edges
-        for (GpuModel* model : pc.view.models) {
-            if (!model) continue;
+    // pass 0: depth pre-pass of every model (occludes the MME layer and the outlines). M5b fix 1: materials the
+    // MME layer owns are skipped, so the MME draw depth-tests against the non-MME geometry (and other MME
+    // materials) instead of its own differently-vertexed surfaces (z-fighting).
+    for (GpuModel* model : pc.view.models) {
+        if (!model) continue;
+        BindModelBuffers(cmd, *model, pc.frame);
+        cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
+        cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
+        ID3D12PipelineState* curPso = nullptr;
+        for (const GpuModel::Material& m : model->Materials()) {
+            if (m.indexCount == 0) continue;
+            if (!m.visible) continue;
+            if (m.additive || m.noDepthWrite) continue;   // .emd blend hints: no edge draw (See ScenePass::Execute)
+            if (MmeMaterialOwned(pc.mme, *model, (size_t)(&m - model->Materials().data()))) continue;   // MME owns it
+            ID3D12PipelineState* want = m.doubleSided ? psoDepthNoCull_.Get() : psoDepthBack_.Get();
+            if (want != curPso) {
+                cmd->SetPipelineState(want);
+                curPso = want;
+            }
+            cmd->SetGraphicsRootConstantBufferView(1, m.constants);
+            cmd->SetGraphicsRootDescriptorTable(3, ctx.SrvHeap().Gpu(m.srvTable));
+            cmd->DrawIndexedInstanced(m.indexCount, 1, m.indexStart, 0, 0);
+            pc.stats.drawCalls++;
+        }
+    }
+
+    // M5b: the MME primary layer, after the depth pre-pass and before the outlines. DrawMmeModel writes the host MRT
+    // (linearised colour, normal, velocity) with the tracer's jittered camera; an MME edge technique replaces the
+    // native outline for its model in this layer.
+    std::vector<uint8_t> mmeEdgeDrew(pc.view.models.size(), 0);
+    if (mmeAny) {
+        for (size_t i = 0; i < pc.view.models.size(); ++i) {
+            GpuModel* model = pc.view.models[i];
+            if (!model || !model->HasMmeEffects()) continue;
+            std::vector<uint8_t> handled;
+            DrawMmeModel(pc, *model, false, handled);
+            if (DrawMmeEdges(pc, *model)) mmeEdgeDrew[i] = 1;
+        }
+        ID3D12DescriptorHeap* restore[1] = {ctx.SrvHeap().Heap()};
+        cmd->SetDescriptorHeaps(1, restore);
+        bindLayerRoot();
+    }
+
+    // pass 1: outlines (skipped when outlines are off, or replaced by the model's MME edge technique)
+    if (pc.settings.drawEdges) {
+        for (size_t mi = 0; mi < pc.view.models.size(); ++mi) {
+            GpuModel* model = pc.view.models[mi];
+            if (!model || mmeEdgeDrew[mi]) continue;
             BindModelBuffers(cmd, *model, pc.frame);
             cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
             cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
             ID3D12PipelineState* defaultEdge = psoEdge_.Get();
             ID3D12PipelineState* packEdge = defaultEdge;
-            if (p == 1 && !model->ShaderPackId().empty() && pc.settings.shading == ViewShading::Lit) {
+            if (!model->ShaderPackId().empty() && pc.settings.shading == ViewShading::Lit) {
                 // the pack's outlines, as the raster lit view draws them
                 const PackPipelines* pack = PackPsos(ctx, model->ShaderPackId(), model->ShaderTextureFolder(), false);
                 if (pack && pack->edge) {
@@ -734,22 +802,11 @@ void ScenePass::DrawPtEdges(PassContext& pc) {
             }
             ID3D12PipelineState* curPso = nullptr;
             for (const GpuModel::Material& m : model->Materials()) {
-                if (m.indexCount == 0) continue;
-                if (p == 0) {
-                    if (!m.visible) continue;
-                    if (m.additive || m.noDepthWrite) continue;   // .emd blend hints: no edge draw (See ScenePass::Execute)
-                    ID3D12PipelineState* want = m.doubleSided ? psoDepthNoCull_.Get() : psoDepthBack_.Get();
-                    if (want != curPso) {
-                        cmd->SetPipelineState(want);
-                        curPso = want;
-                    }
-                } else {
-                    if (!m.drawEdge) continue;
-                    ID3D12PipelineState* want = m.packOff ? defaultEdge : packEdge;
-                    if (want != curPso) {
-                        cmd->SetPipelineState(want);
-                        curPso = want;
-                    }
+                if (!m.drawEdge || m.indexCount == 0) continue;
+                ID3D12PipelineState* want = m.packOff ? defaultEdge : packEdge;
+                if (want != curPso) {
+                    cmd->SetPipelineState(want);
+                    curPso = want;
                 }
                 cmd->SetGraphicsRootConstantBufferView(1, m.constants);
                 cmd->SetGraphicsRootDescriptorTable(3, ctx.SrvHeap().Gpu(m.srvTable));
@@ -759,6 +816,949 @@ void ScenePass::DrawPtEdges(PassContext& pc) {
         }
     }
     t.ptEdges = true;
+}
+
+// ==================================================================================================================
+// M4b: MME object effects drawn inside ScenePass (docs/mme/mme_design.md §2.6, spec draft §3 / §4.2 / §4.4 / §5).
+// ==================================================================================================================
+namespace {
+
+using namespace DirectX;
+
+// `Subset` ("0-6,8"), in material index space. Empty / "*" = all subsets.
+bool SubsetMatches(const std::string& raw, int material) {
+    if (raw.empty() || raw == "*") return true;
+    size_t pos = 0;
+    while (pos < raw.size()) {
+        size_t comma = raw.find(',', pos);
+        if (comma == std::string::npos) comma = raw.size();
+        std::string part = raw.substr(pos, comma - pos);
+        pos = comma + 1;
+        // trim
+        while (!part.empty() && std::isspace((unsigned char)part.front())) part.erase(part.begin());
+        while (!part.empty() && std::isspace((unsigned char)part.back())) part.pop_back();
+        if (part.empty()) continue;
+        const size_t dash = part.find('-');
+        if (dash == std::string::npos) {
+            if (std::atoi(part.c_str()) == material) return true;
+        } else {
+            const int lo = std::atoi(part.substr(0, dash).c_str());
+            const int hi = dash + 1 >= part.size() ? INT32_MAX : std::atoi(part.c_str() + dash + 1);
+            if (material >= lo && material <= hi) return true;
+        }
+    }
+    return false;
+}
+
+bool BoolMatches(int tri, bool value) { return tri < 0 || (tri != 0) == value; }
+
+// MME's technique selection (spec 3): first technique in file order whose MMDPass (object_ss falls back to object),
+// Subset and use-flags all match. Returns null when nothing matches. When `exactPass` is set, the `object_ss` ->
+// `object` fallback is disabled (used when a self-shadow map exists and MMD would pick the object_ss technique).
+const MmeTechnique* SelectTechnique(const MmeEffectDesc& fx, const std::string& wantedPass, const GpuModel& model,
+                                    size_t material, bool exactPass = false) {
+    const GpuModel::Material& m = model.Materials()[material];
+    const bool hasTexture = (model.MaterialConstantsCpu()[material].flags & MatFlag_HasTexture) != 0;
+    const bool sphereMode = m.sphereMode != 0;
+    const bool useToon = true;   // PMX / PMD models use toon rendering
+    for (const MmeTechnique& t : fx.techniques) {
+        const bool passOk = t.mmdPass == wantedPass || (!exactPass && wantedPass == "object_ss" && t.mmdPass == "object");
+        if (!passOk) continue;
+        if (!BoolMatches(t.useTexture, hasTexture)) continue;
+        if (!BoolMatches(t.useSphereMap, sphereMode)) continue;
+        if (!BoolMatches(t.useToon, useToon)) continue;
+        if (!SubsetMatches(t.subset, (int)material)) continue;
+        return &t;
+    }
+    return nullptr;
+}
+
+// M5c fix: object techniques whose script switches RenderColorTarget / RenderDepthStencilTarget. The VM drives the
+// technique; the host draws each pass with the file's plain (non-object) instance into the currently bound effect
+// target, or through the object-mode instance's host MRT when the script binds the default target. Mirrors
+// DrawMmeModel's host-MRT per-material body and PassMmeOffscreen's DrawMmeObjectMaterials (plain instance, object
+// input layout). See docs/mme/mme_design.md 2.6.
+struct MmeObjectScriptCtx {
+    PassContext* pc = nullptr;
+    GpuModel* model = nullptr;
+    size_t material = 0;
+    MmeEffectInstance* objInst = nullptr;    // object mode: the default-target host-MRT draw
+    MmeEffectInstance* plainInst = nullptr;  // non-object mode: effect-target / Draw=Buffer draws
+    MmeFrameValues frame;
+    DXGI_FORMAT sceneRts[3] = {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
+    DXGI_FORMAT sceneDs = DXGI_FORMAT_UNKNOWN;
+    uint32_t sceneRtCount = 0;
+    uint32_t sceneSamples = 1;
+    D3D12_CPU_DESCRIPTOR_HANDLE sceneRtvs[3] = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE sceneDsv{};
+    D3D12_VIEWPORT viewport{};
+    D3D12_RECT scissor{};
+    D3D12_VERTEX_BUFFER_VIEW vbs[3] = {};
+    std::map<uint64_t, std::unique_ptr<MmeConstantWriter>>* writers = nullptr;
+};
+
+class MmeObjectScriptHost final : public IMmeHost {
+public:
+    explicit MmeObjectScriptHost(MmeObjectScriptCtx& c) : c_(c) {
+        FillMmeObjectValues(*c_.model, c_.material, ov_);
+    }
+
+    uint32_t Draws() const { return draws_; }
+
+    void SetColorTarget(int index, const std::string& name) override {
+        if (index < 0 || index > 3) return;
+        colorBound_[index] = true;
+        if (name.empty()) { color_[index] = nullptr; return; }
+        MmeTarget* t = c_.plainInst ? c_.plainInst->FindTarget(name) : nullptr;
+        if (!t || !t->tex) { Diag("RenderColorTarget '" + name + "' not found"); color_[index] = nullptr; return; }
+        color_[index] = &t->tex;
+    }
+
+    void SetDepthTarget(const std::string& name) override {
+        depthBound_ = true;
+        if (name.empty()) { depth_ = nullptr; return; }
+        MmeTarget* t = c_.plainInst ? c_.plainInst->FindTarget(name) : nullptr;
+        if (!t || !t->tex) { Diag("RenderDepthStencilTarget '" + name + "' not found"); depth_ = nullptr; return; }
+        depth_ = &t->tex;
+        depthDsvFormat_ = t->dsvFormat;
+    }
+
+    void Clear(bool color, bool depth, const float color4[4], float depthValue) override {
+        ID3D12GraphicsCommandList* cmd = c_.pc->cmd;
+        if (color) {
+            for (int i = 0; i < 4; ++i) {
+                Texture* t = color_[i];
+                if (!t || !t->res || t->rtv == DescriptorHeap::kInvalid) continue;
+                t->Transition(cmd, kRt);
+                cmd->ClearRenderTargetView(c_.pc->ctx.RtvHeap().Cpu(t->rtv), color4, 0, nullptr);
+            }
+        }
+        if (depth && depth_ && depth_->res && depth_->dsv != DescriptorHeap::kInvalid) {
+            depth_->Transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            cmd->ClearDepthStencilView(c_.pc->ctx.DsvHeap().Cpu(depth_->dsv), D3D12_CLEAR_FLAG_DEPTH, depthValue, 0, 0,
+                                       nullptr);
+        }
+    }
+
+    void ScriptExternal() override { Diag("ScriptExternal=Color is not supported in an object technique, skipped"); }
+
+    void DrawBuffer(const MmeTechnique& t, const MmePass& p) override { DrawPass(t, p, /*geometry=*/false); }
+    void DrawGeometry(const MmeTechnique& t, const MmePass& p) override { DrawPass(t, p, /*geometry=*/true); }
+
+    bool ReadParam(const std::string& name, float out[4]) override {
+        const MmeEffectDesc& fx = c_.plainInst ? c_.plainInst->Desc() : c_.objInst->Desc();
+        return MmeConstantWriter::ReadParam(fx, made_, name, out);
+    }
+
+    void SetLoopIndex(const std::string& name, int index) override { loopOverrides_[name] = (float)index; }
+
+    void Diag(const std::string& message) override {
+        static std::set<std::string> logged;
+        const std::string file = c_.plainInst ? PathToUtf8(c_.plainInst->File()) : std::string("(object)");
+        if (logged.insert(file + "\n" + message).second) LOG_WARN("MME %s: %s", file.c_str(), message.c_str());
+    }
+
+    // Restores the scene targets / viewport the caller's native draws expect, and leaves every bound effect target a
+    // shader resource again (the script's later passes / the scene read them).
+    void Finish() {
+        ID3D12GraphicsCommandList* cmd = c_.pc->cmd;
+        for (int i = 0; i < 4; ++i)
+            if (colorBound_[i] && color_[i] && color_[i]->res) color_[i]->Transition(cmd, kSrv);
+        if (depth_ && depth_->res) depth_->Transition(cmd, kSrv);
+        cmd->OMSetRenderTargets(c_.sceneRtCount, c_.sceneRtvs, FALSE, c_.sceneDsv.ptr ? &c_.sceneDsv : nullptr);
+        cmd->RSSetViewports(1, &c_.viewport);
+        cmd->RSSetScissorRects(1, &c_.scissor);
+    }
+
+private:
+    // Binds the currently bound target and reports its formats. Returns true for an effect target (plain program),
+    // false for the default target (the scene MRTs, the object-mode host-MRT draw).
+    bool BindTargets(DXGI_FORMAT fmts[4], uint32_t& rtCount, DXGI_FORMAT& ds, uint32_t& samples, uint32_t& w,
+                     uint32_t& h) {
+        ID3D12GraphicsCommandList* cmd = c_.pc->cmd;
+        const bool isDefault = !colorBound_[0] || color_[0] == nullptr;
+        if (isDefault) {
+            for (uint32_t i = 0; i < c_.sceneRtCount && i < 4; ++i) fmts[i] = c_.sceneRts[i];
+            rtCount = c_.sceneRtCount;
+            ds = c_.sceneDs;
+            samples = c_.sceneSamples;
+            w = (uint32_t)c_.viewport.Width;
+            h = (uint32_t)c_.viewport.Height;
+            cmd->OMSetRenderTargets(c_.sceneRtCount, c_.sceneRtvs, FALSE, c_.sceneDsv.ptr ? &c_.sceneDsv : nullptr);
+            cmd->RSSetViewports(1, &c_.viewport);
+            cmd->RSSetScissorRects(1, &c_.scissor);
+            return false;
+        }
+        Texture* rts[4] = {};
+        uint32_t n = 0;
+        for (int i = 0; i < 4; ++i) {
+            if (!colorBound_[i] || !color_[i] || !color_[i]->res) continue;
+            if (color_[i]->rtv == DescriptorHeap::kInvalid) continue;
+            rts[n] = color_[i];
+            fmts[n] = color_[i]->format;
+            ++n;
+        }
+        if (!n) {   // every bound target failed: draw nothing rather than bind a null view
+            rtCount = 0;
+            return true;
+        }
+        for (uint32_t i = 0; i < n; ++i) rts[i]->Transition(cmd, kRt);
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4];
+        for (uint32_t i = 0; i < n; ++i) rtvs[i] = c_.pc->ctx.RtvHeap().Cpu(rts[i]->rtv);
+        const bool hasDepth = depth_ && depth_->res && depth_->dsv != DescriptorHeap::kInvalid;
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv{};
+        if (hasDepth) {
+            depth_->Transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            dsv = c_.pc->ctx.DsvHeap().Cpu(depth_->dsv);
+        }
+        cmd->OMSetRenderTargets(n, rtvs, FALSE, hasDepth ? &dsv : nullptr);
+        w = rts[0]->width;
+        h = rts[0]->height;
+        D3D12_VIEWPORT vp{0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f};
+        D3D12_RECT sc{0, 0, (LONG)w, (LONG)h};
+        cmd->RSSetViewports(1, &vp);
+        cmd->RSSetScissorRects(1, &sc);
+        rtCount = n;
+        samples = 1;
+        ds = hasDepth ? depthDsvFormat_ : DXGI_FORMAT_UNKNOWN;
+        return true;
+    }
+
+    MmeConstantWriter* Writer(MmeEffectInstance* inst, int program, int stage, const MmeStage& st) {
+        const uint64_t key = ((uint64_t)(uintptr_t)inst << 32) ^ ((uint64_t)program << 1) ^ (uint64_t)(stage ? 1 : 0);
+        auto it = c_.writers->find(key);
+        if (it != c_.writers->end()) {
+            made_.push_back(it->second.get());
+            return it->second.get();
+        }
+        auto w = std::make_unique<MmeConstantWriter>();
+        std::vector<MmeDiag> diags;
+        w->Bind(inst->Desc(), st, diags);
+        for (const MmeDiag& d : diags) Diag(d.message);
+        MmeConstantWriter* raw = w.get();
+        c_.writers->emplace(key, std::move(w));
+        made_.push_back(raw);
+        return raw;
+    }
+
+    bool BindStages(MmeEffectInstance* inst, int program, const MmeProgram& prog) {
+        for (int pixel = 0; pixel < 2; ++pixel) {
+            const MmeStage& st = pixel ? prog.ps : prog.vs;
+            MmeConstantWriter* w = Writer(inst, program, pixel, st);
+            if (!w) continue;
+            MmeFrameValues fv = c_.frame;
+            fv.textureValue = [inst](const std::string& name, uint32_t& outCount) -> const float* {
+                return inst->TexValueFor(name, outCount);
+            };
+            w->Write(fv);
+            w->WriteObject(ov_);
+            for (const auto& [name, value] : loopOverrides_) w->SetScalar(name, value);
+            D3D12_GPU_VIRTUAL_ADDRESS cbAddr = c_.pc->sceneConstants;
+            if (!w->Bytes().empty()) {
+                cbAddr = c_.pc->mme->AllocConstants(w->Bytes().data(), (uint32_t)w->Bytes().size());
+                if (cbAddr == 0) return false;
+            }
+            const int base = pixel ? 3 : 0;
+            c_.pc->cmd->SetGraphicsRootConstantBufferView(base, cbAddr);
+            const uint32_t materialSrvTable = c_.model->Materials()[c_.material].srvTable;
+            const D3D12_GPU_DESCRIPTOR_HANDLE srv =
+                inst->StageSrvTableObject(*c_.pc, program, pixel != 0, materialSrvTable, c_.model);
+            if (srv.ptr) c_.pc->cmd->SetGraphicsRootDescriptorTable(base + 1, srv);
+            const D3D12_GPU_DESCRIPTOR_HANDLE smp = inst->StageSamplerTable(program, pixel != 0);
+            if (smp.ptr) c_.pc->cmd->SetGraphicsRootDescriptorTable(base + 2, smp);
+        }
+        return true;
+    }
+
+    void DrawPass(const MmeTechnique& t, const MmePass& p, bool geometry) {
+        if (!c_.pc || !c_.model || !c_.plainInst) return;
+        DXGI_FORMAT fmts[4] = {};
+        uint32_t rtCount = 0, samples = 1, w = 0, h = 0;
+        DXGI_FORMAT ds = DXGI_FORMAT_UNKNOWN;
+        const bool effectTargets = BindTargets(fmts, rtCount, ds, samples, w, h);
+        if (!rtCount) { Diag("no usable render target, pass skipped"); return; }
+        // Effect targets draw with the plain (non-object) instance; the default target keeps the host MRT.
+        MmeEffectInstance* inst = effectTargets ? c_.plainInst : c_.objInst;
+        const int program = inst->FindProgram(t.name, p.name);
+        if (program < 0) { Diag("pass '" + p.name + "' has no compiled program, skipped"); return; }
+        const MmeProgram& prog = inst->Programs()[program];
+        if (!prog.ok || !prog.ps.code) return;
+        ID3D12GraphicsCommandList* cmd = c_.pc->cmd;
+        if (geometry) {
+            const GpuModel::Material& m = c_.model->Materials()[c_.material];
+            if (m.indexCount == 0) return;
+            std::vector<D3D12_INPUT_ELEMENT_DESC> layout = MmeObjectInputLayout(prog.vs);
+            ID3D12PipelineState* pso = inst->Pso(c_.pc->ctx, program, p, fmts, rtCount, ds, samples, &layout);
+            if (!pso) { Diag("PSO creation failed, skipped"); return; }
+            cmd->SetPipelineState(pso);
+            if (!BindStages(inst, program, prog)) return;
+            cmd->IASetVertexBuffers(0, 3, c_.vbs);
+            cmd->IASetIndexBuffer(&c_.model->IndexBufferView());
+            cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            cmd->DrawIndexedInstanced(m.indexCount, 1, m.indexStart, 0, 0);
+            c_.pc->stats.drawCalls++;
+            c_.pc->stats.triangles += m.indexCount / 3;
+        } else {
+            ID3D12PipelineState* pso = inst->Pso(c_.pc->ctx, program, p, fmts, rtCount, ds, samples, nullptr);
+            if (!pso) { Diag("PSO creation failed, skipped"); return; }
+            cmd->SetPipelineState(pso);
+            if (!BindStages(inst, program, prog)) return;
+            const D3D12_VERTEX_BUFFER_VIEW& vb = c_.pc->mme->QuadVb(c_.pc->ctx, w, h);
+            cmd->IASetVertexBuffers(0, 1, &vb);
+            cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            cmd->DrawInstanced(4, 1, 0, 0);
+            c_.pc->stats.drawCalls++;
+        }
+        ++draws_;
+    }
+
+    MmeObjectScriptCtx& c_;
+    MmeObjectValues ov_;
+    Texture* color_[4] = {nullptr, nullptr, nullptr, nullptr};
+    bool colorBound_[4] = {false, false, false, false};
+    Texture* depth_ = nullptr;
+    bool depthBound_ = false;
+    DXGI_FORMAT depthDsvFormat_ = DXGI_FORMAT_D32_FLOAT;
+    std::map<std::string, float> loopOverrides_;
+    std::vector<MmeConstantWriter*> made_;
+    uint32_t draws_ = 0;
+};
+
+// Runs one scripted object technique (its script switches RenderColorTarget to an effect target). Returns the number
+// of draws issued. The file's plain instance is created on demand; it draws on a later frame while it loads.
+uint32_t RunMmeObjectScriptTechnique(PassContext& pc, GpuModel& model, size_t mi, const MmeTechnique& tech,
+                                     MmeEffectInstance* objInst, const MmeFrameValues& frame, uint32_t sceneSamples,
+                                     std::map<uint64_t, std::unique_ptr<MmeConstantWriter>>& writers) {
+    if (!pc.mme || !pc.mmeSkin || !objInst) return 0;
+    // Only an object-class effect: a scene / post effect the caller assigned to a mesh material (a `.x` whose
+    // same-stem `.fx` is a post effect) keeps the pre-M5c skip -- running its ScriptExternal-carrying script as an
+    // object technique would paint a black fullscreen quad over the scene.
+    if (objInst->Desc().kind() != "object") return 0;
+    MmeEffectInstance* plain = pc.mme->EnsureInstance(objInst->File(), false);
+    if (!plain || !plain->Ready() || plain->Failed()) return 0;
+    if (pc.targets.colorMsaa.rtv == DescriptorHeap::kInvalid || pc.targets.normalMsaa.rtv == DescriptorHeap::kInvalid ||
+        pc.targets.velocityMsaa.rtv == DescriptorHeap::kInvalid || pc.targets.depthMsaa.dsv == DescriptorHeap::kInvalid)
+        return 0;
+    pc.mmeSkin->Skin(pc, model);
+    D3D12_VERTEX_BUFFER_VIEW vb0 = pc.mmeSkin->Vb(model);
+    if (!vb0.BufferLocation) return 0;
+
+    MmeObjectScriptCtx c;
+    c.pc = &pc;
+    c.model = &model;
+    c.material = mi;
+    c.objInst = objInst;
+    c.plainInst = plain;
+    c.frame = frame;
+    c.sceneRts[0] = RenderTargets::kColorFormat;
+    c.sceneRts[1] = RenderTargets::kNormalFormat;
+    c.sceneRts[2] = RenderTargets::kVelocityFormat;
+    c.sceneDs = DXGI_FORMAT_D32_FLOAT;
+    c.sceneRtCount = 3;
+    c.sceneSamples = sceneSamples ? sceneSamples : 1;
+    c.sceneRtvs[0] = pc.ctx.RtvHeap().Cpu(pc.targets.colorMsaa.rtv);
+    c.sceneRtvs[1] = pc.ctx.RtvHeap().Cpu(pc.targets.normalMsaa.rtv);
+    c.sceneRtvs[2] = pc.ctx.RtvHeap().Cpu(pc.targets.velocityMsaa.rtv);
+    c.sceneDsv = pc.ctx.DsvHeap().Cpu(pc.targets.depthMsaa.dsv);
+    const float* r = pc.view.mainRect;
+    const float px = std::floor(r[0] * (float)pc.targets.width);
+    const float py = std::floor(r[1] * (float)pc.targets.height);
+    const float pw = std::floor((r[0] + r[2]) * (float)pc.targets.width) - px;
+    const float ph = std::floor((r[1] + r[3]) * (float)pc.targets.height) - py;
+    c.viewport = D3D12_VIEWPORT{px, py, pw, ph, 0.0f, 1.0f};
+    c.scissor = D3D12_RECT{(LONG)px, (LONG)py, (LONG)(px + pw), (LONG)(py + ph)};
+    c.vbs[0] = vb0;
+    c.vbs[1] = model.AddUvBufferView();
+    c.vbs[2] = MmeZeroWhiteVb(pc.ctx);
+    if (!c.vbs[2].BufferLocation) return 0;
+    c.writers = &writers;
+
+    MmeObjectScriptHost host(c);
+    // "sceneorobject": an object-class effect that switches RenderColorTarget uses Draw=Buffer passes (FootmarkSnow),
+    // which the VM rejects under class "object"; the target-switching technique is the hybrid case the class is for.
+    RunMmeTechnique(plain->Desc(), tech, "sceneorobject", host);
+    host.Finish();
+    return host.Draws();
+}
+
+} // namespace
+
+// M5a: shared with the offscreen / shadow passes (see Passes.h).
+const MmeTechnique* SelectMmeTechnique(const MmeEffectDesc& fx, const std::string& wantedPass, const GpuModel& model,
+                                       size_t material, bool exactPass) {
+    return SelectTechnique(fx, wantedPass, model, material, exactPass);
+}
+
+// M5b: the shared per-material / per-frame helpers of the MME object draw, used by ScenePass's raster / PT draws,
+// the offscreen pass and the offline GI MME layer (OfflineRenderer.cpp).
+void FillMmeObjectValues(const GpuModel& model, size_t mi, MmeObjectValues& ov) {
+    const GpuModel::Material& m = model.Materials()[mi];
+    const MaterialConstants& mc = model.MaterialConstantsCpu()[mi];
+    ov.diffuse = mc.diffuse;
+    ov.ambient = {mc.diffuse.x, mc.diffuse.y, mc.diffuse.z, 1.0f};
+    ov.specular = {mc.specular.x, mc.specular.y, mc.specular.z, 1.0f};
+    ov.specularPower = mc.specularPower;
+    ov.emissive = {mc.ambient.x, mc.ambient.y, mc.ambient.z, 1.0f};
+    const XMFLOAT3& toon = model.MmeToonColor(mi);
+    ov.toonColor = {toon.x, toon.y, toon.z, 1.0f};
+    ov.edgeColor = mc.edgeColor;
+    ov.texMul = mc.texMul;
+    ov.texAdd = mc.texAdd;
+    ov.sphereMul = mc.sphereMul;
+    ov.sphereAdd = mc.sphereAdd;
+    ov.useTexture = (mc.flags & MatFlag_HasTexture) != 0;
+    ov.useSpheremap = m.sphereMode != 0;
+    ov.useSubtexture = m.sphereMode == 3;
+    ov.useToon = true;
+    ov.spadd = m.sphereMode == 2;
+    ov.parthf = false;
+}
+
+void FillMmeFrameValues(PassContext& pc, const XMFLOAT4X4& view, const XMFLOAT4X4& proj, float viewportW,
+                        float viewportH, MmeFrameValues& out) {
+    out = MmeFrameValues{};
+    const XMMATRIX viewM = XMLoadFloat4x4(&view);
+    XMStoreFloat4x4(&out.view, viewM);
+    XMStoreFloat4x4(&out.proj, XMLoadFloat4x4(&proj));
+    out.cameraPos = pc.view.camera.eye;
+    const XMMATRIX invView = XMMatrixInverse(nullptr, viewM);
+    XMStoreFloat3(&out.cameraDir,
+                  XMVector3Normalize(XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), invView)));
+    XMStoreFloat3(&out.lightDir, XMVector3Normalize(XMLoadFloat3(&pc.view.light.direction)));
+    out.lightColor = pc.view.light.color;
+    std::vector<const GpuModel*> chars;
+    chars.reserve(pc.view.models.size());
+    for (const GpuModel* m : pc.view.models) chars.push_back(m);
+    BuildLightCamera(out.lightDir, chars, pc.view.mmeObjects, out.lightView, out.lightProj);
+    out.viewportW = viewportW;
+    out.viewportH = viewportH;
+    out.time = (float)pc.frame / 60.0f;
+    out.elapsed = pc.frameTimeMs * 0.001f;
+    // M8a: the scene clock (see FrameView). Not edit mode while playing / rendering: MME TIME is the frame time.
+    out.sceneTime = pc.view.sceneTime;
+    out.sceneElapsed = pc.view.sceneElapsed;
+    if (!pc.view.mmeEditMode) {
+        out.time = out.sceneTime;
+        out.elapsed = out.sceneElapsed;
+    }
+    out.self.si = 0.1f;
+    out.lookup = MmeSceneLookup(pc.view);
+}
+
+// M5b: one model's MME-owned materials into the bound MRTs, with `frame`'s camera. The per-material body is the M4b
+// object draw ScenePass::DrawMmeModel ran inline (kept in sync there for the raster / PT layers).
+bool DrawMmeModelToMrt(PassContext& pc, GpuModel& model, const MmeFrameValues& frame,
+                       const XMFLOAT4X4& prevViewProjNoJitter, const DXGI_FORMAT* rtFormats, DXGI_FORMAT dsFormat,
+                       uint32_t sampleCount, uint64_t generation, float shutter) {
+    if (!pc.mme || !pc.mmeSkin) return false;
+    if (!model.HasMmeEffects()) return false;
+
+    pc.mmeSkin->Skin(pc, model, generation, shutter);
+    D3D12_VERTEX_BUFFER_VIEW vb0 = pc.mmeSkin->Vb(model);
+    if (!vb0.BufferLocation) return false;
+    const D3D12_VERTEX_BUFFER_VIEW vbs[3] = {vb0, model.AddUvBufferView(), MmeZeroWhiteVb(pc.ctx)};
+    if (!vbs[2].BufferLocation) return false;
+
+    struct HostCb {
+        XMFLOAT4X4 view;
+        XMFLOAT4X4 viewProjNoJitter;
+        XMFLOAT4X4 prevViewProjNoJitter;
+        XMFLOAT4 params;
+    };
+    HostCb host;
+    host.view = frame.view;
+    XMStoreFloat4x4(&host.viewProjNoJitter, XMLoadFloat4x4(&frame.view) * XMLoadFloat4x4(&frame.proj));
+    host.prevViewProjNoJitter = prevViewProjNoJitter;
+    host.params = {pc.view.light.sunIntensity, 1.0f, 0.0f, 0.0f};
+    const D3D12_GPU_VIRTUAL_ADDRESS hostAddr = pc.mme->AllocConstants(&host, sizeof(host));
+    if (hostAddr == 0) return false;
+
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    ID3D12DescriptorHeap* heaps[2] = {pc.ctx.SrvHeap().Heap(), pc.mme->SamplerHeap()};
+    cmd->SetDescriptorHeaps(2, heaps);
+    cmd->SetGraphicsRootSignature(pc.mme->RootSignature());
+    cmd->SetGraphicsRootConstantBufferView(6, hostAddr);
+
+    bool drew = false;
+    for (size_t mi = 0; mi < model.Materials().size(); ++mi) {
+        const std::filesystem::path& file = model.MmeEffectOf(mi);
+        if (file.empty()) continue;
+        MmeEffectInstance* inst = pc.mme->Instance(file, true);
+        if (!inst || !inst->Ready() || inst->Failed()) continue;
+        const MmeEffectDesc& fx = inst->Desc();
+        if (fx.techniques.empty()) continue;
+        const GpuModel::Material& m = model.Materials()[mi];
+        if (m.indexCount == 0 || !m.visible) continue;
+        const bool haveShadow = pc.mme->HasObjectShadowMap();
+        const MmeTechnique* t = haveShadow ? SelectTechnique(fx, "object_ss", model, mi, /*exactPass=*/true) : nullptr;
+        if (!t) t = SelectTechnique(fx, "object", model, mi);
+        if (!t || t->passes.empty()) continue;
+        if (const MmeAnnotation* sc = FindAnnotation(t->annotations, "Script")) {
+            if (sc->value.str.find("RenderColorTarget") != std::string::npos) continue;
+        }
+        const MmePass& pass = t->passes[0];
+        const int program = inst->FindProgram(t->name, pass.name);
+        if (program < 0) continue;
+        const MmeProgram& prog = inst->Programs()[program];
+        if (!prog.ok || !prog.ps.code || !prog.hostMrt) continue;
+        MmeObjectValues ov;
+        FillMmeObjectValues(model, mi, ov);
+        // fix 4/5: advance this instance's animated textures and give the binder the TEXTUREVALUE provider.
+        inst->UpdateAnimatedTextures(pc);
+        MmeFrameValues frameV = frame;
+        frameV.textureValue = [inst](const std::string& name, uint32_t& outCount) -> const float* {
+            return inst->TexValueFor(name, outCount);
+        };
+        std::vector<D3D12_INPUT_ELEMENT_DESC> layout = MmeObjectInputLayout(prog.vs);
+        ID3D12PipelineState* pso = inst->Pso(pc.ctx, program, pass, rtFormats, 3, dsFormat, sampleCount, &layout);
+        if (!pso) continue;
+        cmd->SetPipelineState(pso);
+        bool ok = true;
+        // $Globals writers: ScenePass caches them in mmeWriters_; a per-draw writer keeps this helper self-contained.
+        for (int pixel = 0; pixel < 2 && ok; ++pixel) {
+            const MmeStage& st = pixel ? prog.ps : prog.vs;
+            MmeConstantWriter writer;
+            std::vector<MmeDiag> diags;
+            writer.Bind(fx, st, diags);
+            writer.Write(frameV);
+            writer.WriteObject(ov);
+            D3D12_GPU_VIRTUAL_ADDRESS cbAddr = pc.sceneConstants;
+            if (!writer.Bytes().empty()) {
+                cbAddr = pc.mme->AllocConstants(writer.Bytes().data(), (uint32_t)writer.Bytes().size());
+                if (cbAddr == 0) ok = false;
+            }
+            if (!ok) break;
+            const int base = pixel ? 3 : 0;
+            cmd->SetGraphicsRootConstantBufferView(base, cbAddr);
+            const D3D12_GPU_DESCRIPTOR_HANDLE srv =
+                inst->StageSrvTableObject(pc, program, pixel != 0, m.srvTable, &model);
+            if (srv.ptr) cmd->SetGraphicsRootDescriptorTable(base + 1, srv);
+            const D3D12_GPU_DESCRIPTOR_HANDLE smp = inst->StageSamplerTable(program, pixel != 0);
+            if (smp.ptr) cmd->SetGraphicsRootDescriptorTable(base + 2, smp);
+        }
+        if (!ok) continue;
+        cmd->IASetVertexBuffers(0, 3, vbs);
+        cmd->IASetIndexBuffer(&model.IndexBufferView());
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmd->DrawIndexedInstanced(m.indexCount, 1, m.indexStart, 0, 0);
+        pc.stats.drawCalls++;
+        pc.stats.triangles += m.indexCount / 3;
+        drew = true;
+    }
+    ID3D12DescriptorHeap* restore[1] = {pc.ctx.SrvHeap().Heap()};
+    cmd->SetDescriptorHeaps(1, restore);
+    return drew;
+}
+
+// M5b fix 1: the MME-layer ownership of one material (the same technique selection / empty-technique rule the MME
+// draw applies). A material whose technique is empty is "not drawn" by MMD either, so the depth pre-pass skips it
+// too (its surface would otherwise write depth that nothing draws over).
+bool MmeMaterialOwned(MmeRuntime* mme, const GpuModel& model, size_t material) {
+    const std::filesystem::path& file = model.MmeEffectOf(material);
+    if (!mme || file.empty()) return false;
+    MmeEffectInstance* inst = mme->Instance(file, true);
+    if (!inst || !inst->Ready() || inst->Failed()) return false;
+    const MmeEffectDesc& fx = inst->Desc();
+    if (fx.techniques.empty()) return false;
+    const bool haveShadow = mme->HasObjectShadowMap();
+    const MmeTechnique* t = haveShadow ? SelectTechnique(fx, "object_ss", model, material, /*exactPass=*/true)
+                                       : nullptr;
+    if (!t) t = SelectTechnique(fx, "object", model, material);
+    return t != nullptr;   // null (no technique, or an empty technique skipped by the draw) -> not owned
+}
+
+// The zero/white vertex buffer (slot 2): four zeros then four ones, stride 16. TEXCOORD3/4 read offset 0 (zeros),
+// COLOR0 reads offset 16 (white). Created once and reused; the MmeSkin host slots are slots 0 (skinned) / 1 (addUV).
+D3D12_VERTEX_BUFFER_VIEW MmeZeroWhiteVb(Dx12Context& ctx) {
+    static ComPtr<ID3D12Resource> res;
+    static D3D12_VERTEX_BUFFER_VIEW view{};
+    if (!res) {
+        static const float kData[8] = {0, 0, 0, 0, 1, 1, 1, 1};
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_UPLOAD};
+        CD3DX12_RESOURCE_DESC rd = CD3DX12_RESOURCE_DESC::Buffer(sizeof(kData));
+        if (SUCCEEDED(ctx.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                            IID_PPV_ARGS(&res)))) {
+            res->SetName(L"mme.zeroWhite");
+            void* mapped = nullptr;
+            if (SUCCEEDED(res->Map(0, nullptr, &mapped))) {
+                memcpy(mapped, kData, sizeof(kData));
+                res->Unmap(0, nullptr);
+                view.BufferLocation = res->GetGPUVirtualAddress();
+                view.SizeInBytes = sizeof(kData);
+                view.StrideInBytes = 16;
+            }
+        }
+    }
+    return view;
+}
+
+void ScenePass::DrawMmeModel(PassContext& pc, GpuModel& model, bool rt, std::vector<uint8_t>& handled) {
+    // Runs the object-effect draws for one model. Uses the runtime's root signature + tables; the caller rebinds
+    // ScenePass's root signature + descriptor heap afterwards. Returns the per-material ownership in `handled`.
+    handled.assign(model.Materials().size(), 0);    if (!pc.mme || !pc.mmeSkin) return;
+    if (!model.HasMmeEffects()) return;
+
+    // M5c: an accessory `.x` (an MME effect object's mesh) is model space with the controller panel as its world;
+    // its materials are drawn only by the effect's object technique (no object technique = invisible, as in MMD).
+    const MmeEffectObject* accessory = nullptr;
+    for (const MmeEffectObject& o : pc.view.mmeEffectObjects)
+        if (o.mesh == &model) { accessory = &o; break; }
+    if (accessory) handled.assign(model.Materials().size(), 2);
+
+    const bool isPmx = true;   // MME object effects run on PMX/PMD models (world-space vertices): WORLD = identity
+    (void)isPmx;
+    const SceneConstants& sc = *pc.sceneConstantsCpu;
+    const XMMATRIX viewM = XMLoadFloat4x4(&sc.view);
+    const XMMATRIX projM = XMLoadFloat4x4(&sc.proj);          // jittered (TAA): the surfaces line up with the scene
+    const CameraParams& cam = pc.view.camera;
+
+    // Frame values: WORLD = identity for PMX models, so WORLDVIEWPROJECTION = identity * view * proj and the MME
+    // surfaces land on the scene's jittered projection.
+    MmeFrameValues frame{};
+    XMStoreFloat4x4(&frame.view, viewM);
+    XMStoreFloat4x4(&frame.proj, projM);
+    frame.cameraPos = cam.eye;
+    const XMMATRIX invView = XMMatrixInverse(nullptr, viewM);
+    XMStoreFloat3(&frame.cameraDir, XMVector3Normalize(XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), invView)));
+    XMStoreFloat3(&frame.lightDir, XMVector3Normalize(XMLoadFloat3(&pc.view.light.direction)));
+    frame.lightColor = pc.view.light.color;
+    // M5a fix 2: one MMD self-shadow light camera per frame, shared with the shadow map pass.
+    {
+        std::vector<const GpuModel*> chars;
+        chars.reserve(pc.view.models.size());
+        for (const GpuModel* m : pc.view.models) chars.push_back(m);
+        BuildLightCamera(frame.lightDir, chars, pc.view.mmeObjects, frame.lightView, frame.lightProj);
+    }
+    frame.viewportW = (float)pc.targets.width;
+    frame.viewportH = (float)pc.targets.height;
+    frame.lookup = MmeSceneLookup(pc.view);
+    frame.time = (float)pc.frame / 60.0f;
+    frame.elapsed = pc.frameTimeMs * 0.001f;
+    // M8a: the scene clock (see FrameView); MME TIME is the frame time while playing / rendering.
+    frame.sceneTime = pc.view.sceneTime;
+    frame.sceneElapsed = pc.view.sceneElapsed;
+    if (!pc.view.mmeEditMode) {
+        frame.time = frame.sceneTime;
+        frame.elapsed = frame.sceneElapsed;
+    }
+    // The binder's WORLD comes from the accessory panel; PMX object draws are world-space, so make
+    // AccessoryWorld (scale = si*10, no offset / rotation) the identity.
+    frame.self.si = 0.1f;
+    // M5c: an accessory `.x` keeps model-space vertices (its skin matrices are identity), so the effect places it
+    // through `CONTROLOBJECT (self)` / its WORLD: hand the binder the controller panel as `self`.
+    if (accessory) frame.self = accessory->panel;
+
+    // Host cbuffer: view, viewProjNoJitter, prevViewProjNoJitter, params (x sun intensity, y = 1).
+    struct HostCb {
+        XMFLOAT4X4 view;
+        XMFLOAT4X4 viewProjNoJitter;
+        XMFLOAT4X4 prevViewProjNoJitter;
+        XMFLOAT4 params;
+    };
+    HostCb host;
+    XMStoreFloat4x4(&host.view, viewM);
+    host.viewProjNoJitter = sc.viewProjNoJitter;
+    host.prevViewProjNoJitter = sc.prevViewProjNoJitter;
+    host.params = {pc.view.light.sunIntensity, 1.0f, 0.0f, 0.0f};
+    const D3D12_GPU_VIRTUAL_ADDRESS hostAddr = pc.mme->AllocConstants(&host, sizeof(host));
+
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    ID3D12DescriptorHeap* heaps[2] = {pc.ctx.SrvHeap().Heap(), pc.mme->SamplerHeap()};
+    cmd->SetDescriptorHeaps(2, heaps);
+    cmd->SetGraphicsRootSignature(pc.mme->RootSignature());
+    cmd->SetGraphicsRootConstantBufferView(6, hostAddr);
+    // CPU-style skinning into the world-space MME vertex buffer (idempotent within the frame).
+    pc.mmeSkin->Skin(pc, model);
+
+    const DXGI_FORMAT rtFormats[3] = {RenderTargets::kColorFormat, RenderTargets::kNormalFormat,
+                                      RenderTargets::kVelocityFormat};
+    const DXGI_FORMAT dsFormat = DXGI_FORMAT_D32_FLOAT;
+    const uint32_t msaa = pc.targets.msaa ? pc.targets.msaa : 1;
+
+    std::set<std::string> used;
+    std::set<MmeEffectInstance*> logged;
+    size_t owned = 0, drawn = 0;
+    for (size_t mi = 0; mi < model.Materials().size(); ++mi) {
+        const std::filesystem::path& file = model.MmeEffectOf(mi);
+        if (file.empty()) continue;
+        ++owned;
+        const GpuModel::Material& m = model.Materials()[mi];
+        if (m.indexCount == 0) continue;
+        // M5c: an accessory `.x` material's own alpha is not a visibility gate -- the effect owns the mesh's look
+        // (particle fields ship alpha-0 materials and the effect's technique shades them).
+        if (!accessory && !m.visible) continue;
+        MmeEffectInstance* inst = pc.mme->Instance(file, true);
+        if (!inst || !inst->Ready() || inst->Failed()) continue;
+        const MmeEffectDesc& fx = inst->Desc();
+        if (fx.techniques.empty()) continue;
+
+        // object_ss only when a self-shadow map is available (spec 3.4); else object. The shadow map is bound at
+        // register(s0) by the runtime's SRV table when an object_ss draw needs it.
+        const bool haveShadow = pc.mme->HasObjectShadowMap();
+        const MmeTechnique* t = haveShadow ? SelectTechnique(fx, "object_ss", model, mi, /*exactPass=*/true) : nullptr;
+        if (!t) t = SelectTechnique(fx, "object", model, mi);
+        if (!t) continue;
+        if (t->passes.empty()) { handled[mi] = 2; continue; }   // empty technique: not drawn
+        // M5c fix: an object-class technique whose script switches RenderColorTarget wants an effect target, not the
+        // scene's G-buffer. Run it through the script VM with a host that draws each pass into the currently bound
+        // target with the file's plain instance (default-target passes keep the object-mode host-MRT draw below).
+        // A scene / post-class effect the caller assigned to a mesh material is not an object technique: it keeps the
+        // pre-M5c skip (running its ScriptExternal-carrying script as an object one would paint the whole frame).
+        if (const MmeAnnotation* sc = FindAnnotation(t->annotations, "Script")) {
+            if (sc->value.str.find("RenderColorTarget") != std::string::npos) {
+                if (inst->Desc().kind() != "object") {
+                    // an effect object's controller `.x` of a post effect is invisible in MMD (expected: no warning)
+                    if (model.MmeEffectMesh()) {
+                        handled[mi] = 2;
+                        continue;
+                    }
+                    if (mmeDiag_.insert("objtarget:" + mmetext::PathKey(file)).second)
+                        LOG_WARN("MME %s: object technique '%s' switches RenderColorTarget; pass skipped (M5)",
+                                 PathToUtf8(file).c_str(), t->name.c_str());
+                    continue;
+                }
+                const uint32_t n = RunMmeObjectScriptTechnique(pc, model, mi, *t, inst, frame, msaa, mmeWriters_);
+                if (n) {
+                    handled[mi] = 1;
+                    ++drawn;
+                    used.insert(t->name);
+                    logged.insert(inst);
+                } else {
+                    handled[mi] = 2;   // nothing drawn: hide the material rather than draw it natively
+                }
+                continue;
+            }
+        }
+        const MmePass& pass = t->passes[0];
+        const int program = inst->FindProgram(t->name, pass.name);
+        if (program < 0) continue;
+        const MmeProgram& prog = inst->Programs()[program];
+        if (!prog.ok || !prog.ps.code) continue;
+        if (!prog.hostMrt) continue;   // PS writes MRT / DEPTH itself: not host-drawable, draw natively
+
+        // per-material binder values (spec §4.2 MMD quirk, as nanoem's Effect::setMaterialParameters)
+        MmeObjectValues ov;
+        FillMmeObjectValues(model, mi, ov);
+        // fix 4/5: advance this instance's animated textures and give the binder the TEXTUREVALUE provider.
+        inst->UpdateAnimatedTextures(pc);
+        MmeFrameValues frameV = frame;
+        frameV.textureValue = [inst](const std::string& name, uint32_t& outCount) -> const float* {
+            return inst->TexValueFor(name, outCount);
+        };
+
+        // PS input layout from the VS output signature (object draw uses the model's own IB).
+        const MmeStage& vs = prog.vs;
+        std::vector<D3D12_INPUT_ELEMENT_DESC> layout = MmeObjectInputLayout(vs);
+        ID3D12PipelineState* pso = inst->Pso(pc.ctx, program, pass, rtFormats, 3, dsFormat, msaa, &layout);
+        if (!pso) continue;
+
+        // The host VBs: slot 0 skinned (MmeSkin), slot 1 add-UV view, slot 2 zero/white.
+        D3D12_VERTEX_BUFFER_VIEW vb0 = pc.mmeSkin->Vb(model);
+        if (!vb0.BufferLocation) continue;   // skinning unavailable
+        const D3D12_VERTEX_BUFFER_VIEW vbs[3] = {vb0, model.AddUvBufferView(), MmeZeroWhiteVb(pc.ctx)};
+        if (!vbs[2].BufferLocation) continue;
+
+        cmd->SetPipelineState(pso);
+        // stage constants (VS / PS $Globals) + SRV / sampler tables
+        for (int pixel = 0; pixel < 2; ++pixel) {
+            const MmeStage& st = pixel ? prog.ps : prog.vs;
+            const uint64_t key = ((uint64_t)(uintptr_t)inst << 32) ^ ((uint64_t)program << 1) ^ (uint64_t)pixel;
+            auto it = mmeWriters_.find(key);
+            if (it == mmeWriters_.end()) {
+                auto w = std::make_unique<MmeConstantWriter>();
+                std::vector<MmeDiag> diags;
+                w->Bind(fx, st, diags);
+                for (const MmeDiag& d : diags)
+                    LOG_WARN("MME %s: %s", PathToUtf8(inst->File()).c_str(), d.message.c_str());
+                it = mmeWriters_.emplace(key, std::move(w)).first;
+            }
+            MmeConstantWriter* writer = it->second.get();
+            writer->Write(frameV);
+            writer->WriteObject(ov);
+            D3D12_GPU_VIRTUAL_ADDRESS cbAddr = pc.sceneConstants;
+            if (!writer->Bytes().empty()) {
+                cbAddr = pc.mme->AllocConstants(writer->Bytes().data(), (uint32_t)writer->Bytes().size());
+                if (cbAddr == 0) break;
+            }
+            const int base = pixel ? 3 : 0;
+            cmd->SetGraphicsRootConstantBufferView(base, cbAddr);
+            const D3D12_GPU_DESCRIPTOR_HANDLE srv = inst->StageSrvTableObject(pc, program, pixel != 0, m.srvTable, &model);
+            if (srv.ptr) cmd->SetGraphicsRootDescriptorTable(base + 1, srv);
+            const D3D12_GPU_DESCRIPTOR_HANDLE smp = inst->StageSamplerTable(program, pixel != 0);
+            if (smp.ptr) cmd->SetGraphicsRootDescriptorTable(base + 2, smp);
+        }
+        cmd->IASetVertexBuffers(0, 3, vbs);
+        cmd->IASetIndexBuffer(&model.IndexBufferView());
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmd->DrawIndexedInstanced(m.indexCount, 1, m.indexStart, 0, 0);
+        pc.stats.drawCalls++;
+        pc.stats.triangles += m.indexCount / 3;
+        handled[mi] = 1;
+        ++drawn;
+        used.insert(t->name);
+        logged.insert(inst);
+    }
+    (void)rt;
+
+    // M6a: one MME OBJECT line per (effect file, model): a model may use several per-material effects.
+    for (MmeEffectInstance* inst : logged) {
+        const uint64_t k = ((uint64_t)(uintptr_t)inst << 32) ^ (uint64_t)(uintptr_t)&model;
+        auto& names = mmeUsed_[k];
+        names.insert(used.begin(), used.end());
+        if (mmeLogged_.insert(k).second) {
+            std::string list;
+            for (const std::string& n : names) list += (list.empty() ? "" : ",") + n;
+            LOG_INFO("MME OBJECT %s model=%s materials=%zu/%zu techniques=%s", PathToUtf8(inst->File()).c_str(),
+                     model.Name().c_str(), owned, model.Materials().size(), list.c_str());
+        }
+    }
+
+    ID3D12DescriptorHeap* restore[1] = {pc.ctx.SrvHeap().Heap()};
+    cmd->SetDescriptorHeaps(1, restore);
+}
+
+bool ScenePass::DrawMmeEdges(PassContext& pc, GpuModel& model) {
+    if (!pc.mme || !pc.mmeSkin) return false;
+    if (!model.HasMmeEffects()) return false;
+
+    const SceneConstants& sc = *pc.sceneConstantsCpu;
+    const XMMATRIX viewM = XMLoadFloat4x4(&sc.view);
+    const XMMATRIX projM = XMLoadFloat4x4(&sc.proj);
+    const CameraParams& cam = pc.view.camera;
+    MmeFrameValues frame{};
+    XMStoreFloat4x4(&frame.view, viewM);
+    XMStoreFloat4x4(&frame.proj, projM);
+    frame.cameraPos = cam.eye;
+    const XMMATRIX invView = XMMatrixInverse(nullptr, viewM);
+    XMStoreFloat3(&frame.cameraDir, XMVector3Normalize(XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), invView)));
+    XMStoreFloat3(&frame.lightDir, XMVector3Normalize(XMLoadFloat3(&pc.view.light.direction)));
+    frame.lightColor = pc.view.light.color;
+    // M5a fix 2: one MMD self-shadow light camera per frame, shared with the shadow map pass.
+    {
+        std::vector<const GpuModel*> chars;
+        chars.reserve(pc.view.models.size());
+        for (const GpuModel* m : pc.view.models) chars.push_back(m);
+        BuildLightCamera(frame.lightDir, chars, pc.view.mmeObjects, frame.lightView, frame.lightProj);
+    }
+    frame.viewportW = (float)pc.targets.width;
+    frame.viewportH = (float)pc.targets.height;
+    frame.time = (float)pc.frame / 60.0f;
+    frame.elapsed = pc.frameTimeMs * 0.001f;
+    // M8a: the scene clock (see FrameView); MME TIME is the frame time while playing / rendering.
+    frame.sceneTime = pc.view.sceneTime;
+    frame.sceneElapsed = pc.view.sceneElapsed;
+    if (!pc.view.mmeEditMode) {
+        frame.time = frame.sceneTime;
+        frame.elapsed = frame.sceneElapsed;
+    }
+
+    struct HostCb { XMFLOAT4X4 view, viewProjNoJitter, prevViewProjNoJitter; XMFLOAT4 params; };
+    HostCb host;
+    XMStoreFloat4x4(&host.view, viewM);
+    host.viewProjNoJitter = sc.viewProjNoJitter;
+    host.prevViewProjNoJitter = sc.prevViewProjNoJitter;
+    host.params = {pc.view.light.sunIntensity, 1.0f, 0.0f, 0.0f};
+    const D3D12_GPU_VIRTUAL_ADDRESS hostAddr = pc.mme->AllocConstants(&host, sizeof(host));
+
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    ID3D12DescriptorHeap* heaps[2] = {pc.ctx.SrvHeap().Heap(), pc.mme->SamplerHeap()};
+    cmd->SetDescriptorHeaps(2, heaps);
+    cmd->SetGraphicsRootSignature(pc.mme->RootSignature());
+    cmd->SetGraphicsRootConstantBufferView(6, hostAddr);
+    pc.mmeSkin->Skin(pc, model);
+
+    const DXGI_FORMAT rtFormats[3] = {RenderTargets::kColorFormat, RenderTargets::kNormalFormat,
+                                      RenderTargets::kVelocityFormat};
+    const DXGI_FORMAT dsFormat = DXGI_FORMAT_D32_FLOAT;
+    const uint32_t msaa = pc.targets.msaa ? pc.targets.msaa : 1;
+    bool drew = false;
+    for (size_t mi = 0; mi < model.Materials().size(); ++mi) {
+        const std::filesystem::path& file = model.MmeEffectOf(mi);
+        if (file.empty()) continue;
+        const GpuModel::Material& m = model.Materials()[mi];
+        if (!m.drawEdge || m.indexCount == 0) continue;
+        MmeEffectInstance* inst = pc.mme->Instance(file, true);
+        if (!inst || !inst->Ready() || inst->Failed()) continue;
+        const MmeEffectDesc& fx = inst->Desc();
+        // edge: per material, the edge technique of that material's effect.
+        const MmeTechnique* edge = nullptr;
+        for (const MmeTechnique& t : fx.techniques)
+            if (t.mmdPass == "edge" && !t.passes.empty()) { edge = &t; break; }
+        if (!edge) continue;
+        const int program = inst->FindProgram(edge->name, edge->passes[0].name);
+        if (program < 0) continue;
+        const MmeProgram& prog = inst->Programs()[program];
+        if (!prog.ok || !prog.ps.code || !prog.hostMrt) continue;
+        // fix 4/5: animated textures + TEXTUREVALUE provider for the edge pass too.
+        inst->UpdateAnimatedTextures(pc);
+        MmeFrameValues frameV = frame;
+        frameV.textureValue = [inst](const std::string& name, uint32_t& outCount) -> const float* {
+            return inst->TexValueFor(name, outCount);
+        };
+        const MaterialConstants& mc = model.MaterialConstantsCpu()[mi];
+        MmeObjectValues ov;
+        ov.diffuse = mc.diffuse;
+        ov.ambient = {mc.diffuse.x, mc.diffuse.y, mc.diffuse.z, 1.0f};
+        ov.specular = {mc.specular.x, mc.specular.y, mc.specular.z, 1.0f};
+        ov.specularPower = mc.specularPower;
+        ov.emissive = {mc.ambient.x, mc.ambient.y, mc.ambient.z, 1.0f};
+        const XMFLOAT3& toon = model.MmeToonColor(mi);
+        ov.toonColor = {toon.x, toon.y, toon.z, 1.0f};
+        ov.edgeColor = mc.edgeColor;
+        ov.texMul = mc.texMul;
+        ov.texAdd = mc.texAdd;
+        ov.sphereMul = mc.sphereMul;
+        ov.sphereAdd = mc.sphereAdd;
+        ov.useTexture = (mc.flags & MatFlag_HasTexture) != 0;
+        ov.useSpheremap = m.sphereMode != 0;
+        ov.useSubtexture = m.sphereMode == 3;
+        ov.useToon = true;
+        ov.spadd = m.sphereMode == 2;
+
+        std::vector<D3D12_INPUT_ELEMENT_DESC> layout = MmeObjectInputLayout(prog.vs);
+        ID3D12PipelineState* pso = inst->Pso(pc.ctx, program, edge->passes[0], rtFormats, 3, dsFormat, msaa, &layout);
+        if (!pso) continue;
+        cmd->SetPipelineState(pso);
+        for (int pixel = 0; pixel < 2; ++pixel) {
+            const MmeStage& st = pixel ? prog.ps : prog.vs;
+            const uint64_t key = ((uint64_t)(uintptr_t)inst << 32) ^ ((uint64_t)program << 1) ^ (uint64_t)pixel;
+            auto it = mmeWriters_.find(key);
+            if (it == mmeWriters_.end()) {
+                auto w = std::make_unique<MmeConstantWriter>();
+                std::vector<MmeDiag> diags;
+                w->Bind(fx, st, diags);
+                it = mmeWriters_.emplace(key, std::move(w)).first;
+            }
+            MmeConstantWriter* writer = it->second.get();
+            writer->Write(frameV);
+            writer->WriteObject(ov);
+            D3D12_GPU_VIRTUAL_ADDRESS cbAddr = pc.sceneConstants;
+            if (!writer->Bytes().empty()) {
+                cbAddr = pc.mme->AllocConstants(writer->Bytes().data(), (uint32_t)writer->Bytes().size());
+                if (cbAddr == 0) break;
+            }
+            const int base = pixel ? 3 : 0;
+            cmd->SetGraphicsRootConstantBufferView(base, cbAddr);
+            const D3D12_GPU_DESCRIPTOR_HANDLE srv = inst->StageSrvTableObject(pc, program, pixel != 0, m.srvTable, &model);
+            if (srv.ptr) cmd->SetGraphicsRootDescriptorTable(base + 1, srv);
+            const D3D12_GPU_DESCRIPTOR_HANDLE smp = inst->StageSamplerTable(program, pixel != 0);
+            if (smp.ptr) cmd->SetGraphicsRootDescriptorTable(base + 2, smp);
+        }
+        const D3D12_VERTEX_BUFFER_VIEW vbs[3] = {pc.mmeSkin->Vb(model), model.AddUvBufferView(),
+                                                 MmeZeroWhiteVb(pc.ctx)};
+        cmd->IASetVertexBuffers(0, 3, vbs);
+        cmd->IASetIndexBuffer(&model.IndexBufferView());
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmd->DrawIndexedInstanced(m.indexCount, 1, m.indexStart, 0, 0);
+        pc.stats.drawCalls++;
+        drew = true;
+    }
+    // Restore the ScenePass descriptor heap (the caller restores the root signature / tables). Mirrors
+    // DrawMmeModel: without this the native edge loop below would run with the MME sampler heap bound.
+    ID3D12DescriptorHeap* restore[1] = {pc.ctx.SrvHeap().Heap()};
+    cmd->SetDescriptorHeaps(1, restore);
+    return drew;
 }
 
 void ScenePass::Execute(PassContext& pc) {
@@ -785,19 +1785,26 @@ void ScenePass::Execute(PassContext& pc) {
 
     const bool rt = pc.path == RenderPath::RayTraced && pc.rt && psoCullBackRt_;
     const bool wire = pc.path == RenderPath::Raster && pc.settings.shading == ViewShading::Wireframe;
-    cmd->SetGraphicsRootSignature(rootSig_.Get());
-    cmd->SetGraphicsRootDescriptorTable(5, pc.transient.SrvTable(ctx, {&t.shadowMap}));
-    cmd->SetGraphicsRootDescriptorTable(11, pc.transient.SrvTable(ctx, {&t.spotShadowMap}));
-    cmd->SetGraphicsRootDescriptorTable(13, pc.transient.SrvTable(ctx, {&t.pointShadowMap}));
-    cmd->SetGraphicsRootShaderResourceView(6, pc.lights);
-    if (rt) {
-        cmd->SetGraphicsRootShaderResourceView(7, pc.rt->Tlas());
-        cmd->SetGraphicsRootShaderResourceView(8, pc.rt->Geometries());
-    }
-    // Bindless tables (t0 space2 textures / space3 buffers): the PBR debug view samples the model's PBR textures
-    // through them on the plain raster path too, so bind the heap segments every frame (not only under RT).
-    cmd->SetGraphicsRootDescriptorTable(9, ctx.SrvHeap().Gpu(0));
-    cmd->SetGraphicsRootDescriptorTable(10, ctx.SrvHeap().Gpu(0));
+    // The shadow-map SRV tables are allocated once; rebinding them (and the root signature) is what MME draws need
+    // to undo when switching back.
+    const D3D12_GPU_DESCRIPTOR_HANDLE shadowTable = pc.transient.SrvTable(ctx, {&t.shadowMap});
+    const D3D12_GPU_DESCRIPTOR_HANDLE spotTable = pc.transient.SrvTable(ctx, {&t.spotShadowMap});
+    const D3D12_GPU_DESCRIPTOR_HANDLE pointTable = pc.transient.SrvTable(ctx, {&t.pointShadowMap});
+    const D3D12_GPU_DESCRIPTOR_HANDLE heapBase = ctx.SrvHeap().Gpu(0);
+    const auto bindSceneRoot = [&]() {
+        cmd->SetGraphicsRootSignature(rootSig_.Get());
+        cmd->SetGraphicsRootDescriptorTable(5, shadowTable);
+        cmd->SetGraphicsRootDescriptorTable(11, spotTable);
+        cmd->SetGraphicsRootDescriptorTable(13, pointTable);
+        cmd->SetGraphicsRootShaderResourceView(6, pc.lights);
+        if (rt) {
+            cmd->SetGraphicsRootShaderResourceView(7, pc.rt->Tlas());
+            cmd->SetGraphicsRootShaderResourceView(8, pc.rt->Geometries());
+        }
+        cmd->SetGraphicsRootDescriptorTable(9, heapBase);
+        cmd->SetGraphicsRootDescriptorTable(10, heapBase);
+    };
+    bindSceneRoot();
     // PBR record selection (b3) is per material; the debug channel is frame-wide (bound per draw).
     const uint32_t pbrDebugChannel = (uint32_t)pc.settings.pbrDebug;
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -859,8 +1866,27 @@ void ScenePass::Execute(PassContext& pc) {
                     cmd->SetGraphicsRootDescriptorTable(12, ctx.SrvHeap().Gpu(it->second.srv));
             }
             ID3D12PipelineState* curPso = nullptr;
+            // M4b: MME object effect for this model (lit camera view only). The effect draws the materials it owns;
+            // `mmeHandled[i]` marks those so the native loop skips them. The MME draw binds its own root signature /
+            // descriptor heaps, so ScenePass's bindings are restored right after.
+            std::vector<uint8_t> mmeHandled;
+            const bool mmeView = !wire && !vd.ortho && pc.settings.shading == ViewShading::Lit;
+            if (mmeView && model->HasMmeEffects() && pc.mme && pc.mmeSkin) {
+                DrawMmeModel(pc, *model, rt, mmeHandled);
+                bindSceneRoot();
+                if (pack) {
+                    const auto pset = pack->sets.find(PackSetKey(model->ShaderTextureFolder()));
+                    if (pset != pack->sets.end() && pset->second.srv != DescriptorHeap::kInvalid)
+                        cmd->SetGraphicsRootDescriptorTable(12, ctx.SrvHeap().Gpu(pset->second.srv));
+                }
+                BindModelBuffers(cmd, *model, pc.frame);
+                cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
+                cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
+            }
             for (const GpuModel::Material& m : model->Materials()) {
                 if (m.indexCount == 0 || !m.visible) continue;   // MMD skips materials with alpha 0
+                const size_t thisMat = (size_t)(&m - model->Materials().data());
+                if (thisMat < mmeHandled.size() && mmeHandled[thisMat] != 0) continue;   // MME owns / hides this material
                 ID3D12PipelineState* want;
                 // Model .emd blend hints: an additive / no-depth-write material uses the matching lit PSO and the
                 // default (no-pack) shading, so a shader pack does not own that draw.
@@ -905,6 +1931,17 @@ void ScenePass::Execute(PassContext& pc) {
             }
 
             if (pc.settings.drawEdges && !wire) {   // wireframe: the model is drawn as edges already
+                // M4b: an `edge` technique in the model's MME object effect replaces the native edge pass for this model.
+                if (mmeView && model->HasMmeEffects() && pc.mme && pc.mmeSkin) {
+                    // DrawMmeEdges binds the MME root signature; restore ScenePass's state whether or not it drew an
+                    // edge (it may bind and then find no edge technique for any material).
+                    const bool drewEdge = DrawMmeEdges(pc, *model);
+                    bindSceneRoot();
+                    BindModelBuffers(cmd, *model, pc.frame);
+                    cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
+                    cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
+                    if (drewEdge) continue;   // skip the native edge loop for this model
+                }
                 ID3D12PipelineState* curEdgePso = nullptr;
                 ID3D12PipelineState* defaultEdge = psoEdge_.Get();
                 ID3D12PipelineState* packEdge = (pack && pack->edge) ? pack->edge.Get() : defaultEdge;

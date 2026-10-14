@@ -1,6 +1,7 @@
 // Offline GI renderer (see src/render/OfflineRenderer.h for the design and dispatch order).
 #include "render/OfflineRenderer.h"
 #include "render/Renderer.h"
+#include "render/MmeRuntime.h"
 #include "render/PassCommon.h"
 #include "render/GpuModel.h"
 #include "asset/ImageLoader.h"
@@ -13,6 +14,7 @@
 #include "core/TextUtil.h"
 #include <directx/d3dx12.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -115,6 +117,10 @@ struct OfflineRenderer::Impl {
     // offline_post.hlsl (lit compose, effect normal / velocity) and offline_effect.hlsl (effect depth): the effect stage
     ComputePipeline litCompose, effectDepth, effectNormal, effectVelocity;
     PackEffectPass effectPre{true}, effectPost{false};   // the shader packs' pre-bloom and post shares (RunOffline)
+    MmePostPass mmePost;                                 // M5b: the MME post chain on the offline sRGB image (RunOffline)
+    // M8b: the song's video layers (frame-exact synchronous decode). Background over the final image where the
+    // G-buffer depth is sky, overlay composited over the final image.
+    VideoPass videoBg{VideoStage::Background}, videoOverlay{VideoStage::Overlay};
     // offline_volumetric.hlsl, bloom_fft.hlsl (optional effects: empty pipelines disable them)
     ComputePipeline volMarch, volBlur;
     ComputePipeline fftInput, fftRows, fftCols, fftKernel, fftOutput;
@@ -138,6 +144,18 @@ struct OfflineRenderer::Impl {
     Texture accum, albedo, moments, gbuf, edgeLayer, edgeAccum, denoiseA, denoiseB, ldr, bloomA, bloomB;
     Texture litA, litB, ldrB, fxDepth, fxNormal, fxVel;   // effect stage: lit HDR and post ping-pong, effect inputs
     Texture edgeColorMsaa, edgeDepthMsaa;
+    // M5b: the MME layer's host MRTs (colour = edgeColorMsaa, normal + velocity here); the MME colour is resolved
+    // with the outlines into edgeLayer and composited exactly like the raster / PT MME layer.
+    Texture edgeNormalMsaa, edgeVelocityMsaa;
+    // M5b fix 2: the MMD self-shadow map the offline MME layer renders (once per image, before its first object_ss
+    // draw) so object_ss never samples an unrendered map.
+    Texture mmeShadowMap, mmeShadowDepth;
+    bool mmeShadowDone = false;        // the map holds this image's content
+    // M5b: the readiness hold (fix 3) and the per-iteration skin generation (fix 2).
+    std::chrono::steady_clock::time_point mmeWaitStart;   // set at Begin; 30 s timeout
+    bool mmeWaitWarned = false;
+    bool mmeWaitDone = false;          // the readiness hold passed (ready or timed out); latching per image
+    uint64_t mmeGeneration = 0;        // bumped per MME-layer iteration (MmeSkin re-skin at its shutter)
     Texture counter;                   // 1x1 R32_UINT
     Texture preE[kOfflinePrepassLevels], preG[kOfflinePrepassLevels];  // prepass levels (irradiance, geometry)
     uint32_t prepassFine = 2;          // stride of the finest prepass level (pixels)
@@ -158,6 +176,11 @@ struct OfflineRenderer::Impl {
     // job state
     FrameView view;                    // copy of the job's view (PassContext needs one)
     OfflineJobDesc job;
+    // M5b: the renderer's MME runtime + object skinning (Renderer::BeginOffline) and a CPU copy of this image's
+    // SceneConstants; the MME post chain (Finish) and the MME layer (DrawEdges) draw through them.
+    MmeRuntime* mme = nullptr;
+    MmeSkin* mmeSkin = nullptr;
+    SceneConstants sceneCpu;           // CPU copy of the SceneConstants passed to Begin (MME object host cbuffer)
     uint32_t serial = 0;               // incremented per Begin
     uint64_t frame = 0;                // ctx.FrameNumber() at Begin
     bool motion = false;               // view.motionBlur: geometry and camera move inside the shutter
@@ -176,9 +199,13 @@ struct OfflineRenderer::Impl {
     ComPtr<ID3D12GraphicsCommandList> list;
 
     PassContext Pc(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t, const BuiltinTextures* b, RtScene& rt) {
-        return PassContext{*ctx, cmd, view, settings, targets, stats, t,
-                           sceneCb->GetGPUVirtualAddress(), lightBuf->GetGPUVirtualAddress(), frame,
-                           false, true, b, RenderPath::PathTraced, &rt, nullptr, 0.0f, 0.0f, 16.7f};
+        PassContext pc{*ctx, cmd, view, settings, targets, stats, t,
+                       sceneCb->GetGPUVirtualAddress(), lightBuf->GetGPUVirtualAddress(), frame,
+                       false, true, b, RenderPath::PathTraced, &rt, nullptr, 0.0f, 0.0f, 16.7f};
+        pc.mme = mme;
+        pc.mmeSkin = mmeSkin;
+        pc.sceneConstantsCpu = &sceneCpu;
+        return pc;
     }
     void UavBarrier(ID3D12GraphicsCommandList* cmd) {
         D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
@@ -193,7 +220,12 @@ struct OfflineRenderer::Impl {
     void ConvolveBloom(PassContext& pc);
     void EffectInputs(PassContext& pc);
     bool EnsureTargets(uint32_t w, uint32_t h);
-    void DrawEdges(ID3D12GraphicsCommandList* cmd, RtScene& rt, float shutter, float lensX, float lensY);
+    void DrawEdges(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t, const BuiltinTextures* b, RtScene& rt,
+                   float shutter, float lensX, float lensY);
+    // M5b: draws the MME layer for one iteration (host MRT colour = edgeColorMsaa surface, normal / velocity here)
+    // with the iteration's lens / shutter camera. Returns true when a model's MME materials were drawn.
+    bool DrawMmeLayer(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t, const BuiltinTextures* b, RtScene& rt,
+                      float shutter, float lensX, float lensY);
     void PreparePackEdges();
     void Work(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t, const BuiltinTextures* b, RtScene& rt,
               OfflineProgress& pg);
@@ -266,6 +298,10 @@ bool OfflineRenderer::Impl::EnsureTargets(uint32_t w, uint32_t h) {
     volB.Release(c);
     edgeColorMsaa.Release(c);
     edgeDepthMsaa.Release(c);
+    edgeNormalMsaa.Release(c);
+    edgeVelocityMsaa.Release(c);
+    mmeShadowMap.Release(c);
+    mmeShadowDepth.Release(c);
     litA.Release(c);
     litB.Release(c);
     ldrB.Release(c);
@@ -274,6 +310,7 @@ bool OfflineRenderer::Impl::EnsureTargets(uint32_t w, uint32_t h) {
     fxVel.Release(c);
     effectPre.ReleaseTargets(c);    // the effect packs' pass targets / state slots of the old size
     effectPost.ReleaseTargets(c);
+    mmePost.ReleaseTargets(c);
     const D3D12_RESOURCE_FLAGS uav = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     const uint32_t qw = (w + 3) / 4, qh = (h + 3) / 4;
     const float zero[4] = {0, 0, 0, 0};
@@ -286,10 +323,11 @@ bool OfflineRenderer::Impl::EnsureTargets(uint32_t w, uint32_t h) {
     ok &= denoiseB.Create(c, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrvAll, L"offline.denoiseB");
     ok &= bloomA.Create(c, qw, qh, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrvAll, L"offline.bloomA");
     ok &= bloomB.Create(c, qw, qh, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrvAll, L"offline.bloomB");
-    ok &= ldr.Create(c, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, uav, kSrvAll, L"offline.ldr");
     // effect stage (shader packs): the lit HDR image and its ping-pong (UAV for CSLitCompose, RT for the effects), the
     // post ping-pong (RT), and the effect inputs; fxVel is 1x1 (zero motion, see EffectInputs)
     const D3D12_RESOURCE_FLAGS uavRt = (D3D12_RESOURCE_FLAGS)(uav | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    // ldr is UAV + RENDER_TARGET: the pack / MME post chains (RunOffline) draw into it and its ping-pong
+    ok &= ldr.Create(c, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, uavRt, kSrvAll, L"offline.ldr");
     ok &= litA.Create(c, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, uavRt, kSrvAll, L"offline.litA");
     ok &= litB.Create(c, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, uavRt, kSrvAll, L"offline.litB");
     ok &= ldrB.Create(c, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, kSrvAll,
@@ -304,6 +342,11 @@ bool OfflineRenderer::Impl::EnsureTargets(uint32_t w, uint32_t h) {
     ok &= edgeLayer.Create(c, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_NONE, kSrvAll,
                            L"offline.edgeLayer");
     ok &= edgeAccum.Create(c, w, h, DXGI_FORMAT_R32G32B32A32_FLOAT, uav, kUav, L"offline.edgeAccum");
+    // M5b: the MME layer's host MRTs (normal / velocity MSAA) and its resolved colour, resolved into edgeMmeLayer
+    ok &= edgeNormalMsaa.Create(c, w, h, RenderTargets::kNormalFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                kRt, L"offline.mme.normal", 4, 1, zero);
+    ok &= edgeVelocityMsaa.Create(c, w, h, RenderTargets::kVelocityFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                  kRt, L"offline.mme.velocity", 4, 1, zero);
     prepassFine = std::max(2u, (uint32_t)std::lround(h / 540.0));
     for (uint32_t l = 0; l < kOfflinePrepassLevels; ++l) {
         const uint32_t st = prepassFine << (kOfflinePrepassLevels - 1 - l);
@@ -374,7 +417,8 @@ void OfflineRenderer::Impl::PreparePackEdges() {
     }
 }
 
-void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, RtScene& rt, float shutter, float lensX,
+void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t,
+                                      const BuiltinTextures* b, RtScene& rt, float shutter, float lensX,
                                       float lensY) {
     Dx12Context& c = *ctx;
     edgeColorMsaa.Transition(cmd, kRt);
@@ -395,9 +439,26 @@ void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, RtScene& r
     cmd->SetGraphicsRoot32BitConstants(4, 4, edgeCb, 0);
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    for (int p = 0; p < 2; ++p) {  // pass 0: depth pre-pass, pass 1: edges
+    // M5b fix 2: render the MMD self-shadow map once per image, before the depth pre-pass / MME draws (the
+    // real-time MmeShadowPass is not part of the offline pass list). The depth pass's MME-material skip and the
+    // object_ss MME draw then use the same (shadow-aware) technique selection, and object_ss never samples an
+    // unrendered map. The state below (RTs / viewport / root signature) is re-bound afterwards.
+    if (!mmeShadowDone) {
+        PassContext spc = Pc(cmd, t, b, rt);
+        RenderMmeSelfShadowMap(spc, mmeShadowMap, mmeShadowDepth, 2048, shaderDir);
+        mmeShadowDone = true;
+        cmd->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+        cmd->RSSetViewports(1, &vp);
+        cmd->RSSetScissorRects(1, &sc);
+        cmd->SetGraphicsRootSignature(edgeRootSig.Get());
+        cmd->SetGraphicsRootConstantBufferView(0, sceneCb->GetGPUVirtualAddress());
+        cmd->SetGraphicsRoot32BitConstants(4, 4, edgeCb, 0);
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    }
+
+    for (int p = 0; p < 2; ++p) {  // pass 0: depth pre-pass (+ the MME layer), pass 1: edges
         for (GpuModel* model : view.models) {
-            if (!model) continue;
+            if (!model || model->MmeEffectMesh()) continue;   // the MME layer alone draws effect meshes
             // pass 1: the model's pack outlines (PackEdge) when its pack draws them, else the default edges
             ID3D12PipelineState* edge = edgePso.Get();
             if (p == 1 && !model->ShaderPackId().empty()) {
@@ -425,6 +486,9 @@ void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, RtScene& r
             for (const GpuModel::Material& mat : model->Materials()) {
                 if (p == 0) {
                     if (mat.indexCount == 0 || !mat.visible) continue;
+                    // M5b fix 1: the MME layer draws its own materials through a different vertex path; skipping
+                    // them here stops the depth pre-pass z-fighting the MME draw's surfaces.
+                    if (MmeMaterialOwned(mme, *model, (size_t)(&mat - model->Materials().data()))) continue;
                     ID3D12PipelineState* want = mat.doubleSided ? depthNoCull.Get() : depthCullBack.Get();
                     if (want != curPso) {
                         cmd->SetPipelineState(want);
@@ -443,6 +507,19 @@ void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, RtScene& r
                 cmd->DrawIndexedInstanced(mat.indexCount, 1, mat.indexStart, 0, 0);
             }
         }
+        // M5b: after the depth pre-pass and before the edges, one iteration's MME layer with this iteration's camera
+        if (p == 0 && mme && mmeSkin) {
+            // the MME layer may bind its own root signature / heaps / targets even when it ends up drawing nothing
+            // (an effect mesh whose technique is skipped): always restore the edge state for pass 1
+            DrawMmeLayer(cmd, t, b, rt, shutter, lensX, lensY);
+            cmd->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+            cmd->RSSetViewports(1, &vp);
+            cmd->RSSetScissorRects(1, &sc);
+            cmd->SetGraphicsRootSignature(edgeRootSig.Get());
+            cmd->SetGraphicsRootConstantBufferView(0, sceneCb->GetGPUVirtualAddress());
+            cmd->SetGraphicsRoot32BitConstants(4, 4, edgeCb, 0);
+            cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        }
     }
     edgeColorMsaa.Transition(cmd, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
     edgeLayer.Transition(cmd, D3D12_RESOURCE_STATE_RESOLVE_DEST);
@@ -450,10 +527,142 @@ void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, RtScene& r
     edgeLayer.Transition(cmd, kSrvAll);
 }
 
+// M5b: one iteration's MME layer, drawn into the edge layer's colour target (3 MRT: colour / normal / velocity) with
+// the iteration's lens / shutter camera, after the depth pass and before the edges. The MME colour then resolves with
+// the edges into edgeLayer and composites like the raster / PT MME layer.
+bool OfflineRenderer::Impl::DrawMmeLayer(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t,
+                                         const BuiltinTextures* b, RtScene& rt, float shutter, float lensX,
+                                         float lensY) {
+    if (!mme || !mmeSkin) return false;
+    bool anyMme = false;
+    for (GpuModel* gm : view.models)
+        if (gm && gm->HasMmeEffects()) { anyMme = true; break; }
+    if (!anyMme) return false;
+
+    Dx12Context& c = *ctx;
+    using namespace DirectX;
+    // The iteration's camera, exactly as offline_common.hlsli OfflineCameraAt: interpolate the camera-to-world basis
+    // (rows right/up/forward) and eye between the shutter-open camera (sceneCpu.prevInvView) and this frame's
+    // (sceneCpu.invView), then invert for the view. Then offline_edge_skin.hlsli's OfflineLensView shear + gProj.
+    const XMMATRIX camToWorld = XMLoadFloat4x4(&sceneCpu.invView);
+    const XMMATRIX prevCamToWorld = XMLoadFloat4x4(&sceneCpu.prevInvView);
+    const XMVECTOR fwd = XMVector3Normalize(XMVectorLerp(prevCamToWorld.r[2], camToWorld.r[2], shutter));
+    XMVECTOR right = XMVectorLerp(prevCamToWorld.r[0], camToWorld.r[0], shutter);
+    right = XMVector3Normalize(XMVectorSubtract(right, XMVectorScale(fwd, XMVectorGetX(XMVector3Dot(right, fwd)))));
+    const XMVECTOR up = XMVector3Cross(fwd, right);
+    const XMVECTOR eye = XMVectorLerp(prevCamToWorld.r[3], camToWorld.r[3], shutter);
+    XMMATRIX c2w = XMMatrixIdentity();
+    c2w.r[0] = XMVectorSetW(right, 0.0f);
+    c2w.r[1] = XMVectorSetW(up, 0.0f);
+    c2w.r[2] = XMVectorSetW(fwd, 0.0f);
+    c2w.r[3] = XMVectorSetW(eye, 1.0f);
+    XMMATRIX viewM = XMMatrixInverse(nullptr, c2w);
+    XMMATRIX proj = XMLoadFloat4x4(&sceneCpu.proj);
+    const float lensFocus = lensRadius > 0.0f ? focus : 0.0f;
+    if (lensFocus > 0.0f) {
+        // OfflineLensView: vp.xy -= lens * (1 - vp.z / focus), a view-space post-multiply (row-vector convention)
+        XMMATRIX shear = XMMatrixIdentity();
+        shear.r[2] = XMVectorSet(lensX / lensFocus, lensY / lensFocus, 1.0f, 0.0f);
+        shear.r[3] = XMVectorSet(-lensX, -lensY, 0.0f, 1.0f);
+        viewM = viewM * shear;
+    }
+    XMFLOAT4X4 viewF{}, projF{};
+    XMStoreFloat4x4(&viewF, viewM);
+    XMStoreFloat4x4(&projF, proj);
+
+    // A PassContext for the MME draws (the offline renderer keeps its own targets; the MME runtime only needs ctx/cmd).
+    PassContext pc = Pc(cmd, t, b, rt);
+
+    // Bind the 3 MRTs (colour = edgeColorMsaa surface, normal / velocity) + the shared depth, at 4x MSAA.
+    edgeColorMsaa.Transition(cmd, kRt);
+    edgeNormalMsaa.Transition(cmd, kRt);
+    edgeVelocityMsaa.Transition(cmd, kRt);
+    edgeDepthMsaa.Transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] = {c.RtvHeap().Cpu(edgeColorMsaa.rtv), c.RtvHeap().Cpu(edgeNormalMsaa.rtv),
+                                           c.RtvHeap().Cpu(edgeVelocityMsaa.rtv)};
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = c.DsvHeap().Cpu(edgeDepthMsaa.dsv);
+    cmd->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
+    D3D12_VIEWPORT vp{0, 0, (float)width, (float)height, 0, 1};
+    D3D12_RECT sc{0, 0, (LONG)width, (LONG)height};
+    cmd->RSSetViewports(1, &vp);
+    cmd->RSSetScissorRects(1, &sc);
+
+    const DXGI_FORMAT rtFormats[3] = {edgeColorMsaa.srvFormat, edgeNormalMsaa.srvFormat, edgeVelocityMsaa.srvFormat};
+
+    // M5b fix 2: this iteration's skin generation (motion blur: the iteration re-skins at its shutter time). The
+    // generation is bumped once per MME-layer call so MmeSkin re-runs CSSkin instead of keeping the first pose.
+    const uint64_t skinGen = ++mmeGeneration;
+    bool drew = false;
+    for (GpuModel* gm : view.models) {
+        if (!gm || !gm->HasMmeEffects()) continue;
+        MmeFrameValues frame;
+        FillMmeFrameValues(pc, viewF, projF, (float)width, (float)height, frame);
+        // Previous frame's jittered view-projection for the host velocity: the iteration's own camera (no motion
+        // between the MME draws of one iteration; the accumulation supplies the blur across iterations).
+        const XMMATRIX vpNoJitter = viewM * proj;
+        XMFLOAT4X4 vpF{};
+        XMStoreFloat4x4(&vpF, vpNoJitter);
+        if (DrawMmeModelToMrt(pc, *gm, frame, vpF, rtFormats, DXGI_FORMAT_D32_FLOAT, 4, skinGen, shutter)) drew = true;
+    }
+
+    // Restore the SRV-only heap for the outline draws (DrawMmeModelToMrt already restored it; harmless).
+    ID3D12DescriptorHeap* restore[1] = {c.SrvHeap().Heap()};
+    cmd->SetDescriptorHeaps(1, restore);
+    return drew;
+}
+
 void OfflineRenderer::Impl::Work(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t, const BuiltinTextures* b,
                                  RtScene& rt, OfflineProgress& pg) {
     if (pg.phase == OfflinePhase::Idle || pg.phase == OfflinePhase::Done) return;
     const uint32_t slot = ctx->FrameSlot();
+
+    // M5b: drive the MME runtime for this image (the offline renderer does not run the real-time pass list): the
+    // MME object effects on the models and the job's MME post effects are (re)created / finished here each frame so
+    // async loads complete while the image renders and the post chain has a ready instance at Finish.
+    if (mme) {
+        std::vector<MmeWanted> wanted;
+        wanted.reserve(job.mmeEffects.size() + view.models.size());
+        for (const MmeEffectEntry& e : job.mmeEffects)
+            if (e.enabled && !e.file.empty()) wanted.push_back({e.file, false});
+        for (GpuModel* gm : view.models)
+            if (gm)
+                for (const std::filesystem::path& fx : gm->MmeEffectFiles()) wanted.push_back({fx, true});
+        // M5c: effect objects (their post/scene and object parts).
+        for (const MmeEffectObject& o : view.mmeEffectObjects) {
+            if (o.fx.empty()) continue;
+            wanted.push_back({o.fx, false});
+            if (o.mesh) wanted.push_back({o.fx, true});
+        }
+        if (!wanted.empty()) mme->Update(*ctx, wanted, width ? width : job.width, height ? height : job.height);
+        mme->BeginFrame(*ctx, frame);
+    }
+
+    // M5b fix 3: the MME object effects compile asynchronously; hold the render in its prepass phase until every
+    // needed instance is Ready, so no accumulated iteration lacks the MME layer. 30 s timeout: then render without
+    // MME and warn once. mmeWaitDone latches once the hold passed (or timed out).
+    if (mme && !mmeWaitDone) {
+        bool allReady = true;
+        for (GpuModel* gm : view.models) {
+            if (!gm) continue;
+            for (const std::filesystem::path& fx : gm->MmeEffectFiles()) {
+                MmeEffectInstance* inst = mme->Instance(fx, true);
+                if (!inst || !inst->Ready()) { allReady = false; break; }
+            }
+            if (!allReady) break;
+        }
+        if (!allReady) {
+            const bool timedOut = std::chrono::steady_clock::now() - mmeWaitStart > std::chrono::seconds(30);
+            if (!timedOut) {
+                pg.fraction = 0.0f;
+                return;
+            }
+            if (!mmeWaitWarned) {
+                mmeWaitWarned = true;
+                LOG_WARN("offline: MME instances not ready after 30 s; rendering without the MME layer");
+            }
+        }
+        mmeWaitDone = true;
+    }
 
     // a) results of the frame that used this slot kFramesInFlight frames ago (BeginFrame already waited for it)
     if (slots[slot].serial == serial) {
@@ -534,7 +743,7 @@ void OfflineRenderer::Impl::Work(ID3D12GraphicsCommandList* cmd, TransientDescri
                 lx *= lensRadius;
                 ly *= lensRadius;
             }
-            DrawEdges(cmd, rt, shutter, lx, ly);
+            DrawEdges(cmd, t, b, rt, shutter, lx, ly);
             edgeAccum.Transition(cmd, kUav);
             const float c[8] = {0, 0, 0, 0, (float)width, (float)height, 0, 0};
             edgeAccumulate.Dispatch(pc, edgeSrv, edgeUav, c, 8, Groups(width), Groups(height));
@@ -786,6 +995,28 @@ void OfflineRenderer::Impl::Finish(PassContext& pc) {
                           (float)w, (float)h, 0.12f, (float)edgeLayers};
     DispatchPost(pc, finalize, &ldr, lit ? &litA : &denoiseA, &bloomA, fin, Groups(w), Groups(h), lit ? 1.0f : 0.0f);
     if (postFx) effectPost.RunOffline(pc, job.effects, ldr, ldrB, fxDepth, fxVel, fxNormal, &job);
+    // M5b: the MME post effects run on the same sRGB image, after the pack post effects (ping-pong through ldrB).
+    // M5c: the effect objects' post/scene parts join the chain (their panel is `(self)`).
+    if (mme) {
+        std::vector<MmeEffectEntry> chain = job.mmeEffects;
+        for (const MmeEffectObject& o : view.mmeEffectObjects) {
+            if (!o.enabled || o.fx.empty()) continue;
+            MmeEffectEntry e;
+            e.file = o.fx;
+            e.x = o.panel.x; e.y = o.panel.y; e.z = o.panel.z;
+            e.rx = DirectX::XMConvertToDegrees(o.panel.rx);
+            e.ry = DirectX::XMConvertToDegrees(o.panel.ry);
+            e.rz = DirectX::XMConvertToDegrees(o.panel.rz);
+            e.si = o.panel.si; e.tr = o.panel.tr; e.visible = o.panel.visible;
+            chain.push_back(std::move(e));
+        }
+        if (!chain.empty()) mmePost.RunOffline(pc, chain, ldr, ldrB);
+    }
+    // M8b: the video layers, frame-exact for this time, after the post stack. The background fills where the
+    // G-buffer is sky first, then the overlay composites over the image. RunOffline is a no-op (returns false) when
+    // the frame has no layer of its kind.
+    if (gbuf) videoBg.RunOffline(pc, ldr, gbuf);
+    videoOverlay.RunOffline(pc, ldr, ldrB);
 }
 
 OfflineRenderer::OfflineRenderer() = default;
@@ -820,6 +1051,10 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
     // the packs' effect.hlsl is compiled lazily from the shader directory (as the real-time passes do)
     m.effectPre.CreatePipelines(ctx, shaderDir, 0);
     m.effectPost.CreatePipelines(ctx, shaderDir, 0);
+    m.mmePost.CreatePipelines(ctx, shaderDir, 0);
+    // M8b: the video layers (the background PSO must exist even when it draws nothing; a failure only disables it).
+    if (!m.videoBg.CreatePipelines(ctx, shaderDir, 0)) LOG_WARN("offline renderer: video background unavailable");
+    if (!m.videoOverlay.CreatePipelines(ctx, shaderDir, 0)) LOG_WARN("offline renderer: video overlay unavailable");
     if (!ok) {
         LOG_ERROR("offline renderer: compute pipeline creation failed");
         return false;
@@ -1008,7 +1243,8 @@ void OfflineRenderer::Shutdown() {
     for (Texture& tex : m.preG) tex.Release(ctx);
     m.icFinal.Release(ctx);
     for (Texture* t : {&m.accum, &m.albedo, &m.moments, &m.gbuf, &m.edgeLayer, &m.edgeAccum, &m.denoiseA, &m.denoiseB, &m.ldr, &m.bloomA, &m.bloomB, &m.edgeColorMsaa,
-                       &m.edgeDepthMsaa, &m.counter, &m.volA, &m.volB, &m.gridA, &m.gridB, &m.kernelSpec,
+                       &m.edgeDepthMsaa, &m.edgeNormalMsaa, &m.edgeVelocityMsaa, &m.mmeShadowMap, &m.mmeShadowDepth,
+                       &m.counter, &m.volA, &m.volB, &m.gridA, &m.gridB, &m.kernelSpec,
                        &m.litA, &m.litB, &m.ldrB, &m.fxDepth, &m.fxNormal, &m.fxVel})
         t->Release(ctx);
     if (m.sceneCb && m.sceneCbMapped) m.sceneCb->Unmap(0, nullptr);
@@ -1039,13 +1275,16 @@ void OfflineRenderer::Shutdown() {
 void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient,
                             const BuiltinTextures* builtin, RtScene& rt, const FrameView& view,
                             const SceneConstants& sc, const GpuLight* lights, uint32_t lightCount,
-                            const OfflineJobDesc& job, uint64_t frame) {
+                            const OfflineJobDesc& job, uint64_t frame, MmeRuntime* mme, MmeSkin* mmeSkin) {
     if (!impl_) return;
     Impl& m = *impl_;
 
     // 1. job state
     m.view = view;
     m.job = job;
+    m.mme = mme;
+    m.mmeSkin = mmeSkin;
+    m.sceneCpu = sc;
     m.job.maxSamples = std::max(1u, m.job.maxSamples);
     m.job.minSamples = std::min(m.job.minSamples, m.job.maxSamples);
     m.frame = frame;
@@ -1056,6 +1295,10 @@ void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors
     m.edgeLayers = 0;
     m.volReady = false;
     m.motion = view.motionBlur;
+    // M5b: the readiness hold restarts per image; the shadow map and the skin generation latch per image too.
+    m.mmeWaitStart = std::chrono::steady_clock::now();
+    m.mmeWaitDone = false;
+    m.mmeShadowDone = false;
     m.focus = view.focusDistance;
     // an effect pack that replaces the depth of field (pack.json "replaces": ["dof"]) draws it on the image instead
     const bool lensDof = job.dof && !EffectStackReplacesDof(job.effects);

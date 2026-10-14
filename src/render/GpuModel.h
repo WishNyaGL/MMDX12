@@ -10,6 +10,7 @@
 #include "asset/PbrMaterial.h"
 #include "asset/PmxModel.h"
 #include <DirectXMath.h>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,7 @@ public:
         bool packOff = false;        // shader pack switched off for this material (ShaderChoice::materials): default shading
         bool additive = false;       // the model's own .emd effect is additive: ScenePass uses the additive PSO
         bool noDepthWrite = false;   // the model's own .emd effect draws with ZWriteEnable = false (no depth write)
+        uint8_t sphereMode = 0;      // PMX sphere mode (0 none, 1 multiply, 2 add, 3 subtexture): MME UseSphereMap
         float edgeSize = 0;
     };
 
@@ -99,8 +101,39 @@ public:
     void SetDefaultPackTextureFolder(const std::filesystem::path& folder) { defaultPackTextureFolder_ = folder; }
     const std::filesystem::path& DefaultPackTextureFolder() const { return defaultPackTextureFolder_; }
 
+    // M6a: per-material MME object effects (docs/mme/mme_design.md §2.12 / §2.13). `perMaterial` is parallel to
+    // Materials(); an empty path = native shading for that material, an empty vector = no MME at all. An MME object
+    // effect wins over a shader pack for the materials it owns. Mirrors SetShaderPack.
+    void SetMmeEffects(std::vector<std::filesystem::path> perMaterial);
+    // The effect file owning `material` (empty = native shading). The reference is stable for the model's lifetime.
+    const std::filesystem::path& MmeEffectOf(size_t material) const {
+        static const std::filesystem::path kEmpty;
+        return material < mmeEffects_.size() ? mmeEffects_[material] : kEmpty;
+    }
+    bool HasMmeEffects() const;
+    // The model's effect files, unique, in material order.
+    std::vector<std::filesystem::path> MmeEffectFiles() const;
+    bool MmeMaterial(size_t i) const { return i < mmeEffects_.size() && !mmeEffects_[i].empty(); }
+    // M5c: the mesh of an MME effect object (an accessory `.x` its effect owns: particles, floors, sprites). Only the
+    // MME draws show it: it stays out of the ray-traced scene (TLAS) and the offline depth / edge passes.
+    void SetMmeEffectMesh(bool on) { mmeEffectMesh_ = on; }
+    bool MmeEffectMesh() const { return mmeEffectMesh_; }
+    // M4b CLI wrapper: one effect for the listed materials (empty `materialMask` = every material).
+    void SetMmeEffect(const std::filesystem::path& fx, std::vector<int> materialMask = {});
+    // Per-material TOONCOLOR (spec §4.2): the bottom-left texel of the material's toon texture (PMX toon or
+    // built-in toon01..10), white when none. Read at model load; parallel to Materials().
+    const DirectX::XMFLOAT3& MmeToonColor(size_t i) const {
+        static const DirectX::XMFLOAT3 kWhite{1, 1, 1};
+        return i < mmeToonColor_.size() ? mmeToonColor_[i] : kWhite;
+    }
+
     const std::string& Name() const { return name_; }
     ModelRole Role() const { return role_; }
+    // M8a: an animated stage (a song-bundled stage with a stage motion) is not a static stage: its BLAS is rebuilt
+    // when it moves and its own shaders shade it as geometry that can move. Set after creation (stages are built
+    // static, then a motion may be bound).
+    void SetDynamic(bool dynamic) { dynamic_ = dynamic; }
+    bool Dynamic() const { return dynamic_; }
     uint32_t BoneCount() const { return boneCount_; }
     uint32_t VertexCount() const { return vertexCount_; }
     uint32_t IndexCount() const { return indexCount_; }
@@ -207,6 +240,7 @@ private:
     std::vector<uint32_t> pbrIndex_;
     bool hasPbrRecords_ = false;
     ModelRole role_ = ModelRole::Character;
+    bool dynamic_ = false;   // M8a: an animated stage rebuilds its BLAS
     DirectX::XMFLOAT3 boundsMin_{}, boundsMax_{};
     ComPtr<ID3D12Resource> boneBuf_[kRing];
     void* boneMapped_[kRing] = {};
@@ -230,6 +264,10 @@ private:
     std::filesystem::path defaultPackTextureFolder_;   // model's own MME-derived pack texture folder (fallback)
     PackParamValues packParams_{};
     MaterialClassOverrides packOverrides_{};
+    // MME object effect (M4b/M6a)
+    bool mmeEffectMesh_ = false;
+    std::vector<std::filesystem::path> mmeEffects_;   // per material (empty path = native shading)
+    std::vector<DirectX::XMFLOAT3> mmeToonColor_;   // per material: bottom-left toon texel (white when none)
 };
 
 } // namespace mmdx

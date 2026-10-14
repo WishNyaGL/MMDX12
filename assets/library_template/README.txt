@@ -8,6 +8,7 @@ Put your assets in these folders (MMDX12 ships no assets; follow each asset's te
   stages/      one folder per stage. All PMX files in a folder are drawn together;
                every glTF/GLB/FBX/OBJ file is a stage of its own.
   songs/       one folder per song: dance .vmd, camera .vmd, audio (.wav/.mp3/.ogg/.flac).
+  effects/     MikuMikuEffect (.fx) post / object effects, one per file (sub-folders are scanned too).
 You may use any layout you like. Folder names decide the type (characters/models/..., stages/...,
 songs/motions/...); without them MMDX12 guesses from the content. Several songs in one folder are
 told apart by length and file names.

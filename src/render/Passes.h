@@ -23,12 +23,17 @@
 //   PresentPass   letterboxed stretch to the back buffer (on screen only)
 #pragma once
 #include <deque>
+#include <functional>
 #include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include "render/RenderPass.h"
 #include "render/PtPackVariants.h"
 #include "render/PackTextures.h"
 #include "render/ShaderPack.h"
+#include "render/MmeScriptVM.h"
+#include "render/MmeSemantics.h"
 #include <wrl/client.h>
 
 namespace mmdx {
@@ -36,6 +41,8 @@ namespace mmdx {
 struct ShaderPack;
 struct OfflineJobDesc;
 class EffectPipeline;   // PassEffect.cpp: one effect pack's pipeline (root signature + PSO)
+class MmeRuntime;       // MmeRuntime.h: the MME per-frame driver (owned by MmePostPass)
+class MmeConstantWriter;  // MmeSemantics.h: one stage's $Globals staging buffer
 
 // Spot shadow maps are rendered (and sampled by the scene / volumetric shaders) when shadows are on
 // and something reads them: the raster and RT scene shaders, or the volumetric march.
@@ -67,6 +74,8 @@ private:
 
 class ScenePass final : public IRenderPass {
 public:
+    ScenePass() = default;
+    ~ScenePass() override;
     const char* Name() const override { return "Scene"; }
     bool CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) override;
     void Execute(PassContext& pc) override;
@@ -85,6 +94,20 @@ private:
     ComPtr<ID3D12RootSignature> rootSig_;
     // PT mode: the outline layer (depth pre-pass + edges, default or PackEdge) for PathTracePass to composite
     void DrawPtEdges(PassContext& pc);
+
+    // M4b: MME object effects drawn inside Execute (lit camera view only). DrawMmeModel draws one model's owned
+    // materials with its effect. `handled[i]` per material: 0 = draw natively (existing code), 1 = drawn by MME
+    // (skip the native draw), 2 = an empty technique matched (the material is not drawn at all). DrawMmeEdges
+    // draws the model's edge materials with the effect's edge technique. Both return true when they issued a draw
+    // (the caller rebinds ScenePass's root signature + tables after switching back).
+    void DrawMmeModel(PassContext& pc, GpuModel& model, bool rt, std::vector<uint8_t>& handled);
+    bool DrawMmeEdges(PassContext& pc, GpuModel& model);
+    // M4b: per-(instance, program, stage) $Globals writers for object draws (owned; freed with the pass).
+    std::map<uint64_t, std::unique_ptr<MmeConstantWriter>> mmeWriters_;
+    std::set<std::string> mmeDiag_;   // once-per-message diagnostics (draw-skip reasons)
+    // used technique names per (instance, model) for the [I] OBJECT line
+    std::map<uint64_t, std::set<std::string>> mmeUsed_;   // key: (instance ptr, model ptr)
+    std::set<uint64_t> mmeLogged_;                        // (instance, model) the [I] OBJECT line was printed for
 
     // Shader packs (render/ShaderPack.h): PSOs compiled on first use from mmd.hlsl's PSPack with the pack's surface,
     // PSOs keyed by pack id (compile defines depend only on the manifest), dropped when the registry generation
@@ -265,6 +288,35 @@ private:
     bool historyReady_ = false;
 };
 
+// M8b: video layers of the MV packages (docs/mme/mme_design.md §5b). One instance draws the background (behind the
+// scene, where the depth is far), a second the overlay (over the final image, after the post stack). Each instance
+// serves the matching layers of FrameView::videoLayers and owns its own decode thread + upload ring. In play mode
+// the decode runs ahead of the requested time; the offline entry points decode synchronously, frame-exact.
+enum class VideoStage : uint8_t { Background, Overlay };
+class VideoPass final : public IRenderPass {
+public:
+    explicit VideoPass(VideoStage stage);
+    ~VideoPass() override;
+    const char* Name() const override { return stage_ == VideoStage::Background ? "Video(bg)" : "Video(overlay)"; }
+    bool CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) override;
+    void OnResize(Dx12Context& ctx, RenderTargets& targets) override;
+    void ReleaseTargets(Dx12Context& ctx) override;
+    void Execute(PassContext& pc) override;
+
+    // Offline GI: decode the matching layers frame-exact for `time` of `pc.view`. The background is drawn onto the
+    // linear HDR `lit` (where `depth` is far, R32_FLOAT raw device depth); the overlay is composited over `image`
+    // (ping-ponging through `scratch`, same format). Return true when a layer was drawn.
+    bool RunOffline(PassContext& pc, Texture& target, Texture& depthOrScratch);
+
+    // Releases decode threads, staging buffers and textures (scene end / unload).
+    void Clear(Dx12Context& ctx);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    VideoStage stage_;
+};
+
 // Depth of field at output resolution on hdrFinal: CoC from depth (render res, sampled by uv),
 // half-res golden-angle bokeh gather, then a full-res blend. Sets hdrFinal = out_.
 // Does nothing offscreen or when settings.dof is off.
@@ -383,6 +435,131 @@ private:
     std::map<StateKey, StateSlot> stateSlots_;
     uint64_t passExecutionCount_ = 0;
     bool resetRequested_ = false;
+};
+
+// M5a: the MME technique selection of M4b (first technique whose MMDPass / Subset / use-flags match; object_ss
+// falls back to object), shared with the offscreen / shadow passes; and the static zero/white vertex buffer slot.
+const MmeTechnique* SelectMmeTechnique(const MmeEffectDesc& fx, const std::string& wantedPass, const GpuModel& model,
+                                       size_t material, bool exactPass = false);
+D3D12_VERTEX_BUFFER_VIEW MmeZeroWhiteVb(Dx12Context& ctx);
+
+// M5b fix 1: true when the MME layer owns material `material` of `model` in this frame -- the effect's object /
+// object_ss technique applies (drawn by the MME layer) or an empty technique matches ("not drawn" by MMD either).
+// The native depth pre-pass of an MME layer (ScenePass::DrawPtEdges, OfflineRenderer::DrawEdges) must not write
+// those materials' depth, or the MME draw (a different vertex path) z-fights its own surfaces. Mirrors the
+// per-material ownership ScenePass::DrawMmeModel records in its `handled` vector (same technique selection).
+// `mme` is the renderer's runtime (PassContext::mme); false without one / when the instance is not ready yet.
+bool MmeMaterialOwned(MmeRuntime* mme, const GpuModel& model, size_t material);
+
+// M5b: the per-material input for one MME object draw of `model` (material semantics + by-name uniforms), filled
+// from MaterialConstantsCpu / GpuModel. Shared by ScenePass's raster/PT draws, the offscreen pass and the offline
+// renderer's MME layer (OfflineRenderer.cpp).
+struct MmeObjectValues;
+void FillMmeObjectValues(const GpuModel& model, size_t material, MmeObjectValues& out);
+// M5b: the MME frame values for a camera draw with an explicit view / projection and viewport (PT: the tracer's
+// jittered projection; offline: the iteration's lens / shutter camera). One MMD self-shadow light camera per call.
+struct MmeFrameValues;
+void FillMmeFrameValues(PassContext& pc, const DirectX::XMFLOAT4X4& view, const DirectX::XMFLOAT4X4& proj,
+                        float viewportW, float viewportH, MmeFrameValues& out);
+
+// M5b: draws the MME-owned materials of `model` into the currently bound 3 MRTs (colour / normal / velocity)
+// through the runtime (`pc.mme` / `pc.mmeSkin`), with `frame`'s camera values and the host cbuffer's prevViewProj.
+// `rtFormats` / `dsFormat` / `sampleCount` describe the bound targets. Used by the offline GI MME layer; ScenePass's
+// raster / PT draws use the same per-material body inline. Returns true when at least one material was drawn.
+// M5b fix 2: `generation` + `shutter` reach MmeSkin::Skin so the offline renderer re-skins the iteration's pose
+// (motion blur) instead of keeping the first iteration's; the real-time callers keep it a frame-level skin.
+bool DrawMmeModelToMrt(PassContext& pc, GpuModel& model, const MmeFrameValues& frame,
+                       const DirectX::XMFLOAT4X4& prevViewProjNoJitter, const DXGI_FORMAT* rtFormats,
+                       DXGI_FORMAT dsFormat, uint32_t sampleCount, uint64_t generation = 0, float shutter = 1.0f);
+
+// M5a: the CONTROLOBJECT lookup over FrameView::mmeObjects (models); shared by ScenePass's M4b draws and the
+// offscreen pass. Fills up to 16 floats (a float4x4 fills all 16); outCount receives the number written.
+std::function<bool(const std::string&, const std::string&, int, float*, int&)> MmeSceneLookup(const FrameView& view);
+
+// M5b fix 2: offline entry point of the MMD-style self-shadow map. The real-time shadow pass (MmeShadowPass) is not
+// part of the offline renderer's pass list, so the offline MME layer renders the map itself (once per image, before
+// its first object_ss draw, so it never samples an unrendered map). Draws each MME model with its effect's zplot
+// (else the built-in standard effect) into caller-owned `map` (R32_FLOAT size x size) + `depth`, through the same
+// light camera (MmeSemantics' BuildLightCamera) the object_ss compare uses, then binds it via
+// pc.mme->SetObjectShadowMap. False when nothing was drawn. See PassMmeOffscreen.cpp.
+bool RenderMmeSelfShadowMap(PassContext& pc, Texture& map, Texture& depth, uint32_t size,
+                            const std::filesystem::path& shaderDir);
+
+// The MME post effects (--mme): runs the enabled, ready, post-class MMEEffectEntry list from RenderSettings::mmeEffects
+// on the LDR image (targets.ldr, output resolution) through an MmeRuntime driver, chaining the effects in list order
+// via ping-pong RGBA8 targets. Zero effects: nothing allocates, nothing runs (a byte-identical frame). A non-lit
+// view skips like PackEffectPass. The pass is the IMmeHost for the script VM; the work lives in PassMme.cpp.
+class MmePostPass final : public IRenderPass, public IMmeHost {
+public:
+    MmePostPass();
+    ~MmePostPass() override;
+    const char* Name() const override { return "Mme"; }
+    bool CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) override;
+    void OnResize(Dx12Context& ctx, RenderTargets& targets) override;
+    void ReleaseTargets(Dx12Context& ctx) override;
+    void Execute(PassContext& pc) override;
+
+    // M5b: runs this pass's MME post chain on an offline image (OfflineRenderer::Impl::Finish). `io` is the sRGB
+    // image (chain input / output), `scratch` a second texture of the same size and format for ping-ponging. The
+    // effects come from OfflineJobDesc::mmeEffects; `pc.mme` must be the renderer's runtime. Effects that need a
+    // larger target render it at their own output size (the chain runs where the offline renderer calls it).
+    bool RunOffline(PassContext& pc, const std::vector<MmeEffectEntry>& effects, Texture& io, Texture& scratch);
+    // M7 fix 3: copy a chain result into `out` as an opaque (rgb, alpha = 1) fullscreen blit. The scene LDR image's
+    // alpha is coverage, and MMD's back buffer is XRGB, so the MME chain output must not change it.
+    void CopyBackOpaque(PassContext& pc, Texture& out, Texture& src);
+
+    // IMmeHost (called by RunMmeTechnique during Execute)
+    void SetColorTarget(int index, const std::string& name) override;
+    void SetDepthTarget(const std::string& name) override;
+    void Clear(bool color, bool depth, const float color4[4], float depthValue) override;
+    void ScriptExternal() override;
+    void DrawBuffer(const MmeTechnique& t, const MmePass& p) override;
+    void DrawGeometry(const MmeTechnique& t, const MmePass& p) override;
+    bool ReadParam(const std::string& name, float out[4]) override;
+    void SetLoopIndex(const std::string& name, int index) override;
+    void Diag(const std::string& message) override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// M5a: offscreen scene re-render (docs/mme/mme_design.md 2.3). For every OFFSCREENRENDERTARGET of every ready MME
+// instance (post or object), clears it and draws every FrameView::models model matched by the target's parsed
+// DefaultEffect table (first match wins; `hide`, `none` = the built-in standard effect, else the sub-effect), using
+// the object draw path without the host MRT. Registered right before ScenePass; a no-op (byte-identical frame) when
+// no instance declares an offscreen target. The work lives in PassMmeOffscreen.cpp.
+class MmeOffscreenPass final : public IRenderPass {
+public:
+    MmeOffscreenPass();
+    ~MmeOffscreenPass() override;
+    const char* Name() const override { return "MME Offscreen"; }
+    bool CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) override;
+    void Execute(PassContext& pc) override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// M5a: the MMD-style self-shadow map (docs/mme/mme_design.md 2.7). When any ready MME instance used by a model has
+// an object_ss or zplot technique and shadows are on, renders an R32_FLOAT 2048^2 light-space depth map (each MME
+// model with its effect's zplot, each non-MME model with the built-in standard effect's zplot) through the light
+// camera of MmeSemantics' BuildLightCamera, then binds it at register(s0) for object_ss draws. Registered right
+// before ScenePass (its own depth, no colour output).
+class MmeShadowPass final : public IRenderPass {
+public:
+    MmeShadowPass();
+    ~MmeShadowPass() override;
+    const char* Name() const override { return "MME Shadow"; }
+    bool CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) override;
+    void OnResize(Dx12Context& ctx, RenderTargets& targets) override;
+    void ReleaseTargets(Dx12Context& ctx) override;
+    void Execute(PassContext& pc) override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 class BackdropPass final : public IRenderPass {

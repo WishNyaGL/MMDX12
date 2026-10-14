@@ -23,7 +23,7 @@ inline constexpr int kProjectFormatVersion = 2;
 inline constexpr const char* kProjectFormatName = "mmdx12-studio-project";
 inline constexpr const wchar_t* kProjectExtension = L".mmdxproj";
 
-enum class ModelKind : uint8_t { Character = 0, Stage = 1, Prop = 2 };
+enum class ModelKind : uint8_t { Character = 0, Stage = 1, Prop = 2, Effect = 3 };   // Effect: M5c MME effect object
 const char* ModelKindName(ModelKind k);                    // "character" | "stage" | "prop"
 bool ParseModelKind(const std::string& s, ModelKind& out);  // false for anything else (out untouched)
 
@@ -50,12 +50,14 @@ struct ProjectModel {
     std::string name;                  // outliner label (UTF-8)
     ModelKind kind = ModelKind::Character;
     std::filesystem::path path;        // model file, absolute
+    std::filesystem::path fx;          // M5c: effect-object effects ("fx"; kind Effect only)
     std::string libraryId;             // library character id (saved display scale); may be empty
     bool visible = true;
     PropAttach attach;                 // used for props only
     PropAttach place;                  // characters / stages: world placement (translation / rotationDeg / scale; parent unused)
     bool physicsOff = false;           // P2.2: rigid-body physics off for this model ("physics": false, absent = on)
     ShaderChoice shader;               // characters: shader pack ("shader", absent = the default shading)
+    MmeChoice mme;                     // M6a: MME object effect choice ("mme", absent = characters None / stages Auto)
     MaterialChoice material;           // P5: per-material PBR source ("material", absent = Default)
     MotionData motion;                 // its keys; motion.modelName is written as the VMD header model name
 };
@@ -114,12 +116,22 @@ struct ProjectEditor {
     float camYaw = 0.0f, camPitch = 0.1f, camDistance = 45.0f, camFovDeg = 30.0f;
 };
 
+// M6b: one entry of the studio's own MME post stack (project "mmeEffects"). The path is resolved to the project
+// folder on load (absolute in assets).
+struct MmePostEntry {
+    std::filesystem::path path;
+    bool enabled = true;
+};
+
 struct ProjectData {
     std::vector<ProjectModel> models;
     MotionData camera;                 // camera, light and self-shadow keys (camera VMD) + focus keys (editor "focus"); bones/morphs ignored
     std::filesystem::path audioPath;   // absolute; empty = no audio
     double audioOffset = 0.0;          // seconds: the audio starts at this timeline time (may be negative)
     ProjectEditor editor;
+    // M6b: the project's own MME post stack (docs/mme/mme_design.md §2.10/§2.13). While the studio is open this
+    // replaces the play-mode stack (RenderSettings::mmeEffects); offline renders from the studio use it. Empty = none.
+    std::vector<MmePostEntry> mmePost;
     std::filesystem::path recoveryOf;  // autosave (recovery) files only: the project it belongs to (empty: never saved)
 };
 

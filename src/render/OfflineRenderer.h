@@ -76,6 +76,9 @@ struct OfflineJobDesc {
     float dofAperture = 1.0f;        // 0.2 .. 3 (1 = the original lens)
     // The shader packs' effect stack (RenderSettings::packEffects of the real-time frame); empty = no effects.
     std::vector<EffectStackEntry> effects;
+    // M5b: the MME post effects (RenderSettings::mmeEffects of the renderer when the job was created); run after the
+    // pack post effects on the sRGB image (MmePostPass::RunOffline). Empty = no effects.
+    std::vector<MmeEffectEntry> mmeEffects;
     float effectDt = 0.0f;           // >0: dt in seconds (1/fps for video)
     bool still = false;              // true for still renders (state pass runs 64 times)
     bool effectReset = false;        // reset effect state (first frame, cut)
@@ -117,7 +120,8 @@ public:
     // ctx.FrameNumber() (bone/morph ring entry for the outline pass).
     void Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, const BuiltinTextures* builtin,
                RtScene& rt, const FrameView& view, const SceneConstants& sc, const GpuLight* lights,
-               uint32_t lightCount, const OfflineJobDesc& job, uint64_t frame);
+               uint32_t lightCount, const OfflineJobDesc& job, uint64_t frame, MmeRuntime* mme = nullptr,
+               MmeSkin* mmeSkin = nullptr);
     // Records this frame's share of work (no-op when Idle or Done).
     void Render(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, const BuiltinTextures* builtin,
                 RtScene& rt);

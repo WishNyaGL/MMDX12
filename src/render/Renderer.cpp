@@ -1,6 +1,8 @@
 // Frame orchestration (see Passes.h for the pass list).
 #include "render/Renderer.h"
 #include "render/Passes.h"
+#include "render/MmeRuntime.h"
+#include "render/MmeSkin.h"
 #include "asset/ImageLoader.h"
 #include "asset/PmxModel.h"
 #include "core/I18n.h"
@@ -136,6 +138,17 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
         progress->SetStatus(Tr("렌더러 엔진 준비 중"));
     }
     packTextures_ = std::make_unique<PackTextures>();
+    // MME runtime + object skinning (M4b): owned here, used by ScenePass and MmePostPass through PassContext.
+    // The runtime only allocates its root signature / sampler heap / rings; without any effect it stays idle.
+    mme_ = std::make_unique<MmeRuntime>();
+    if (!mme_->Init(ctx, shaderDir)) {
+        LOG_WARN("MME runtime unavailable");
+        mme_.reset();
+    }
+    mmeSkin_ = std::make_unique<MmeSkin>();
+    if (!mmeSkin_->Init(ctx, shaderDir)) {
+        mmeSkin_.reset();   // DXC unavailable: object effects draw natively
+    }
     rt_ = std::make_unique<RtScene>();
     rtSupported_ = rt_->Initialize(ctx, shaderDir);
     if (!rtSupported_) rt_.reset();
@@ -153,6 +166,10 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
 
     passes_.clear();
     passes_.push_back(std::make_unique<ShadowPass>());
+    // M5a: the MMD-style self-shadow map (before ScenePass so object_ss draws see it) then the offscreen scene
+    // renders. Both skip entirely when no effect needs them (byte-identical frame).
+    passes_.push_back(std::make_unique<MmeShadowPass>());
+    passes_.push_back(std::make_unique<MmeOffscreenPass>());
     passes_.push_back(std::make_unique<ScenePass>());
     passes_.push_back(std::make_unique<ResolvePass>());
     passes_.push_back(std::make_unique<PathTracePass>());
@@ -168,7 +185,12 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     passes_.push_back(std::make_unique<PackEffectPass>(true));
     passes_.push_back(std::make_unique<BloomPass>());
     passes_.push_back(std::make_unique<PostPass>());
+    // M8b: the song's video layers. Background where the scene has no geometry (right after post, before the effect
+    // packs), overlay composited over the final image (after the effect packs / MME post chain, before the UI backdrop).
+    passes_.push_back(std::make_unique<VideoPass>(VideoStage::Background));
     passes_.push_back(std::make_unique<PackEffectPass>(false));
+    passes_.push_back(std::make_unique<MmePostPass>());
+    passes_.push_back(std::make_unique<VideoPass>(VideoStage::Overlay));
     passes_.push_back(std::make_unique<BackdropPass>());
     passes_.push_back(std::make_unique<PresentPass>());
 
@@ -241,6 +263,30 @@ std::unique_ptr<GpuModel> Renderer::CreateModel(UploadBatch& batch, const PmxMod
     if (!model->Create(*ctx_, batch, pmx, textures, builtin_, role, pbr ? *pbr : kEmptyPbr)) return nullptr;
     model->SetHasPbrRecords(pbr && pbr->materialsWithRecord > 0);
     return model;
+}
+
+void Renderer::ForgetModel(const GpuModel* model) {
+    if (!model || !ctx_) return;
+    // Frees the model's MME resources (object SRV tables + skinned buffer). Keyed by pointer, they may live in
+    // in-flight command lists, so the free is deferred by the number of frames in flight plus one (matching the
+    // GpuModel ring logic). DrainMmeForget runs it once those frames are done.
+    for (const PendingMmeForget& p : pendingMmeForget_)
+        if (p.model == model) return;
+    pendingMmeForget_.push_back({model, ctx_->FrameNumber() + Dx12Context::kFramesInFlight + 1});
+}
+
+void Renderer::DrainMmeForget() {
+    if (pendingMmeForget_.empty()) return;
+    const uint64_t now = ctx_->FrameNumber();
+    pendingMmeForget_.erase(
+        std::remove_if(pendingMmeForget_.begin(), pendingMmeForget_.end(),
+                       [&](const PendingMmeForget& p) {
+                           if (p.frame > now) return false;
+                           if (mme_) mme_->ForgetModel(*ctx_, p.model);
+                           if (mmeSkin_) mmeSkin_->Forget(*ctx_, p.model);
+                           return true;
+                       }),
+        pendingMmeForget_.end());
 }
 
 void Renderer::ReadGpuTimer() {
@@ -529,6 +575,7 @@ uint32_t Renderer::FillGpuLights(const LightParams& light, GpuLight* out, uint32
 void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t w, uint32_t h,
                            uint32_t cbSlot, uint64_t frame, bool offscreen) {
     EnsurePointShadowMap(view.light, offscreen);
+    DrainMmeForget();
     SceneConstants sc{};
     FillSceneConstants(view, w, h, offscreen, sc);
     memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
@@ -597,6 +644,40 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
                    lightBuf_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kLightBytes,
                    frame, historyValid, offscreen, &builtin_, path, rt, up,
                    jitterPx_[0], jitterPx_[1], frameTimeMs_};
+    pc.mme = mme_.get();
+    pc.mmeSkin = mmeSkin_.get();
+    pc.sceneConstantsCpu = &sc;
+    // A model destroyed or replaced since the last drawn frame leaves the model set: release its per-model MME
+    // resources (object SRV tables + skinned buffer) after the frames that still reference them.
+    if (!offscreen) {
+        for (const GpuModel* old : frameModels_) {
+            if (std::find(view.models.begin(), view.models.end(), old) == view.models.end()) ForgetModel(old);
+        }
+        frameModels_.assign(view.models.begin(), view.models.end());
+    }
+    // MME runtime: one Update per frame with the union of the post effects and every model's object effect (M4b).
+    // The MME instance lifetime / async loads / target (re)creation live here, not in a pass.
+    if (mme_) {
+        mme_->PollHotReload();   // M6b: recompile changed .fx files at <= 1 Hz
+        std::vector<MmeWanted> wanted;
+        wanted.reserve(frameSettings.mmeEffects.size() + view.models.size());
+        for (const MmeEffectEntry& e : frameSettings.mmeEffects) {
+            if (e.enabled && !e.file.empty()) wanted.push_back({e.file, false});
+        }
+        for (const GpuModel* m : view.models)
+            if (m)
+                for (const std::filesystem::path& fx : m->MmeEffectFiles()) wanted.push_back({fx, true});
+        // M5c: effect objects have a post/scene part and (with a mesh) an object part.
+        for (const MmeEffectObject& o : view.mmeEffectObjects) {
+            if (o.fx.empty()) continue;
+            wanted.push_back({o.fx, false});
+            if (o.mesh) wanted.push_back({o.fx, true});
+        }
+        const uint32_t mmeOutW = targets_.outWidth ? targets_.outWidth : w;
+        const uint32_t mmeOutH = targets_.outHeight ? targets_.outHeight : h;
+        if (!wanted.empty()) mme_->Update(*ctx_, wanted, mmeOutW, mmeOutH);
+        mme_->BeginFrame(*ctx_, frame);
+    }
     // quad view: one SceneConstants per extra view (orthographic, no jitter)
     if (quad) {
         const size_t count = std::min<size_t>(view.extraViews.size(), kMaxExtraViews);
@@ -641,6 +722,13 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     }
 }
 
+void Renderer::ReleaseVideoLayers() {
+    if (!ctx_) return;
+    ctx_->WaitForGpu();
+    for (auto& pass : passes_)
+        if (VideoPass* vp = dynamic_cast<VideoPass*>(pass.get())) vp->Clear(*ctx_);
+}
+
 void Renderer::ClearBackBuffer(ID3D12GraphicsCommandList* cmd) {
     ID3D12DescriptorHeap* heaps[] = {ctx_->SrvHeap().Heap()};
     cmd->SetDescriptorHeaps(1, heaps);
@@ -670,6 +758,7 @@ void Renderer::Render(ID3D12GraphicsCommandList* cmd, const FrameView& view) {
         sceneVisible_ = false;
         havePrev_ = false;
         lastFrameQpc_ = 0;
+        frameModels_.clear();   // no model is drawable: drop the MME model set (nothing to compare against)
         ClearBackBuffer(cmd);
         return;
     }
@@ -959,6 +1048,11 @@ void Renderer::Shutdown() {
         packTextures_->Clear(ctx_);
         packTextures_.reset();
     }
+    if (mme_) {
+        mme_->Release(*ctx_);
+        mme_.reset();
+    }
+    mmeSkin_.reset();
     rtSupported_ = false;
     for (size_t k = 1; k < 4; ++k) {
         if (upscalers_[k]) {
@@ -968,6 +1062,9 @@ void Renderer::Shutdown() {
         upscalerAvailable_[k] = false;
     }
     ReleaseTargets();
+    // M8b: release the video layers (decode threads, staging buffers, textures) with the renderer.
+    for (auto& pass : passes_)
+        if (VideoPass* vp = dynamic_cast<VideoPass*>(pass.get())) vp->Clear(*ctx_);
     targets_.shadowMap.Release(*ctx_);
     targets_.spotShadowMap.Release(*ctx_);
     targets_.pointShadowMap.Release(*ctx_);

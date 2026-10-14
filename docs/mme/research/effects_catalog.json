@@ -1,0 +1,2812 @@
+[
+  {
+    "id": "mikumikueffect",
+    "name": "MikuMikuEffect",
+    "name_ja": "MikuMikuEffect 本体",
+    "author": "舞力介入P",
+    "category": "framework",
+    "kind": "mixed",
+    "description": "The foundational DirectX 9 HLSL shader plugin for MikuMikuDance enabling custom rendering pipelines.",
+    "popularity_evidence": "ニコニ・コモンズ sm12149815 子作品 113,746件; VPVP wiki page 155; essential core of all MME effects.",
+    "popularity_score": 100,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/155.html",
+      "https://www.nicovideo.jp/watch/sm12149815"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Packaged alongside standard effect sets; original uploader mirrors."
+      }
+    ],
+    "version": "v0.37 (x86/x64)",
+    "license_terms": "Free for personal and commercial non-commercial MMD creation. Redistribution allowed with credit.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/12149815/12149815"
+    ],
+    "requires": "MikuMikuDance v7.39+, DirectX 9.0c, Pixel Shader 3.0",
+    "rank": 1
+  },
+  {
+    "id": "autoluminous4",
+    "name": "AutoLuminous4",
+    "name_ja": "AutoLuminous Ver.4.2",
+    "author": "そぼろ",
+    "category": "glow",
+    "kind": "post",
+    "description": "True emissive glowing bloom shader triggered by model material specular/ambient threshold settings.",
+    "popularity_evidence": "ニコニ・コモンズ sm15369179 子作品 50,604件; LearnMMD #1 essential lighting effect; universal standard for glow.",
+    "popularity_score": 99,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm15369179",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布 (AutoLuminous4 folder)."
+      },
+      {
+        "url": "https://1drv.ms/1hAXcox",
+        "type": "onedrive",
+        "access": "dead",
+        "notes": "Original author OneDrive distribution link (legacy URL expired)."
+      }
+    ],
+    "version": "v4.2",
+    "license_terms": "Credit required. Non-commercial and commercial derivative videos permitted; no standalone reselling.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/15369179/15369179"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 2
+  },
+  {
+    "id": "diffusion7",
+    "name": "Diffusion7",
+    "name_ja": "Diffusion7",
+    "author": "そぼろ",
+    "category": "bloom",
+    "kind": "post",
+    "description": "Soft focus optical diffusion filter creating a dreamy, cinematic atmosphere across the entire viewport.",
+    "popularity_evidence": "ニコニ・コモンズ sm15369179 子作品 50,604件; standard soft-light bloom in virtually all MMD music videos.",
+    "popularity_score": 98,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm15369179",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v7",
+    "license_terms": "Free to use in videos. Credit そぼろ. No resale.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/15369179/15369179"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 3
+  },
+  {
+    "id": "excellentshadow2",
+    "name": "ExcellentShadow2",
+    "name_ja": "ExcellentShadow2",
+    "author": "そぼろ",
+    "category": "shadow",
+    "kind": "mixed",
+    "description": "High-precision cascaded shadow mapping replacing standard MMD pixelated self-shadows with smooth soft edges.",
+    "popularity_evidence": "ニコニ・コモンズ sm19123817 子作品 50,387件; recognized community standard for photorealistic shadows.",
+    "popularity_score": 97,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm19123817",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布 (ExcellentShadow2)."
+      }
+    ],
+    "version": "v2.4",
+    "license_terms": "Free for MMD production; credit requested; no commercial redistributions.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/19123817/19123817"
+    ],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0, 64-bit recommended",
+    "rank": 4
+  },
+  {
+    "id": "raymmd",
+    "name": "Ray-MMD",
+    "name_ja": "Ray-MMD",
+    "author": "ray-cast",
+    "category": "pbr",
+    "kind": "mixed",
+    "description": "Complete physically-based rendering framework with Cook-Torrance GGX shading, IBL, SSR, and volumetric lighting.",
+    "popularity_evidence": "GitHub 3,100+ stars, 500+ forks; globally the most popular modern photorealistic MMD rendering framework.",
+    "popularity_score": 96,
+    "pages": [
+      "https://github.com/ray-cast/ray-mmd",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://github.com/ray-cast/ray-mmd",
+        "type": "github",
+        "access": "open",
+        "notes": "Full open-source repository including releases, documentation and material libraries."
+      }
+    ],
+    "version": "v1.5.2",
+    "license_terms": "MIT License. Free for commercial and non-commercial works with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0 (Direct3D 9 Shader Model 3.0), modern dedicated GPU",
+    "rank": 5
+  },
+  {
+    "id": "svssao",
+    "name": "SvSSAO",
+    "name_ja": "SvSSAO",
+    "author": "そぼろ",
+    "category": "ssao",
+    "kind": "post",
+    "description": "Screen Space Ambient Occlusion generating contact shadows and realistic depth in crevices and corners.",
+    "popularity_evidence": "ニコニ・コモンズ sm15369179 子作品 50,604件; VPVP wiki featured SSAO staple; LearnMMD recommended.",
+    "popularity_score": 95,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm15369179",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Free for video creation; author credit appreciated.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/15369179/15369179"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 6
+  },
+  {
+    "id": "airdust",
+    "name": "AirDust",
+    "name_ja": "空中に漂う埃",
+    "author": "化身バレッタ",
+    "category": "particle",
+    "kind": "mixed",
+    "description": "Gentle floating atmospheric air dust motes illuminated by scene lighting for enhanced physical presence.",
+    "popularity_evidence": "ニコニ・コモンズ sm20916681 子作品 33,177件; ubiquitous environmental particle in dance stages.",
+    "popularity_score": 94,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm20916681",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/18971",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Download key specified in sm20916681 video description."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Free for MMD productions; credit 化身バレッタ; no commercial resale.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/20916681/20916681"
+    ],
+    "requires": "MME 0.37+",
+    "rank": 7
+  },
+  {
+    "id": "hgdof",
+    "name": "HgDOF",
+    "name_ja": "HgDOF",
+    "author": "針金P",
+    "category": "dof",
+    "kind": "post",
+    "description": "High-quality realistic depth of field with hex/circular bokeh shape simulation and autofocus support.",
+    "popularity_evidence": "ニコニ・コモンズ im2489180 子作品 28,516件; flagship DoF effect across Japanese MMD productions.",
+    "popularity_score": 93,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "Hosted on HariganeP's official Google Drive distribution repository."
+      }
+    ],
+    "version": "v0.0.5",
+    "license_terms": "Free for personal and commercial non-commercial MMD video production. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 8
+  },
+  {
+    "id": "o_selfoverlay",
+    "name": "o_SelfOverlay",
+    "name_ja": "自己オーバーレイフィルタ o_SelfOverlay",
+    "author": "おたもん",
+    "category": "color",
+    "kind": "post",
+    "description": "Screen blending overlay filter that enhances visual contrast, sharpness, and color saturation.",
+    "popularity_evidence": "ニコニ・コモンズ sm16093043 子作品 19,259件; essential post-filter in nearly every PV production.",
+    "popularity_score": 92,
+    "pages": [
+      "https://okoneya.jp/mmd_files/",
+      "https://www.nicovideo.jp/watch/sm16093043"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_SelfOverlay_v0_6.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct zip archive download from Otamon's official server okoneya.jp."
+      }
+    ],
+    "version": "v0.6",
+    "license_terms": "Freeware. Free to use with credit to おたもん. Redistribution of unmodified archives allowed.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/16093043/16093043"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 9
+  },
+  {
+    "id": "o_ssao",
+    "name": "o_SSAO",
+    "name_ja": "改変版SSAOエフェクト o_SSAO",
+    "author": "おたもん",
+    "category": "ssao",
+    "kind": "post",
+    "description": "Refined screen-space ambient occlusion filter featuring exclusion masks and soft shadow gradient controls.",
+    "popularity_evidence": "ニコニ・コモンズ sm16930526 子作品 17,484件; widely preferred for clean anime/cel-shaded model shading.",
+    "popularity_score": 91,
+    "pages": [
+      "https://okoneya.jp/mmd_files/",
+      "https://www.nicovideo.jp/watch/sm16930526"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_SSAO_v0_5.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct zip archive from okoneya.jp."
+      }
+    ],
+    "version": "v0.5a",
+    "license_terms": "Free for MMD works. Attribution おたもん required.",
+    "preview_images": [
+      "https://okoneya.jp/mmd_files/images/o_SSAO_exclusion.jpg"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 10
+  },
+  {
+    "id": "water_v5",
+    "name": "Water_v5",
+    "name_ja": "水面エフェクト Water_v5",
+    "author": "ビームマンP",
+    "category": "water",
+    "kind": "mixed",
+    "description": "Physically animated procedural 3D water surface shader featuring real-time reflection, refraction, and caustic ripples.",
+    "popularity_evidence": "ニコニ・コモンズ sm21437138 子作品 17,089件; benchmark water effect across the MMD community.",
+    "popularity_score": 90,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html",
+      "https://www.nicovideo.jp/watch/sm21437138"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan2/download/76/Water_v5_5_32_64.zip",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "Official Google Drive mirror linked on BeammanP's wiki."
+      }
+    ],
+    "version": "v5.56",
+    "license_terms": "Free for non-commercial MMD creation. Credit ビームマンP.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/21437138/21437138"
+    ],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 11
+  },
+  {
+    "id": "postmovie",
+    "name": "PostMovie",
+    "name_ja": "PostMovie",
+    "author": "ビームマンP",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Cinematic post-processing suite providing anamorphic letterbox framing, analog film grain, and color grading presets.",
+    "popularity_evidence": "ニコニ・コモンズ sm26920117 子作品 16,522件; top-tier choice for story videos and cinematic PVs.",
+    "popularity_score": 89,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html",
+      "https://www.nicovideo.jp/watch/sm26920117"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan2/download/PostMovie",
+        "type": "other",
+        "access": "open",
+        "notes": "Distributed via BeammanP's official AtWiki effect catalog."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Free for personal and non-commercial productions with credit.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/26920117/26920117"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 12
+  },
+  {
+    "id": "o_tonemap",
+    "name": "o_Tonemap",
+    "name_ja": "お手軽トーン補正フィルタ o_Tonemap",
+    "author": "おたもん",
+    "category": "lut",
+    "kind": "post",
+    "description": "Versatile color grading and tone curve adjustments enabling quick filmic, high-contrast, or desaturated aesthetics.",
+    "popularity_evidence": "ニコニ・コモンズ sm13654257 子作品 16,466件; BowlRoll derivatives exceed 50,000+ total downloads.",
+    "popularity_score": 88,
+    "pages": [
+      "https://okoneya.jp/mmd_files/",
+      "https://www.nicovideo.jp/watch/sm13654257"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_Tonemap_v0_7.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct download from official site okoneya.jp."
+      }
+    ],
+    "version": "v0.7",
+    "license_terms": "Free to use in all MMD videos; attribution to おたもん requested.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/13654257/13654257"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 13
+  },
+  {
+    "id": "croquis_kai",
+    "name": "Croquis改",
+    "name_ja": "Croquis改 (クロッキー改)",
+    "author": "less",
+    "category": "outline",
+    "kind": "post",
+    "description": "Enhanced edge detection outline filter improving upon Elle's Croquis with depth buffer and normal sensitivity.",
+    "popularity_evidence": "ニコニ・コモンズ im3705513 子作品 12,499件; premier anime line art filter in MMD.",
+    "popularity_score": 87,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/153032",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Frequently bundled in community anime shader packs; originally on BowlRoll."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Derived from Elle's Croquis. Free for non-commercial MMD usage. Credit less / Elle.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 14
+  },
+  {
+    "id": "workingflooral",
+    "name": "WorkingFloorAL",
+    "name_ja": "WorkingFloorAL",
+    "author": "針金P",
+    "category": "floor",
+    "kind": "offscreen",
+    "description": "Real-time mirror floor reflection plane integrating directly with AutoLuminous glowing materials.",
+    "popularity_evidence": "ニコニ・コモンズ im1575145 子作品 10,068件; standard dance stage floor reflection.",
+    "popularity_score": 86,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "Available in HariganeP's official Google Drive repository."
+      }
+    ],
+    "version": "v0.0.6",
+    "license_terms": "Free to use in MMD works. Attribution required. No paid redistribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, AutoLuminous optional",
+    "rank": 15
+  },
+  {
+    "id": "ikdiffusion",
+    "name": "ikDiffusion",
+    "name_ja": "ikDiffusion",
+    "author": "ikeno",
+    "category": "bloom",
+    "kind": "post",
+    "description": "Subtle optical diffusion and high-end photographic halation bloom filter.",
+    "popularity_evidence": "ニコニ・コモンズ im4851176 子作品 9,015件; staple diffusion variant for modern realistic styles.",
+    "popularity_score": 85,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikDiffusion",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "Hosted on ikeno's getuploader (subject to Cloudflare captcha challenge)."
+      }
+    ],
+    "version": "v0.0.1",
+    "license_terms": "Free for personal and non-commercial productions. Credit ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 16
+  },
+  {
+    "id": "lightbloom",
+    "name": "LightBloom",
+    "name_ja": "LightBloom",
+    "author": "くるりんぽん",
+    "category": "bloom",
+    "kind": "post",
+    "description": "High-intensity multi-pass HDR bloom producing anamorphic lens streaks and dazzling light spills.",
+    "popularity_evidence": "ニコニ・コモンズ sm12618255 子作品 8,091件; pioneer HDR bloom filter in MME history.",
+    "popularity_score": 84,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm12618255",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "http://www1.axfc.net/uploader/File/so/53513.zip&key=mme",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Archived in standard community packs."
+      }
+    ],
+    "version": "v1.1",
+    "license_terms": "Free for non-commercial MMD usage. Credit くるりんぽん.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/12618255/12618255"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 17
+  },
+  {
+    "id": "hgssao",
+    "name": "HgSSAO",
+    "name_ja": "HgSSAO",
+    "author": "針金P",
+    "category": "ssao",
+    "kind": "post",
+    "description": "Fast and smooth screen-space ambient occlusion optimized for large stages and multi-model scenes.",
+    "popularity_evidence": "ニコニ・コモンズ im3910816 子作品 7,326件; praised on LearnMMD for low performance impact.",
+    "popularity_score": 83,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "Hosted in HariganeP's official Google Drive repository."
+      }
+    ],
+    "version": "v0.0.1",
+    "license_terms": "Free to use in videos. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 18
+  },
+  {
+    "id": "hatoon2",
+    "name": "HAToon2",
+    "name_ja": "HAToon2",
+    "author": "ミーフォ茜",
+    "category": "toon",
+    "kind": "object",
+    "description": "Comprehensive anime cel-shading framework offering highly customizable shadow gradients and highlight masks.",
+    "popularity_evidence": "ニコニ・コモンズ im3060770 子作品 7,265件; the premier anime-aesthetic shader pack in MMD.",
+    "popularity_score": 82,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://download.sorairo.pictures/mme-effects/HAToon2/HAToon2_r14.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Official distribution from author site sorairo.pictures"
+      }
+    ],
+    "version": "v2.0",
+    "license_terms": "Free for personal MMD creations. Credit ミーフォ茜.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 19
+  },
+  {
+    "id": "adultshader",
+    "name": "AdultShader",
+    "name_ja": "AdultShader",
+    "author": "データP",
+    "category": "material",
+    "kind": "object",
+    "description": "Atmospheric material shader providing rich deep contrast and velvety skin tones for realistic character art.",
+    "popularity_evidence": "ニコニ・コモンズ sm14067112 子作品 6,086件; spawned multiple popular community forks (SShader, dAdultShader).",
+    "popularity_score": 81,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm14067112",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/Elle_DataPort/download/9/AdultShader_v014.zip",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Available in community shader distribution packs."
+      }
+    ],
+    "version": "v0.14",
+    "license_terms": "Free for non-commercial MMD creation. Credit データP (Elle).",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/14067112/14067112"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 20
+  },
+  {
+    "id": "ikclut",
+    "name": "ikClut",
+    "name_ja": "ikClut",
+    "author": "ikeno",
+    "category": "lut",
+    "kind": "post",
+    "description": "Professional 3D Color Lookup Table (CLUT) color grading engine with multi-table interpolation and morphing.",
+    "popularity_evidence": "ニコニ・コモンズ im4952092 子作品 5,911件; hundreds of user-made palette expansions on BowlRoll.",
+    "popularity_score": 80,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikClut",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "Distributed on ikeno's getuploader."
+      }
+    ],
+    "version": "v0.0.7",
+    "license_terms": "Free to use and modify. Credit ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 21
+  },
+  {
+    "id": "alternativefull",
+    "name": "AlternativeFull",
+    "name_ja": "AlternativeFull",
+    "author": "less",
+    "category": "material",
+    "kind": "object",
+    "description": "Modular uber-shader framework with sub-materials for specular highlights, normal maps, and rim lighting.",
+    "popularity_evidence": "ニコニ・コモンズ sm19753668 子作品 5,746件; foundational base for modern MMD character texture packs.",
+    "popularity_score": 79,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm19753668",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://www.deviantart.com/surrealscrawls/art/AlternativeFull-English-Version-DL-979877345",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Widely mirrored across community repositories."
+      }
+    ],
+    "version": "v1.0a6",
+    "license_terms": "Free for personal MMD creation with attribution to less.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/19753668/19753668"
+    ],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 22
+  },
+  {
+    "id": "greenershader",
+    "name": "GreenerShader",
+    "name_ja": "GreenerShader",
+    "author": "下っ腹P",
+    "category": "material",
+    "kind": "object",
+    "description": "Naturalistic soft-lighting material shader offering velvety skin shading, organic specular, and balanced contrast.",
+    "popularity_evidence": "ニコニ・コモンズ im2929158 配布作品; extremely popular across VOCALOID and anime character MMD videos.",
+    "popularity_score": 78,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/357379",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Bundled in community character shader libraries."
+      }
+    ],
+    "version": "v1.14",
+    "license_terms": "Free for personal MMD videos. Credit 下っ腹P.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 23
+  },
+  {
+    "id": "ikoverray",
+    "name": "ikOverray",
+    "name_ja": "ikOverray",
+    "author": "ikeno",
+    "category": "glow",
+    "kind": "post",
+    "description": "Atmospheric screen overlay glow illuminating scene highlights with smooth gradient falloffs.",
+    "popularity_evidence": "ニコニ・コモンズ im4301634 子作品 5,158件; prominent lighting overlay in Japanese music videos.",
+    "popularity_score": 78,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikOverray",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "Hosted on ikeno getuploader."
+      }
+    ],
+    "version": "v0.03",
+    "license_terms": "Free to use in videos with credit to ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+",
+    "rank": 24
+  },
+  {
+    "id": "ikbokeh",
+    "name": "ikBokeh",
+    "name_ja": "ikBokeh",
+    "author": "ikeno",
+    "category": "dof",
+    "kind": "post",
+    "description": "Cinematic depth of field shader featuring polygonal aperture bokeh disks and foreground/background blur separation.",
+    "popularity_evidence": "Prominently featured on ikeno's distribution catalog and NicoNico Seiga; top-tier modern DoF choice.",
+    "popularity_score": 77,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikBokeh",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "Distributed on ikeno's getuploader uploader."
+      }
+    ],
+    "version": "v0.20a",
+    "license_terms": "Free for personal and non-commercial productions. Credit ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 25
+  },
+  {
+    "id": "kirakira_beamman",
+    "name": "KiraKira (ビームマンP)",
+    "name_ja": "KiraKira (キラキラ粒子)",
+    "author": "ビームマンP",
+    "category": "particle",
+    "kind": "object",
+    "description": "Floating shimmering bokeh light orbs and fairy dust particle generator with controllable size and drift.",
+    "popularity_evidence": "Featured on LearnMMD top particle guides; Beamman AtWiki; thousands of video appearances.",
+    "popularity_score": 77,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan/download/KiraKira",
+        "type": "other",
+        "access": "open",
+        "notes": "Beamman AtWiki effect distribution page."
+      }
+    ],
+    "version": "v2.1",
+    "license_terms": "Free for non-commercial MMD creation. Credit ビームマンP.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 26
+  },
+  {
+    "id": "motionblur3",
+    "name": "MotionBlur3",
+    "name_ja": "MotionBlur3",
+    "author": "そぼろ",
+    "category": "motionblur",
+    "kind": "post",
+    "description": "Camera and bone velocity motion blur removing stuttering from fast choreographies and sweeps.",
+    "popularity_evidence": "ニコニ・コモンズ sm14179584 子作品 4,997件; staple motion blur recommendation on LearnMMD.",
+    "popularity_score": 77,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm14179584",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布 (MotionBlur)."
+      }
+    ],
+    "version": "v3.0",
+    "license_terms": "Free for personal and non-commercial productions. Credit そぼろ.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/14179584/14179584"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 27
+  },
+  {
+    "id": "kirakira_harigane",
+    "name": "KiraKira (針金P)",
+    "name_ja": "キラキラエフェクト KiraKira",
+    "author": "針金P",
+    "category": "particle",
+    "kind": "object",
+    "description": "Configurable sparkling glitter particle system with custom color palettes, star shapes, and gravity flow.",
+    "popularity_evidence": "HariganeP official FX repository; standard idol stage sparkle particle across thousands of MMD videos.",
+    "popularity_score": 76,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201010article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://hariganep.seesaa.net/article/201010article_1.html#kirakira",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "Hosted on HariganeP's Google Drive archive."
+      }
+    ],
+    "version": "v0.0.7",
+    "license_terms": "Free for personal and commercial non-commercial MMD video production. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 28
+  },
+  {
+    "id": "m4layer",
+    "name": "M4Layer",
+    "name_ja": "M4Layer (レイヤー構造エフェクト)",
+    "author": "ミーフォ茜",
+    "category": "framework",
+    "kind": "mixed",
+    "description": "Multi-pass render target compositing framework enabling Photoshop-style blend modes (Multiply, Screen, Overlay) in MME.",
+    "popularity_evidence": "ニコニ・コモンズ im2077977; foundational compositing tool for complex layered shader setups.",
+    "popularity_score": 76,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://download.sorairo.pictures/mme-effects/M4Layer/M4Layer_r12.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Official distribution from author site sorairo.pictures"
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Free for personal and non-commercial productions. Credit ミーフォ茜.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 29
+  },
+  {
+    "id": "truecameralx",
+    "name": "TrueCameraLX",
+    "name_ja": "TrueCameraLX",
+    "author": "そぼろ",
+    "category": "lens",
+    "kind": "post",
+    "description": "Physical camera optical simulation suite modeling lens aberration, vignetting, bokeh, and sensor noise.",
+    "popularity_evidence": "ニコニ・コモンズ sm18652131 子作品 4,010件; definitive realistic camera lens simulator in MMD.",
+    "popularity_score": 76,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm18652131",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v3.2",
+    "license_terms": "Free for MMD videos; attribution requested.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/18652131/18652131"
+    ],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 30
+  },
+  {
+    "id": "blackout",
+    "name": "BlackOut",
+    "name_ja": "暗転エフェクト BlackOut",
+    "author": "そぼろ",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Clean scene fade-out and fade-in to pure black directly controllable via accessory morph sliders.",
+    "popularity_evidence": "ニコニ・コモンズ sm12387576 子作品 3,910件; universal transition effect in story and PV projects.",
+    "popularity_score": 75,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm12387576",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v3.1",
+    "license_terms": "Freeware. Attribution appreciated.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/12387576/12387576"
+    ],
+    "requires": "MME 0.36+",
+    "rank": 31
+  },
+  {
+    "id": "iksunshaft",
+    "name": "ikSunshaft",
+    "name_ja": "ikSunshaft",
+    "author": "ikeno",
+    "category": "light",
+    "kind": "post",
+    "description": "Volumetric sunlight shafts and crepuscular atmospheric ray scattering penetrating occluding geometry.",
+    "popularity_evidence": "Recognized sunshaft effect across NicoNico and DeviantArt MMD groups.",
+    "popularity_score": 75,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikSunshaft",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "ikeno getuploader repository."
+      }
+    ],
+    "version": "v0.0.6",
+    "license_terms": "Free for MMD videos with attribution to ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 32
+  },
+  {
+    "id": "objectluminous",
+    "name": "ObjectLuminous",
+    "name_ja": "ObjectLuminous",
+    "author": "そぼろ",
+    "category": "glow",
+    "kind": "object",
+    "description": "Dedicated object-specific glow shader casting intense radiant illumination from assigned model subsets.",
+    "popularity_evidence": "Included in そぼろ 自作エフェクト20選 sm15369179 (50k+ uses); pioneer selective glowing shader.",
+    "popularity_score": 75,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm15369179",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v2.0",
+    "license_terms": "Free for personal MMD videos. Credit そぼろ.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/15369179/15369179"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 33
+  },
+  {
+    "id": "postrimlighting",
+    "name": "PostRimLighting",
+    "name_ja": "PostRimLighting",
+    "author": "ミーフォ茜",
+    "category": "light",
+    "kind": "post",
+    "description": "Depth and normal based edge illumination shader generating vibrant silhouette rim lighting around 3D meshes.",
+    "popularity_evidence": "ミーフォ茜 distribution catalog; VPVP wiki featured rim lighting solution.",
+    "popularity_score": 75,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://download.sorairo.pictures/mme-effects/PostRimLighting/PostRimLighting_r4.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Official distribution from author site sorairo.pictures"
+      }
+    ],
+    "version": "v1.2",
+    "license_terms": "Free for personal MMD use with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 34
+  },
+  {
+    "id": "screentex",
+    "name": "ScreenTex",
+    "name_ja": "ScreenTex",
+    "author": "針金P",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Overlay texture mapping system projecting custom film grain, dust scratches, grids, and decorative borders.",
+    "popularity_evidence": "HariganeP FX repository; ubiquitous screen texture compositing tool in music and story videos.",
+    "popularity_score": 75,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP official Google Drive repository."
+      }
+    ],
+    "version": "v0.0.4",
+    "license_terms": "Free to use in videos with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 35
+  },
+  {
+    "id": "sshader",
+    "name": "SShader",
+    "name_ja": "SShader (Simple Shader)",
+    "author": "データP",
+    "category": "material",
+    "kind": "object",
+    "description": "Streamlined character material shader providing clean diffuse illumination and crisp specular highlights.",
+    "popularity_evidence": "ニコニ・コモンズ sm14067112 配布系; long-standing staple material shader across classic MMD videos.",
+    "popularity_score": 75,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm14067112",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/Elle_DataPort/download/62/SeriousShader_v020.zip",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Archived in standard community shader bundles."
+      }
+    ],
+    "version": "v3.1",
+    "license_terms": "Free for personal and non-commercial productions. Credit データP (Elle).",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/14067112/14067112"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 36
+  },
+  {
+    "id": "colorshift",
+    "name": "ColorShift",
+    "name_ja": "ColorShift (色ズレエフェクト)",
+    "author": "そぼろ",
+    "category": "color",
+    "kind": "post",
+    "description": "RGB channel chromatic aberration shader creating glitch, analog distortion, and vintage lens fringing.",
+    "popularity_evidence": "HariganeP blog; staple effect for EDM, cyberpunk, and fast-paced dance video choreography.",
+    "popularity_score": 74,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201010article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "http://www.mediafire.com/?hpb8symhvghmk3k",
+        "type": "mediafire",
+        "access": "open",
+        "notes": "MediaFire mirror of ColorShift (00psy DeviantArt distribution)"
+      },
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "login",
+        "notes": "Soboro effect set archive on BowlRoll (contains ColorShift.zip)"
+      }
+    ],
+    "version": "v0.0.3",
+    "license_terms": "Free for personal and non-commercial productions. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 37
+  },
+  {
+    "id": "crossluminous",
+    "name": "CrossLuminous",
+    "name_ja": "CrossLuminous",
+    "author": "そぼろ",
+    "category": "glow",
+    "kind": "post",
+    "description": "Cross-shaped optical diffraction glare filter adding dazzling 4-point star streaks to glowing materials.",
+    "popularity_evidence": "Included in そぼろ 自作エフェクト20選 sm15369179 (50k+ uses); popular for glittering jewelry and stage lights.",
+    "popularity_score": 74,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm15369179",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v1.2",
+    "license_terms": "Free for personal MMD videos with attribution.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/15369179/15369179"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 38
+  },
+  {
+    "id": "godray",
+    "name": "GodRay",
+    "name_ja": "GodRay_v2 (ゴッドレイ)",
+    "author": "ビームマンP",
+    "category": "light",
+    "kind": "post",
+    "description": "Full-screen radial crepuscular light shaft filter simulating brilliant sun rays breaking through canopy or clouds.",
+    "popularity_evidence": "Featured in LearnMMD lighting tutorials; Beamman AtWiki; thousands of atmospheric video uses.",
+    "popularity_score": 74,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan/download/GodRay",
+        "type": "other",
+        "access": "open",
+        "notes": "Beamman AtWiki effect repository."
+      }
+    ],
+    "version": "v2.0",
+    "license_terms": "Free for non-commercial MMD creation. Credit ビームマンP.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 39
+  },
+  {
+    "id": "nchlshader2",
+    "name": "NCHLShader2",
+    "name_ja": "NCHLShader2",
+    "author": "nil",
+    "category": "pbr",
+    "kind": "object",
+    "description": "Non-directional ambient cubemap PBR shader with glossy reflection and realistic skin subsurface approximation.",
+    "popularity_evidence": "BowlRoll file/52182 129,020 downloads; ニコニ・コモンズ im4325058 子作品 3,630件; massive popularity.",
+    "popularity_score": 74,
+    "pages": [
+      "https://bowlroll.net/file/52182"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/52182",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Direct public download on BowlRoll without password."
+      }
+    ],
+    "version": "v1.01",
+    "license_terms": "Free for personal and non-commercial productions. Credit nil.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 40
+  },
+  {
+    "id": "postoverray",
+    "name": "PostOverRay",
+    "name_ja": "PostOverRay",
+    "author": "ミーフォ茜",
+    "category": "glow",
+    "kind": "post",
+    "description": "Luminous optical glow overlay bathing high-key lighting across the scene with soft exposure bleeding.",
+    "popularity_evidence": "ミーフォ茜 distribution suite; widely adopted for ethereal dream sequences and angelic visuals.",
+    "popularity_score": 74,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/Elle_DataPort/download/17/PostOverRay_v003.zip",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Preserved in community effect libraries."
+      }
+    ],
+    "version": "v0.3",
+    "license_terms": "Free for personal MMD creation with attribution to ミーフォ茜.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 41
+  },
+  {
+    "id": "croquis",
+    "name": "Croquis",
+    "name_ja": "Croquis (クロッキー)",
+    "author": "データP",
+    "category": "outline",
+    "kind": "post",
+    "description": "Original line-art outline post-filter extracting pen and pencil style sketch contours from 3D models.",
+    "popularity_evidence": "ニコニ・コモンズ sm13998918; classic foundational outline filter paving the way for anime cel outlines in MME.",
+    "popularity_score": 73,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/Elle_DataPort/download/38/Croquis_v012.zip",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in standard community effect archives."
+      }
+    ],
+    "version": "v0.12",
+    "license_terms": "Free for personal MMD use with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 42
+  },
+  {
+    "id": "o_dlaa",
+    "name": "o_DLAA",
+    "name_ja": "局地的双方向ポストアンチエイリアス o_DLAA",
+    "author": "おたもん",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Directionally localized post-process anti-aliasing smoothing jagged edges without blurring fine textures.",
+    "popularity_evidence": "ニコニ・コモンズ sm15635052 子作品 3,295件; staple post-AA filter for clean MMD captures.",
+    "popularity_score": 73,
+    "pages": [
+      "https://okoneya.jp/mmd_files/",
+      "https://www.nicovideo.jp/watch/sm15635052"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_DLAA_v0_1.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct zip archive from okoneya.jp."
+      }
+    ],
+    "version": "v0.1",
+    "license_terms": "Freeware. Credit おたもん.",
+    "preview_images": [
+      "https://okoneya.jp/mmd_files/images/o_DLAA.jpg"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 43
+  },
+  {
+    "id": "rain_snow",
+    "name": "Rain_Snow",
+    "name_ja": "雨・雪エフェクト",
+    "author": "ビームマンP",
+    "category": "particle",
+    "kind": "object",
+    "description": "Atmospheric precipitation particle generator with camera-relative velocity streaks and ground splash rings.",
+    "popularity_evidence": "Beamman AtWiki; widely utilized weather particle pack across MMD drama and music videos.",
+    "popularity_score": 73,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan/download/Rain_Snow",
+        "type": "other",
+        "access": "open",
+        "notes": "Beamman AtWiki effect directory."
+      }
+    ],
+    "version": "v1.2",
+    "license_terms": "Free for non-commercial MMD creation. Credit ビームマンP.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 44
+  },
+  {
+    "id": "screenblur",
+    "name": "ScreenBlur",
+    "name_ja": "ScreenBlur",
+    "author": "針金P",
+    "category": "blur",
+    "kind": "post",
+    "description": "Full-screen radial, zoom, and directional motion blur shader creating high-speed action impact.",
+    "popularity_evidence": "HariganeP blog distribution catalog; widely used for fast camera pans and dynamic action shots.",
+    "popularity_score": 73,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "Hosted in HariganeP Google Drive folder."
+      }
+    ],
+    "version": "v0.0.1",
+    "license_terms": "Free to use in videos. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 45
+  },
+  {
+    "id": "whiteout",
+    "name": "WhiteOut",
+    "name_ja": "白点エフェクト WhiteOut",
+    "author": "そぼろ",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Clean scene fade-out and flash transition to brilliant pure white with controllable slider curves.",
+    "popularity_evidence": "Included in そぼろ 自作エフェクト20選 sm15369179 (50k+ uses); companion to BlackOut.",
+    "popularity_score": 73,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm15369179",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v3.1",
+    "license_terms": "Freeware. Attribution to そぼろ requested.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/15369179/15369179"
+    ],
+    "requires": "MME 0.36+",
+    "rank": 46
+  },
+  {
+    "id": "furshader",
+    "name": "FurShader",
+    "name_ja": "FurShader (毛皮・ファーシェーダー)",
+    "author": "くるりんぽん",
+    "category": "material",
+    "kind": "object",
+    "description": "Multi-layer geometry shell expansion shader generating realistic fuzzy fur coats, plush toys, and velvet trim.",
+    "popularity_evidence": "ニコニ・コモンズ sm12327208; iconic specialized fur material shader in MMD history.",
+    "popularity_score": 72,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm12327208",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://mikumikudance.fandom.com/f/p/1995616909525598175",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Archived in community shader collections."
+      }
+    ],
+    "version": "v0.1",
+    "license_terms": "Free for personal MMD videos. Credit くるりんぽん / ogugu.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/12327208/12327208"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 47
+  },
+  {
+    "id": "gaussianplus",
+    "name": "GaussianPlus",
+    "name_ja": "GaussianPlus",
+    "author": "針金P",
+    "category": "blur",
+    "kind": "post",
+    "description": "High-speed separable 2D Gaussian blur post-filter with wide radius support and negligible overhead.",
+    "popularity_evidence": "VPVP wiki featured blur effect; HariganeP blog Page 2; standard fast blur tool.",
+    "popularity_score": 72,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP official Google Drive."
+      }
+    ],
+    "version": "v0.0.1",
+    "license_terms": "Free for MMD videos. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 48
+  },
+  {
+    "id": "hgsao",
+    "name": "HgSAO",
+    "name_ja": "HgSAO",
+    "author": "針金P",
+    "category": "ssao",
+    "kind": "post",
+    "description": "High-accuracy Screen Ambient Occlusion modeling ambient light occlusion in creases with soft blur falloffs.",
+    "popularity_evidence": "ニコニ・コモンズ im3910813 子作品 2,852件; VPVP wiki featured SSAO shader.",
+    "popularity_score": 72,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "Hosted in HariganeP's official Google Drive repository."
+      }
+    ],
+    "version": "v0.0.1",
+    "license_terms": "Free to use in videos. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 49
+  },
+  {
+    "id": "realfigureshader",
+    "name": "RealFigureShader",
+    "name_ja": "リアルフィギュアシェーダー RealFigureShader",
+    "author": "データP",
+    "category": "material",
+    "kind": "object",
+    "description": "PVC figure collectible material shader simulating glossy plastic finishes, coated resins, and figurine paint.",
+    "popularity_evidence": "ニコニ・コモンズ sm14362828; pioneer shader that popularized the 'scale figure in real world' genre of MMD.",
+    "popularity_score": 72,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "http://www.mediafire.com/download/edx5451hslci4rm/Real%20Figure%20shader.zip",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Bundled in community archive packages."
+      }
+    ],
+    "version": "v0.1",
+    "license_terms": "Free for non-commercial MMD creation. Credit データP (Elle).",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 50
+  },
+  {
+    "id": "selfoverlay_soft",
+    "name": "SelfOverlay_Soft",
+    "name_ja": "SelfOverlay_Soft",
+    "author": "ビームマンP",
+    "category": "color",
+    "kind": "post",
+    "description": "Softened ambient contrast overlay boosting vibrancy while avoiding clipped specular highlights.",
+    "popularity_evidence": "BeammanP AtWiki effect catalog; widely used companion alongside o_SelfOverlay.",
+    "popularity_score": 72,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan/download/SelfOverlay_Soft",
+        "type": "other",
+        "access": "open",
+        "notes": "Listed on Beamman AtWiki index."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Free for non-commercial MMD creation. Credit ビームマンP.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 51
+  },
+  {
+    "id": "worldsnow",
+    "name": "WorldSnow",
+    "name_ja": "WorldSnow",
+    "author": "そぼろ",
+    "category": "particle",
+    "kind": "object",
+    "description": "3D volumetric falling snow particle generator filling entire scene space with gently fluttering snowflakes.",
+    "popularity_evidence": "Included in そぼろ 自作エフェクト20選 sm15369179 (50k+ uses); classic winter stage particle.",
+    "popularity_score": 72,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm15369179",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v1.1",
+    "license_terms": "Freeware. Attribution to そぼろ requested.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/15369179/15369179"
+    ],
+    "requires": "MME 0.36+",
+    "rank": 52
+  },
+  {
+    "id": "animescreen",
+    "name": "AnimeScreen",
+    "name_ja": "AnimeScreen",
+    "author": "針金P",
+    "category": "toon",
+    "kind": "post",
+    "description": "Broadcast anime post-processing filter emulating TV cel toning, color harmonization, and line softening.",
+    "popularity_evidence": "HariganeP blog Page 1; staple post-filter for replicating authentic Japanese TV anime aesthetic.",
+    "popularity_score": 71,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201010article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://hariganep.seesaa.net/article/201010article_1.html#animescreen",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.2",
+    "license_terms": "Free to use in videos. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 53
+  },
+  {
+    "id": "gshader",
+    "name": "G_Shader",
+    "name_ja": "G_Shader",
+    "author": "下っ腹P",
+    "category": "material",
+    "kind": "object",
+    "description": "Versatile all-around material shader balancing anime cel-shading and realistic soft illumination.",
+    "popularity_evidence": "ニコニ・コモンズ im10674299 linked nc235716 子作品 2,422件; widely adopted in vocaloid/anime dance videos.",
+    "popularity_score": 71,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/252959",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Available via community distribution and author updates on BowlRoll."
+      }
+    ],
+    "version": "v3.1",
+    "license_terms": "Free for personal MMD videos. Credit 下っ腹P.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 54
+  },
+  {
+    "id": "retrocolor",
+    "name": "RetroColor",
+    "name_ja": "RetroColor",
+    "author": "ミーフォ茜",
+    "category": "lut",
+    "kind": "post",
+    "description": "Vintage photograph color toning filter replicating aged film stock dyes, sepia shifts, and muted saturation.",
+    "popularity_evidence": "ニコニ・コモンズ im2560946; recognized nostalgic color grading asset in narrative MMD films.",
+    "popularity_score": 71,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://sorairo.pictures/3dcg/mme-effects/#retrocolor",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Preserved in community effect collections."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Free for non-commercial MMD creation. Credit ミーフォ茜.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 55
+  },
+  {
+    "id": "simplemagic",
+    "name": "SimpleMagic",
+    "name_ja": "SimpleMagic (魔法陣エフェクト)",
+    "author": "ビームマンP",
+    "category": "particle",
+    "kind": "object",
+    "description": "Rotating glowing magic circles, summoning geometric rings, and ascending mana particle sparks.",
+    "popularity_evidence": "Beamman AtWiki; ubiquitous magic circle asset in fantasy, RPG, and battle MMD scenes.",
+    "popularity_score": 71,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://w.atwiki.jp/beamman/pages/13.html#SimpleMagic",
+        "type": "other",
+        "access": "open",
+        "notes": "Beamman AtWiki effect library."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Free for non-commercial MMD creation. Credit ビームマンP.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 56
+  },
+  {
+    "id": "softlighthl",
+    "name": "SoftLightHL",
+    "name_ja": "SoftLightHL",
+    "author": "ビームマンP",
+    "category": "light",
+    "kind": "post",
+    "description": "Soft lighting highlight filter bathing illuminated character faces and edges in glowing warmth.",
+    "popularity_evidence": "Beamman AtWiki effect pages; frequently credited in idol dance PVs.",
+    "popularity_score": 71,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan/download/SoftLightHL",
+        "type": "other",
+        "access": "open",
+        "notes": "Distributed via Beamman wiki catalog."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Free for personal MMD videos. Credit ビームマンP.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 57
+  },
+  {
+    "id": "ssaolite",
+    "name": "SSAO_Lite",
+    "name_ja": "SSAO_Lite",
+    "author": "nil",
+    "category": "ssao",
+    "kind": "post",
+    "description": "Ultralight screen-space ambient occlusion filter designed for real-time responsiveness on budget laptops.",
+    "popularity_evidence": "ニコニ・コモンズ sm13065191; staple recommendation on LearnMMD for low-spec computer users.",
+    "popularity_score": 71,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/54239",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Bundled in standard community packs."
+      }
+    ],
+    "version": "v0.1",
+    "license_terms": "Free for personal MMD use with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.35+, DirectX 9 ps_2_0 / ps_3_0",
+    "rank": 58
+  },
+  {
+    "id": "wetshader",
+    "name": "WetShader",
+    "name_ja": "WetShader (水濡れシェーダー)",
+    "author": "くるりんぽん",
+    "category": "material",
+    "kind": "object",
+    "description": "High-specular liquid coating shader simulating drenched wet skin, glistening water sheens, and rain-soaked clothing.",
+    "popularity_evidence": "ニコニ・コモンズ sm14457630; staple character material shader for rainy, beach, and swimming scenes.",
+    "popularity_score": 71,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm14457630",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://www.deviantart.com/tag/wetshader",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Preserved in community shader collections."
+      }
+    ],
+    "version": "v0.1",
+    "license_terms": "Free for non-commercial MMD creation. Credit くるりんぽん.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/14457630/14457630"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 59
+  },
+  {
+    "id": "workingray",
+    "name": "WorkingRay",
+    "name_ja": "WorkingRay",
+    "author": "針金P",
+    "category": "light",
+    "kind": "post",
+    "description": "Atmospheric god-ray beam generator projecting bright volumetric sunbeams across dark environmental scenes.",
+    "popularity_evidence": "HariganeP blog Page 2; beloved lighting tool for church, forest, and sunrise scenes.",
+    "popularity_score": 71,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.3",
+    "license_terms": "Free to use in videos with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 60
+  },
+  {
+    "id": "blast",
+    "name": "Blast",
+    "name_ja": "爆発エフェクト Blast / Bomb",
+    "author": "ビームマンP",
+    "category": "particle",
+    "kind": "object",
+    "description": "Action explosion effect generating fireballs, shockwave rings, and smoking debris plumes.",
+    "popularity_evidence": "Beamman AtWiki effect index; the primary explosion asset in action MMD videos.",
+    "popularity_score": 70,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan/download/Blast",
+        "type": "other",
+        "access": "open",
+        "notes": "Beamman AtWiki effect download page."
+      }
+    ],
+    "version": "v1.1",
+    "license_terms": "Free for personal and non-commercial productions with credit.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 61
+  },
+  {
+    "id": "mechanic",
+    "name": "Mechanic",
+    "name_ja": "メカシェーダー Mechanic",
+    "author": "ビームマンP",
+    "category": "material",
+    "kind": "object",
+    "description": "Procedural brushed metal, chrome reflections, and rusty mechanical surface material shader.",
+    "popularity_evidence": "ニコニ・コモンズ sm16681792 子作品 2,242件; indispensable shader for mecha, armor, and weapons.",
+    "popularity_score": 70,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html",
+      "https://www.nicovideo.jp/watch/sm16681792"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan/download/Mechanic",
+        "type": "other",
+        "access": "open",
+        "notes": "Listed on BeammanP's wiki download directory."
+      }
+    ],
+    "version": "v2.0",
+    "license_terms": "Free for non-commercial MMD creation. Credit ビームマンP.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/16681792/16681792"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 62
+  },
+  {
+    "id": "o_bloom",
+    "name": "o_Bloom",
+    "name_ja": "お手軽発光フィルタ o_Bloom",
+    "author": "おたもん",
+    "category": "bloom",
+    "kind": "post",
+    "description": "High dynamic range style threshold bloom filter producing glowing radiance around illuminated materials.",
+    "popularity_evidence": "ニコニ・コモンズ sm13926017 (former ID); prominent bloom alternative in okoneya.jp suite; thousands of usages.",
+    "popularity_score": 70,
+    "pages": [
+      "https://okoneya.jp/mmd_files/"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_Diffusion_v0_5.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "sm13926017 corresponds to Otamon's o_Diffusion (bloom/diffusion filter) on okoneya.jp"
+      }
+    ],
+    "version": "v0.3b",
+    "license_terms": "Free for personal and non-commercial productions. Attribution to おたもん.",
+    "preview_images": [
+      "https://okoneya.jp/mmd_files/images/o_SSAO_exclusion.jpg"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 63
+  },
+  {
+    "id": "powerspread",
+    "name": "PowerSpread",
+    "name_ja": "PowerSpread",
+    "author": "針金P",
+    "category": "particle",
+    "kind": "object",
+    "description": "High-density particle distribution system scattering falling leaves, petals, and embers with turbulence physics.",
+    "popularity_evidence": "ニコニ・コモンズ sm15837738 配布作品; HariganeP blog; staple sakura petal and autumn leaf generator.",
+    "popularity_score": 70,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201010article_1.html",
+      "https://www.nicovideo.jp/watch/sm15837738"
+    ],
+    "downloads": [
+      {
+        "url": "https://hariganep.seesaa.net/article/201010article_1.html#powerspread",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.3",
+    "license_terms": "Free for personal MMD use with attribution.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/15837738/15837738"
+    ],
+    "requires": "MME 0.36+",
+    "rank": 64
+  },
+  {
+    "id": "simpletoon",
+    "name": "SimpleToon",
+    "name_ja": "SimpleToon",
+    "author": "winglayer",
+    "category": "toon",
+    "kind": "object",
+    "description": "Lightweight crisp cel-shader providing sharp comic thresholds and vibrant anime color reproduction.",
+    "popularity_evidence": "下っ腹P distribution suite; widely praised for clean rendering on lower-specification hardware.",
+    "popularity_score": 70,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/141994",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Preserved in community anime shader packages."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Free for non-commercial MMD creation. Credit 下っ腹P.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 65
+  },
+  {
+    "id": "toondx",
+    "name": "ToonDX",
+    "name_ja": "ToonDX",
+    "author": "針金P",
+    "category": "toon",
+    "kind": "object",
+    "description": "Configurable toon shader offering multi-band shading ramps, highlight specular spots, and rim contour lighting.",
+    "popularity_evidence": "VPVP wiki featured toon shader; HariganeP blog; referenced across cel-shading tutorials.",
+    "popularity_score": 70,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201010article_1.html",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://hariganep.seesaa.net/article/201010article_1.html#toondx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.4",
+    "license_terms": "Free for video creation with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 66
+  },
+  {
+    "id": "hgspotlight",
+    "name": "HgSpotLight",
+    "name_ja": "HgSpotLight",
+    "author": "針金P",
+    "category": "light",
+    "kind": "mixed",
+    "description": "Volumetric cone spotlight projecting focused directional stage light with configurable beam angle and falloff.",
+    "popularity_evidence": "HariganeP blog Page 2; staple concert and live stage lighting tool in MMD dance productions.",
+    "popularity_score": 69,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.2",
+    "license_terms": "Free to use in videos with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 67
+  },
+  {
+    "id": "iklensghost",
+    "name": "ikLensGhost",
+    "name_ja": "ikLensGhost",
+    "author": "ikeno",
+    "category": "lens",
+    "kind": "post",
+    "description": "Photographic optical lens flare system generating internal reflection ghost artifacts from bright scene lights.",
+    "popularity_evidence": "ikeno effect suite staple; featured in high-end cinematic MMD animations.",
+    "popularity_score": 69,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikLensGhost",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "Hosted on ikeno getuploader."
+      }
+    ],
+    "version": "v0.0.4",
+    "license_terms": "Free for video production with credit.",
+    "preview_images": [],
+    "requires": "MME 0.37+",
+    "rank": 68
+  },
+  {
+    "id": "mirrorwater",
+    "name": "MirrorWater",
+    "name_ja": "MirrorWater (水鏡エフェクト)",
+    "author": "針金P",
+    "category": "water",
+    "kind": "offscreen",
+    "description": "Calm pond and shallow puddle mirror reflection shader combining surface ripple distortion with clear reflections.",
+    "popularity_evidence": "HariganeP blog Page 1; staple water surface effect for serene nature and rain-soaked pavement stages.",
+    "popularity_score": 69,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201010article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://hariganep.seesaa.net/article/201010article_1.html#mirrorwf",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.5",
+    "license_terms": "Free for personal MMD use with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 69
+  },
+  {
+    "id": "o_vignette",
+    "name": "o_Vignette",
+    "name_ja": "周辺減光フィルタ o_Vignette",
+    "author": "おたもん",
+    "category": "lens",
+    "kind": "post",
+    "description": "Subtle edge and corner darkening camera vignetting filter focusing viewer attention toward the center.",
+    "popularity_evidence": "ニコニ・コモンズ im1671720 子作品 2,114件; LearnMMD recommended post-processing polish.",
+    "popularity_score": 69,
+    "pages": [
+      "https://okoneya.jp/mmd_files/"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_Vignette_v0_3a.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct download from okoneya.jp."
+      }
+    ],
+    "version": "v0.3a",
+    "license_terms": "Freeware. Attribution to おたもん requested.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 70
+  },
+  {
+    "id": "waterreflect",
+    "name": "WaterReflect",
+    "name_ja": "WaterReflect",
+    "author": "ビームマンP",
+    "category": "water",
+    "kind": "offscreen",
+    "description": "Planar water reflection shader rendering realistic inverted mirror scenes with surface bump ripples.",
+    "popularity_evidence": "Beamman AtWiki effect library; standard companion to outdoor lakeside and shore stages.",
+    "popularity_score": 69,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan2/download/WaterReflect",
+        "type": "other",
+        "access": "open",
+        "notes": "Beamman AtWiki effect directory."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Free for personal MMD use with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 71
+  },
+  {
+    "id": "hgpointlight",
+    "name": "HgPointLight",
+    "name_ja": "HgPointLight",
+    "author": "針金P",
+    "category": "light",
+    "kind": "mixed",
+    "description": "Movable 3D point light accessory with distance attenuation and dynamic specular highlight calculation.",
+    "popularity_evidence": "HariganeP blog Page 2; widely used auxiliary stage light source in complex multi-character scenes.",
+    "popularity_score": 68,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.2",
+    "license_terms": "Free to use in videos. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 72
+  },
+  {
+    "id": "ikunderwater",
+    "name": "ikUnderwater",
+    "name_ja": "ikUnderwater",
+    "author": "ikeno",
+    "category": "water",
+    "kind": "post",
+    "description": "Immersive underwater environment shader featuring depth-attenuated murky fog, refraction distortion, and caustic light.",
+    "popularity_evidence": "ikeno distribution index; standard choice for deep sea and underwater scenes.",
+    "popularity_score": 68,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikUnderwater",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "ikeno getuploader repository."
+      }
+    ],
+    "version": "v0.0.3",
+    "license_terms": "Free for non-commercial MMD creation. Credit ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 73
+  },
+  {
+    "id": "ikwatercolor",
+    "name": "ikWaterColor",
+    "name_ja": "ikWaterColor",
+    "author": "ikeno",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Artistic watercolor illustration post-filter simulating wet paper bleed, pigment pooling, and paper grain.",
+    "popularity_evidence": "ニコニ・コモンズ im4808945 子作品 1,958件; beloved artistic stylized shader in the community.",
+    "popularity_score": 68,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikWaterColor",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "Hosted on ikeno getuploader."
+      }
+    ],
+    "version": "v0.0.3",
+    "license_terms": "Free for non-commercial MMD usage. Credit ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 74
+  },
+  {
+    "id": "o_surplusfilter",
+    "name": "o_SurplusFilter",
+    "name_ja": "小ネタフィルタの詰め合わせ o_SurplusFilter",
+    "author": "おたもん",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Comprehensive toolbox of utility post-filters including bleachex, monochrome, sepia, and color grading variants.",
+    "popularity_evidence": "okoneya.jp distribution hub; widely used utility pack across NicoNico MMD community.",
+    "popularity_score": 68,
+    "pages": [
+      "https://okoneya.jp/mmd_files/"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_SurplusFilter_v0_3b.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct archive download from okoneya.jp."
+      }
+    ],
+    "version": "v0.3b",
+    "license_terms": "Freeware. Credit to おたもん.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 75
+  },
+  {
+    "id": "posthatchingfilter",
+    "name": "PostHatchingFilter",
+    "name_ja": "PostHatchingFilter (ハッチング風シェーダー)",
+    "author": "データP",
+    "category": "outline",
+    "kind": "post",
+    "description": "Cross-hatching ink drawing filter converting scene shadows into multi-layered diagonal pencil and pen hatch lines.",
+    "popularity_evidence": "VPVP wiki featured stylize shader; featured in artistic and comic-book style MMD exhibitions.",
+    "popularity_score": 68,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/Elle_DataPort/download/66/PostHatchingShader_v011.zip",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Preserved in community effect archives."
+      }
+    ],
+    "version": "v0.1",
+    "license_terms": "Free for personal MMD use with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 76
+  },
+  {
+    "id": "trackback",
+    "name": "TrackBack",
+    "name_ja": "TrackBack (残像エフェクト)",
+    "author": "針金P",
+    "category": "motionblur",
+    "kind": "post",
+    "description": "Temporal afterimage trail shader drawing fading echo silhouettes behind fast character movements.",
+    "popularity_evidence": "HariganeP blog Page 1; widely cited for martial arts, superspeed, and dance choruses.",
+    "popularity_score": 68,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201010article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://hariganep.seesaa.net/article/201010article_1.html#trackback",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.3",
+    "license_terms": "Free to use in videos. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 77
+  },
+  {
+    "id": "wind",
+    "name": "Wind",
+    "name_ja": "Wind_v2 (風エフェクト)",
+    "author": "ビームマンP",
+    "category": "particle",
+    "kind": "object",
+    "description": "Particle wind simulation generating dynamic floating dust trails, swirl gusts, and drifting leaves.",
+    "popularity_evidence": "Beamman AtWiki library; standard environmental effect for outdoor and breezy meadow scenes.",
+    "popularity_score": 68,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan/download/Wind",
+        "type": "other",
+        "access": "open",
+        "notes": "Beamman AtWiki effect download index."
+      }
+    ],
+    "version": "v2.0",
+    "license_terms": "Free for personal MMD works with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 78
+  },
+  {
+    "id": "dropshadow",
+    "name": "DropShadow",
+    "name_ja": "ドロップシャドウエフェクト DropShadow",
+    "author": "ビームマンP",
+    "category": "shadow",
+    "kind": "object",
+    "description": "Simple clean contact drop-shadow under characters and objects preventing floating appearance.",
+    "popularity_evidence": "ニコニ・コモンズ sm19160219 子作品 1,600件; featured in LearnMMD stage setup guides.",
+    "popularity_score": 67,
+    "pages": [
+      "https://www43.atwiki.jp/beamman/pages/13.html",
+      "https://www.nicovideo.jp/watch/sm19160219"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/BeamMan/download/DropShadow",
+        "type": "other",
+        "access": "open",
+        "notes": "Beamman wiki effect catalog listing."
+      }
+    ],
+    "version": "v0.3",
+    "license_terms": "Free for personal MMD use with attribution.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/19160219/19160219"
+    ],
+    "requires": "MME 0.36+",
+    "rank": 79
+  },
+  {
+    "id": "heatground",
+    "name": "HeatGround",
+    "name_ja": "HeatGround (陽炎エフェクト)",
+    "author": "針金P",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Atmospheric heat haze shimmer distorting background geometry over hot pavement or thermal sources.",
+    "popularity_evidence": "HariganeP FX catalog; essential atmospheric distortion shader for summer outdoor and desert scenes.",
+    "popularity_score": 67,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201010article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.2",
+    "license_terms": "Free to use in videos with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 80
+  },
+  {
+    "id": "o_shadowframe",
+    "name": "o_ShadowFrame",
+    "name_ja": "画面端を暗くするフィルタ o_ShadowFrame",
+    "author": "おたもん",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Screen boundary framing filter creating atmospheric edge shadows and depth focus.",
+    "popularity_evidence": "okoneya.jp download index; staple framing vignette in drama and PV scenes.",
+    "popularity_score": 67,
+    "pages": [
+      "https://okoneya.jp/mmd_files/"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_ShadowFrame_v0_3.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct archive from official okoneya.jp server."
+      }
+    ],
+    "version": "v0.3",
+    "license_terms": "Freeware. Attribution to おたもん requested.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 81
+  },
+  {
+    "id": "ikpolishshader",
+    "name": "ikPolishShader",
+    "name_ja": "ikPolishShader",
+    "author": "ikeno",
+    "category": "pbr",
+    "kind": "mixed",
+    "description": "Feature-packed PBR shader engine featuring real-time Screen Space Reflections (SSR), SSS, and AO.",
+    "popularity_evidence": "ニコニ・コモンズ im4686100 / sm25606989 子作品 1,432件; flagship alternative to Ray-MMD.",
+    "popularity_score": 66,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm25606989"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/203/ikPolishShader.zip",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "Hosted on ikeno getuploader."
+      }
+    ],
+    "version": "v0.17",
+    "license_terms": "Free for non-commercial MMD creation. Credit ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0, powerful GPU",
+    "rank": 82
+  },
+  {
+    "id": "ikwetcloth",
+    "name": "ikWetCloth",
+    "name_ja": "ikWetCloth",
+    "author": "ikeno",
+    "category": "material",
+    "kind": "object",
+    "description": "Physically simulated wet fabric material shader rendering cloth saturation, cling, and translucent translucency.",
+    "popularity_evidence": "Featured on ikeno uploader; popular specialized character material shader.",
+    "popularity_score": 66,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikWetCloth",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "Hosted on ikeno getuploader."
+      }
+    ],
+    "version": "v0.0.3",
+    "license_terms": "Free for MMD works. Attribution to ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+",
+    "rank": 83
+  },
+  {
+    "id": "mmdshadow",
+    "name": "MMDShadow",
+    "name_ja": "MMDShadow",
+    "author": "針金P",
+    "category": "shadow",
+    "kind": "object",
+    "description": "Shadow map receiver shader expanding native MMD shadow rendering onto custom stages and transparency meshes.",
+    "popularity_evidence": "HariganeP blog Page 2; widely referenced fix for custom stages failing to receive standard shadows.",
+    "popularity_score": 66,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.3",
+    "license_terms": "Free for personal MMD use with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 84
+  },
+  {
+    "id": "iksweat",
+    "name": "ikSweat",
+    "name_ja": "ikSweat",
+    "author": "ikeno",
+    "category": "material",
+    "kind": "object",
+    "description": "Procedural liquid droplet simulation producing sweat and water drops on character skin and clothing surfaces.",
+    "popularity_evidence": "ikeno effect library; widely cited for sports, exertion, and summer-themed dance videos.",
+    "popularity_score": 65,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikSweat",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "ikeno getuploader repository."
+      }
+    ],
+    "version": "v0.0.2",
+    "license_terms": "Free for non-commercial MMD creation. Credit ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+",
+    "rank": 85
+  },
+  {
+    "id": "o_postkeying",
+    "name": "o_postKeying",
+    "name_ja": "お手軽キーイングエフェクト o_postKeying",
+    "author": "おたもん",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Post-process chroma and luminance keying filter allowing background replacement without external compositing software.",
+    "popularity_evidence": "okoneya.jp popular utility tool; essential for MMD green-screen and alpha transparency workflows.",
+    "popularity_score": 65,
+    "pages": [
+      "https://okoneya.jp/mmd_files/"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_postKeying_v0_5.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct download from official site."
+      }
+    ],
+    "version": "v0.5",
+    "license_terms": "Freeware. Credit to おたもん.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 86
+  },
+  {
+    "id": "powerdof",
+    "name": "PowerDOF",
+    "name_ja": "PowerDOF",
+    "author": "針金P",
+    "category": "dof",
+    "kind": "post",
+    "description": "High-performance Depth of Field shader optimized for smooth real-time playback and fast exports.",
+    "popularity_evidence": "ニコニ・コモンズ im2489180 配布系列; VPVP wiki featured fast DoF alternative.",
+    "popularity_score": 65,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "Google Drive distribution repository."
+      }
+    ],
+    "version": "v0.0.5",
+    "license_terms": "Free to use in videos. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 87
+  },
+  {
+    "id": "softshadow",
+    "name": "SoftShadow",
+    "name_ja": "SoftShadow",
+    "author": "針金P",
+    "category": "shadow",
+    "kind": "object",
+    "description": "Penumbra filtering shader smoothing out harsh jagged shadow edges into realistic photographic soft shadows.",
+    "popularity_evidence": "HariganeP blog Page 2; popular lightweight soft shadow alternative.",
+    "popularity_score": 65,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.4",
+    "license_terms": "Free for video creation with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 88
+  },
+  {
+    "id": "appeal",
+    "name": "Appeal",
+    "name_ja": "アピールエフェクト Appeal",
+    "author": "針金P",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Anime comic expression overlay adding stylized sweat drops, shock lines, question marks, and emotion graphics.",
+    "popularity_evidence": "HariganeP blog Page 2; widely used in comedy MMD skits and drama animations.",
+    "popularity_score": 64,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.3",
+    "license_terms": "Free for non-commercial MMD creation. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 89
+  },
+  {
+    "id": "footmark",
+    "name": "Footmark",
+    "name_ja": "Footmark (足跡エフェクト)",
+    "author": "針金P",
+    "category": "floor",
+    "kind": "object",
+    "description": "Dynamic footprint tracking effect printing character shoe impressions automatically onto floor surfaces.",
+    "popularity_evidence": "HariganeP blog Page 2; acclaimed procedural footprint simulation tool in dance and walking motions.",
+    "popularity_score": 64,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.3",
+    "license_terms": "Free to use in videos. Credit 針金P.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 90
+  },
+  {
+    "id": "o_rayleighfilter",
+    "name": "o_RayleighFilter",
+    "name_ja": "夕焼け・夜闇風フィルタ o_RayleighFilter",
+    "author": "おたもん",
+    "category": "fog",
+    "kind": "post",
+    "description": "Rayleigh atmospheric scattering simulation casting rich sunset gradients and nocturnal atmospheric hues.",
+    "popularity_evidence": "okoneya.jp; popular atmospheric mood lighting filter for outdoor and twilight stages.",
+    "popularity_score": 64,
+    "pages": [
+      "https://okoneya.jp/mmd_files/"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_RayleighFilter_v0_1.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct download from okoneya.jp."
+      }
+    ],
+    "version": "v0.1",
+    "license_terms": "Freeware. Credit おたもん.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 91
+  },
+  {
+    "id": "workingfloor2",
+    "name": "WorkingFloor2",
+    "name_ja": "WorkingFloor2 / WorkingFloorX",
+    "author": "針金P",
+    "category": "floor",
+    "kind": "offscreen",
+    "description": "Classic planar reflection floor shader rendering realistic ground mirror reflections for stage performances.",
+    "popularity_evidence": "Included in そぼろエフェクトセット sm15369179 (50k+ uses); original staple floor reflection in MMD history.",
+    "popularity_score": 64,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm15369179",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Bundled in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v2.0",
+    "license_terms": "Free for personal and non-commercial productions. Credit そぼろ.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/15369179/15369179"
+    ],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 92
+  },
+  {
+    "id": "billboardset",
+    "name": "BillboardSet",
+    "name_ja": "BillboardSet",
+    "author": "針金P",
+    "category": "particle",
+    "kind": "mixed",
+    "description": "Camera-facing 2D billboard sprite particle engine supporting animated sprite sheets and volumetric clusters.",
+    "popularity_evidence": "HariganeP blog Page 2; staple building block for stage crowds, foliage, and animated sprite particles.",
+    "popularity_score": 63,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.2",
+    "license_terms": "Free for personal MMD use with credit.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 93
+  },
+  {
+    "id": "cheaplens",
+    "name": "CheapLens",
+    "name_ja": "CheapLens",
+    "author": "そぼろ",
+    "category": "lens",
+    "kind": "post",
+    "description": "Optical lens aberration filter adding barrel distortion and chromatic color fringes around viewport borders.",
+    "popularity_evidence": "Included in そぼろエフェクトセット sm15369179 (50k+ uses); iconic retro lens look in music videos.",
+    "popularity_score": 63,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm15369179",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Bundled in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v1.0",
+    "license_terms": "Freeware. Attribution to そぼろ requested.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/15369179/15369179"
+    ],
+    "requires": "MME 0.36+",
+    "rank": 94
+  },
+  {
+    "id": "footmarksnow",
+    "name": "FootmarkSnow",
+    "name_ja": "FootmarkSnow",
+    "author": "針金P",
+    "category": "floor",
+    "kind": "object",
+    "description": "Snowy ground depression shader stamping realistic sunken footprint tracks with displaced powdery rim meshes.",
+    "popularity_evidence": "HariganeP blog Page 2; standard companion to winter snow stages.",
+    "popularity_score": 63,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.2",
+    "license_terms": "Free for non-commercial MMD creation with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 95
+  },
+  {
+    "id": "o_opticalblur",
+    "name": "o_OpticalBlur",
+    "name_ja": "光学風ぼかしフィルタ o_OpticalBlur",
+    "author": "おたもん",
+    "category": "blur",
+    "kind": "post",
+    "description": "Optical lens blur simulating circular lens diaphragm out-of-focus characteristics across the image.",
+    "popularity_evidence": "Featured on okoneya.jp; recognized alternative to heavy DoF shaders for background defocusing.",
+    "popularity_score": 63,
+    "pages": [
+      "https://okoneya.jp/mmd_files/"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_OpticalBlur_v0_1.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct download from okoneya.jp."
+      }
+    ],
+    "version": "v0.1",
+    "license_terms": "Freeware. Attribution おたもん.",
+    "preview_images": [],
+    "requires": "MME 0.36+, DirectX 9 ps_3_0",
+    "rank": 96
+  },
+  {
+    "id": "ikgouache",
+    "name": "ikGouache",
+    "name_ja": "ikGouache",
+    "author": "ikeno",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Opaque gouache painting filter rendering thick brushstroke impasto textures and painterly color blending.",
+    "popularity_evidence": "ikeno artistic shader collection; popular artistic non-photorealistic rendering filter.",
+    "popularity_score": 62,
+    "pages": [
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://ux.getuploader.com/ikeno/download/ikGouache",
+        "type": "uploader",
+        "access": "captcha",
+        "notes": "ikeno getuploader repository."
+      }
+    ],
+    "version": "v0.0.1",
+    "license_terms": "Free for personal MMD productions. Credit ikeno.",
+    "preview_images": [],
+    "requires": "MME 0.37+",
+    "rank": 97
+  },
+  {
+    "id": "o_disalphablend",
+    "name": "o_disAlphaBlend",
+    "name_ja": "背景色との合成を無効化するエフェクト o_disAlphaBlend",
+    "author": "おたもん",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Utility shader that disables background alpha blending artifacts when capturing transparent character layers.",
+    "popularity_evidence": "okoneya.jp; vital technical utility for transparent rendering and overlay compositing.",
+    "popularity_score": 62,
+    "pages": [
+      "https://okoneya.jp/mmd_files/"
+    ],
+    "downloads": [
+      {
+        "url": "https://okoneya.jp/mmd_files/o_disAlphaBlend_v0_1.zip",
+        "type": "direct",
+        "access": "open",
+        "notes": "Direct download from okoneya.jp."
+      }
+    ],
+    "version": "v0.1",
+    "license_terms": "Freeware. Attribution おたもん.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 98
+  },
+  {
+    "id": "panellight",
+    "name": "PanelLight",
+    "name_ja": "PanelLight",
+    "author": "そぼろ",
+    "category": "light",
+    "kind": "object",
+    "description": "Area light panel emitting diffuse directional illumination onto models from an arbitrary geometric plane.",
+    "popularity_evidence": "ニコニ・コモンズ sm19123817 配布同梱; standard photography softbox simulation in MMD.",
+    "popularity_score": 62,
+    "pages": [
+      "https://www.nicovideo.jp/watch/sm19123817",
+      "https://w.atwiki.jp/vpvpwiki/pages/272.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://bowlroll.net/file/236274",
+        "type": "bowlroll",
+        "access": "open",
+        "notes": "Included in そぼろエフェクトセット_再配布."
+      }
+    ],
+    "version": "v1.1",
+    "license_terms": "Free for personal MMD videos. Credit そぼろ.",
+    "preview_images": [
+      "https://nicovideo.cdn.nimg.jp/thumbnails/19123817/19123817"
+    ],
+    "requires": "MME 0.37+, DirectX 9 ps_3_0",
+    "rank": 99
+  },
+  {
+    "id": "poptex",
+    "name": "PopTex",
+    "name_ja": "PopTex",
+    "author": "針金P",
+    "category": "post-misc",
+    "kind": "post",
+    "description": "Pop-art pattern filter overlaying geometric halftone patterns, diagonal striping, and vibrant retro motifs.",
+    "popularity_evidence": "HariganeP blog Page 2; popular aesthetic choice in modern vocaloid music video productions.",
+    "popularity_score": 62,
+    "pages": [
+      "https://hariganep.seesaa.net/article/201209article_1.html"
+    ],
+    "downloads": [
+      {
+        "url": "https://drive.google.com/drive/folders/1pkhUYIXMxsSV5TKlSWqAUIhjk6M9iWIx",
+        "type": "gdrive",
+        "access": "open",
+        "notes": "HariganeP Google Drive repository."
+      }
+    ],
+    "version": "v0.0.1",
+    "license_terms": "Free for personal MMD use with attribution.",
+    "preview_images": [],
+    "requires": "MME 0.36+",
+    "rank": 100
+  }
+]

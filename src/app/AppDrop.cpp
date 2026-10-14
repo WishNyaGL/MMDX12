@@ -9,6 +9,7 @@
 #include "core/I18n.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
+#include "asset/MmeEffect.h"
 #include "studio/StudioDoc.h"
 
 namespace mmdx {
@@ -95,13 +96,20 @@ void App::PollDroppedFiles() {
 }
 
 void App::ApplyStudioDrop(std::vector<std::filesystem::path> files) {
-    std::vector<std::filesystem::path> models, vmds, vpds, audios, projects, unsupported;
+    std::vector<std::filesystem::path> models, vmds, vpds, audios, projects, effects, unsupported;
     for (auto& f : files) {
         const std::string e = LowerExt(f);
         if (e == ".mmdxproj" || e == ".pmm") projects.push_back(std::move(f));
+        else if (e == ".x" && [&] {   // M5c: a `.x` with a same-stem `.fx` is an effect object, not a prop
+                     std::filesystem::path fx, mesh;
+                     ResolveMmeObjectPair(std::filesystem::absolute(f), fx, mesh);
+                     return !fx.empty() && !mesh.empty();
+                 }())
+            effects.push_back(std::move(f));
         else if (IsModelExt(e)) models.push_back(std::move(f));
         else if (e == ".vmd") vmds.push_back(std::move(f));
         else if (e == ".vpd") vpds.push_back(std::move(f));
+        else if (e == ".fx") effects.push_back(std::move(f));
         else if (IsAudioExt(e)) audios.push_back(std::move(f));
         else unsupported.push_back(std::move(f));
     }
@@ -115,7 +123,7 @@ void App::ApplyStudioDrop(std::vector<std::filesystem::path> files) {
         return;
     }
 
-    const size_t accepted = models.size() + vmds.size() + vpds.size() + audios.size();
+    const size_t accepted = models.size() + vmds.size() + vpds.size() + audios.size() + effects.size();
     if (accepted == 0) {
         if (!unsupported.empty()) {
             toast_ = {Tr("지원하지 않는 파일"), UnsupportedList(unsupported), {}, true, timeSeconds_ + 6.0};
@@ -132,7 +140,7 @@ void App::ApplyStudioDrop(std::vector<std::filesystem::path> files) {
         return;
     }
 
-    // Models first, then motions / pose / audio. A dropped VMD/VPD needs a model to land on and models load on
+    // Models first, then motions / pose / audio / effects. A dropped VMD/VPD needs a model to land on and models load on
     // worker threads, so they are queued onto the first new model (models load in drop order, so it is in the
     // document first). If that model fails to load, StudioPollJobs re-queues the VMD/VPD onto the next new model.
     const bool oneModel = models.size() == 1;
@@ -153,7 +161,7 @@ void App::ApplyStudioDrop(std::vector<std::filesystem::path> files) {
         // StudioImportVmdFrom / StudioImportVpdFrom report a missing model themselves).
         for (const auto& v : vmds) StudioImportVmdFrom(std::filesystem::absolute(v));
         for (const auto& v : vpds) StudioImportVpdFrom(std::filesystem::absolute(v));
-        if (audios.empty()) {   // the imports posted their own result toast
+        if (audios.empty() && effects.empty()) {   // the imports posted their own result toast
             if (!unsupported.empty())
                 toast_ = {Tr("지원하지 않는 파일"), UnsupportedList(unsupported), {}, true, timeSeconds_ + 6.0};
             return;
@@ -177,6 +185,56 @@ void App::ApplyStudioDrop(std::vector<std::filesystem::path> files) {
         });
         studioJobs_.push_back(std::move(job));
         LOG_INFO("drop: audio %s", PathToUtf8(abs).c_str());
+    }
+
+    // M6b: dropped .fx effects. M5c: a `.x` dropped with a same-stem `.fx` becomes an effect object; a `.fx` with
+    // no `.x` next to it keeps the M6b behaviour (object -> the selected model's choice, post -> the project stack).
+    // A Ray-MMD main effect (ray.x / ray.fx) opens the shared confirm modal first; a plain add keeps the flow below.
+    for (const auto& f : effects) {
+        const std::filesystem::path abs = std::filesystem::absolute(f);
+        std::filesystem::path fx, mesh;
+        ResolveMmeObjectPair(abs, fx, mesh);
+        if (!mesh.empty()) {
+            // A Ray-MMD main effect pair: queue the confirm modal, the add (StudioAddMmeObject) runs on "그래도".
+            if (GuardRayMme(abs, [this](const std::filesystem::path& file) {
+                    if (!studio_) return;
+                    StudioAddMmeObject(file);
+                    LOG_INFO("drop: MME effect object %s", PathToUtf8(file).c_str());
+                })) {
+                continue;
+            }
+            StudioAddMmeObject(abs);
+            LOG_INFO("drop: MME effect object %s", PathToUtf8(abs).c_str());
+            continue;
+        }
+        const std::string kind = LoadMmeEffect(abs, MmeLoadOptions{}).kind();
+        if (kind == "post" || kind == "pre") {
+            if (GuardRayMme(abs, [this](const std::filesystem::path& file) {
+                    if (!studio_) return;
+                    bool dup = false;
+                    for (const studio::MmePostEntry& e : studio_->mmePost) dup |= e.path == file;
+                    if (!dup) studio_->mmePost.push_back(studio::MmePostEntry{file, true});
+                    StudioMmeChanged();
+                })) {
+                continue;
+            }
+            bool dup = false;
+            for (const studio::MmePostEntry& e : studio_->mmePost) dup |= e.path == abs;
+            if (!dup) studio_->mmePost.push_back(studio::MmePostEntry{abs, true});
+            StudioMmeChanged();
+            LOG_INFO("drop: MME post effect %s", PathToUtf8(abs).c_str());
+        } else {
+            studio::StudioModel* target = studio_->Selected();
+            if (!target && studio_->models.size() == 1) target = studio_->models[0].get();
+            if (target) {
+                target->mme = MmeChoice{MmeChoice::File, abs};
+                ++studio_->projectVersion;
+                LOG_INFO("drop: MME object effect %s on %s", PathToUtf8(abs).c_str(), target->name.c_str());
+            } else {
+                unsupported.push_back(abs);
+                LOG_INFO("drop: MME object effect %s (no model selected)", PathToUtf8(abs).c_str());
+            }
+        }
     }
 
     char title[96];

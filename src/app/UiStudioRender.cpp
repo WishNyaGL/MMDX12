@@ -231,6 +231,15 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
 
         changed |= DrawEffectStackEditor(settings_.effectStack, true);
 
+        // M6b: the project's own MME post stack (replaces the play-mode stack while the studio is open).
+        Gap(12.0f);
+        ImDrawList* mmeDl = ImGui::GetWindowDrawList();
+        const float mmeSepY = ImGui::GetCursorScreenPos().y;
+        mmeDl->AddLine(ImVec2(ImGui::GetWindowPos().x + Dp(14.0f), mmeSepY),
+                       ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x - Dp(14.0f), mmeSepY), p.line);
+        Gap(8.0f);
+        changed |= DrawStudioMmeStackEditor();
+
         if (changed) {
             ApplyRenderSettings();
             settings_.Save(settingsPath_);

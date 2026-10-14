@@ -12,10 +12,12 @@
 #include <thread>
 
 #include "app/Icons.h"
+#include "asset/MmeAssign.h"
 #include "asset/PmxModel.h"
 #include "asset/RayMaterial.h"
 #include "app/UiKit.h"
 #include "core/I18n.h"
+#include "core/Log.h"
 #include "core/TextUtil.h"
 #include "render/ShaderPack.h"
 #include "render/GpuModel.h"
@@ -32,6 +34,31 @@ using namespace ui;
 // P6: declared here rather than including asset/ModelImport.h, which also defines mmdx::ModelRole (GpuModel.h wins
 // in this translation unit). Defined in asset/ModelImport.cpp.
 bool ModelHasImportedPbr(const std::filesystem::path& path);
+
+namespace {
+// M6b: a wrapped paragraph in the kit's type (the shader screens' helper).
+void Para(const std::string& text, ImU32 col, float sizePx = size::Small, Font font = Font::Regular) {
+    if (text.empty()) return;
+    PushFont(font, sizePx);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(col));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+    PopFont();
+}
+} // namespace
+
+namespace {
+// M6b: the model's own MME files (the Auto candidate): `.emd` / same-name `.fx` / name[fx].pmx (asset/MmeAssign.h).
+bool ModelShipsMme(const std::filesystem::path& modelPath) {
+    if (modelPath.empty()) return false;
+    const std::vector<MmeAssignment> a = FindModelEffects(modelPath);
+    for (const MmeAssignment& x : a)
+        if (!x.effect.empty() || x.hidden) return true;
+    return false;
+}
+} // namespace
 
 // Folder picker (FOS_PICKFOLDERS): runs on its own STA thread like studio::FileDialog, keeping the
 // owner's messages pumped so the enable ping-pong cannot deadlock. Declared in App.h, shared with
@@ -119,6 +146,59 @@ const char* MaterialClassName(int cls) {
 } // namespace
 
 int App::MaterialOverrideCount(const ShaderChoice& choice) { return (int)choice.materials.size(); }
+
+// M6a: the model's MME choice. The saved per-character / per-stage choice (unless a run-wide CLI override applies),
+// defaulting to None for characters and Auto for stages. `id` may be empty (no saved choice): then the CLI overrides
+// or the kind default decide.
+MmeChoice App::ResolveMmeChoice(const std::string& id, bool isStage) const {
+    // --mme-auto forces None / Auto for every model; --stage-mme does the same for stages only (and wins for stages).
+    if (isStage && options_.stageMmeSet) return {options_.stageMme != 0 ? MmeChoice::Auto : MmeChoice::None, {}};
+    if (options_.mmeAutoSet) return {options_.mmeAuto != 0 ? MmeChoice::Auto : MmeChoice::None, {}};
+    if (!id.empty()) return isStage ? settings_.StageMme(id) : settings_.CharacterMme(id);
+    return isStage ? MmeChoice{MmeChoice::Auto, {}} : MmeChoice{};
+}
+
+// M6a: the per-material effect files a choice assigns. None = native shading, Auto = the model's own files
+// (FindModelEffects: .emd / same-name .fx / name[fx].pmx), File = one effect for every material.
+void App::ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::filesystem::path& modelPath) {
+    const size_t count = gpu.Materials().size();
+    if (choice.mode == MmeChoice::None) {
+        gpu.SetMmeEffects({});
+        return;
+    }
+    if (choice.mode == MmeChoice::File) {
+        gpu.SetMmeEffects(std::vector<std::filesystem::path>(count, choice.file));
+        return;
+    }
+    // Auto: what the model's own files ask for, mapped to per-material paths (subset -1 = every material,
+    // subset n = material n; later entries override earlier; hidden = hide the model, ignored for now).
+    std::vector<std::filesystem::path> perMaterial(count);
+    const std::vector<MmeAssignment> assigns = FindModelEffects(modelPath);
+    bool hidden = false;
+    size_t raySkipped = 0;
+    for (const MmeAssignment& a : assigns) {
+        if (a.hidden && a.subset < 0) hidden = true;
+        // Ray-MMD material files (material_2.0 / ray macros) are what the native PBR reads (asset/RayMaterial): Auto
+        // leaves them to it. Run as MME objects they need ray.x's deferred G-buffer and render dark. File mode still
+        // forces any effect.
+        if (!a.effect.empty() && IsRayMaterialFx(a.effect)) {
+            ++raySkipped;
+            continue;
+        }
+        if (a.subset < 0) {
+            for (auto& p : perMaterial) p = a.effect;
+        } else if ((size_t)a.subset < perMaterial.size() && !a.hidden) {
+            perMaterial[(size_t)a.subset] = a.effect;
+        }
+    }
+    if (hidden && !modelPath.empty() && mmeHiddenWarned_.insert(PathToUtf8(modelPath)).second)
+        LOG_WARN("MME: %s asks to hide the model (Obj.show = false); ignored for now",
+                 PathToUtf8(modelPath).c_str());
+    if (raySkipped && !modelPath.empty() && mmeHiddenWarned_.insert("ray|" + PathToUtf8(modelPath)).second)
+        LOG_INFO("MME: %s: %zu Ray-MMD material assignment(s) left to the native PBR", PathToUtf8(modelPath).c_str(),
+                 raySkipped);
+    gpu.SetMmeEffects(std::move(perMaterial));
+}
 
 // Per-material class / default shading of a pack model. One row per material: name + a class dropdown ("자동" shows the
 // pack's own pick). Ctrl / Shift + click selects several rows; a dropdown on a selected row then sets all of them.
@@ -486,7 +566,188 @@ void App::DrawPackCompare(const char* id, ImDrawList* dl, uint64_t before, const
     }
 }
 
-// ---- picker ---------------------------------------------------------------------------------------------------------
+// M6b: the studio project's MME post stack as RenderSettings entries (docs/mme/mme_design.md §2.10). Empty outside
+// the studio / without a project: ApplyRenderSettings then falls back to the play-mode stack.
+std::vector<MmeEffectEntry> App::StudioMmeEntries() const {
+    std::vector<MmeEffectEntry> out;
+    if (!studio_) return out;
+    for (const studio::MmePostEntry& e : studio_->mmePost) {
+        MmeEffectEntry m;
+        m.file = e.path;
+        m.enabled = e.enabled;
+        out.push_back(std::move(m));
+    }
+    return out;
+}
+
+// M6b: a studio MME stack edit (add / remove / toggle) marks the project dirty and pushes the stack to the renderer.
+void App::StudioMmeChanged() {
+    if (studio_) ++studio_->projectVersion;
+    ApplyRenderSettings();
+}
+
+// Ray-MMD main effect guard: every MME add site asks before adding ray.x / ray.fx next to the native PBR renderer.
+// True = queued for the confirm modal (the caller must NOT add now); false = add as before.
+bool App::GuardRayMme(const std::filesystem::path& p, std::function<void(const std::filesystem::path&)> add) {
+    if (!IsRayMmdMainEffect(p)) return false;
+    rayConfirmPath_ = p;
+    rayConfirmAdd_ = std::move(add);
+    return true;
+}
+
+// The shared Ray-MMD confirm modal. Draws only while a guarded add is pending; "취소" (default) drops it, "그래도
+// MME로 추가" runs the site's continuation.
+void App::DrawRayMmeConfirm() {
+    using namespace ui;
+    if (rayConfirmPath_.empty()) return;
+    const Palette& p = P();
+    const ImVec2 ds = ImGui::GetIO().DisplaySize;
+
+    ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(Dp(420.0f), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(24.0f), Dp(22.0f)));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImGui::ColorConvertU32ToFloat4(p.surface));
+
+    if (!ImGui::IsPopupOpen("##raymmeconfirm")) ImGui::OpenPopup("##raymmeconfirm");
+    if (ImGui::BeginPopupModal("##raymmeconfirm", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        TextEllipsis(dl, Font::Semibold, size::Title, c, c.x + Dp(372.0f), p.ink, Tr("Ray-MMD"));
+        Text(dl, Font::Semibold, size::Body, ImVec2(c.x, c.y + Dp(28.0f)), p.ink,
+             PathToUtf8(rayConfirmPath_.filename()).c_str());
+
+        ImGui::SetCursorScreenPos(ImVec2(c.x, c.y + Dp(54.0f)));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Dp(372.0f));   // window-local x
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink2));
+        PushFont(Font::Regular, size::Small);
+        ImGui::TextWrapped("%s", Tr("이 앱은 Ray-MMD를 네이티브 PBR로 지원합니다. 캐릭터의 재질 소스를 'Ray-MMD'로 바꾸면 그대로 쓸 수 있습니다. MME로 함께 실행하면 조명과 후처리가 두 번 적용됩니다."));
+        PopFont();
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
+
+        ImGui::Dummy(ImVec2(0, Dp(20.0f)));
+        bool close = false;
+        // default: cancel, nothing is added
+        if (Button("##raycancel", Tr("취소"), nullptr, ButtonKind::Secondary, ImVec2(180.0f, 40.0f)) ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            close = true;
+        }
+        ImGui::SameLine(0, Dp(12.0f));
+        if (Button("##rayforce", Tr("그래도 MME로 추가"), nullptr, ButtonKind::Primary, ImVec2(180.0f, 40.0f))) {
+            const std::filesystem::path file = rayConfirmPath_;
+            std::function<void(const std::filesystem::path&)> add = std::move(rayConfirmAdd_);
+            rayConfirmPath_.clear();
+            rayConfirmAdd_ = nullptr;
+            close = true;
+            if (add) add(file);
+        }
+        if (close) {
+            rayConfirmPath_.clear();
+            rayConfirmAdd_ = nullptr;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+}
+
+// M6b: one-time suggestion when a character with no saved MME choice ships an .emd / same-name .fx. The toast
+// offers an apply button (DrawToast); never applied automatically. Remembered per character id.
+void App::SuggestMme(const std::string& characterId, const std::filesystem::path& modelPath) {
+    if (characterId.empty() || options_.mmeAutoSet || options_.mmeModelSet || HeadlessRun()) return;
+    if (settings_.CharacterMme(characterId).mode != MmeChoice::None) return;
+    if (settings_.MmeSuggested(characterId)) return;
+    if (!ModelShipsMme(modelPath)) return;
+    settings_.SetMmeSuggested(characterId);
+    settings_.Save(settingsPath_);
+    toast_ = Toast{Tr("이 모델은 MME 재질을 포함하고 있어요"), Tr("MME 메뉴에서 켤 수 있어요"), {}, false, timeSeconds_ + 6.0};
+    mmeSuggestApply_ = characterId;   // the toast's apply button
+}
+
+// M6b: the per-model MME choice editor (combo 없음 / 모델 동봉 효과 / 파일 선택…). Shared by the lobby character
+// panel, the play bar's shader popup and the studio inspector. `hasOwn` = the model ships an `.emd` / same-name `.fx`
+// (only then is the Auto row offered). Returns true when the choice changed.
+bool App::DrawMmeRow(const char* id, MmeChoice& choice, const std::string& modelId,
+                     const std::filesystem::path& modelPath, float width) {
+    const Palette& p = P();
+    (void)modelId;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    bool changed = false;
+    const bool hasOwn = ModelShipsMme(modelPath);
+
+    // update the visible state if a CLI override applies this run (it is not saved)
+    const bool stageOverride = options_.stageMmeSet;
+    const bool autoOverride = options_.mmeAutoSet;
+
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    const ImVec2 a = win->DC.CursorPos;
+    const ImVec2 b(a.x + width, a.y + Dp(30.0f));
+    Text(dl, Font::Regular, size::Small, ImVec2(a.x, a.y + Dp(6.0f)), p.ink2, Tr("효과 파일"));
+    ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(190.0f), a.y + Dp(2.0f)));
+    ImGui::SetNextItemWidth(Dp(190.0f));
+    PushFont(Font::Regular, size::Small);
+
+    std::string preview = choice.mode == MmeChoice::Auto    ? std::string(Tr("모델 동봉 효과"))
+                          : choice.mode == MmeChoice::File  ? PathToUtf8(choice.file.filename())
+                                                            : std::string(Tr("없음"));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink));
+    const bool open = ImGui::BeginCombo(id, preview.c_str(), ImGuiComboFlags_HeightLarge | ImGuiComboFlags_NoArrowButton);
+    ImGui::PopStyleColor();
+    {
+        const ImVec2 cmax = ImGui::GetItemRectMax(), cmin = ImGui::GetItemRectMin();
+        Icon(dl, icon::CaretDown, 12.0f, ImVec2(cmax.x - Dp(12.0f), (cmin.y + cmax.y) * 0.5f), p.ink3);
+    }
+    if (open) {
+        if (ImGui::Selectable(Tr("없음"), choice.mode == MmeChoice::None)) {
+            choice = MmeChoice{};
+            changed = true;
+        }
+        ImGui::BeginDisabled(!hasOwn);
+        if (ImGui::Selectable(Tr("모델 동봉 효과"), choice.mode == MmeChoice::Auto)) {
+            choice = MmeChoice{MmeChoice::Auto, {}};
+            changed = true;
+        }
+        ImGui::EndDisabled();
+        if (!hasOwn) {
+            PushFont(Font::Regular, size::Caption);
+            ImGui::TextDisabled("%s", Tr("이 모델은 동봉된 MME 재질이 없어요"));
+            PopFont();
+        }
+        // a library object effect picked for this model (File mode)
+        for (const EffectAsset& e : library_.effects) {
+            if (e.kind == "post" || e.kind == "pre") continue;   // object effects only
+            ImGui::PushID(e.id.c_str());
+            const bool sel = choice.mode == MmeChoice::File && choice.file == e.path;
+            if (ImGui::Selectable(e.displayName.c_str(), sel)) {
+                choice = MmeChoice{MmeChoice::File, e.path};
+                changed = true;
+            }
+            ImGui::PopID();
+        }
+        ImGui::Separator();
+        if (ImGui::Selectable(Tr("파일 선택…"))) {
+            const std::filesystem::path picked =
+                studio::OpenFileDialog(hwnd_, {{L"MME 효과 (.fx)", L"*.fx"}}, modelPath.parent_path());
+            if (!picked.empty()) {
+                choice = MmeChoice{MmeChoice::File, picked};
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    PopFont();
+    ImGui::SetCursorScreenPos(ImVec2(a.x, b.y));
+    ImGui::Dummy(ImVec2(width, 0));
+
+    if (stageOverride || autoOverride) {
+        PushFont(Font::Regular, size::Caption);
+        ImGui::TextDisabled("%s", Tr("명령줄 설정이 이번 실행 동안 우선합니다"));
+        PopFont();
+    }
+    return changed;
+}
+
 
 bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width, const ModelTraits* traits) {
     const Palette& p = P();
@@ -967,6 +1228,187 @@ void App::DrawStudioMaterialRow(float w) {
         }
         StudioAddModelFile(m->kind, m->path, m->uid, &m->material);   // reload this model's PBR data
     }
+}
+
+// M6b: the selected studio model's MME object effect choice (없음 / 모델 동봉 효과 / 파일 선택…), saved in the project.
+void App::DrawStudioMmeRow(float w) {
+    studio::StudioDoc& d = *studio_;
+    studio::StudioModel* m = d.Selected();
+    if (!m) return;
+    const Palette& p = P();
+    ImDrawList* cdl = ImGui::GetWindowDrawList();
+    ImGui::Dummy(ImVec2(w, Dp(10.0f)));
+    {
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("MME"));
+        ImGui::Dummy(ImVec2(w, Dp(20.0f)));
+    }
+    MmeChoice mme = m->mme;
+    if (DrawMmeRow("##studiomme", mme, m->libraryId, m->path, w)) {
+        m->mme = mme;
+        ++d.projectVersion;   // saved with the project (no undo step)
+    }
+}
+
+// M6b: the ordered MME post stack (RenderSettings::mmeEffects): per entry an enable switch, up / down / remove, and
+// an "MME 효과 추가" picker over the library's post effects (plus a file dialog). Shared by the play bar / shader
+// manager (play-mode settings_.mmeEffects) and the studio (the project's own stack). True = the stack changed.
+bool App::DrawMmePostStackEditor(std::vector<MmeEffectEntry>& stack, bool header) {
+    const Palette& p = P();
+    if (header) SectionLabel(Tr("MME"));
+    Para(Tr("위에서 아래로 MME 효과를 차례로 적용합니다. 영상·스틸 렌더에도 같은 스택이 쓰입니다."), p.ink3, size::Caption);
+    Gap(6.0f);
+    bool changed = false;
+    size_t swapWith = SIZE_MAX, removeAt = SIZE_MAX, swapA = 0;
+    for (size_t i = 0; i < stack.size(); ++i) {
+        MmeEffectEntry& e = stack[i];
+        ImGui::PushID((int)i);
+        bool on = e.enabled;
+        const std::string name = PathToUtf8(e.file.filename());
+        std::error_code ec;
+        const bool exists = std::filesystem::exists(e.file, ec);
+        const std::string hint = exists ? PathToUtf8(e.file.parent_path()) : std::string(Tr("파일 없음"));
+        if (Switch("##on", name.c_str(), &on, hint.c_str())) {
+            e.enabled = on;
+            changed = true;
+        }
+        if (IconButton("##up", icon::CaretUp, Tr("위로"), false, 28.0f) && i > 0) {
+            swapA = i - 1;
+            swapWith = i;
+        }
+        ImGui::SameLine();
+        if (IconButton("##down", icon::CaretDown, Tr("아래로"), false, 28.0f) && i + 1 < stack.size()) {
+            swapA = i;
+            swapWith = i + 1;
+        }
+        ImGui::SameLine();
+        if (IconButton("##remove", icon::X, Tr("스택에서 제거"), false, 28.0f)) removeAt = i;
+        ImGui::PopID();
+        Gap(8.0f);
+    }
+    if (removeAt != SIZE_MAX) {
+        stack.erase(stack.begin() + (long)removeAt);
+        changed = true;
+    } else if (swapWith != SIZE_MAX) {
+        std::swap(stack[swapA], stack[swapWith]);
+        changed = true;
+    }
+
+    // the add picker: library post effects (files under effects/ whose kind is post)
+    if (Button("##mmeadd", Tr("MME 효과 추가"), icon::Plus, ButtonKind::Secondary)) ImGui::OpenPopup("##mmeaddpopup");
+    ImGui::SetNextWindowSize(ImVec2(Dp(320.0f), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(12.0f), Dp(12.0f)));
+    if (ImGui::BeginPopup("##mmeaddpopup")) {
+        int shown = 0;
+        for (const EffectAsset& e : library_.effects) {
+            if (e.kind != "post") continue;   // a post stack only takes post effects
+            ++shown;
+            ImGui::PushID(e.id.c_str());
+            if (MenuItem("##mmeadd", e.displayName.c_str())) {
+                // add into whichever stack this editor instance edits (play-mode settings or the studio project)
+                const auto addEntry = [this](const std::filesystem::path& file) {
+                    MmeEffectEntry m;
+                    m.file = file;
+                    m.enabled = true;
+                    if (screen_ == Screen::Studio && studio_) {
+                        std::vector<MmeEffectEntry> entries = StudioMmeEntries();
+                        bool dup = false;
+                        for (const MmeEffectEntry& x : entries) dup |= x.file == file;
+                        if (!dup) {
+                            entries.push_back(std::move(m));
+                            studio_->mmePost.clear();
+                            for (const MmeEffectEntry& x : entries)
+                                studio_->mmePost.push_back(studio::MmePostEntry{x.file, x.enabled});
+                            StudioMmeChanged();
+                        }
+                    } else {
+                        bool dup = false;
+                        for (const MmeEffectEntry& x : settings_.mmeEffects) dup |= x.file == file;
+                        if (!dup) {
+                            settings_.mmeEffects.push_back(m);
+                            settings_.Save(settingsPath_);
+                            ApplyRenderSettings();
+                        }
+                    }
+                };
+                if (GuardRayMme(e.path, addEntry)) {
+                    ImGui::CloseCurrentPopup();
+                } else {
+                    MmeEffectEntry m;
+                    m.file = e.path;
+                    m.enabled = true;
+                    stack.push_back(std::move(m));
+                    changed = true;
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::PopID();
+        }
+        if (!shown) {
+            PushFont(Font::Regular, size::Caption);
+            ImGui::TextDisabled("%s", Tr("라이브러리 effects 폴더에 post 효과가 없습니다"));
+            PopFont();
+        }
+        ImGui::Separator();
+        if (MenuItem("##mmefile", Tr("파일 선택…"))) {
+            const std::filesystem::path picked =
+                studio::OpenFileDialog(hwnd_, {{L"MME 효과 (.fx / .x)", L"*.fx;*.x"}, {L"MME 효과", L"*.fx"}});
+            if (!picked.empty()) {
+                if (GuardRayMme(picked, [this](const std::filesystem::path& file) {
+                        // the file dialog adds into whichever stack this editor edits (see the library branch)
+                        MmeEffectEntry m;
+                        m.file = file;
+                        m.enabled = true;
+                        if (screen_ == Screen::Studio && studio_) {
+                            std::vector<MmeEffectEntry> entries = StudioMmeEntries();
+                            bool dup = false;
+                            for (const MmeEffectEntry& x : entries) dup |= x.file == file;
+                            if (!dup) {
+                                entries.push_back(std::move(m));
+                                studio_->mmePost.clear();
+                                for (const MmeEffectEntry& x : entries)
+                                    studio_->mmePost.push_back(studio::MmePostEntry{x.file, x.enabled});
+                                StudioMmeChanged();
+                            }
+                        } else {
+                            bool dup = false;
+                            for (const MmeEffectEntry& x : settings_.mmeEffects) dup |= x.file == file;
+                            if (!dup) {
+                                settings_.mmeEffects.push_back(m);
+                                settings_.Save(settingsPath_);
+                                ApplyRenderSettings();
+                            }
+                        }
+                    })) {
+                    // the confirm modal collects the add
+                } else {
+                    MmeEffectEntry m;
+                    m.file = picked;
+                    m.enabled = true;
+                    stack.push_back(std::move(m));
+                    changed = true;
+                }
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
+    if (stack.empty()) Para(Tr("MME 효과가 없습니다."), p.ink3, size::Caption);
+    return changed;
+}
+
+// M6b: the studio's project MME post stack. Mirrors DrawMmePostStackEditor over studio_->mmePost.
+bool App::DrawStudioMmeStackEditor() {
+    if (!studio_) return false;
+    std::vector<MmeEffectEntry> entries = StudioMmeEntries();
+    const bool changed = DrawMmePostStackEditor(entries);
+    if (changed) {
+        studio_->mmePost.clear();
+        for (MmeEffectEntry& e : entries) studio_->mmePost.push_back(studio::MmePostEntry{e.file, e.enabled});
+        StudioMmeChanged();
+    }
+    return changed;
 }
 
 } // namespace mmdx

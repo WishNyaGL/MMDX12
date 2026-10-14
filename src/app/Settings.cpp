@@ -1,5 +1,7 @@
 #include "app/Settings.h"
 
+#include "core/TextUtil.h"
+
 #include <algorithm>
 #include <charconv>
 #include <cctype>
@@ -20,6 +22,49 @@ void AppSettings::SetCharacterShader(const std::string& id, const ShaderChoice& 
     if (choice.pack.empty() && choice.remembered.empty() && choice.materials.empty())
         characterShaders.erase(id);   // nothing left to keep
     else characterShaders[id] = choice;
+}
+
+// M6a: MME choice mode names ("none" | "auto" | "file").
+static const char* MmeModeName(MmeChoice::Mode m) {
+    switch (m) {
+        case MmeChoice::Auto: return "auto";
+        case MmeChoice::File: return "file";
+        default: return "none";
+    }
+}
+
+static bool ParseMmeMode(const std::string& v, MmeChoice::Mode& out) {
+    const std::string lo = [&] {
+        std::string s = v;
+        for (char& c : s) c = (char)std::tolower((unsigned char)c);
+        return s;
+    }();
+    if (lo == "none") { out = MmeChoice::None; return true; }
+    if (lo == "auto") { out = MmeChoice::Auto; return true; }
+    if (lo == "file") { out = MmeChoice::File; return true; }
+    return false;
+}
+
+MmeChoice AppSettings::CharacterMme(const std::string& id) const {
+    auto it = characterMmes.find(id);
+    return it == characterMmes.end() ? MmeChoice{} : it->second;   // characters default to None
+}
+
+void AppSettings::SetCharacterMme(const std::string& id, const MmeChoice& choice) {
+    if (choice.mode == MmeChoice::None) characterMmes.erase(id);
+    else characterMmes[id] = choice;
+}
+
+MmeChoice AppSettings::StageMme(const std::string& id) const {
+    auto it = stageMmes.find(id);
+    if (it != stageMmes.end()) return it->second;
+    return MmeChoice{MmeChoice::Auto, {}};   // stages default to Auto
+}
+
+void AppSettings::SetStageMme(const std::string& id, const MmeChoice& choice) {
+    static const MmeChoice kDefault{MmeChoice::Auto, {}};
+    if (choice == kDefault) stageMmes.erase(id);
+    else stageMmes[id] = choice;
 }
 
 MaterialChoice AppSettings::CharacterMaterial(const std::string& id) const {
@@ -238,6 +283,25 @@ bool AppSettings::Load(const std::filesystem::path& file) {
             const size_t bar = value.find('|');
             if (bar != std::string::npos && bar > 0 && bar + 1 < value.size()) characterShaderSuggested.insert(value);
         }
+        else if (key == "characterMmeSuggested") {
+            // characterMmeSuggested=<character id>: the model's own MME material was already suggested
+            if (!value.empty()) characterMmeSuggested.insert(value);
+        }
+        else if (key == "characterMme" || key == "stageMme") {
+            // characterMme=<mode>|<file or ->|<character id> / stageMme=<mode>|<file or ->|<stage id>
+            // (mode = none|auto|file; the id last, like the other lines: library ids hold no '|')
+            const size_t a = value.find('|');
+            const size_t b = a == std::string::npos ? a : value.find('|', a + 1);
+            if (b != std::string::npos && b + 1 < value.size()) {
+                MmeChoice c;
+                if (ParseMmeMode(value.substr(0, a), c.mode)) {
+                    const std::string file = value.substr(a + 1, b - a - 1);
+                    if (c.mode == MmeChoice::File && !file.empty() && file != "-") c.file = Utf8ToPath(file);
+                    if (key == "characterMme") SetCharacterMme(value.substr(b + 1), c);
+                    else SetStageMme(value.substr(b + 1), c);
+                }
+            }
+        }
         else if (key == "characterMaterial") {
             // characterMaterial=<ray|default>|<emd path or empty>|<character id> (the id last, like the other lines)
             const size_t a = value.find('|');
@@ -290,6 +354,18 @@ bool AppSettings::Load(const std::filesystem::path& file) {
                 effectStack.push_back(std::move(e));
             }
         }
+        else if (key == "mmeEffect") {
+            // mmeEffect=<enabled 0|1>|<path> (path last: effect paths may hold '|')
+            const size_t a = value.find('|');
+            if (a != std::string::npos && a + 1 < value.size()) {
+                MmeEffectEntry e;
+                int en = 1;
+                if (ParseInt(value.substr(0, a), en)) e.enabled = en != 0;
+                const std::string path = value.substr(a + 1);
+                if (!path.empty() && path != "-") e.file = Utf8ToPath(path);
+                if (!e.file.empty()) mmeEffects.push_back(std::move(e));
+            }
+        }
         else if (key == "shaderSort") {
             const size_t sep = value.find_first_of(",|");
             if (sep != std::string::npos) {
@@ -315,6 +391,26 @@ bool AppSettings::Load(const std::filesystem::path& file) {
             const size_t bar = value.find('|');
             if (bar != std::string::npos && bar > 0 && bar + 1 < value.size())
                 songCameras[value.substr(bar + 1)] = value.substr(0, bar);
+        }
+        else if (key == "songStage") {   // songStage=<stage id|->|<song id> (the id last: ids may hold '|')
+            const size_t bar = value.find('|');
+            if (bar != std::string::npos && bar > 0 && bar + 1 < value.size())
+                songStages[value.substr(bar + 1)] = value.substr(0, bar);
+        }
+        else if (key == "songAudio") {   // songAudio=<audio file name>|<song id> (the id last: ids may hold '|')
+            const size_t bar = value.find('|');
+            if (bar != std::string::npos && bar > 0 && bar + 1 < value.size())
+                songAudios[value.substr(bar + 1)] = value.substr(0, bar);
+        }
+        else if (key == "songVideo") {
+            // songVideo=<overlay|background|off>[:<black|screen|add|normal>]|<file name>|<song id>
+            // (the file name may be empty; the song id goes last because song ids may hold '|')
+            const size_t bar1 = value.find('|');
+            if (bar1 != std::string::npos && bar1 > 0) {
+                const size_t bar2 = value.find('|', bar1 + 1);
+                if (bar2 != std::string::npos && bar2 + 1 < value.size())
+                    songVideos[value.substr(bar2 + 1)] = value.substr(0, bar2);
+            }
         }
         else if (key == "songFormationPart" || key == "songFormationCenter") {
             // songFormationPart=<dance file>|<character id>|<song id>, songFormationCenter=<dance file>|<song id>
@@ -465,6 +561,13 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     for (const auto& [id, dir] : packTextureFolders)
         std::fprintf(f, "packTextureFolder=%s|%s\n", id.c_str(), dir.c_str());
     for (const std::string& key : characterShaderSuggested) std::fprintf(f, "characterShaderSuggested=%s\n", key.c_str());
+    for (const std::string& id : characterMmeSuggested) std::fprintf(f, "characterMmeSuggested=%s\n", id.c_str());
+    for (const auto& [id, c] : characterMmes)
+        std::fprintf(f, "characterMme=%s|%s|%s\n", MmeModeName(c.mode),
+                     c.file.empty() ? "-" : PathToUtf8(c.file).c_str(), id.c_str());
+    for (const auto& [id, c] : stageMmes)
+        std::fprintf(f, "stageMme=%s|%s|%s\n", MmeModeName(c.mode),
+                     c.file.empty() ? "-" : PathToUtf8(c.file).c_str(), id.c_str());
     for (const auto& [id, m] : characterMaterials)
         if (m.ray) std::fprintf(f, "characterMaterial=ray|%s|%s\n", m.emd.c_str(), id.c_str());
     for (const std::string& id : characterMaterialSuggested)
@@ -479,12 +582,17 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
         std::fprintf(f, "effect=%s|%d|%s|%s\n", e.pack.c_str(), e.enabled ? 1 : 0, list.c_str(),
                      e.textureFolder.empty() ? "-" : e.textureFolder.c_str());
     }
+    for (const MmeEffectEntry& e : mmeEffects)
+        std::fprintf(f, "mmeEffect=%d|%s\n", e.enabled ? 1 : 0, PathToUtf8(e.file).c_str());
     std::fprintf(f, "shaderSort=%d,%d\n", shaderSort[0], shaderSort[1]);
     std::fprintf(f, "shaderType=%d,%d\n", shaderType[0], shaderType[1]);
     std::fprintf(f, "lastCharacter=%s\n", lastCharacter.c_str());
     std::fprintf(f, "lastStage=%s\n", lastStage.c_str());
     std::fprintf(f, "lastSong=%s\n", lastSong.c_str());
     for (const auto& [songId, cam] : songCameras) std::fprintf(f, "songCamera=%s|%s\n", cam.c_str(), songId.c_str());
+    for (const auto& [songId, stage] : songStages) std::fprintf(f, "songStage=%s|%s\n", stage.c_str(), songId.c_str());
+    for (const auto& [songId, audio] : songAudios) std::fprintf(f, "songAudio=%s|%s\n", audio.c_str(), songId.c_str());
+    for (const auto& [songId, video] : songVideos) std::fprintf(f, "songVideo=%s|%s\n", video.c_str(), songId.c_str());
     for (const auto& [songId, form] : songFormations) {
         if (!form.centerDance.empty()) std::fprintf(f, "songFormationCenter=%s|%s\n", form.centerDance.c_str(), songId.c_str());
         for (const auto& [dance, cid] : form.byDance)

@@ -3,6 +3,7 @@
 #include "core/I18n.h"
 #include "app/App.h"
 #include "asset/ImageLoader.h"
+#include "asset/RayMaterial.h"
 
 #include <ShlObj.h>
 #include <shellapi.h>
@@ -17,6 +18,7 @@
 
 #include "app/Lighting.h"
 #include "app/UiKit.h"
+#include "render/MmeSemantics.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
 #include "imgui.h"
@@ -27,6 +29,51 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace mmdx {
+
+// M5c: case-insensitive ASCII lowercase of a wide string (path stems only; avoids a dependency on Passes.cpp).
+static std::wstring LowerAsciiWideLocal(const std::wstring& s) {
+    std::wstring out = s;
+    for (wchar_t& c : out)
+        if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
+    return out;
+}
+
+// M5c: pairs an MME effect object path (an accessory `.x` or its `.fx`) with its same-stem partner in the same
+// folder (case-insensitive; `.x` -> `.fx`, `.fx` -> `.x` when present). Sets `fx` and `meshFile` (either may be
+// empty when the partner is absent). Shared by --mme-object and the studio / project load.
+void ResolveMmeObjectPair(const std::filesystem::path& path, std::filesystem::path& fx,
+                          std::filesystem::path& meshFile) {
+    fx.clear();
+    meshFile.clear();
+    if (path.empty()) return;
+    const std::filesystem::path dir = path.parent_path();
+    const std::wstring wantLower = LowerAsciiWideLocal(path.stem().wstring());
+    auto hasExt = [&](const std::filesystem::path& p, const wchar_t* ext) {
+        std::wstring e = p.extension().wstring();
+        for (wchar_t& c : e) c = (wchar_t)towlower(c);
+        return e == ext;
+    };
+    if (hasExt(path, L".x")) {
+        meshFile = path;
+        // same-stem .fx in the same folder
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (!entry.is_regular_file()) continue;
+            const std::filesystem::path p = entry.path();
+            if (!hasExt(p, L".fx")) continue;
+            if (LowerAsciiWideLocal(p.stem().wstring()) == wantLower) { fx = p; break; }
+        }
+    } else {
+        fx = path;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (!entry.is_regular_file()) continue;
+            const std::filesystem::path p = entry.path();
+            if (!hasExt(p, L".x")) continue;
+            if (LowerAsciiWideLocal(p.stem().wstring()) == wantLower) { meshFile = p; break; }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Command line
@@ -50,6 +97,8 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.song = WideToUtf8(next());
         } else if (arg == L"--formation") {
             opt.formation = WideToUtf8(next());
+        } else if (arg == L"--song-audio") {
+            opt.songAudio = WideToUtf8(next());
         } else if (arg == L"--autoplay") {
             opt.autoplay = true;
         } else if (arg == L"--seek") {
@@ -176,6 +225,87 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
                     if (!id.empty()) opt.effectStack.push_back({id, true, {}, {}});
                     pos = end + 1;
                 }
+            }
+        } else if (arg == L"--mme") {
+            // --mme <file>[,<file>...]: MMDX12 MME post effects for this run, in list order
+            const std::string v = WideToUtf8(next());
+            opt.mmeEffects.clear();
+            opt.mmeSet = true;
+            size_t pos = 0;
+            while (pos <= v.size()) {
+                size_t end = v.find(',', pos);
+                if (end == std::string::npos) end = v.size();
+                const std::string p = v.substr(pos, end - pos);
+                if (!p.empty()) {
+                    MmeEffectEntry e;
+                    e.file = Utf8ToPath(p);
+                    std::error_code ec;
+                    if (!std::filesystem::exists(e.file, ec))
+                        LOG_WARN("--mme: file not found: %s", p.c_str());
+                    // CLI cannot answer a modal: a Ray-MMD main effect is added with a warning
+                    if (IsRayMmdMainEffect(e.file))
+                        LOG_WARN("Ray-MMD main effect added as MME (forced by script)");
+                    opt.mmeEffects.push_back(std::move(e));
+                }
+                pos = end + 1;
+            }
+        } else if (arg == L"--mme-model") {
+            // --mme-model <fx>: an MME object effect applied to the play-mode character (M4b)
+            opt.mmeModel = Utf8ToPath(WideToUtf8(next()));
+            opt.mmeModelSet = true;
+            std::error_code ec;
+            if (!std::filesystem::exists(opt.mmeModel, ec))
+                LOG_WARN("--mme-model: file not found: %s", PathToUtf8(opt.mmeModel).c_str());
+        } else if (arg == L"--mme-object") {
+            // --mme-object <path>[,<path>...]: MME effect objects (an accessory `.x` + its same-stem `.fx`), this run
+            const std::string v = WideToUtf8(next());
+            opt.mmeObjects.clear();
+            opt.mmeObjectSet = true;
+            size_t pos = 0;
+            while (pos <= v.size()) {
+                size_t end = v.find(',', pos);
+                if (end == std::string::npos) end = v.size();
+                const std::string p = v.substr(pos, end - pos);
+                if (!p.empty()) {
+                    const std::filesystem::path path = Utf8ToPath(p);
+                    std::error_code ec;
+                    if (!std::filesystem::exists(path, ec)) {
+                        LOG_WARN("--mme-object: file not found: %s", p.c_str());
+                    } else {
+                        std::filesystem::path fx, mesh;
+                        ResolveMmeObjectPair(path, fx, mesh);
+                        if (fx.empty())
+                            LOG_WARN("--mme-object: no same-stem .fx next to %s; skipped", p.c_str());
+                        else {
+                            // CLI cannot answer a modal: a Ray-MMD main effect is added with a warning (once)
+                            if (IsRayMmdMainEffect(path))
+                                LOG_WARN("Ray-MMD main effect added as MME (forced by script)");
+                            opt.mmeObjects.emplace_back(fx, mesh);
+                        }
+                    }
+                }
+                pos = end + 1;
+            }
+        } else if (arg == L"--mme-model-all") {
+            opt.mmeModelAll = _wtoi(next().c_str()) != 0;
+        } else if (arg == L"--mme-auto") {
+            // --mme-auto <0|1>: force None(0) / Auto(1) for every model of this run (not saved)
+            opt.mmeAuto = _wtoi(next().c_str()) != 0 ? 1 : 0;
+            opt.mmeAutoSet = true;
+        } else if (arg == L"--stage-mme") {
+            // --stage-mme <0|1>: force None(0) / Auto(1) for the stage(s) of this run only
+            opt.stageMme = _wtoi(next().c_str()) != 0 ? 1 : 0;
+            opt.stageMmeSet = true;
+        } else if (arg == L"--mme-panel") {
+            // --mme-panel <si>,<tr>: sets si / tr of every --mme entry (for tests)
+            const std::string v = WideToUtf8(next());
+            float si = 1.0f, tr = 1.0f;
+            if (sscanf_s(v.c_str(), "%f,%f", &si, &tr) == 2) {
+                opt.mmePanelSet = true;
+                opt.mmePanelSi = si;
+                opt.mmePanelTr = tr;
+            } else {
+                LOG_WARN("--mme-panel wants <si>,<tr>; got: %s", v.c_str());
             }
         } else if (arg == L"--offline-still") {
             opt.offlineStill = next();
@@ -373,6 +503,10 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     startupPhase("shaders+upscalers");
 
     ApplyRenderSettings();
+    // M6b: MME hot-reload failures report a toast (fires on the main thread during Render).
+    renderer_.SetMmeMessage([this](const std::string& msg, bool error) {
+        toast_ = Toast{Tr("MME 효과를 다시 컴파일하지 못했습니다"), msg, {}, error, timeSeconds_ + 8.0};
+    });
 
     if (!audio_.Initialize()) LOG_WARN("audio disabled");
     audio_.SetVolume(settings_.volume);
@@ -804,6 +938,7 @@ void App::RenderFrame() {
         DrawRecoveryPrompt();
         DrawUpdateNotice();
         DrawToast();
+        DrawRayMmeConfirm();
         break;
     case Screen::Loading: DrawLoading(); break;
     case Screen::Play:
@@ -813,13 +948,14 @@ void App::RenderFrame() {
             DrawPlayOverlay();
             DrawToast();
         }
+        DrawRayMmeConfirm();
         break;
     case Screen::Offline:
         UpdateOffline();
         DrawOfflineOverlay();
         break;
     case Screen::BenchLobby: DrawBenchLobby(); break;
-    case Screen::Shaders: DrawShaders(); break;
+    case Screen::Shaders: DrawShaders(); DrawRayMmeConfirm(); break;
     case Screen::BenchRun: DrawBenchRunOverlay(); break;
     case Screen::BenchResult: DrawBenchResult(); break;
     case Screen::BenchRender: DrawRenderBenchOverlay(); break;
@@ -827,6 +963,7 @@ void App::RenderFrame() {
         UpdateStudio(dt);
         if (screen_ == Screen::Studio) UpdateOffline();   // CLI render trigger (may switch to Screen::Offline)
         if (screen_ == Screen::Studio) DrawStudio();
+        DrawRayMmeConfirm();
         break;
     }
 
@@ -1057,9 +1194,10 @@ void App::ApplyStartScreen() {
         libraryTab_ = 1;
     } else if (options_.startScreen == "songs") {
         libraryTab_ = 2;
-    } else if (options_.startScreen == "shaders" || options_.startScreen == "shaders-online") {
+    } else if (options_.startScreen == "shaders" || options_.startScreen == "shaders-online" ||
+               options_.startScreen == "shaders-mme") {
         screen_ = Screen::Shaders;
-        shaderTab_ = options_.startScreen == "shaders-online" ? 1 : 0;
+        shaderTab_ = options_.startScreen == "shaders-online" ? 1 : options_.startScreen == "shaders-mme" ? 2 : 0;
     } else if (options_.startScreen == "settings") {
         lobbyTab_ = 2;
     } else if (options_.startScreen == "studio") {
@@ -1327,6 +1465,22 @@ void App::ApplyRenderSettings() {
     rs.bloomConvolution = settings_.bloomConvolution;
     rs.lutIntensity = settings_.lutIntensity;
     rs.packEffects = settings_.effectStack;   // effect packs (the shader screens edit it)
+    // M6b: the MME post stack. --mme overrides for one run; while the studio is open the project's own stack
+    // replaces the play-mode one (docs/mme/mme_design.md §2.10).
+    rs.mmeEffects = options_.mmeSet ? options_.mmeEffects
+                   : studio_        ? StudioMmeEntries()
+                                    : settings_.mmeEffects;
+    // M5c: a `.x` stack entry is an effect object (its `.fx` runs via FrameView::mmeEffectObjects, its mesh via the
+    // model list), not a post effect: keep it out of the post chain.
+    rs.mmeEffects.erase(std::remove_if(rs.mmeEffects.begin(), rs.mmeEffects.end(),
+                                       [](const MmeEffectEntry& e) {
+                                           std::wstring ext = e.file.extension().wstring();
+                                           for (wchar_t& c : ext) c = (wchar_t)towlower(c);
+                                           return ext == L".x";
+                                       }),
+                        rs.mmeEffects.end());
+    if (options_.mmePanelSet)
+        for (MmeEffectEntry& e : rs.mmeEffects) { e.si = options_.mmePanelSi; e.tr = options_.mmePanelTr; }
     rs.fixedResolution = false;
     rs.headless = false;
     renderer_.SetSettings(rs);
@@ -1406,11 +1560,16 @@ void App::StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsse
     const bool hasStage = st != nullptr;
     const StageAsset s = hasStage ? *st : StageAsset{};
     const SongAsset so = SongAsChosen(*song);
+    // M8b: the song's video layers (classification + ini override), resolved here and re-applied to the package after
+    // the worker runs (LoadScenePackage resets the package struct it fills).
+    const std::vector<VideoLayerDesc> videos = ResolveSongVideos(so);
     const bool hasFormation = formation != nullptr && !formation->empty();
     const std::vector<PerformerCast> form = hasFormation ? *formation : std::vector<PerformerCast>{};
     loadFuture_ = std::async(std::launch::async, [=, pkg = loadPackage_.get(), this] {
-        return LoadScenePackage(c, hasStage ? &s : nullptr, so, *pkg, &loadProgress_, &loadError_,
-                                hasFormation ? &form : nullptr, MaterialChoiceResolver());
+        const bool ok = LoadScenePackage(c, hasStage ? &s : nullptr, so, *pkg, &loadProgress_, &loadError_,
+                                         hasFormation ? &form : nullptr, MaterialChoiceResolver());
+        pkg->videos = videos;   // M8b: LoadScenePackage resets the package; re-apply the resolved video layers
+        return ok;
     });
 }
 
@@ -1532,6 +1691,7 @@ void App::PollLoad() {
     rs.bloomConvolution = false;
     rs.lutIntensity = 0.0f;
     rs.packEffects.clear();   // fixed workload: no effect packs
+    rs.mmeEffects.clear();    // fixed workload: no MME post effects
     renderer_.SetSettings(rs);
 
     benchStartTime_ = timeSeconds_;
@@ -1592,6 +1752,7 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         s->characterId = library_.characters[(size_t)selCharacter_].id;
     }
     s->characterDisplayName = !pkg.characterDisplayName.empty() ? pkg.characterDisplayName : (s->character ? s->character->Model().name : "");
+    if (selStage_ >= 0 && (size_t)selStage_ < library_.stages.size()) s->stageId = library_.stages[(size_t)selStage_].id;
     s->characterGpu = renderer_.CreateModel(batch, *pkg.character.pmx, pkg.character.textures,
                                             ModelRole::Character, &pkg.character.pbr);
     if (!s->characterGpu) return false;
@@ -1624,10 +1785,76 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         s->stages.push_back(std::move(inst));
         s->stageGpu.push_back(std::move(gpu));
     }
+
+    // M5c: MME effect objects (an accessory `.x` + its same-stem `.fx`). --mme-object, else the persisted play-mode
+    // stack's `.x` entries (mmeEffect= lines). Each accessory becomes a prop-role mesh drawn through the MME object
+    // path with its controller panel as the world transform.
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> objectPairs;
+    if (options_.mmeObjectSet) {
+        objectPairs = options_.mmeObjects;
+    }
+    // Persisted / CLI stack `.x` entries are effect objects too (the dialog now offers `.x` files).
+    const std::vector<MmeEffectEntry>& stackEntries =
+        options_.mmeSet ? options_.mmeEffects : settings_.mmeEffects;
+    for (const MmeEffectEntry& e : stackEntries) {
+        std::wstring ext = e.file.extension().wstring();
+        for (wchar_t& c : ext) c = (wchar_t)towlower(c);
+        if (ext != L".x") continue;
+        std::filesystem::path fx, mesh;
+        ResolveMmeObjectPair(e.file, fx, mesh);
+        if (!fx.empty()) objectPairs.emplace_back(fx, mesh);
+    }
+    for (const auto& [fx, meshFile] : objectPairs) {
+        SceneRuntime::EffectObject obj;
+        obj.fx = fx;
+        obj.meshFile = meshFile;
+        obj.panel = MmeControllerPanel{};
+        if (meshFile.empty()) {
+            // .fx-only effect object: nothing to draw, but the post/scene part still runs.
+            obj.fileName = PathToUtf8(fx.filename());
+            s->effectObjects.push_back(std::move(obj));
+            continue;
+        }
+        LoadedModelCpu cpu;
+        studio::StudioPackageModel spm;
+        std::string err;
+        LoadProgress progress;
+        if (!studio::LoadStudioModel(meshFile, studio::ModelKind::Prop, PathToUtf8(meshFile.stem()), spm, &progress,
+                                     &err)) {
+            LOG_WARN("MME effect object mesh load failed: %s: %s", PathToUtf8(meshFile).c_str(), err.c_str());
+            obj.fileName = PathToUtf8(meshFile.filename());
+            s->effectObjects.push_back(std::move(obj));
+            continue;
+        }
+        cpu.pmx = spm.pmx;
+        cpu.textures = std::move(spm.textures);
+        obj.inst = std::make_unique<ModelInstance>(cpu.pmx);
+        obj.inst->SetRootTransform(DirectX::XMFLOAT4X4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+        obj.mesh = renderer_.CreateModel(batch, *cpu.pmx, cpu.textures, ModelRole::Stage);
+        obj.fileName = PathToUtf8(meshFile.filename());
+        for (char& c : obj.fileName) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        obj.displayName = cpu.pmx->name;
+        // the accessory draws only through the effect's object technique (kInvisible handled by the mesh's MME choice)
+        if (obj.mesh) {
+            obj.mesh->SetMmeEffect(fx);
+        }
+        s->effectObjects.push_back(std::move(obj));
+    }
+
     batch.Submit();
+    // M8a: the bundled stage's motion (a stage part with no physics). Its model takes the dynamic (character) BLAS path.
+    s->stageMotion = pkg.stageMotion;
+    s->stageMotionPart = pkg.stageMotion && pkg.stageMotionPart >= 0 &&
+                                 (size_t)pkg.stageMotionPart < s->stageGpu.size()
+                             ? pkg.stageMotionPart
+                             : -1;
+    if (s->stageMotionPart >= 0) s->stageGpu[(size_t)s->stageMotionPart]->SetDynamic(true);
 
     s->motion = pkg.motion;
     s->camera = pkg.camera;
+    s->videos = std::move(pkg.videos);   // M8b: the song's video layers
+    // M8a: the loaded stage's library id (a bundled stage loaded for a song), for the MME choice / display scale keys.
+    if (!pkg.stageId.empty()) s->stageId = pkg.stageId;
     for (const VmdLightKey& k : pkg.lightKeys) studio::UpsertKey(s->lightTrack, studio::LightKf{(int)k.frame, k.color, k.direction});
     for (const VmdShadowKey& k : pkg.shadowKeys)
         studio::UpsertKey(s->shadowTrack, studio::ShadowKf{(int)k.frame, k.mode, k.distance});
@@ -1638,6 +1865,8 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     s->endFrame = pkg.endFrame;
     s->motionFps = pkg.motionFps;
     s->hasAudio = !pkg.audioPath.empty() && audio_.Load(pkg.audioPath);
+    if (s->hasAudio)
+        LOG_INFO("audio: playing %s", PathToUtf8(pkg.audioPath.filename()).c_str());
     if (s->hasAudio) s->endFrame = std::max(s->endFrame, (float)(audio_.DurationSeconds() * s->motionFps));
 
     scene_ = std::move(s);
@@ -1654,6 +1883,7 @@ void App::UnloadScene() {
         offline_ = OfflineJob{};
     }
     ctx_.WaitForGpu();
+    renderer_.ReleaseVideoLayers();   // M8b: stop the song's video decode threads, free their buffers
     haveLastLiveCamera_ = false;
     scene_.reset();
     playAutoFocus_.Reset();
@@ -1698,6 +1928,12 @@ void App::UpdateScene(float frame) {
     scene_->characterGpu->UpdateMorphs(slot, scene_->character->VertexMorphDeltas(),
                                        scene_->character->MorphVersion());
     ApplyShaderChoice(*scene_->characterGpu, PlayShaderChoice(*scene_->characterGpu, scene_->characterId));
+    // M6a: the character's MME object effect: --mme-model (File) wins for this run, else the saved / default choice.
+    {
+        const MmeChoice mme = options_.mmeModelSet ? MmeChoice{MmeChoice::File, options_.mmeModel}
+                                                   : ResolveMmeChoice(scene_->characterId, /*isStage=*/false);
+        ApplyMmeEffect(*scene_->characterGpu, mme, scene_->character->Model().sourcePath);
+    }
     scene_->characterGpu->UpdateMaterials(slot, ch.MaterialMul(), ch.MaterialAdd(), ch.MaterialVersion());
     // P5: suggest Ray-MMD material data once per character that has a Ray .emd candidate and no saved choice.
     if (scene_->character)
@@ -1709,15 +1945,32 @@ void App::UpdateScene(float frame) {
                                (int)extra.instance->Model().materials.size());
     }
     for (size_t i = 0; i < scene_->stages.size(); ++i) {
-        scene_->stageGpu[i]->UpdateSkinning(slot, scene_->stages[i]->SkinMatrices());
-        scene_->stageGpu[i]->UpdateMorphs(slot, scene_->stages[i]->VertexMorphDeltas(),
-                                          scene_->stages[i]->MorphVersion());
-        const ModelInstance& st = *scene_->stages[i];
+        ModelInstance& st = *scene_->stages[i];
+        // M8a: the bundled stage's motion animates on the song clock (the normal pose path, no physics).
+        if ((int)i == scene_->stageMotionPart && scene_->stageMotion) {
+            scene_->stageMotion->Evaluate(frame, st);
+            st.UpdatePose(0.0f);
+        }
+        scene_->stageGpu[i]->UpdateSkinning(slot, st.SkinMatrices());
+        scene_->stageGpu[i]->UpdateMorphs(slot, st.VertexMorphDeltas(), st.MorphVersion());
+        // M6a: the stage MME choice (default Auto: a stage package ships its .emd for exactly this).
+        const MmeChoice stageMme = ResolveMmeChoice(scene_->stageId, /*isStage=*/true);
+        ApplyMmeEffect(*scene_->stageGpu[i], stageMme, st.Model().sourcePath);
         scene_->stageGpu[i]->UpdateMaterials(slot, st.MaterialMul(), st.MaterialAdd(), st.MaterialVersion());
     }
+    // M5c: MME effect objects. An accessory `.x` is drawn in MODEL space in MMD (unlike a CPU-skinned PMX model):
+    // the effect's WORLD / `CONTROLOBJECT (self)` = the controller panel places it. Keep the root identity so the
+    // skinned vertices stay model space, and hand the binder the panel as `self` (DrawMmeModel does).
+    for (SceneRuntime::EffectObject& obj : scene_->effectObjects) {
+        if (!obj.mesh || !obj.inst) continue;
+        obj.inst->SetRootTransform(DirectX::XMFLOAT4X4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+        obj.inst->UpdatePose(0.0f);
+        obj.mesh->UpdateSkinning(slot, obj.inst->SkinMatrices());
+        obj.mesh->UpdateMorphs(slot, obj.inst->VertexMorphDeltas(), obj.inst->MorphVersion());
+        obj.mesh->UpdateMaterials(slot, obj.inst->MaterialMul(), obj.inst->MaterialAdd(), obj.inst->MaterialVersion());
+    }
     if (screen_ != Screen::BenchRender) {
-        for (auto& extra : scene_->extras) {
-            if (!extra.instance || !extra.gpu) continue;
+        for (auto& extra : scene_->extras) {            if (!extra.instance || !extra.gpu) continue;
             if (extra.motion) {
                 extra.motion->Evaluate(frame, *extra.instance);
             } else {
@@ -1743,9 +1996,72 @@ void App::UpdateScene(float frame) {
                                                         : PlayShaderChoice(*extra.gpu, extra.characterId);
             }
             ApplyShaderChoice(*extra.gpu, choice);
+            // M6a: the extra performer's MME choice (--mme-model-all makes them all use --mme-model).
+            {
+                const MmeChoice mme = (options_.mmeModelSet && options_.mmeModelAll)
+                                          ? MmeChoice{MmeChoice::File, options_.mmeModel}
+                                          : ResolveMmeChoice(extra.characterId, /*isStage=*/false);
+                ApplyMmeEffect(*extra.gpu, mme, extra.instance->Model().sourcePath);
+            }
             extra.gpu->UpdateMaterials(slot, extra.instance->MaterialMul(), extra.instance->MaterialAdd(),
                                        extra.instance->MaterialVersion());
         }
+    }
+}
+
+void App::AppendMmeObject(FrameView& view, const GpuModel* gpu, const ModelInstance* inst, bool visible,
+                          const std::string& displayName) {
+    MmeSceneObject obj;
+    obj.gpu = gpu;
+    obj.visible = visible;
+    obj.displayName = displayName;
+    obj.rootWorld = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    if (inst) {
+        const PmxModel& pmx = inst->Model();
+        // The model's source file name (MME DefaultEffect / CONTROLOBJECT match by file name, no folder).
+        if (!pmx.sourcePath.empty()) obj.fileName = PathToUtf8(pmx.sourcePath.filename());
+        obj.rootWorld = inst->RootTransform();
+        obj.boneNames.reserve(pmx.bones.size());
+        obj.boneWorld.reserve(pmx.bones.size());
+        for (size_t b = 0; b < pmx.bones.size(); ++b) {
+            obj.boneNames.push_back(pmx.bones[b].name);
+            obj.boneWorld.push_back(inst->BoneWorld((int)b));
+        }
+        obj.morphNames.reserve(pmx.morphs.size());
+        obj.morphWeights.reserve(pmx.morphs.size());
+        for (size_t mi = 0; mi < pmx.morphs.size(); ++mi) {
+            obj.morphNames.push_back(pmx.morphs[mi].name);
+            obj.morphWeights.push_back(inst->MorphWeight((int)mi));
+        }
+    }
+    view.mmeObjects.push_back(std::move(obj));
+}
+
+void App::AppendMmeEffectObjects(FrameView& view, const std::vector<SceneRuntime::EffectObject>& objects) {
+    for (const SceneRuntime::EffectObject& o : objects) {
+        if (o.fx.empty()) continue;
+        // The post/scene part runs from FrameView::mmeEffectObjects (its panel is `(self)`); the effect is also
+        // CONTROLOBJECT-addressable by its `.x` file name (or, without a mesh, its `.fx` name).
+        MmeEffectObject eo;
+        eo.fx = o.fx;
+        eo.meshFile = o.meshFile;
+        eo.mesh = o.mesh.get();
+        eo.fileName = o.fileName;
+        eo.displayName = o.displayName;
+        eo.panel = o.panel;
+        if (o.mesh) {
+            o.mesh->SetMmeEffectMesh(true);
+            view.models.push_back(o.mesh.get());
+            AppendMmeObject(view, o.mesh.get(), o.inst.get(), true,
+                            !o.displayName.empty() ? o.displayName : o.mesh->Name());
+            // Mark the scene object as an accessory (its vertices are model space; the controller panel is its world).
+            if (!view.mmeObjects.empty()) {
+                MmeSceneObject& so = view.mmeObjects.back();
+                so.accessory = true;
+                so.panel = o.panel;
+            }
+        }
+        view.mmeEffectObjects.push_back(std::move(eo));
     }
 }
 
@@ -1769,12 +2085,26 @@ void App::BuildFrameView(float frame, FrameView& view) {
         DirectX::XMStoreFloat3(&view.camera.eye, eye);
         view.camera.fovYRadians = DirectX::XMConvertToRadians(cam.fovDeg);
     }
-    for (const auto& g : scene_->stageGpu) view.models.push_back(g.get());
-    if (scene_->characterGpu) view.models.push_back(scene_->characterGpu.get());
+    for (const auto& g : scene_->stageGpu) {
+        view.models.push_back(g.get());
+        AppendMmeObject(view, g.get(), nullptr, true, g->Name());   // stages: static, no motion instance
+    }
+    if (scene_->characterGpu) {
+        view.models.push_back(scene_->characterGpu.get());
+        const bool vis = true;
+        AppendMmeObject(view, scene_->characterGpu.get(), scene_->character.get(), vis, scene_->characterDisplayName);
+    }
     for (const auto& extra : scene_->extras) {
-        if (extra.gpu) view.models.push_back(extra.gpu.get());
+        if (extra.gpu) {
+            view.models.push_back(extra.gpu.get());
+            AppendMmeObject(view, extra.gpu.get(), extra.instance.get(), true,
+                            !extra.displayName.empty() ? extra.displayName : extra.gpu->Name());
+        }
     }
     view.studioFloor = scene_->stageGpu.empty();
+    // M5c: the MME effect objects' accessory meshes (drawn through the MME object path; appended after the
+    // characters so particle / floor accessories sit over the scene as in MMD).
+    AppendMmeEffectObjects(view, scene_->effectObjects);
 
     // Spotlights follow the performer (center bone when present).
     DirectX::XMFLOAT3 focus{0, 10, 0};
@@ -1843,7 +2173,15 @@ void App::BuildFrameView(float frame, FrameView& view) {
     // Seeking (or a restart) breaks temporal history.
     const double step = std::fabs(playTime_ - lastRenderedTime_);
     view.cameraCut = lastRenderedTime_ < 0 || step > 0.25;
+    // M8a: the MME scene clock = seconds since the song / motion start (paused = constant, seeks jump).
+    view.sceneTime = (float)playTime_;
+    view.sceneElapsed = lastRenderedTime_ < 0 ? 0.0f : (float)step;
     lastRenderedTime_ = playTime_;
+    // M8b: the song's video layers, with the video time = the song time (the background pass loops it).
+    if (scene_) {
+        view.videoLayers = scene_->videos;
+        for (VideoLayerDesc& v : view.videoLayers) v.time = playTime_;
+    }
     if (options_.quitAfterFrames > 0 || !options_.uiScript.empty() || options_.mcp == 1 || HeadlessRun()) {
         view.effectDt = 1.0f / 60.0f;
     }

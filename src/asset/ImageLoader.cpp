@@ -1,5 +1,6 @@
 #include "asset/ImageLoader.h"
 #include "asset/BinaryReader.h"
+#include "asset/DdsLoader.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_PIC
@@ -85,6 +86,38 @@ bool LoadImageRGBA8(const std::filesystem::path& path, ImageRGBA8& out, std::str
 bool LoadImageRGBA8FromMemory(const uint8_t* bytes, size_t size, ImageRGBA8& out, std::string* error) {
     try {
         out = ImageRGBA8{};
+
+        // M5a: a DDS file is decoded by our own loader (stb/WIC cannot read DDS); the mip chain is built below.
+        if (IsDdsImage(bytes, size)) {
+            if (!LoadDdsLevel0(bytes, size, out, error)) return false;
+            uint32_t sw = out.mips[0].width, sh = out.mips[0].height;
+            while (sw > 1 || sh > 1) {
+                uint32_t nw = std::max(1u, sw / 2), nh = std::max(1u, sh / 2);
+                ImageRGBA8::Level dst;
+                dst.width = nw;
+                dst.height = nh;
+                dst.pixels.resize((size_t)nw * nh * 4);
+                const ImageRGBA8::Level& srcLevel = out.mips.back();
+                const uint8_t* src = srcLevel.pixels.data();
+                for (uint32_t y = 0; y < nh; ++y) {
+                    for (uint32_t x = 0; x < nw; ++x) {
+                        const uint32_t sx0 = std::min(2 * x, sw - 1), sy0 = std::min(2 * y, sh - 1);
+                        const uint32_t sx1 = std::min(2 * x + 1, sw - 1), sy1 = std::min(2 * y + 1, sh - 1);
+                        uint8_t* dstPix = &dst.pixels[((size_t)y * nw + x) * 4];
+                        for (int c = 0; c < 4; ++c) {
+                            const int sum = src[((size_t)sy0 * sw + sx0) * 4 + c] + src[((size_t)sy0 * sw + sx1) * 4 + c] +
+                                            src[((size_t)sy1 * sw + sx0) * 4 + c] + src[((size_t)sy1 * sw + sx1) * 4 + c];
+                            dstPix[c] = (uint8_t)((sum + 2) / 4);
+                        }
+                    }
+                }
+                out.mips.push_back(std::move(dst));
+                sw = nw;
+                sh = nh;
+            }
+            return true;
+        }
+
         const std::string readError = "empty image data";
         struct View {
             const uint8_t* ptr;

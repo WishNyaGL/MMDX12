@@ -16,6 +16,8 @@
 #include "asset/MmeText.h"
 #include "core/TextUtil.h"
 
+#include <fstream>
+
 namespace mmdx {
 namespace {
 
@@ -661,6 +663,46 @@ bool IsRayMaterialFx(const std::filesystem::path& fx) {
     const ParsedFx* p = ParseFxCached(fx);
     if (!p) return false;
     return p->isRay || HasRayMacro(*p);
+}
+
+bool IsRayMmdMainEffect(const std::filesystem::path& p) {
+    // The markers are ASCII, so the raw bytes answer both encodings; no preprocessing, no include chase.
+    const auto lowerWide = [](std::wstring s) {
+        for (wchar_t& c : s) c = (wchar_t)towlower(c);
+        return s;
+    };
+    std::filesystem::path fx = p;
+    if (lowerWide(p.extension().wstring()) == L".x") {
+        // A .x is ranked by its same-stem .fx in the same folder (case-insensitive stem match).
+        const std::wstring stem = lowerWide(p.stem().wstring());
+        std::error_code ec;
+        if (!std::filesystem::is_directory(p.parent_path(), ec)) return false;
+        for (const std::filesystem::directory_entry& e :
+             std::filesystem::directory_iterator(p.parent_path(), std::filesystem::directory_options::skip_permission_denied, ec)) {
+            if (ec) break;
+            if (!e.is_regular_file(ec) || lowerWide(e.path().extension().wstring()) != L".fx") continue;
+            if (lowerWide(e.path().stem().wstring()) == stem) {
+                fx = e.path();
+                break;
+            }
+        }
+        if (lowerWide(fx.extension().wstring()) != L".fx") return false;
+    }
+    std::ifstream in(fx, std::ios::binary);
+    if (!in) return false;
+    std::string text(64 * 1024, '\0');
+    in.read(text.data(), (std::streamsize)text.size());
+    text.resize((size_t)in.gcount());
+    // "#include ray.conf" (any quoting, case-insensitive file name) or an MME object bound to ray_controller.pmx.
+    const std::string lower = Lower(text);
+    size_t at = lower.find("ray.conf");
+    while (at != std::string::npos) {
+        const size_t lineStart = lower.rfind('\n', at) == std::string::npos ? 0 : lower.rfind('\n', at) + 1;
+        const std::string line = lower.substr(lineStart, lower.find('\n', lineStart) - lineStart);
+        if (line.find("#include") != std::string::npos) return true;
+        at = lower.find("ray.conf", at + 1);
+    }
+    return lower.find("ray_controller.pmx") != std::string::npos;
 }
 
 std::vector<RayEmdCandidate> FindRayEmdCandidates(const std::filesystem::path& modelFile, int pmxMaterialCount,

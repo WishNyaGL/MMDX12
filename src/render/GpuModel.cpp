@@ -348,10 +348,26 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     baseConsts_ = consts;
     materialNames_.clear();
     materialTextures_.clear();
-    for (const PmxMaterial& m : pmx.materials) {
+    // MME TOONCOLOR (spec §4.2): the bottom-left texel of the material's toon texture. A shared (built-in
+    // toon01..10) toon has no decoded image here, so it stays white (logged by the object pass when used).
+    mmeToonColor_.assign(pmx.materials.size(), DirectX::XMFLOAT3{1, 1, 1});
+    for (size_t mi = 0; mi < pmx.materials.size(); ++mi) {
+        const PmxMaterial& m = pmx.materials[mi];
         materialNames_.emplace_back(m.name, m.nameEn);
         const bool tex = m.textureIndex >= 0 && (size_t)m.textureIndex < pmx.textures.size();
         materialTextures_.push_back(tex ? pmx.textures[(size_t)m.textureIndex] : std::string());
+        if (!m.sharedToon && m.toonIndex >= 0 && (size_t)m.toonIndex < textures.size() && !textures[m.toonIndex].Empty()) {
+            const ImageRGBA8& img = textures[(size_t)m.toonIndex];
+            if (!img.mips.empty() && !img.mips[0].pixels.empty() && img.mips[0].width > 0 && img.mips[0].height > 0) {
+                const ImageRGBA8::Level& lv = img.mips[0];
+                // Bottom-left corner = the last row's first texel.
+                const size_t idx = ((size_t)lv.height - 1) * (size_t)lv.width * 4;
+                if (idx + 3 < lv.pixels.size()) {
+                    mmeToonColor_[mi] = {lv.pixels[idx + 0] / 255.0f, lv.pixels[idx + 1] / 255.0f,
+                                         lv.pixels[idx + 2] / 255.0f};
+                }
+            }
+        }
     }
     headBone_ = -1;
     for (const char* name : {"\xE9\xA0\xAD", "\xE9\xA6\x96"}) {  // 頭, else 首
@@ -391,6 +407,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         mat.castShadow = materialBase_[mIdx].castFlag && m.diffuse.w > 0.01f;
         mat.alphaTested = m.textureIndex >= 0 && (size_t)m.textureIndex < textures.size() &&
                           textures[m.textureIndex].hasAlpha;
+        mat.sphereMode = (uint8_t)m.sphereMode;
         mat.edgeSize = m.edgeSize;
         mat.constants = materialCb_->GetGPUVirtualAddress() + mIdx * sizeof(MaterialConstants);
 
@@ -742,6 +759,39 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
     }
     // every ring entry is rewritten by the next UpdateMaterials calls
     for (uint64_t& v : materialEntryVersion_) v = ~0ull;
+}
+
+void GpuModel::SetMmeEffects(std::vector<std::filesystem::path> perMaterial) {
+    mmeEffects_ = std::move(perMaterial);
+}
+
+bool GpuModel::HasMmeEffects() const {
+    for (const auto& fx : mmeEffects_)
+        if (!fx.empty()) return true;
+    return false;
+}
+
+std::vector<std::filesystem::path> GpuModel::MmeEffectFiles() const {
+    std::vector<std::filesystem::path> out;
+    for (const auto& fx : mmeEffects_) {
+        if (fx.empty()) continue;
+        bool dup = false;
+        for (const auto& e : out)
+            if (e == fx) { dup = true; break; }
+        if (!dup) out.push_back(fx);
+    }
+    return out;
+}
+
+void GpuModel::SetMmeEffect(const std::filesystem::path& fx, std::vector<int> materialMask) {
+    mmeEffects_.assign(materials_.size(), std::filesystem::path());
+    if (fx.empty()) return;
+    if (materialMask.empty()) {
+        for (auto& p : mmeEffects_) p = fx;
+        return;
+    }
+    for (int m : materialMask)
+        if (m >= 0 && (size_t)m < mmeEffects_.size()) mmeEffects_[(size_t)m] = fx;
 }
 
 ModelTraits GpuModel::Traits() const {

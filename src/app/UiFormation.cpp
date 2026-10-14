@@ -121,7 +121,85 @@ SongAsset App::SongAsChosen(const SongAsset& song) const {
     if (it != settings_.songCameras.end())
         for (const auto& c : song.cameraVmds)
             if (PathToUtf8(c.filename()) == it->second) { s.cameraVmd = c; break; }
+    // M8a: the chosen audio version (songs with several), else the default (audioPath, already in `s`).
+    // --song-audio <substring> overrides for this run (case-insensitive file-name substring).
+    if (!options_.songAudio.empty()) {
+        const std::string needle = ToLowerAscii(options_.songAudio);
+        for (const auto& a : song.audioPaths)
+            if (ToLowerAscii(PathToUtf8(a.filename())).find(needle) != std::string::npos) { s.audioPath = a; break; }
+    } else if (const auto ai = settings_.songAudios.find(song.id); ai != settings_.songAudios.end()) {
+        for (const auto& a : song.audioPaths)
+            if (PathToUtf8(a.filename()) == ai->second) { s.audioPath = a; break; }
+    }
     return s;
+}
+
+// M8b: the song's video layers (docs/mme/mme_design.md §5b). The scan classified overlayVideo / backgroundVideo;
+// the per-song ini override `songVideo=<overlay|background|off>[:<blend>]|<file>|<song id>` replaces the file and/or
+// the blend for the named kind. The overlay time is the song time (background loops in the pass / offline renderer).
+std::vector<VideoLayerDesc> App::ResolveSongVideos(const SongAsset& song) const {
+    VideoLayerDesc overlay, background;
+    overlay.path = song.overlayVideo;
+    overlay.kind = VideoLayerKind::Overlay;
+    overlay.blend = VideoBlend::BlackKey;
+    background.path = song.backgroundVideo;
+    background.kind = VideoLayerKind::Background;
+
+    const auto it = settings_.songVideos.find(song.id);
+    if (it != settings_.songVideos.end() && !it->second.empty()) {
+        // spec = "<kind>[:<blend>]|<file name>" (the song id is not stored in the value)
+        const std::string& spec = it->second;
+        const size_t sep = spec.find('|');
+        const std::string head = sep == std::string::npos ? spec : spec.substr(0, sep);
+        const std::string file = sep == std::string::npos ? std::string() : spec.substr(sep + 1);
+        const size_t colon = head.find(':');
+        const std::string kind = colon == std::string::npos ? head : head.substr(0, colon);
+        const std::string blend = colon == std::string::npos ? std::string() : head.substr(colon + 1);
+        VideoBlend b = VideoBlend::BlackKey;
+        if (blend == "screen") b = VideoBlend::Screen;
+        else if (blend == "add") b = VideoBlend::Add;
+        else if (blend == "normal") b = VideoBlend::Normal;
+        // A named file (relative to the song folder or an absolute path).
+        std::filesystem::path chosen;
+        if (!file.empty()) {
+            chosen = Utf8ToPath(file);
+            if (!std::filesystem::exists(chosen)) {
+                std::filesystem::path cand = song.danceVmd.parent_path() / chosen;
+                if (std::filesystem::exists(cand)) chosen = cand;
+            }
+        }
+        if (kind == "off") {
+            return {};
+        } else if (kind == "overlay") {
+            if (!chosen.empty()) overlay.path = chosen;
+            overlay.blend = b;
+        } else if (kind == "background") {
+            if (!chosen.empty()) background.path = chosen;
+        }
+    }
+    std::vector<VideoLayerDesc> out;
+    if (!background.path.empty()) out.push_back(background);
+    if (!overlay.path.empty()) out.push_back(overlay);
+    return out;
+}
+
+// M8a: the stage to load for a song (see the header comment).
+const StageAsset* App::ResolveSongStage(const SongAsset& song) const {
+    const auto libStage = [&](const std::string& id) -> const StageAsset* {
+        for (const auto& st : library_.stages)
+            if (st.id == id) return &st;
+        return nullptr;
+    };
+    // --stage on the command line wins (already applied to selStage_; "-"/"none" lands as -1).
+    if (!options_.stage.empty())
+        return selStage_ >= 0 && (size_t)selStage_ < library_.stages.size() ? &library_.stages[(size_t)selStage_] : nullptr;
+    // An explicit per-song stage choice ("-" = none).
+    if (auto it = settings_.songStages.find(song.id); it != settings_.songStages.end())
+        return it->second == "-" ? nullptr : libStage(it->second);
+    // The song's bundled stage (the default for an MV package).
+    if (!song.bundledStageId.empty())
+        if (const StageAsset* st = libStage(song.bundledStageId)) return st;
+    return selStage_ >= 0 && (size_t)selStage_ < library_.stages.size() ? &library_.stages[(size_t)selStage_] : nullptr;
 }
 
 // Play / Enter / the lobby's video render: a song with several parts asks for the formation first; --formation
@@ -131,7 +209,7 @@ void App::StartLobbyLoad(LoadTarget target, bool allowModal) {
         (size_t)selSong_ >= library_.songs.size())
         return;
     const SongAsset& song = library_.songs[(size_t)selSong_];
-    const StageAsset* st = selStage_ >= 0 && (size_t)selStage_ < library_.stages.size() ? &library_.stages[(size_t)selStage_] : nullptr;
+    const StageAsset* st = ResolveSongStage(song);
     if (song.parts.size() >= 2) {
         if (!options_.formation.empty()) {
             const std::vector<PerformerCast> cast = ParseFormationSpec(options_.formation, song);
@@ -268,7 +346,7 @@ void App::StartFormationLoad() {
     formationModal_.open = false;
 
     StartLoad(formationModal_.target, &cast[0].character,
-              selStage_ >= 0 ? &library_.stages[(size_t)selStage_] : nullptr, &song, &cast);
+              ResolveSongStage(song), &song, &cast);
 }
 
 void App::DrawFormationModal() {
@@ -546,7 +624,7 @@ void App::DrawFormationModal() {
         formationModal_.open = false;
         if (selCharacter_ >= 0 && (size_t)selCharacter_ < library_.characters.size())
             StartLoad(formationModal_.target, &library_.characters[(size_t)selCharacter_],
-                      selStage_ >= 0 ? &library_.stages[(size_t)selStage_] : nullptr, &song);
+                      ResolveSongStage(song), &song);
         return;
     }
     if (cast > 0 && (start || (keysLive && ImGui::IsKeyPressed(ImGuiKey_Enter, false)))) StartFormationLoad();

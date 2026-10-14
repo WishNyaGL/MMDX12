@@ -1,6 +1,8 @@
 #include "asset/VmdMotion.h"
 #include <vector>
 #include <algorithm>
+#include <set>
+#include <string_view>
 #include "asset/BinaryReader.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
@@ -246,6 +248,7 @@ bool ProbeVmd(const std::filesystem::path& path, VmdProbe& out, std::string* err
         static const char kCenter[] = "\x83\x5A\x83\x93\x83\x5E\x81\x5B";     // センター (Shift-JIS)
         static const char kRoot[] = "\x91\x53\x82\xC4\x82\xCC\x90\x65";       // 全ての親
         std::vector<std::pair<uint32_t, float>> centerKeys, rootKeys;
+        std::set<std::string> boneNameSet;   // M8a: distinct keyed bone names (UTF-8)
         for (uint32_t i = 0; i < boneCount; ++i) {
             char name[15];
             uint32_t frame = 0;
@@ -255,10 +258,16 @@ bool ProbeVmd(const std::filesystem::path& path, VmdProbe& out, std::string* err
                 return false;
             }
             out.maxFrame = UpdateMaxFrame(out.maxFrame, frame);
+            {
+                size_t len = 0;
+                while (len < sizeof(name) && name[len] != '\0') ++len;
+                boneNameSet.insert(SjisToUtf8(std::string_view(name, len)));
+            }
             const auto is = [&](const char* n) { return std::memcmp(name, n, 8) == 0 && name[8] == '\0'; };
             if (is(kCenter)) centerKeys.push_back({frame, x});
             else if (is(kRoot)) rootKeys.push_back({frame, x});
         }
+        out.boneNames.assign(boneNameSet.begin(), boneNameSet.end());
         if (!centerKeys.empty() || !rootKeys.empty()) {
             const auto prepare = [](std::vector<std::pair<uint32_t, float>>& k) {
                 std::sort(k.begin(), k.end(), [](const auto& a, const auto& b) { return a.first < b.first; });

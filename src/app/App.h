@@ -20,6 +20,7 @@
 #include "audio/AudioPlayer.h"
 #include "render/ColorLut.h"
 #include "render/Dx12Context.h"
+#include "render/MmeDiagnostics.h"
 #include "render/Renderer.h"
 #include "studio/AutoIk.h"
 #include "studio/Gizmo.h"
@@ -79,7 +80,8 @@ namespace mmdx {
 //   --width <w> --height <h>  initial window client size
 //   --debug                enable the D3D12 debug layer
 //   --free-camera          start with the free orbit camera
-//   --screen <select|stages|songs|settings|video|bench|bench-gi|studio> open that screen after the scan (UI testing;
+//   --screen <select|stages|songs|settings|video|bench|bench-gi|studio|shaders|shaders-online|shaders-mme> open that
+//                          screen after the scan (UI testing; shaders-mme: the shader manager's MME tab);
 //                          --frames counts all frames; studio: opens --character/--stage/--song in the Studio at
 //                          --seek and counts frames from the Studio on; without --character: a new empty project)
 //   --project <file.mmdxproj>  open that Studio project after the scan (implies --screen studio)
@@ -160,6 +162,22 @@ struct AppOptions {
     std::string packIndex;     // --pack-index <url|path>: the online shader pack gallery index (testing)
     std::vector<EffectStackEntry> effectStack;  // --effect <id>[,<id>...] / none: the effect stack, this run
     bool effectSet = false;
+    std::vector<MmeEffectEntry> mmeEffects;  // --mme <file>[,<file>...]: MME post effects, this run
+    bool mmeSet = false;                     // --mme was given: it overrides the saved play-mode stack for one run
+    bool mmePanelSet = false;                // --mme-panel <si>,<tr>
+    float mmePanelSi = 1.0f, mmePanelTr = 1.0f;
+    // M5c: --mme-object <path>[,<path>...] (an accessory `.x` or its `.fx`). Pairs each with its same-stem partner
+    // in the same folder (an `.x` -> its `.fx`, an `.fx` -> its `.x` when present). The `.fx` runs as a post/scene
+    // effect (panel default) whose object techniques draw the `.x`.
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> mmeObjects;  // (fx, meshFile)
+    bool mmeObjectSet = false;
+    std::filesystem::path mmeModel;          // --mme-model <fx>: an MME object effect on the play-mode character
+    bool mmeModelSet = false;                // --mme-model was given (File mode for the character, this run)
+    bool mmeModelAll = false;                // --mme-model-all: apply --mme-model to every performer
+    int mmeAuto = -1;                        // --mme-auto <0|1>: force None(0)/Auto(1) for every model, this run
+    bool mmeAutoSet = false;
+    int stageMme = -1;                       // --stage-mme <0|1>: force None(0)/Auto(1) for stages only, this run
+    bool stageMmeSet = false;
     int dof = -1, volumetric = -1, bloomConv = -1;  // --dof/--volumetric/--bloom-conv <0|1>: override for this run
     int autoLuminous = -1;     // --auto-luminous <0|1>: override for this run (-1 = settings)
     bool classic = false;      // --classic: vanilla-MMD look for this run (SSAO/SSR/bloom/volumetric/DoF/LUT/effects/soft shadows off)
@@ -180,6 +198,7 @@ struct AppOptions {
     std::filesystem::path project;  // --project
     float uiScale = 0.0f;           // --ui-scale (0 = the window's DPI scale)
     std::string formation;          // --formation <spec>
+    std::string songAudio;          // --song-audio <substring>: pick an audio version of the song for this run
     std::string startScreen;  // --screen select|bench: open that screen after the scan; --frames then counts every frame  // --free-camera: start in the orbit camera instead of the VMD camera
     std::string updateFeed;   // --update-feed: feed URL / file override (empty: the default feed)
     int updateRelaunchFrames = 0;  // --update-relaunch-frames: relaunch the updated app with --frames (E2E)
@@ -190,6 +209,13 @@ struct AppOptions {
     int mcp = -1;                     // --mcp (1), --no-mcp (0), auto (-1)
 };
 AppOptions ParseCommandLine(int argc, wchar_t** argv);  // unknown args are logged and ignored
+
+// M5c: pairs an MME effect object path (an accessory `.x` or its `.fx`) with its same-stem partner in the same
+// folder (case-insensitive; `.x` -> `.fx`, `.fx` -> `.x` when present). Either output may be empty when the partner
+// is absent. Defined in App.cpp.
+void ResolveMmeObjectPair(const std::filesystem::path& path, std::filesystem::path& fx,
+                          std::filesystem::path& meshFile);
+
 
 // Folder picker for a pack's user texture folder (FOS_PICKFOLDERS): runs on its own STA thread,
 // keeping the owner's messages pumped. Defined in UiShaderPack.cpp, also used by UiShaders.cpp.
@@ -217,8 +243,23 @@ private:
         std::unique_ptr<GpuModel> characterGpu;
         std::vector<std::unique_ptr<ModelInstance>> stages;
         std::vector<std::unique_ptr<GpuModel>> stageGpu;
+        std::string stageId;   // M6a: the stage library id (key of the saved MME choice / display scale)
+        std::shared_ptr<BoundMotion> stageMotion;   // M8a: the bundled stage's motion (may be null)
+        int stageMotionPart = -1;                   // index into `stages` / `stageGpu`
         std::shared_ptr<BoundMotion> motion;
         std::shared_ptr<CameraMotion> camera;
+        // M8b: the song's resolved video layers (background + overlay), from the song / the ini override.
+        std::vector<VideoLayerDesc> videos;
+        // M5c: MME effect objects (accessory `.x` + same-stem `.fx`). Each `mesh` is appended to `view.models` (so
+        // the renderer draws it through the MME object path) and to `mmeEffectObjects`.
+        struct EffectObject {
+            std::filesystem::path fx, meshFile;
+            std::unique_ptr<ModelInstance> inst;  // accessory transform carrier (identity world vertices are skinned by this)
+            std::unique_ptr<GpuModel> mesh;
+            MmeControllerPanel panel;
+            std::string fileName, displayName;
+        };
+        std::vector<EffectObject> effectObjects;
         // The camera VMD's light / self-shadow tracks (empty when absent or only MMD's defaults); used when
         // AppSettings::motionLighting is on.
         std::vector<studio::LightKf> lightTrack;
@@ -284,6 +325,14 @@ private:
     void UnloadScene();                          // WaitForGpu, release runtime + audio
     void UpdateScene(float frame);               // evaluate motion, update poses, upload to GPU
     void BuildFrameView(float frame, FrameView& view);
+    // M5a: appends one MME scene object (CONTROLOBJECT / DefaultEffect matching) parallel to view.models. `inst`
+    // may be null (no per-model data); `displayName` is the model's display name.
+    void AppendMmeObject(FrameView& view, const GpuModel* gpu, const ModelInstance* inst, bool visible,
+                         const std::string& displayName);
+    // M5c: appends the play scene's MME effect objects' meshes to `view.models` (before the characters so the
+    // character draws over them) and fills `view.mmeEffectObjects`, each mesh with its own scene object (the
+    // accessory world matrix). Shared by the play and studio views.
+    void AppendMmeEffectObjects(FrameView& view, const std::vector<SceneRuntime::EffectObject>& objects);
 
     // --- screens (UiSelect.cpp / UiPlay.cpp / UiBenchmark.cpp)
     void DrawScanning();
@@ -498,8 +547,11 @@ private:
     void StudioAddModelFile(studio::ModelKind kind, const std::filesystem::path& file, uint32_t replaceUid = 0,
                             const MaterialChoice* material = nullptr,
                             std::vector<std::filesystem::path> queuedDrops = {}, size_t retryQueuedDrops = 0);  // async
-    void StudioAddModelDialog(studio::ModelKind kind, uint32_t replaceUid = 0);
-    void StudioAddLibraryCharacter(int index, uint32_t replaceUid = 0);
+    // M5c: an MME effect object (an accessory `.x` + its same-stem `.fx`, or a bare `.fx`): a prop row with the
+    // accessory key track, its effect file saved as the project model's "fx". The dialog filters `.x` / `.fx`.
+    void StudioAddMmeObjectDialog();
+    void StudioAddMmeObject(const std::filesystem::path& path);
+    void StudioAddModelDialog(studio::ModelKind kind, uint32_t replaceUid = 0);    void StudioAddLibraryCharacter(int index, uint32_t replaceUid = 0);
     void StudioAddLibraryStage(int index, uint32_t replaceUid = 0);  // replace: the first part replaces, the rest are added
     void StudioApplyLibrarySong(int index);           // dance -> selected character, camera, audio when none
     bool StudioSetAudio(const std::filesystem::path& file);  // empty: remove
@@ -674,7 +726,15 @@ private:
     FormationState formationModal_;
 
     void StartLobbyLoad(LoadTarget target, bool allowModal = true);
-    SongAsset SongAsChosen(const SongAsset& song) const;   // with the camera picked in the lobby (songs with several)
+    SongAsset SongAsChosen(const SongAsset& song) const;   // with the camera / audio / stage picked in the lobby (songs with several)
+    // M8b: the song's video layers (docs/mme/mme_design.md §5b), applying the songVideo ini override (kind + blend
+    // + a chosen file) over the scan's classification. Empty when the song has no videos / the override is "off".
+    std::vector<VideoLayerDesc> ResolveSongVideos(const SongAsset& song) const;
+    // M8b: the videos a song would play (classification + override), for the lobby song header line.
+    std::vector<VideoLayerDesc> SongVideosForDisplay(const SongAsset& song) const { return ResolveSongVideos(song); }
+    // M8a: the stage to load for a song. Precedence: the run's --stage (already in selStage_) > the song's songStage
+    // ini choice > the song's bundled stage (when the user has not chosen one) > the library selection.
+    const StageAsset* ResolveSongStage(const SongAsset& song) const;
     void OpenFormationModal(LoadTarget target);
     void DrawFormationModal();
     void AutoFormation();
@@ -684,6 +744,26 @@ private:
     void DrawToast();           // completion / error toast (Select, Play)
     // shader packs (UiShaderPack.cpp)
     void ApplyShaderChoice(GpuModel& gpu, const ShaderChoice& choice);   // every frame, before UpdateMaterials
+    // M6b: the per-model MME object effect choice editor (없음 / 모델 동봉 효과 / 파일 선택…). Shared by the lobby
+    // character panel, the play bar's shader popup and the studio inspector. True = the choice changed.
+    bool DrawMmeRow(const char* id, MmeChoice& choice, const std::string& modelId,
+                    const std::filesystem::path& modelPath, float width);
+    // M6b: one-time suggestion when a character with no saved MME choice ships an .emd / same-name .fx (a toast
+    // with an apply button; remembered per character id). Never applies it automatically.
+    void SuggestMme(const std::string& characterId, const std::filesystem::path& modelPath);
+    // M6a: the per-model MME object effect choice (player + studio). Resolves the saved choice (or the run-wide CLI
+    // overrides: --mme-auto for every model, --stage-mme for stages) and calls gpu.SetMmeEffects. `isStage` picks the
+    // stage default / store. Applied right before UpdateMaterials, at the shader choice's site.
+    MmeChoice ResolveMmeChoice(const std::string& id, bool isStage) const;
+    // Applies a resolved choice: None = native, Auto = the model's own .emd / same-name .fx ([fx]), File = one effect
+    // for every material. `modelPath` drives Auto (FindModelEffects). Never throws.
+    void ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::filesystem::path& modelPath);
+    std::set<std::string> mmeHiddenWarned_;   // models whose .emd asked to hide (one [W] each)
+    std::string mmeSuggestApply_;             // the character id the MME suggestion toast's apply button would set
+    // M6b: the studio project's MME post stack as RenderSettings entries (empty outside the studio / without a project).
+    std::vector<MmeEffectEntry> StudioMmeEntries() const;
+    // M6b: applies a studio MME stack change (add / remove / toggle) to the project and the renderer.
+    void StudioMmeChanged();
     // P5: the per-character PBR material source. A saved choice, or the run-wide --material-source override when
     // given (wins over saved choices). Default when nothing applies.
     MaterialChoice ResolveMaterialChoice(const std::string& characterId) const;
@@ -750,6 +830,8 @@ private:
     // shader pack manager (UiShaders.cpp)
     void DrawShaders();
     void DrawShaderPackDetail(float x0, float y0, float x1, float y1);
+    // M6b: the shader manager's MME tab detail pane (compile status per pass, unsupported features, missing textures).
+    void DrawMmeDetail(float x0, float y0, float x1, float y1);
     void DrawRemotePackDetail(float x0, float y0, float x1, float y1);
     void DrawNewPackDialog();
     void InstallPackPath(const std::filesystem::path& path);             // .zip or a pack folder (drop / dialog)
@@ -757,21 +839,39 @@ private:
     // The effect stack editor (UiShaders.cpp): add / remove / reorder (up/down) / enable + per-effect
     // sliders. Edits `stack` in place; true = changed. `widths` = the content width for layout.
     bool DrawEffectStackEditor(std::vector<EffectStackEntry>& stack, bool header = true);
+    // M6b: the ordered MME post stack editor (play-mode settings_.mmeEffects in the play bar / shader manager; the
+    // studio calls DrawStudioMmeStackEditor for its project stack). True = the stack changed.
+    bool DrawMmePostStackEditor(std::vector<MmeEffectEntry>& stack, bool header = true);
+    bool DrawStudioMmeStackEditor();                                     // the studio project's own MME post stack
+    // Ray-MMD main effect (ray.x / ray.fx) guard: an MME add site calls GuardRayMme before touching its stack; when it
+    // returns true the path is queued and the confirm modal (DrawRayMmeConfirm) offers "add anyway", which runs the
+    // stored continuation. False = not a Ray-MMD main effect, add as before.
+    bool GuardRayMme(const std::filesystem::path& p, std::function<void(const std::filesystem::path&)> add);
+    void DrawRayMmeConfirm();                                            // the shared confirm modal
+    std::filesystem::path rayConfirmPath_;   // pending Ray-MMD main effect (empty = modal closed)
+    std::function<void(const std::filesystem::path&)> rayConfirmAdd_;   // the site's "add" continuation
     bool shaderParamsOpen_ = false;                                      // select screen: pack settings disclosure
     bool effectStackOpen_ = false;                                       // select screen: effect stack disclosure
     int shaderDetailTab_ = 0;                                            // shader detail: 0 info, 1 settings, 2 manage
     ShaderPackStore shaderStore_;
-    int shaderTab_ = 0;                                                  // 0 installed, 1 online
+    int shaderTab_ = 0;                                                  // 0 installed, 1 online, 2 MME effects
     char shaderFilter_[128] = {};
     uint32_t shaderPackWriteTimesGen_ = 0;
     std::unordered_map<std::string, std::filesystem::file_time_type> shaderPackWriteTimes_;
     std::string shaderSelInstalled_, shaderSelRemote_;
+    // M6b: shader manager MME tab (docs/mme/mme_design.md §2.13). The selected library effect and its async
+    // diagnostics compile (spinner while running).
+    std::string shaderSelMme_;
+    MmeDiagJob mmeDiagJob_;
+    MmeEffectDiag mmeDiag_;
+    std::string mmeDiagFile_;   // the file mmeDiag_ describes
     bool newPackOpen_ = false, newPackEffect_ = false;
     char newPackId_[64] = {}, newPackName_[96] = {}, newPackAuthor_[96] = {};
     std::vector<std::filesystem::path> droppedFiles_;
     std::vector<std::filesystem::path> pendingDrop_;  // a drop that arrived while scanning / loading: applied at the lobby
     void DrawStudioShaderRow(float w);                                   // inspector: the selected character's pack
     void DrawStudioMaterialRow(float w);                                 // inspector: the selected model's material source
+    void DrawStudioMmeRow(float w);                                      // M6b inspector: the selected model's MME choice
     void CheckShaderPackErrors();                                        // compile failures -> error toast
     uint32_t shaderPackErrorsSeen_ = 0;
     std::filesystem::path OfflineOutputDir(bool video) const;  // Pictures\MMDX12 or Videos\MMDX12

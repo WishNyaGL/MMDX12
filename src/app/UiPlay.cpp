@@ -573,9 +573,23 @@ void App::DrawPlayOverlay() {
                 settings_.SetCharacterShader(perf.id, choice);
                 settings_.Save(settingsPath_);
             }
-            // P5: PBR material source of the edited performer. The center reloads the scene at the current time (a
-            // unit-song formation scene applies it at the next load instead); an extra keeps the next-load behaviour
-            // (the saved choice is keyed by its own id).
+            // M6b: the performer's MME object effect choice (없음 / 모델 동봉 효과 / 파일 선택…), saved as characterMme=.
+            if (perf.instance) {
+                Gap(10.0f);
+                SectionLabel(Tr("MME"));
+                MmeChoice mme = settings_.CharacterMme(perf.id);
+                if (DrawMmeRow("##playmme", mme, perf.id, perf.instance->Model().sourcePath,
+                               ImGui::GetContentRegionAvail().x)) {
+                    settings_.SetCharacterMme(perf.id, mme);
+                    settings_.Save(settingsPath_);
+                    if (playEditPerformer_ == 0) {
+                        ApplyMmeEffect(*perf.gpu, mme, perf.instance->Model().sourcePath);
+                    } else {
+                        toast_ = {Tr("MME 설정을 저장했어요"), Tr("여러 명이 함께 추는 곡은 다음 로드 때 반영돼요"), {}, false,
+                                  timeSeconds_ + 6.0};
+                    }
+                }
+            }
             if (perf.instance && !perf.id.empty() &&
                 HasMaterialOptions(perf.id, perf.instance->Model().sourcePath,
                                    (int)perf.instance->Model().materials.size(),
@@ -620,6 +634,11 @@ void App::DrawPlayOverlay() {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(16.0f), Dp(14.0f)));
         if (ImGui::BeginPopup("##effectspopup")) {
             if (DrawEffectStackEditor(settings_.effectStack)) {
+                settings_.Save(settingsPath_);
+                ApplyRenderSettings();
+            }
+            Gap(12.0f);
+            if (DrawMmePostStackEditor(settings_.mmeEffects)) {
                 settings_.Save(settingsPath_);
                 ApplyRenderSettings();
             }

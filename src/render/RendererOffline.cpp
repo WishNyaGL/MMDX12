@@ -47,7 +47,12 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     GpuLight lights[kMaxPunctualLights] = {};
     const uint32_t count = FillGpuLights(view.light, lights);
     if (!rt_->Build(cmd, view.models, ctx_->FrameNumber(), ctx_->FrameSlot())) return false;
-    offline_->Begin(cmd, transient_, &builtin_, *rt_, view, sc, lights, count, job, ctx_->FrameNumber());
+    // M5b: the offline job's post-effect list is filled by the caller (app) from the same list; this is only a
+    // fallback for callers that did not (the renderer's current MME list).
+    OfflineJobDesc jobWithMme = job;
+    if (jobWithMme.mmeEffects.empty()) jobWithMme.mmeEffects = settings_.mmeEffects;
+    offline_->Begin(cmd, transient_, &builtin_, *rt_, view, sc, lights, count, jobWithMme, ctx_->FrameNumber(),
+                    mme_.get(), mmeSkin_.get());
     if (offlinePresent_) offline_->Present(cmd, transient_, presentRect_);
     sceneVisible_ = false;
     havePrev_ = false;

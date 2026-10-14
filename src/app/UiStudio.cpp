@@ -19,6 +19,7 @@
 #include "core/TextUtil.h"
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "render/MmeSemantics.h"
 #include "studio/FileDialog.h"
 #include "studio/StudioPose.h"
 #include "studio/UiBezier.h"
@@ -104,26 +105,30 @@ bool App::FinishStudioLoad() {
         sm->place = sm->placeApplied = m.place;
         sm->shader = m.shader;
         sm->material = m.material;
+        sm->mme = m.mme;
         sm->uid = doc->nextUid++;
-        sm->path = m.pmx->sourcePath;
-        sm->pmx = m.pmx;
-        sm->inst = std::make_unique<ModelInstance>(m.pmx);
-        // props follow bones every frame: they need the per-frame (character) RT path, not the static stage BLAS
-        sm->gpu = renderer_.CreateModel(batch, *m.pmx, m.textures,
-                                        m.kind == ModelKind::Stage ? ModelRole::Stage : ModelRole::Character, &m.pbr);
-        if (!sm->gpu) {
-            if (m.kind != ModelKind::Character || pkg.fromProject) {
-                LOG_WARN("studio: GPU upload failed: %s", m.name.c_str());
-                continue;
+        sm->fx = m.fx;   // M5c: effect objects carry their `.fx`
+        if (m.pmx) {
+            sm->path = m.pmx->sourcePath;
+            sm->pmx = m.pmx;
+            sm->inst = std::make_unique<ModelInstance>(m.pmx);
+            // props follow bones every frame: they need the per-frame (character) RT path, not the static stage BLAS
+            sm->gpu = renderer_.CreateModel(batch, *m.pmx, m.textures,
+                                            m.kind == ModelKind::Stage ? ModelRole::Stage : ModelRole::Character, &m.pbr);
+            if (!sm->gpu) {
+                if (m.kind != ModelKind::Character || pkg.fromProject) {
+                    LOG_WARN("studio: GPU upload failed: %s", m.name.c_str());
+                    continue;
+                }
+                return false;
             }
-            return false;
+            sm->gpu->SetDefaultPackTextureFolder(m.defaultPackTextureFolder);
+            sm->gpu->SetMaterialBlendHints(m.materialBlend, m.materialBlendDefault);
+            if (!pkg.fromProject) StudioSuggestShader(*sm);   // added character with no shader choice: maybe suggest a pack
+            sm->inst->UpdatePose();
         }
-        sm->gpu->SetDefaultPackTextureFolder(m.defaultPackTextureFolder);
-        sm->gpu->SetMaterialBlendHints(m.materialBlend, m.materialBlendDefault);
-        if (!pkg.fromProject) StudioSuggestShader(*sm);   // added character with no shader choice: maybe suggest a pack
         sm->motion = std::move(m.motion);
         sm->BuildRowGroups();
-        sm->inst->UpdatePose();
         remap[i] = (int)doc->models.size();
         doc->models.push_back(std::move(sm));
     }
@@ -194,6 +199,7 @@ bool App::FinishStudioLoad() {
         freeCam_.distance = std::clamp(e.camDistance, 2.0f, 600.0f);
         freeCam_.fovDeg = std::clamp(e.camFovDeg, 5.0f, 120.0f);
         doc->projectPath = pkg.projectPath;  // recovery: the project the autosave belongs to (may be empty)
+        doc->mmePost = pkg.mmePost;          // M6b: the project's own MME post stack
     } else if (pkg.fromPmm) {
         // PMM import: a NEW unsaved project. Camera motion when the PMM had camera keys; the PMM has
         // no scene lights, so the Studio preset is the default (a PMM light track overrides it).
@@ -290,6 +296,8 @@ void App::StudioEnter(std::unique_ptr<StudioDoc> doc) {
     if (uiScriptNext_ == 0) framesInScene_ = 0;  // a running ui script keeps its frame clock across project switches
     if (studio_->hasAudio) StudioSeekAudio();
     screen_ = Screen::Studio;
+    // M6b: while the studio is open the project's own MME post stack replaces the play-mode stack.
+    ApplyRenderSettings();
 }
 
 void App::LeaveStudio() {
@@ -494,6 +502,7 @@ void App::UpdateStudioScene() {
 
 void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float physicsDt, bool resetPhysics) {
     StudioDoc& d = *studio_;
+    if (!m.inst || !m.gpu) return;   // M5c: an `.fx`-only effect object has no mesh / instance
     // Re-bind after edits (throttled while a curve is being dragged: binding a long dance takes a while).
     if (m.boundVersion != m.motionVersion && (!d.curveEditing || timeSeconds_ - studioLastBind_ > 0.15)) {
         OpTimer timer{"bind motion"};
@@ -531,7 +540,11 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
         }
         if (resetPhysics) inst.ResetPhysics();
     }
-    if (m.IsProp()) {
+    if (m.IsEffect()) {
+        // M5c: an effect object's mesh keeps model-space vertices in MMD (the effect's WORLD places it), so the
+        // root transform is the identity and only the controller panel (AccessoryPlacement) drives `(self)`.
+        inst.SetRootTransform(DirectX::XMFLOAT4X4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+    } else if (m.IsProp()) {
         inst.SetRootTransform(StudioPropRoot(m));
     } else if (m.IsStage()) {
         // placement of a stage: scale + rotation + position in the root (no library scale). Keyless stages are
@@ -571,6 +584,15 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
             shader.pack = options_.shaderPack;
         }
         ApplyShaderChoice(*m.gpu, shader);
+    }
+    // M6a: the model's MME choice (project field; characters default None, stages Auto), with the run-wide CLI overrides.
+    {
+        MmeChoice mme = m.mme;
+        const bool isStage = m.kind == ModelKind::Stage;
+        if (isStage && options_.stageMmeSet) mme = {options_.stageMme != 0 ? MmeChoice::Auto : MmeChoice::None, {}};
+        else if (options_.mmeAutoSet) mme = {options_.mmeAuto != 0 ? MmeChoice::Auto : MmeChoice::None, {}};
+        if (m.IsEffect() && !m.fx.empty()) mme = {MmeChoice::File, m.fx};  // M5c: the effect object's own .fx
+        ApplyMmeEffect(*m.gpu, mme, m.path);
     }
     m.gpu->UpdateMaterials(slot, inst.MaterialMul(), inst.MaterialAdd(), inst.MaterialVersion(),
                            m.IsProp() ? AccessoryOpacity(m, frame) : 1.0f);
@@ -643,10 +665,47 @@ void App::BuildStudioFrameView(FrameView& view) {
             if (!m->visible || m->IsStage() != (pass == 0)) continue;
             if (m->IsProp() && !AccessoryVisible(*m, viewFrame)) continue;  // a hidden accessory key hides the prop
             view.models.push_back(m->gpu.get());
+            AppendMmeObject(view, m->gpu.get(), m->inst.get(), true,
+                            !m->pmx->name.empty() ? m->pmx->name : m->gpu->Name());
             if (m->IsStage()) anyStage = true;
         }
     }
     view.studioFloor = !anyStage;
+
+    // M5c: MME effect objects (an accessory `.x` + its same-stem `.fx`). The effect's post/scene part runs in the
+    // post chain with the accessory key's panel as `(self)`; its object part draws the mesh (drawn here through the
+    // MME object path). The mesh is added to `view.models` (via AppendMmeObject) so every draw path covers it.
+    for (const auto& m : d.models) {
+        if (!m->visible || !m->IsEffect() || m->fx.empty() || !m->gpu) continue;
+        if (!AccessoryVisible(*m, viewFrame)) continue;
+        const PropAttach pl = AccessoryPlacement(*m, viewFrame);
+        MmeControllerPanel panel;
+        panel.x = pl.translation.x;
+        panel.y = pl.translation.y;
+        panel.z = pl.translation.z;
+        panel.rx = DirectX::XMConvertToRadians(pl.rotationDeg.x);
+        panel.ry = DirectX::XMConvertToRadians(pl.rotationDeg.y);
+        panel.rz = DirectX::XMConvertToRadians(pl.rotationDeg.z);
+        panel.si = pl.scale;
+        panel.tr = AccessoryOpacity(*m, viewFrame);
+        panel.visible = true;
+        MmeEffectObject eo;
+        eo.fx = m->fx;
+        eo.meshFile = m->path;
+        eo.mesh = m->gpu.get();
+        eo.fileName = PathToUtf8(m->path.filename());
+        for (char& c : eo.fileName) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        eo.displayName = m->pmx && !m->pmx->name.empty() ? m->pmx->name : m->name;
+        eo.panel = panel;
+        m->gpu->SetMmeEffectMesh(true);
+        view.models.push_back(m->gpu.get());
+        AppendMmeObject(view, m->gpu.get(), m->inst.get(), true, eo.displayName);
+        if (!view.mmeObjects.empty()) {
+            view.mmeObjects.back().accessory = true;
+            view.mmeObjects.back().panel = panel;
+        }
+        view.mmeEffectObjects.push_back(std::move(eo));
+    }
 
     LightAnchors anchors = StudioBuildLightAnchors();
     BuildSceneLighting(d.lights, d.camera.light, d.time, anchors, view.light);
@@ -654,6 +713,11 @@ void App::BuildStudioFrameView(FrameView& view) {
 
     // DoF: the focus track over the automatic focus (UiStudioFocus.cpp)
     StudioComputeFocus(view);
+    // M8a: the studio is edit mode for MME TIME (wall clock without SyncInEditMode); the scene clock follows the
+    // timeline (paused = constant).
+    view.sceneTime = (float)d.time;
+    view.sceneElapsed = lastRenderedTime_ < 0 ? 0.0f : (float)std::fabs(d.time - lastRenderedTime_);
+    view.mmeEditMode = true;
     view.cameraCut = lastRenderedTime_ < 0 || std::fabs(d.time - lastRenderedTime_) > 0.25;
     lastRenderedTime_ = d.time;
     if (options_.quitAfterFrames > 0 || !options_.uiScript.empty() || options_.mcp == 1 || HeadlessRun()) {
@@ -2021,6 +2085,7 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
             }
             if (m->kind == ModelKind::Character) DrawStudioShaderRow(w);
             DrawStudioMaterialRow(w);
+            DrawStudioMmeRow(w);
         } else {
             char counts[96];
             std::snprintf(counts, sizeof(counts), Tr("카메라 %d · 조명 %d · 섀도 %d · 초점 %d"), (int)d.camera.camera.size(),

@@ -704,6 +704,109 @@ void App::DrawSelect() {
             }
             y += Dp(8.0f);
         }
+        // M8a: a song folder that bundles a stage (an MV package): a small label + a choice, bundled by default.
+        if (song && !song->bundledStageId.empty()) {
+            const StageAsset* bundled = nullptr;
+            for (const auto& sts : library_.stages)
+                if (sts.id == song->bundledStageId) { bundled = &sts; break; }
+            if (bundled) {
+                y += Dp(26.0f);
+                const auto sit = settings_.songStages.find(song->id);
+                const bool explicitChoice = sit != settings_.songStages.end();
+                const std::string chosenId = explicitChoice ? sit->second : bundled->id;
+                auto stageName = [&](const std::string& id) -> std::string {
+                    if (id == "-") return Tr("없음");
+                    for (const auto& sts : library_.stages)
+                        if (sts.id == id) return sts.displayName;
+                    return id;
+                };
+                const std::string current = stageName(chosenId);
+                const ImVec2 ca(pa.x + ip, y), cb(pb.x - ip, y + Dp(28.0f));
+                bool hovered = false;
+                if (CardItem("##songstage", ca, cb, &hovered, Tr("곡 전용 스테이지"))) ImGui::OpenPopup("##songstagepop");
+                dl->AddRectFilled(ca, cb, hovered ? Mix(p.sunken, p.surface, 0.3f) : p.sunken, Dp(8.0f));
+                Icon(dl, icon::Play, 14.0f, ImVec2(ca.x + Dp(14.0f), (ca.y + cb.y) * 0.5f), p.ink2);
+                const char* stageLabel = Tr("곡 전용 스테이지");
+                Text(dl, Font::Semibold, size::Caption, ImVec2(ca.x + Dp(28.0f), ca.y + Dp(7.0f)), p.ink2, stageLabel);
+                const float stx = ca.x + Dp(32.0f) + TextSize(Font::Semibold, size::Caption, stageLabel).x;
+                TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(stx, ca.y + Dp(7.0f)), cb.x - Dp(28.0f), p.ink, current.c_str());
+                Icon(dl, icon::CaretDown, 12.0f, ImVec2(cb.x - Dp(14.0f), (ca.y + cb.y) * 0.5f), p.ink2);
+                Tooltip(Tr("이 곡 폴더에 전용 스테이지가 들어 있습니다. 기본으로 재생돼요."));
+                ImGui::SetNextWindowPos(ImVec2(ca.x, cb.y + Dp(4.0f)));
+                ImGui::SetNextWindowSize(ImVec2(cb.x - ca.x, 0.0f));
+                if (ImGui::BeginPopup("##songstagepop")) {
+                    if (ImGui::Selectable((std::string(Tr("곡 전용: ")) + bundled->displayName).c_str(),
+                                          !explicitChoice || sit->second == bundled->id)) {
+                        settings_.songStages.erase(song->id);
+                        settings_.Save(settingsPath_);
+                    }
+                    if (ImGui::Selectable(Tr("스테이지 없음"), explicitChoice && sit->second == "-")) {
+                        settings_.songStages[song->id] = "-";
+                        settings_.Save(settingsPath_);
+                    }
+                    if (ImGui::Selectable((std::string(Tr("현재 선택: ")) + (st ? st->displayName : Tr("스튜디오"))).c_str(),
+                                          explicitChoice && sit->second != "-" && sit->second != bundled->id)) {
+                        if (st) settings_.songStages[song->id] = st->id;
+                        else settings_.songStages.erase(song->id);
+                        settings_.Save(settingsPath_);
+                    }
+                    ImGui::EndPopup();
+                }
+                y += Dp(8.0f);
+            }
+        }
+        // M8a: a song folder with several audio files of the same length (versions of one song): a choice like cameras.
+        if (song && song->audioPaths.size() >= 2) {
+            y += Dp(26.0f);
+            const SongAsset chosenAudio = SongAsChosen(*song);
+            const std::string current = PathToUtf8(chosenAudio.audioPath.stem());
+            const ImVec2 ca(pa.x + ip, y), cb(pb.x - ip, y + Dp(28.0f));
+            bool hovered = false;
+            if (CardItem("##songaudio", ca, cb, &hovered, Tr("음원"))) ImGui::OpenPopup("##songaudiopop");
+            dl->AddRectFilled(ca, cb, hovered ? Mix(p.sunken, p.surface, 0.3f) : p.sunken, Dp(8.0f));
+            Icon(dl, icon::Music, 14.0f, ImVec2(ca.x + Dp(14.0f), (ca.y + cb.y) * 0.5f), p.ink2);
+            const char* audioLabel = Tr("음원");
+            Text(dl, Font::Semibold, size::Caption, ImVec2(ca.x + Dp(28.0f), ca.y + Dp(7.0f)), p.ink2, audioLabel);
+            const float ax = ca.x + Dp(32.0f) + TextSize(Font::Semibold, size::Caption, audioLabel).x;
+            TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(ax, ca.y + Dp(7.0f)), cb.x - Dp(28.0f), p.ink, current.c_str());
+            Icon(dl, icon::CaretDown, 12.0f, ImVec2(cb.x - Dp(14.0f), (ca.y + cb.y) * 0.5f), p.ink2);
+            Tooltip(Tr("이 곡 폴더에 길이가 같은 음원이 여러 개 있습니다(버전)."));
+            ImGui::SetNextWindowPos(ImVec2(ca.x, cb.y + Dp(4.0f)));
+            ImGui::SetNextWindowSize(ImVec2(cb.x - ca.x, 0.0f));
+            if (ImGui::BeginPopup("##songaudiopop")) {
+                for (size_t ai = 0; ai < song->audioPaths.size(); ++ai) {
+                    const std::filesystem::path& a = song->audioPaths[ai];
+                    std::string label = PathToUtf8(a.stem());
+                    if (a == song->audioPath) label += std::string("  ·  ") + Tr("기본");
+                    label += "##audio" + std::to_string(ai);
+                    if (ImGui::Selectable(label.c_str(), a == chosenAudio.audioPath)) {
+                        if (a == song->audioPath) settings_.songAudios.erase(song->id);
+                        else settings_.songAudios[song->id] = PathToUtf8(a.filename());
+                        settings_.Save(settingsPath_);
+                    }
+                }
+                ImGui::EndPopup();
+            }
+            y += Dp(8.0f);
+        }
+        // M8b: a song folder with videos: one line saying what will play (background loop / overlay).
+        if (song) {
+            const std::vector<VideoLayerDesc> videos = SongVideosForDisplay(*song);
+            if (!videos.empty()) {
+                std::string line = std::string(Tr("영상")) + ": ";
+                bool first = true;
+                for (const VideoLayerDesc& v : videos) {
+                    if (!first) line += "  ·  ";
+                    first = false;
+                    line += v.kind == VideoLayerKind::Background ? Tr("배경") : Tr("오버레이");
+                    line += " ";
+                    line += PathToUtf8(v.path.filename());
+                }
+                y += Dp(26.0f);
+                TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(pa.x + ip, y), pb.x - ip, p.ink2, line.c_str());
+                y += Dp(8.0f);
+            }
+        }
         y += Dp(34.0f);
         dl->AddLine(ImVec2(pa.x + ip, y), ImVec2(pb.x - ip, y), p.line);
         y += Dp(16.0f);
@@ -834,6 +937,19 @@ void App::DrawSelect() {
                         }
                     }
                 }
+
+                // M6b: the character's MME object effect choice (없음 / 모델 동봉 효과 / 파일 선택…), saved as
+                // characterMme=. Applied at the next play / studio load.
+                {
+                    Gap(14.0f);
+                    SectionLabel(Tr("MME"));
+                    MmeChoice lobbyMme = settings_.CharacterMme(ch->id);
+                    SuggestMme(ch->id, ch->modelPath);   // one-time "this model ships MME materials" toast
+                    if (DrawMmeRow("##lobbyMme", lobbyMme, ch->id, ch->modelPath, colW)) {
+                        settings_.SetCharacterMme(ch->id, lobbyMme);
+                        settings_.Save(settingsPath_);
+                    }
+                }
             }
             {
                 Gap(4.0f);
@@ -850,6 +966,11 @@ void App::DrawSelect() {
                      ImVec2(da.x + colW - Dp(10.0f), da.y + Dp(15.0f)), p.ink2);
                 if (effectStackOpen_) {
                     if (DrawEffectStackEditor(settings_.effectStack, false)) {
+                        settings_.Save(settingsPath_);
+                        ApplyRenderSettings();
+                    }
+                    Gap(10.0f);
+                    if (DrawMmePostStackEditor(settings_.mmeEffects)) {
                         settings_.Save(settingsPath_);
                         ApplyRenderSettings();
                     }

@@ -53,6 +53,25 @@ struct SongAsset {
     std::vector<SongPart> parts;  // performer parts, stage left to right (>= 1 for playable songs; one holds danceVmd)
     int centerPart = -1;          // the part that dances in the middle most of the song (-1: unknown / one part)
     std::vector<std::filesystem::path> cameraVmds;  // every camera of the song, the default (cameraVmd) first
+    // M8a: MV package (docs/mme/mme_design.md §5b). All content-based; ids/paths empty when absent.
+    std::string bundledStageId;                     // a stage found under the song folder (it stays in the stage list too)
+    std::filesystem::path stageVmd;                 // the stage's motion VMD (bone names match the bundled stage model)
+    std::vector<std::filesystem::path> audioPaths;  // audio versions (lengths within 0.5 s), the default (audioPath) first
+    // M8b: the song's videos (docs/mme/mme_design.md §5b). overlayVideo = a video whose duration is within +-3 %
+    // of the song (or >= 90 % of it); backgroundVideo = the longest of the rest. Both may be empty.
+    std::filesystem::path overlayVideo;
+    std::filesystem::path backgroundVideo;
+};
+
+// M6b: one MME (MikuMikuEffect) effect entry point under the library's `effects/` folder. Only real entry points
+// are listed: `.fx` files that are not `#include`d by another `.fx` of the same folder (so `src`-style helper files
+// do not show up). `kind` is the M1 parser's classification (post / pre / object).
+struct EffectAsset {
+    std::string id;               // stable key: library-relative path of the .fx, '/' separated, UTF-8
+    std::filesystem::path path;
+    std::string displayName;      // the file stem
+    std::string kind;             // "post" | "pre" | "object" (MmeEffectDesc::kind())
+    std::filesystem::path readmeImage;   // a readme image next to the effect when present, else empty
 };
 
 struct LibraryScanResult {
@@ -60,6 +79,7 @@ struct LibraryScanResult {
     std::vector<CharacterAsset> characters;  // sorted by displayName
     std::vector<StageAsset> stages;          // sorted by displayName
     std::vector<SongAsset> songs;            // sorted by displayName
+    std::vector<EffectAsset> effects;        // M6b: `effects/` .fx entry points, sorted by displayName
     std::vector<std::string> warnings;       // e.g. "skipped broken.pmx: <error>"
     std::vector<std::string> notes;          // classification decisions worth knowing (skipped props, guessed matches)
     double scanSeconds = 0;
@@ -87,8 +107,8 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& root, ScanProgress* p
 bool CreateLibrarySkeleton(const std::filesystem::path& root, const std::filesystem::path& templateDir);
 
 // Persistent library scan result and probe cache (Requirements B.5, B.6, B.7)
-inline constexpr uint32_t kLibraryScanResultVersion = 4;
-inline constexpr uint32_t kProbeCacheVersion = 3;
+inline constexpr uint32_t kLibraryScanResultVersion = 7;   // 7: M6b effects/ entries (EffectAsset)
+inline constexpr uint32_t kProbeCacheVersion = 4;
 
 bool SaveLibraryScanResult(const LibraryScanResult& result);
 bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult& out);

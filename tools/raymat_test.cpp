@@ -93,6 +93,17 @@ Obj[0] = ray.fx
 Obj[2] = ray.fx
 )";
 
+// A Ray-MMD main (deferred lighting) effect: includes ray.conf and addresses the ray_controller.pmx accessory.
+const char* kRayMainFx = R"(#include "ray.conf"
+#include "ray_advanced.conf"
+float mSunLightP : CONTROLOBJECT<string name="ray_controller.pmx"; string item = "SunLight+";>;
+)";
+
+// An ordinary post .fx next to a same-stem .x: must not mark that .x as a Ray main effect.
+const char* kPostFx = R"(#define DiffuseDarkness 1.4
+float4 MaterialDiffuse : DIFFUSE<string Object = "Geometry";>;
+)";
+
 } // namespace
 
 int wmain() {
@@ -112,6 +123,22 @@ int wmain() {
     Expect(IsRayMaterialFx(dir / L"ray.fx"), "content rule: slot-macro fx is Ray");
     Expect(!IsRayMaterialFx(dir / L"plain.fx"), "content rule: SeriousShader-like fx is not Ray");
     Expect(!IsRayMaterialFx(dir / L"missing.fx"), "content rule: missing file is not Ray");
+
+    // Main-effect rule: a Ray-MMD main .fx (ray.conf include / ray_controller.pmx) and its same-stem .x; a plain
+    // .fx next to a same-stem .x stays false; a missing file stays false.
+    Write(dir / L"main.fx", kRayMainFx);
+    Write(dir / L"main.x", "not read");      // ranked by its same-stem main.fx
+    Write(dir / L"post.fx", kPostFx);
+    Write(dir / L"post.x", "not read");
+    Write(dir / L"OTHER.FX", kRayMainFx);    // case-insensitive stem match
+    Write(dir / L"other.X", "not read");
+    Expect(IsRayMmdMainEffect(dir / L"main.fx"), "main rule: ray.conf include fx is a Ray main effect");
+    Expect(IsRayMmdMainEffect(dir / L"main.x"), "main rule: the .x goes by its same-stem .fx");
+    Expect(!IsRayMmdMainEffect(dir / L"post.fx"), "main rule: a plain post fx is not a main effect");
+    Expect(!IsRayMmdMainEffect(dir / L"post.x"), "main rule: a plain fx next to a same-stem .x keeps it false");
+    Expect(IsRayMmdMainEffect(dir / L"other.x"), "main rule: the stem match is case-insensitive");
+    Expect(!IsRayMmdMainEffect(dir / L"missing.fx"), "main rule: a missing file is false");
+    Expect(!IsRayMmdMainEffect(dir / L"missing.x"), "main rule: a .x with no same-stem .fx is false");
 
     // Candidate ranking: b.emd is 100% Ray, a.emd 50%.
     const std::vector<RayEmdCandidate> cands = FindRayEmdCandidates(dir / L"model.pmx", 3);

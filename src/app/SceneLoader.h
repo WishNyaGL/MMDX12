@@ -7,6 +7,7 @@
 #include "asset/MaterialChoice.h"
 #include "asset/PbrMaterial.h"
 #include "asset/PmxModel.h"
+#include "render/RenderTypes.h"   // VideoLayerDesc (M8b)
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -41,6 +42,7 @@ struct ScenePackage {
     std::string characterId;
     std::string characterDisplayName;
     std::vector<LoadedModelCpu> stageParts;   // empty when no stage selected
+    std::string stageId;                      // the loaded stage's library id (may differ from the lobby selection)
     std::shared_ptr<BoundMotion> motion;      // bound to character
     std::shared_ptr<CameraMotion> camera;     // null if the song has no camera vmd
     std::vector<VmdLightKey> lightKeys;       // the camera vmd's light / self-shadow keys (may be empty)
@@ -54,6 +56,13 @@ struct ScenePackage {
     std::vector<std::string> extraCharacterIds;
     std::vector<std::string> extraCharacterDisplayNames;
     std::vector<std::shared_ptr<BoundMotion>> extraMotions;
+    // M8a: the song-bundled stage's motion (docs/mme/mme_design.md §5b). `stageMotionPart` is the index into
+    // stageParts it is bound to (-1 when none). Stage motion VMDs are evaluated on the song clock like a dance.
+    std::shared_ptr<BoundMotion> stageMotion;
+    int stageMotionPart = -1;
+    // M8b: the song's video layers (background + overlay), resolved by the App from the song / ini override and
+    // passed through the (copyable) package so the loader worker does not need the App.
+    std::vector<VideoLayerDesc> videos;
 };
 
 struct LoadProgress {

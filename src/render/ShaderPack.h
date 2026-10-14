@@ -66,6 +66,17 @@ struct ShaderMemo {   // what was set for a pack that is not the current one
 };
 // `remembered` holds the parameters and texture folder of the packs this model used before, so going back to one
 // (after trying another pack or the default shading) restores them instead of starting from scratch.
+// M6a: a model's MME object effect choice (docs/mme/mme_design.md §2.12). None = native / pack shading (the default
+// for characters: users' characters keep their look), Auto = what the model's files ask for (its `.emd` / same-name
+// `.fx` / `name[fx].pmx`, mapped to per-material paths), File = one effect for every material (the CLI `--mme-model`).
+// Stages default to Auto. Saved per character / stage (settings) and per studio model (project).
+struct MmeChoice {
+    enum Mode { None = 0, Auto, File };
+    Mode mode = None;
+    std::filesystem::path file;   // File mode only
+    bool operator==(const MmeChoice&) const = default;
+};
+
 struct ShaderChoice {
     std::string pack;
     std::map<std::string, float> params;

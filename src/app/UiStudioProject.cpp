@@ -10,6 +10,7 @@
 #include "anim/ModelInstance.h"
 #include "app/Icons.h"
 #include "app/UiKit.h"
+#include "asset/RayMaterial.h"
 #include "core/I18n.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
@@ -170,18 +171,20 @@ ProjectData App::StudioProjectData() const {
         pm.name = m.name;
         pm.kind = m.kind;
         pm.path = m.path;
+        pm.fx = m.fx;   // M5c: effect objects carry their `.fx`
         pm.libraryId = m.libraryId;
         pm.visible = m.visible;
         pm.physicsOff = m.physicsOff;
         pm.place = m.place;
         pm.shader = m.shader;
         pm.material = m.material;
+        pm.mme = m.mme;
         if (m.IsProp()) {
             pm.attach = m.attach;
             pm.attach.parent = m.attach.parent >= 0 ? d.IndexOfUid((uint32_t)m.attach.parent) : -1;  // uid -> index
         }
         pm.motion = m.motion;
-        pm.motion.modelName = m.pmx->name;  // MMD checks it against the model the motion is loaded onto
+        if (m.pmx) pm.motion.modelName = m.pmx->name;  // MMD checks it against the model the motion is loaded onto
         // accessory key parents: uid -> 1 + the package model index (0 = the world); a parent that is gone -> world
         for (AccessoryKf& k : pm.motion.accessory) {
             if (k.parentUid == 0) continue;
@@ -201,6 +204,7 @@ ProjectData App::StudioProjectData() const {
     }
     if (d.hasAudio) pd.audioPath = d.audioPath;
     pd.audioOffset = d.audioOffset;
+    pd.mmePost = d.mmePost;   // M6b: the project's own MME post stack
     ProjectEditor& e = pd.editor;
     e.frame = d.Frame();
     e.selectedModel = d.selectedModel;
@@ -423,6 +427,22 @@ void App::StudioAddModelDialog(ModelKind kind, uint32_t replaceUid) {
     if (!f.empty()) StudioAddModelFile(kind, f, replaceUid);
 }
 
+void App::StudioAddMmeObjectDialog() {
+    // M5c: pick an accessory `.x` or its `.fx`; the same-stem partner in the same folder completes the pair.
+    static const std::vector<FileFilter> f = {{L"MME 효과 (.x / .fx)", L"*.x;*.fx"}, {L"X 액세서리", L"*.x"},
+                                              {L"MME 효과", L"*.fx"}};
+    const std::filesystem::path p = OpenFileDialog(hwnd_, f);
+    if (p.empty()) return;
+    // A Ray-MMD main effect: the shared confirm modal collects the add.
+    if (GuardRayMme(p, [this](const std::filesystem::path& file) { StudioAddMmeObject(file); })) return;
+    StudioAddMmeObject(p);
+}
+
+void App::StudioAddMmeObject(const std::filesystem::path& path) {
+    if (path.empty()) return;
+    StudioAddModelFile(ModelKind::Effect, path);
+}
+
 void App::StudioAddLibraryCharacter(int index, uint32_t replaceUid) {
     if (index < 0 || index >= (int)library_.characters.size()) return;
     const CharacterAsset c = library_.characters[(size_t)index];
@@ -606,30 +626,36 @@ void App::StudioPollJobs() {
             UploadBatch batch(ctx_);
             int first = -1, insertedAfter = 0;
             for (StudioPackageModel& pm : job.models) {
-                if (!pm.pmx || targetGone) continue;
+                if (targetGone) continue;
+                const bool fxOnly = pm.kind == ModelKind::Effect && !pm.pmx;
+                if (!pm.pmx && !fxOnly) continue;
                 auto sm = std::make_unique<StudioModel>();
                 sm->name = pm.name;
                 sm->libraryId = pm.libraryId;
                 sm->material = pm.material;
+                sm->mme = pm.mme;
                 sm->defaultPackTextureFolder = pm.defaultPackTextureFolder;
                 sm->kind = pm.kind;
+                sm->fx = pm.fx;
                 sm->visible = pm.visible;
                 sm->uid = d.nextUid++;
-                sm->path = pm.pmx->sourcePath;
-                sm->pmx = pm.pmx;
-                sm->inst = std::make_unique<ModelInstance>(pm.pmx);
-                sm->gpu = renderer_.CreateModel(batch, *pm.pmx, pm.textures,
-                                                pm.kind == ModelKind::Stage ? ModelRole::Stage : ModelRole::Character,
-                                                &pm.pbr);
-                if (!sm->gpu) {
-                    LOG_WARN("studio: GPU upload failed: %s", pm.name.c_str());
-                    continue;
+                if (pm.pmx) {
+                    sm->path = pm.pmx->sourcePath;
+                    sm->pmx = pm.pmx;
+                    sm->inst = std::make_unique<ModelInstance>(pm.pmx);
+                    sm->gpu = renderer_.CreateModel(batch, *pm.pmx, pm.textures,
+                                                    (pm.kind == ModelKind::Stage) ? ModelRole::Stage : ModelRole::Character,
+                                                    &pm.pbr);
+                    if (!sm->gpu) {
+                        LOG_WARN("studio: GPU upload failed: %s", pm.name.c_str());
+                        continue;
+                    }
+                    sm->gpu->SetDefaultPackTextureFolder(pm.defaultPackTextureFolder);
+                    sm->gpu->SetMaterialBlendHints(pm.materialBlend, pm.materialBlendDefault);
+                    StudioSuggestShader(*sm);   // character with no shader choice: maybe suggest a pack
+                    sm->inst->UpdatePose();
                 }
-                sm->gpu->SetDefaultPackTextureFolder(pm.defaultPackTextureFolder);
-                sm->gpu->SetMaterialBlendHints(pm.materialBlend, pm.materialBlendDefault);
-                StudioSuggestShader(*sm);   // character with no shader choice: maybe suggest a pack
                 sm->BuildRowGroups();
-                sm->inst->UpdatePose();
                 // the rest of a replacing library stage goes right after the replaced part (stage parts come first)
                 const int at = replaced ? replaceAt + 1 + insertedAfter++ : (int)d.models.size();
                 if (first < 0) first = at;
@@ -858,6 +884,10 @@ void App::DrawStudioAddMenu() {
             if (MenuItemChip("##addprop", Tr("소품 (파일에서)"), icon::Cube)) {
                 ImGui::CloseCurrentPopup();
                 StudioAddModelDialog(ModelKind::Prop);
+            }
+            if (MenuItemChip("##addeff", Tr("MME 효과"), icon::Sparkle)) {
+                ImGui::CloseCurrentPopup();
+                StudioAddMmeObjectDialog();
             }
             MenuSeparator();
             SectionLabel(Tr("모션 · 음원"));

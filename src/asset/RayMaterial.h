@@ -104,4 +104,10 @@ bool FindAndParseRayMaterials(const std::filesystem::path& modelFile, int pmxMat
 // (*_MAP_FROM / CUSTOM_ENABLE) or contains MaterialParam / EncodeGbuffer. No name is consulted.
 bool IsRayMaterialFx(const std::filesystem::path& fx);
 
+// Content rule for a Ray-MMD main (deferred lighting) effect, ray.x / ray.fx: a .fx whose text includes ray.conf
+// (#include line) or addresses ray_controller.pmx; for a .x the same test on its same-stem .fx in the same folder
+// (case-insensitive stem match). Raw bytes only (the markers are ASCII, so Shift-JIS / UTF-8 both work), at most the
+// first 64 KiB. A missing / unreadable file is false.
+bool IsRayMmdMainEffect(const std::filesystem::path& p);
+
 } // namespace mmdx

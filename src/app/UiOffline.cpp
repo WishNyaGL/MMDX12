@@ -36,6 +36,9 @@ OfflineJobDesc MakeJobDesc(const AppOptions& o, const AppSettings& st, const Vid
     j.dofAperture = video ? v.dofAperture : st.dofAperture;
     // Shader packs: the same effect stack as the real-time frame (a video's real-time renderers get it from VideoRealtimeSettings)
     j.effects = st.effectStack;
+    // M6b: the MME post effects. --mme overrides for one run; else the saved play stack. A studio job overrides this
+    // with the project's own stack at the call site.
+    j.mmeEffects = o.mmeSet ? o.mmeEffects : st.mmeEffects;
     if (video) {
         const VideoQualityPreset& q = kVideoQualities[v.quality];
         if (studioAspect > 0.0f) {
@@ -331,6 +334,9 @@ void App::OfflinePose(float frame) {
 void App::OfflineView(float frame, FrameView& view) {
     if (offline_.studio) BuildStudioFrameView(view);   // StudioPoseForRender set the studio's time to `frame`
     else BuildFrameView(frame, view);
+    // M8a: an offline render uses the scene clock (the rendered frame's time) for MME TIME, never the edit-mode
+    // wall clock, so GI stills / videos are deterministic.
+    view.mmeEditMode = false;
 }
 
 void App::SaveOfflinePose() {
@@ -536,6 +542,9 @@ void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
     }
     OfflineJobDesc jd = MakeJobDesc(options_, settings_, offline_.video, video, true,
                                     (offline_.studio && studio_) ? studio_->AspectRatio() : 0.0f);
+    // M6b: while the studio is open its own MME post stack replaces the play-mode one (unless --mme overrides);
+    // a project's stack is what offline renders from the studio use.
+    if (offline_.studio && studio_ && !options_.mmeSet) jd.mmeEffects = StudioMmeEntries();
     if (video) {
         jd.effectReset = (offline_.frame == 0) || jumpCut || view.cameraCut;
     }
@@ -1008,8 +1017,10 @@ void App::UpdateVideoProbe() {
 
     // the scene is loaded once, at the first combination that needs measuring
     const CharacterAsset& ch = library_.characters[(size_t)selCharacter_];
-    const std::string stageId = selStage_ >= 0 ? library_.stages[(size_t)selStage_].id : std::string();
-    const SongAsset& song = library_.songs[(size_t)selSong_];
+    const SongAsset songRaw = library_.songs[(size_t)selSong_];
+    const SongAsset song = SongAsChosen(songRaw);
+    const StageAsset* stage = ResolveSongStage(songRaw);
+    const std::string stageId = stage ? stage->id : std::string();
     const uint64_t sceneKey = VideoProbeKey(VideoRenderConfig{}, ch.id, stageId, song.id) | 1u;
     if (!scene_ || bgProbe_.sceneKey != sceneKey) {
         if (scene_ && bgProbe_.sceneKey != 0) UnloadScene();
@@ -1020,8 +1031,8 @@ void App::UpdateVideoProbe() {
         bgProbe_.loadingSceneKey = sceneKey;
         bgProbe_.loading = true;
         const CharacterAsset c = ch;
-        const bool hasStage = selStage_ >= 0;
-        const StageAsset st = hasStage ? library_.stages[(size_t)selStage_] : StageAsset{};
+        const bool hasStage = stage != nullptr;
+        const StageAsset st = hasStage ? *stage : StageAsset{};
         const SongAsset so = song;
         bgProbe_.loadFuture = std::async(std::launch::async, [=, pkg = bgProbe_.package.get(), this] {
             return LoadScenePackage(c, hasStage ? &st : nullptr, so, *pkg, &bgProbe_.progress, &bgProbe_.error,
@@ -1072,7 +1083,10 @@ bool App::VideoRendererAvailable(VideoRenderer r) const {
 
 uint64_t App::CurrentVideoProbeKey() const {
     const std::string ch = selCharacter_ >= 0 ? library_.characters[(size_t)selCharacter_].id : std::string();
-    const std::string st = selStage_ >= 0 ? library_.stages[(size_t)selStage_].id : std::string();
+    const StageAsset* stage = selSong_ >= 0 && (size_t)selSong_ < library_.songs.size()
+                                  ? ResolveSongStage(library_.songs[(size_t)selSong_])
+                                  : (selStage_ >= 0 ? &library_.stages[(size_t)selStage_] : nullptr);
+    const std::string st = stage ? stage->id : std::string();
     const std::string so = selSong_ >= 0 ? library_.songs[(size_t)selSong_].id : std::string();
     return VideoProbeKey(ActiveVideoConfig(), ch, st, so);
 }
@@ -1137,6 +1151,19 @@ void App::DrawToast() {
         if (Button("##toastopen", Tr("폴더 열기"), icon::FolderOpen, ButtonKind::Ghost, ImVec2(0, 34))) {
             const std::wstring arg = L"/select,\"" + toast_.path.wstring() + L"\"";
             ShellExecuteW(nullptr, L"open", L"explorer.exe", arg.c_str(), nullptr, SW_SHOWNORMAL);
+        }
+    }
+    // M6b: the MME suggestion toast offers "적용" (the model's own MME materials); never applied automatically.
+    if (!mmeSuggestApply_.empty() && !toast_.error) {
+        const char* applyLabel = Tr("MME 켜기");
+        const float bw = ButtonWidth(applyLabel, true);
+        ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(14.0f) - bw, (a.y + b.y - Dp(34.0f)) * 0.5f));
+        if (Button("##toastmme", applyLabel, icon::Sparkle, ButtonKind::Primary, ImVec2(0, 34))) {
+            const std::string id = mmeSuggestApply_;
+            mmeSuggestApply_.clear();
+            settings_.SetCharacterMme(id, MmeChoice{MmeChoice::Auto, {}});
+            settings_.Save(settingsPath_);
+            toast_ = Toast{Tr("MME 재질을 켰어요"), Tr("다음 재생부터 적용돼요"), {}, false, timeSeconds_ + 4.0};
         }
     }
     ImGui::End();

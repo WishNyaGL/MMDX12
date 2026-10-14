@@ -1,0 +1,20 @@
+{
+  "5": {"final_tier": "N", "notes": "Ray-MMD: native PBR equivalent (material source Ray-MMD); MME Auto leaves Ray material files to it, running ray.x as MME is not recommended"},
+  "2": {"final_tier": "A", "notes": "glow from emissive materials only (offscreen sub-effect waits for its compile)"},
+  "7": {"final_tier": "A", "notes": "subtle by design (0.22-unit dust specks); controller-less defaults"},
+  "15": {"final_tier": "B", "notes": "mirror reflection renders (geometry, fade) but its colours come out darker than MMD"},
+  "31": {"final_tier": "A", "notes": "blackout is the effect"},
+  "40": {"final_tier": "C", "notes": "needs its controller model / setup; renders the model dark without it"},
+  "46": {"final_tier": "A", "notes": "whiteout is the effect"},
+  "50": {"final_tier": "B", "notes": "figure look renders; blocky self-shadow on hair"},
+  "60": {"final_tier": "B", "notes": "reflection plane drawn too high with a red fringe"},
+  "67": {"final_tier": "B", "notes": "no visible light at the default panel (needs the light accessory placed); not verified further"},
+  "72": {"final_tier": "B", "notes": "no visible light at the default panel (needs the light accessory placed); not verified further"},
+  "89": {"final_tier": "B", "notes": "translucent / additive draw fixed; nothing distinct at the default panel"},
+  "8": {"final_tier": "C", "notes": "does not draw (post chain produces no change)"},
+  "19": {"final_tier": "C", "notes": "FXC X4555 (casts on l-values)"},
+  "30": {"final_tier": "C", "notes": "loads 0 effect programs"},
+  "65": {"final_tier": "C", "notes": "PSO creation fails (E_INVALIDARG)"},
+  "84": {"final_tier": "C", "notes": "main entry loads 0 programs in effect-object mode"},
+  "35": {"final_tier": "B", "notes": "needs a user-supplied screen.bmp"}
+}

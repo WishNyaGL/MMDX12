@@ -13,6 +13,7 @@
 
 #include "app/Icons.h"
 #include "app/UiKit.h"
+#include "asset/RayMaterial.h"
 #include "core/I18n.h"
 #include "core/Log.h"
 #include "core/NetUtil.h"
@@ -196,10 +197,12 @@ void App::DrawShaders() {
         const std::string l1 = shaderStore_.State() == ShaderPackStore::IndexState::Ready
                                    ? Tr("온라인  ") + std::to_string(shaderStore_.Packs().size())
                                    : std::string(Tr("온라인"));
-        const char* labels[] = {l0.c_str(), l1.c_str()};
-        const char* icons[] = {icon::Stack, icon::Globe};
+        const std::string l2 = std::string(Tr("MME")) +
+                               (library_.effects.empty() ? "" : "  " + std::to_string(library_.effects.size()));
+        const char* labels[] = {l0.c_str(), l1.c_str(), l2.c_str()};
+        const char* icons[] = {icon::Stack, icon::Globe, icon::Sparkle};
         ImGui::SetCursorScreenPos(ImVec2(leftX, top));
-        Segmented("##shadertabs", labels, 2, &shaderTab_, 0.0f, 40.0f, icons);
+        Segmented("##shadertabs", labels, 3, &shaderTab_, 0.0f, 40.0f, icons);
         const float tabsR = ImGui::GetItemRectMax().x;
 
         // actions, right-aligned against the panel
@@ -243,58 +246,69 @@ void App::DrawShaders() {
 
         float curX = tabsR + Dp(12.0f);
 
-        // type filter: Segmented (전체 / 셰이더 / 효과)
-        const char* typeLabels[] = {Tr("전체"), Tr("셰이더"), Tr("효과")};
-        int curType = std::clamp(settings_.shaderType[shaderTab_], 0, 2);
-        ImGui::SetCursorScreenPos(ImVec2(curX, top + Dp(2.0f)));
-        if (Segmented("##packtype", typeLabels, 3, &curType, 0.0f, 36.0f)) {
-            settings_.shaderType[shaderTab_] = curType;
-            settings_.Save(settingsPath_);
-        }
-        curX = ImGui::GetItemRectMax().x + Dp(8.0f);
-
-        // sort combo: compact combo (추천순 / 이름순 / 최근 업데이트 / 파라미터 많은 순)
-        const char* sortLabels[] = {Tr("추천순"), Tr("이름순"), Tr("최근 업데이트"), Tr("파라미터 많은 순")};
-        const float comboW = Dp(120.0f);
-        const char* sortPreview = sortLabels[std::clamp(settings_.shaderSort[shaderTab_], 0, 3)];
-        ImGui::SetCursorScreenPos(ImVec2(curX, top + Dp(2.0f)));
-        ImGui::SetNextItemWidth(comboW);
-        PushFont(Font::Regular, size::Small);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink));
-        const bool openSort = ImGui::BeginCombo("##packsort", sortPreview, ImGuiComboFlags_HeightLarge | ImGuiComboFlags_NoArrowButton);
-        ImGui::PopStyleColor();
-        {
-            const ImVec2 cmax = ImGui::GetItemRectMax(), cmin = ImGui::GetItemRectMin();
-            Icon(ImGui::GetWindowDrawList(), icon::CaretDown, 12.0f, ImVec2(cmax.x - Dp(12.0f), (cmin.y + cmax.y) * 0.5f), p.ink3);
-        }
-        if (openSort) {
-            for (int k = 0; k < 4; ++k) {
-                const bool sel = settings_.shaderSort[shaderTab_] == k;
-                if (ImGui::Selectable(sortLabels[k], sel)) {
-                    settings_.shaderSort[shaderTab_] = k;
-                    settings_.Save(settingsPath_);
-                }
+        // type filter: Segmented (전체 / 셰이더 / 효과) — the installed / online tabs only
+        if (shaderTab_ < 2) {
+            const char* typeLabels[] = {Tr("전체"), Tr("셰이더"), Tr("효과")};
+            int curType = std::clamp(settings_.shaderType[shaderTab_], 0, 2);
+            ImGui::SetCursorScreenPos(ImVec2(curX, top + Dp(2.0f)));
+            if (Segmented("##packtype", typeLabels, 3, &curType, 0.0f, 36.0f)) {
+                settings_.shaderType[shaderTab_] = curType;
+                settings_.Save(settingsPath_);
             }
-            ImGui::EndCombo();
+            curX = ImGui::GetItemRectMax().x + Dp(8.0f);
+
+            // sort combo: compact combo (추천순 / 이름순 / 최근 업데이트 / 파라미터 많은 순)
+            const char* sortLabels[] = {Tr("추천순"), Tr("이름순"), Tr("최근 업데이트"), Tr("파라미터 많은 순")};
+            const float comboW = Dp(120.0f);
+            const char* sortPreview = sortLabels[std::clamp(settings_.shaderSort[shaderTab_], 0, 3)];
+            ImGui::SetCursorScreenPos(ImVec2(curX, top + Dp(2.0f)));
+            ImGui::SetNextItemWidth(comboW);
+            PushFont(Font::Regular, size::Small);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink));
+            const bool openSort = ImGui::BeginCombo("##packsort", sortPreview, ImGuiComboFlags_HeightLarge | ImGuiComboFlags_NoArrowButton);
+            ImGui::PopStyleColor();
+            {
+                const ImVec2 cmax = ImGui::GetItemRectMax(), cmin = ImGui::GetItemRectMin();
+                Icon(ImGui::GetWindowDrawList(), icon::CaretDown, 12.0f, ImVec2(cmax.x - Dp(12.0f), (cmin.y + cmax.y) * 0.5f), p.ink3);
+            }
+            if (openSort) {
+                for (int k = 0; k < 4; ++k) {
+                    const bool sel = settings_.shaderSort[shaderTab_] == k;
+                    if (ImGui::Selectable(sortLabels[k], sel)) {
+                        settings_.shaderSort[shaderTab_] = k;
+                        settings_.Save(settingsPath_);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            PopFont();
+            curX = ImGui::GetItemRectMax().x + Dp(12.0f);
         }
-        PopFont();
-        curX = ImGui::GetItemRectMax().x + Dp(12.0f);
 
         // Compute match count for result count and search field layout
         const std::string needle = ToLowerAscii(shaderFilter_);
+        const int curType0 = std::clamp(settings_.shaderType[0], 0, 2);
+        const int curType1 = std::clamp(settings_.shaderType[1], 0, 2);
         int matchCount = 0;
         if (shaderTab_ == 0) {
             for (const ShaderPack& pk : reg.Packs()) {
-                if (curType == 1 && pk.type != PackType::Surface) continue;
-                if (curType == 2 && pk.type != PackType::Effect) continue;
+                if (curType0 == 1 && pk.type != PackType::Surface) continue;
+                if (curType0 == 2 && pk.type != PackType::Effect) continue;
                 if (!PackMatches(needle, pk.id, pk.name, pk.authors, pk.tags)) continue;
                 ++matchCount;
             }
-        } else {
+        } else if (shaderTab_ == 1) {
             for (const RemotePack& rp : shaderStore_.Packs()) {
-                if (curType == 1 && rp.type != "surface") continue;
-                if (curType == 2 && rp.type != "effect") continue;
+                if (curType1 == 1 && rp.type != "surface") continue;
+                if (curType1 == 2 && rp.type != "effect") continue;
                 if (!PackMatches(needle, rp.id, rp.name, rp.authors, rp.tags)) continue;
+                ++matchCount;
+            }
+        } else {
+            for (const EffectAsset& e : library_.effects) {
+                if (!needle.empty() && ToLowerAscii(e.displayName).find(needle) == std::string::npos &&
+                    ToLowerAscii(e.id).find(needle) == std::string::npos && ToLowerAscii(e.kind).find(needle) == std::string::npos)
+                    continue;
                 ++matchCount;
             }
         }
@@ -331,7 +345,7 @@ void App::DrawShaders() {
         const float cw = (availW - cgap * (cols - 1)) / cols;
         const float imgH = cw * 9.0f / 16.0f, chH = imgH + Dp(92.0f);
         const std::string needle = ToLowerAscii(shaderFilter_);
-        const int curType = std::clamp(settings_.shaderType[shaderTab_], 0, 2);
+        const int curType = shaderTab_ < 2 ? std::clamp(settings_.shaderType[shaderTab_], 0, 2) : 0;
         float contentH = 0;
         int n = 0;
 
@@ -448,7 +462,7 @@ void App::DrawShaders() {
                     contentH = std::max(contentH, Dp(80.0f));
                 }
             }
-        } else {
+        } else if (shaderTab_ == 1) {
             const auto st = shaderStore_.State();
             if (st == ShaderPackStore::IndexState::Loading) {
                 Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3, Tr("온라인 목록을 불러오는 중..."));
@@ -528,6 +542,40 @@ void App::DrawShaders() {
                     }
                 }
             }
+        } else {
+            // M6b: the MME effects tab — the library's effects/ entries.
+            std::vector<const EffectAsset*> list;
+            for (const EffectAsset& e : library_.effects) {
+                if (!needle.empty() && ToLowerAscii(e.displayName).find(needle) == std::string::npos &&
+                    ToLowerAscii(e.id).find(needle) == std::string::npos && ToLowerAscii(e.kind).find(needle) == std::string::npos)
+                    continue;
+                list.push_back(&e);
+            }
+            std::stable_sort(list.begin(), list.end(), [](const EffectAsset* a, const EffectAsset* b) {
+                return ToLowerAscii(a->displayName) < ToLowerAscii(b->displayName);
+            });
+            for (const EffectAsset* e : list) {
+                std::vector<std::pair<std::string, std::pair<ImU32, ImU32>>> badges;
+                const std::pair<ImU32, ImU32> kindCol =
+                    e->kind == "post"   ? std::make_pair(p.accentSoft, p.accentInk)
+                    : e->kind == "pre"  ? std::make_pair(WithAlpha(p.ink, 0.12f), p.ink)
+                                        : std::make_pair(WithAlpha(p.ink, 0.05f), p.ink2);
+                badges.push_back({e->kind == "post" ? Tr("화면 효과") : e->kind == "pre" ? Tr("사전 효과") : Tr("오브젝트 효과"),
+                                  kindCol});
+                ImGui::PushID(e->id.c_str());
+                if (card("##mec", shaderSelMme_ == e->id, 0, {}, 0, "mme:" + e->id, e->displayName, e->id, badges, -1.0f))
+                    shaderSelMme_ = e->id;
+                ImGui::PopID();
+            }
+            if (n == 0) {
+                if (library_.effects.empty()) {
+                    Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3,
+                         Tr("라이브러리 effects 폴더에 MME 효과가 없습니다"));
+                } else {
+                    Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3,
+                         Tr("조건에 맞는 효과가 없습니다"));
+                }
+            }
         }
         ImGui::SetCursorScreenPos(origin);
         ImGui::Dummy(ImVec2(availW, contentH + inset));
@@ -539,7 +587,8 @@ void App::DrawShaders() {
         const ImVec2 pa(panelX, top), pb(ds.x - pad, ds.y - pad);
         Panel(ImGui::GetWindowDrawList(), pa, pb, Dp(22.0f), 1.0f);
         if (shaderTab_ == 0) DrawShaderPackDetail(pa.x, pa.y, pb.x, pb.y);
-        else DrawRemotePackDetail(pa.x, pa.y, pb.x, pb.y);
+        else if (shaderTab_ == 1) DrawRemotePackDetail(pa.x, pa.y, pb.x, pb.y);
+        else DrawMmeDetail(pa.x, pa.y, pb.x, pb.y);
     }
     DrawNewPackDialog();
     DrawToast();
@@ -790,6 +839,142 @@ void App::DrawShaderPackDetail(float x0, float y0, float x1, float y1) {
 }
 
 // ---- effect stack editor ------------------------------------------------------------------------------------------------------
+
+// M6b: the MME tab's detail pane (docs/mme/mme_design.md §2.13): compile status per pass, unsupported features and
+// missing textures (the parsed diagnostics), and the post-effect "효과 스택에 추가" action. Compiling for the
+// diagnostics runs on a worker thread (a spinner while it runs).
+void App::DrawMmeDetail(float x0, float y0, float x1, float y1) {
+    const Palette& p = P();
+    const EffectAsset* sel = nullptr;
+    for (const EffectAsset& e : library_.effects)
+        if (e.id == shaderSelMme_) sel = &e;
+    if (!sel && !library_.effects.empty()) {
+        sel = &library_.effects.front();
+        shaderSelMme_ = sel->id;
+    }
+    const float ip = Dp(22.0f);
+    ImGui::SetCursorScreenPos(ImVec2(x0 + ip, y0 + ip));
+    ImGui::BeginChild("##mmedetail", ImVec2(x1 - x0 - ip * 2.0f + Dp(8.0f), y1 - y0 - ip * 2.0f), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoBackground);
+    const float w = x1 - x0 - ip * 2.0f;
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+    if (!sel) {
+        Para(Tr("MME 효과는 MikuMikuEffect(.fx) 파일입니다. 라이브러리 effects 폴더에 넣으면 여기에 나타납니다."), p.ink2);
+        Gap(10.0f);
+        Para(Tr("화면 효과는 재생 중 화면 전체에, 오브젝트 효과는 캐릭터·스테이지 재질에 적용됩니다."), p.ink3, size::Caption);
+        ImGui::PopTextWrapPos();
+        ImGui::EndChild();
+        return;
+    }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    Para(sel->displayName, p.ink, size::Heading, Font::Bold);
+    const char* kindLabel = sel->kind == "post" ? Tr("화면 효과") : sel->kind == "pre" ? Tr("사전 효과") : Tr("오브젝트 효과");
+    Para(std::string(kindLabel) + "  ·  " + sel->id, p.ink3, size::Caption);
+
+    // Ray-MMD diagnostics note: the native PBR serves Ray-MMD; running it through MME is not recommended.
+    if (IsRayMmdMainEffect(sel->path) || IsRayMaterialFx(sel->path))
+        Para(Tr("Ray-MMD: 네이티브 PBR로 지원 (MME 실행은 비권장)"), p.warn, size::Caption);
+
+    // Compile for diagnostics when the selection changes (async, one at a time). The spinner shows while running.
+    if (mmeDiagFile_ != sel->id) {
+        mmeDiagFile_ = sel->id;
+        mmeDiagJob_.Start(sel->path);
+        mmeDiag_ = MmeEffectDiag{};
+    }
+    const bool busy = !mmeDiagJob_.Busy() && mmeDiag_.passes.empty() && mmeDiag_.kind.empty() && mmeDiagFile_ == sel->id;
+    // poll on every frame (the future is ready a few frames after selection)
+    if (mmeDiagJob_.Busy() && mmeDiagJob_.Poll(mmeDiag_)) { /* done */ }
+    const bool compiling = mmeDiagJob_.Busy() && mmeDiag_.kind.empty();
+    (void)busy;
+
+    Gap(12.0f);
+    // post effects can be added to the play-mode MME post stack right here
+    if (sel->kind == "post") {
+        auto& stack = settings_.mmeEffects;
+        const auto it = std::find_if(stack.begin(), stack.end(),
+                                     [&](const MmeEffectEntry& e) { return e.file == sel->path; });
+        const bool inStack = it != stack.end();
+        if (!inStack ? Button("##mestackadd", Tr("효과 스택에 추가"), icon::Plus, ButtonKind::Primary)
+                     : Button("##mestackremove", Tr("효과 스택에서 빼기"), icon::X, ButtonKind::Secondary)) {
+            if (inStack) stack.erase(it);
+            else if (GuardRayMme(sel->path, [this](const std::filesystem::path& file) {
+                         bool dup = false;
+                         for (const MmeEffectEntry& x : settings_.mmeEffects) dup |= x.file == file;
+                         if (!dup) {
+                             MmeEffectEntry m;
+                             m.file = file;
+                             m.enabled = true;
+                             settings_.mmeEffects.push_back(std::move(m));
+                             settings_.Save(settingsPath_);
+                             ApplyRenderSettings();
+                         }
+                     })) {
+                // the confirm modal collects the add
+            }
+            else {
+                MmeEffectEntry m;
+                m.file = sel->path;
+                m.enabled = true;
+                stack.push_back(std::move(m));
+            }
+            settings_.Save(settingsPath_);
+            ApplyRenderSettings();
+        }
+        Gap(8.0f);
+        Para(Tr("켠 효과는 재생 바의 화면 효과 버튼에서 끄거나 순서를 바꿀 수 있습니다."), p.ink3, size::Caption);
+        Gap(12.0f);
+    } else {
+        Para(Tr("오브젝트 효과는 로비 캐릭터 패널이나 스튜디오에서 모델에 적용합니다."), p.ink3, size::Caption);
+        Gap(12.0f);
+    }
+
+    if (compiling) {
+        Skeleton(dl, ImGui::GetCursorScreenPos(),
+                 ImVec2(ImGui::GetCursorScreenPos().x + w, ImGui::GetCursorScreenPos().y + Dp(28.0f)), Dp(8.0f));
+        ImGui::Dummy(ImVec2(w, Dp(32.0f)));
+        Para(Tr("효과를 컴파일하는 중..."), p.ink3, size::Caption);
+    } else {
+        // compile status per pass
+        SectionLabel(Tr("패스 컴파일"));
+        if (mmeDiag_.passes.empty()) {
+            Para(Tr("이 파일에는 컴파일할 패스가 없습니다"), p.ink3, size::Caption);
+        } else {
+            for (const MmeEffectDiag::Pass& pp : mmeDiag_.passes) {
+                const ImVec2 c = ImGui::GetCursorScreenPos();
+                Icon(dl, pp.ok ? icon::Check : icon::Warning, 14.0f, ImVec2(c.x + Dp(7.0f), c.y + Dp(9.0f)),
+                     pp.ok ? p.accent : p.danger);
+                Text(dl, Font::Regular, size::Small, ImVec2(c.x + Dp(22.0f), c.y + Dp(2.0f)), pp.ok ? p.ink : p.danger,
+                     (pp.technique + " / " + pp.pass).c_str());
+                if (!pp.ok && !pp.error.empty())
+                    TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(c.x + Dp(22.0f), c.y + Dp(20.0f)),
+                                 c.x + w, p.ink3, pp.error.c_str());
+                ImGui::Dummy(ImVec2(w, pp.ok ? Dp(26.0f) : Dp(44.0f)));
+            }
+        }
+        if (!mmeDiag_.unsupported.empty()) {
+            SectionLabel(Tr("지원하지 않는 기능"));
+            for (const std::string& s : mmeDiag_.unsupported) Para("· " + s, p.warn, size::Caption);
+        }
+        if (!mmeDiag_.missingTextures.empty()) {
+            SectionLabel(Tr("없는 텍스처"));
+            for (const std::string& s : mmeDiag_.missingTextures)
+                Para("· " + s + "  " + Tr("(흰색으로 표시)"), p.ink3, size::Caption);
+        }
+        if (mmeDiag_.ok && mmeDiag_.unsupported.empty() && mmeDiag_.missingTextures.empty()) {
+            Gap(12.0f);
+            Para(Tr("이 효과는 모든 패스가 정상적으로 컴파일됩니다."), p.accentInk, size::Small, Font::Semibold);
+        }
+        if (!mmeDiag_.kind.empty()) {
+            Gap(8.0f);
+            char meta[96];
+            std::snprintf(meta, sizeof(meta), "%d/%d %s", (int)(mmeDiag_.passes.size() - mmeDiag_.unsupported.size()),
+                          (int)mmeDiag_.passes.size(), Tr("패스"));
+            Para(meta, p.ink3, size::Caption);
+        }
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::EndChild();
+}
 
 // The ordered effect stack (RenderSettings::packEffects): per entry an enable switch, up / down / remove and the pack's
 // sliders; "효과 추가" appends an installed effect pack. True = the stack changed this frame (the caller saves + applies).

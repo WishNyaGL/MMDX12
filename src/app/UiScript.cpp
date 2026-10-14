@@ -9,6 +9,7 @@
 
 #include "anim/ModelInstance.h"
 #include "app/Lighting.h"
+#include "asset/RayMaterial.h"
 #include "core/I18n.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
@@ -248,6 +249,18 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                              l.keys.size(), (int)l.viewportVisible);
                 }
             }
+            // M6b: the per-model MME choice + the project's MME post stack (studio E2E comparisons).
+            for (size_t i = 0; i < d.models.size(); ++i) {
+                const studio::StudioModel& mm = *d.models[i];
+                const char* mode = mm.mme.mode == MmeChoice::Auto  ? "auto"
+                                   : mm.mme.mode == MmeChoice::File ? "file"
+                                                                    : "none";
+                LOG_INFO("STUDIOMME %zu mode=%s file=%s", i, mode,
+                         mm.mme.file.empty() ? "-" : PathToUtf8(mm.mme.file).c_str());
+            }
+            for (size_t i = 0; i < d.mmePost.size(); ++i)
+                LOG_INFO("STUDIOMMEPOST %zu enabled=%d path=%s", i, (int)d.mmePost[i].enabled,
+                         PathToUtf8(d.mmePost[i].path).c_str());
         }
     } else if (cmd == "studiobone") {  // studiobone <name>: click the bone's joint in the viewport
         const studio::StudioModel* m = studio_ ? studio_->Selected() : nullptr;
@@ -498,6 +511,17 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
         studio::ModelKind kind;
         if (studio_ && args.size() >= 2 && studio::ParseModelKind(args[0], kind))
             StudioAddModelFile(kind, std::filesystem::absolute(Utf8ToPath(args[1])));
+    } else if (cmd == "studiommeobject") {  // studiommeobject <path.x|path.fx> [label...]
+        // M5c: adds an MME effect object (an accessory `.x` + its same-stem `.fx`, or a fee `.fx`).
+        if (studio_ && !args.empty()) {
+            std::string path = args[0];
+            for (size_t i = 1; i < args.size(); ++i) path += " " + args[i];
+            const std::filesystem::path abs = std::filesystem::absolute(Utf8ToPath(path));
+            // scripts cannot answer a modal: a Ray-MMD main effect is added with a warning
+            if (IsRayMmdMainEffect(abs))
+                LOG_WARN("Ray-MMD main effect added as MME (forced by script)");
+            StudioAddMmeObject(abs);
+        }
     } else if (cmd == "studioaddlib" || cmd == "studiosong") {  // studioaddlib <character|stage> <substr>
         const bool song = cmd == "studiosong";
         const std::string kind = song ? "song" : (args.empty() ? "" : args[0]);
@@ -615,6 +639,39 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             }
             StudioAddModelFile(m->kind, m->path, m->uid, &m->material);   // reload this model's PBR data
             ++studio_->projectVersion;
+        }
+    } else if (cmd == "studiomme") {  // studiomme <model index> <none|auto|file> [path]
+        if (studio_ && args.size() >= 2) {
+            const int mi = std::atoi(args[0].c_str());
+            if (mi >= 0 && mi < (int)studio_->models.size()) {
+                studio::StudioModel* m = studio_->models[(size_t)mi].get();
+                MmeChoice c;
+                if (args[1] == "auto") c.mode = MmeChoice::Auto;
+                else if (args[1] == "file") {
+                    c.mode = MmeChoice::File;
+                    if (args.size() > 2 && !args[2].empty() && args[2] != "-")
+                        c.file = std::filesystem::absolute(Utf8ToPath(args[2]));
+                }
+                m->mme = c;
+                ++studio_->projectVersion;
+            }
+        }
+    } else if (cmd == "studiommepost") {  // studiommepost <add|remove> <path>
+        if (studio_ && args.size() >= 2) {
+            const std::string action = ToLowerAscii(args[0]);
+            if (action == "add") {
+                const std::filesystem::path p = std::filesystem::absolute(Utf8ToPath(args[1]));
+                bool dup = false;
+                for (const studio::MmePostEntry& e : studio_->mmePost) dup |= e.path == p;
+                if (!dup) studio_->mmePost.push_back(studio::MmePostEntry{p, true});
+                StudioMmeChanged();
+            } else if (action == "remove") {
+                const std::filesystem::path p = std::filesystem::absolute(Utf8ToPath(args[1]));
+                auto& v = studio_->mmePost;
+                v.erase(std::remove_if(v.begin(), v.end(), [&](const studio::MmePostEntry& e) { return e.path == p; }),
+                        v.end());
+                StudioMmeChanged();
+            }
         }
     } else if (cmd == "log") {
         LOG_INFO("UISCRIPT %s", args.empty() ? "" : args[0].c_str());

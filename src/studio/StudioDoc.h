@@ -42,6 +42,7 @@ struct StudioModel {
     std::string name;              // outliner label
     std::string libraryId;         // character id in the library (saved display scale), empty for others
     std::filesystem::path path;
+    std::filesystem::path fx;          // M5c: effect-object effects (kind Effect; optional with a mesh)
     std::filesystem::path defaultPackTextureFolder;  // model's MME face texture folder (shader pack default)
     uint32_t uid = 0;              // stable id (prop parents, async loads); indices shift when a model is removed
     ModelKind kind = ModelKind::Character;  // stage: no physics, drawn first; prop: follows `attach`, no physics
@@ -51,6 +52,7 @@ struct StudioModel {
     bool visible = true;
     bool physicsOff = false;       // P2.2: rigid-body physics is off for this model (saved in the project; baked keys replace it)
     ShaderChoice shader;           // characters: shader pack (render/ShaderPack.h); empty = the default shading
+    MmeChoice mme;                 // M6a: MME object effect choice; characters default None, stages Auto
     MaterialChoice material;       // P5: per-material PBR source (Default / Ray-MMD + optional explicit .emd)
     std::shared_ptr<const PmxModel> pmx;
     std::unique_ptr<ModelInstance> inst;
@@ -68,7 +70,10 @@ struct StudioModel {
     std::vector<uint32_t> boneRowGroup, morphRowGroup;
     void BuildRowGroups();
     bool IsStage() const { return kind == ModelKind::Stage; }
-    bool IsProp() const { return kind == ModelKind::Prop; }
+    // M5c: an effect object is an accessory `.x` + its same-stem `.fx`; it reuses the prop row / accessory key
+    // track (the keys drive the controller panel), so IsProp() is true for it too.
+    bool IsEffect() const { return kind == ModelKind::Effect; }
+    bool IsProp() const { return kind == ModelKind::Prop || kind == ModelKind::Effect; }
 };
 
 // Timeline row ids: kind in the top byte, then a 24-bit group and a 32-bit index. Light is the camera VMD's light
@@ -133,6 +138,9 @@ struct StudioDoc {
     // order = timeline order. The undoable edits of the list are LightsCommand; key edits are TrackEditCommand.
     std::vector<SceneLight> lights;
     uint32_t nextLightUid = 1;        // light uids are separate from the model uids
+    // M6b: the project's own MME post stack (docs/mme/mme_design.md §2.10); while the studio is open it replaces
+    // the play-mode stack (RenderSettings::mmeEffects) and offline renders use it. Saved in the project.
+    std::vector<MmePostEntry> mmePost;
     bool Dirty() const { return history.Version() != savedVersion || projectVersion != savedProjectVersion; }
     uint64_t ChangeStamp() const { return history.Version() + (projectVersion << 32); }
     void MarkSaved() { savedVersion = history.Version(); savedProjectVersion = projectVersion; }
@@ -403,6 +411,7 @@ struct StudioPackageModel {
     std::vector<ImageRGBA8> textures;
     std::string name, libraryId;
     ModelKind kind = ModelKind::Character;
+    std::filesystem::path fx;                 // M5c: kind Effect only: the effect file (mesh = `pmx`, may be null)
     bool visible = true;
     bool physicsOff = false;                 // P2.2: physics off for this model (project files)
     std::filesystem::path defaultPackTextureFolder;  // model's MME face texture folder (shader pack default)
@@ -412,6 +421,7 @@ struct StudioPackageModel {
     PropAttach attach;                       // props: parent = index into StudioPackage::models (-1 world)
     PropAttach place;                        // characters / stages: world placement
     ShaderChoice shader;                     // characters: shader pack
+    MmeChoice mme;                           // M6a: MME object effect choice
     MaterialChoice material;                 // P5: per-material PBR source (Default / Ray-MMD)
     MotionData motion;                       // names canonicalised to pmx
 };
@@ -427,6 +437,9 @@ struct StudioPackage {
     std::filesystem::path projectPath;       // the file loaded (recovery: the project it belongs to, may be empty)
     bool recovered = false;                  // loaded from the autosave: opens dirty
     std::vector<std::string> warnings;       // missing models / motions (shown as a toast)
+    // M6b: the project's own MME post stack (StudioProject.h "mmeEffects"); while the studio is open it replaces
+    // the play-mode stack (RenderSettings::mmeEffects).
+    std::vector<MmePostEntry> mmePost;
     PmmEffectSettings pmmEffects;            // .pmm import: MME controller mapping (App applies it)
     int pmmWidth = 0, pmmHeight = 0;         // .pmm import: output resolution (aspect preset)
     float pmmFps = 0.0f;                     // .pmm import: preferred fps (informational)

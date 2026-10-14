@@ -55,7 +55,7 @@ std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> BuildGeometryDescs(GpuModel& model, 
         // queries see their run-time alpha (RtGeometry). Character BLAS are rebuilt every frame.
         const bool alphaTest = m.alphaTested || c.diffuse.w < 0.999f ||
                                PackAlphaKeyFromClass(c.packClass) > 0.0f ||
-                               (m.morphable && model.Role() == ModelRole::Stage);
+                               (m.morphable && model.Role() == ModelRole::Stage && !model.Dynamic());
         d.Flags = (m.castShadow && !alphaTest) ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE
                                                : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
         d.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
@@ -194,7 +194,7 @@ bool RtScene::EnsureModelResources(GpuModel& model) {
         if (geoms.empty()) continue;
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
         in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-        in.Flags = model.Role() == ModelRole::Stage
+        in.Flags = model.Role() == ModelRole::Stage && !model.Dynamic()
                        ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
                        : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
         in.NumDescs = (UINT)geoms.size();
@@ -225,9 +225,10 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
     ID3D12Device* device = ctx_->Device();
 
     const auto needsSkin = [](const GpuModel* m) {
-        return m->Role() == ModelRole::Character || !const_cast<GpuModel*>(m)->Rt().blasBuilt;
+        return m->Role() == ModelRole::Character || m->Dynamic() || !const_cast<GpuModel*>(m)->Rt().blasBuilt;
     };
-    const auto usable = [](GpuModel* m) { return m && m->VertexCount() > 0; };
+    // MME effect-object meshes (particles, sprites) are drawn by the MME layer only, never traced.
+    const auto usable = [](GpuModel* m) { return m && m->VertexCount() > 0 && !m->MmeEffectMesh(); };
 
     // ---- 1. GPU skinning into the world-space RtVertex buffers -----------
     cmd->SetComputeRootSignature(skinRootSig_.Get());
@@ -275,14 +276,14 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
     for (GpuModel* m : models) {
         if (!usable(m) || !EnsureModelResources(*m)) continue;
         auto& rt = m->Rt();
-        if (!(m->Role() == ModelRole::Character || !rt.blasBuilt)) continue;
+        if (!(m->Role() == ModelRole::Character || m->Dynamic() || !rt.blasBuilt)) continue;
         for (int part = 0; part < 2; ++part) {
             const auto& bp = rt.parts[part];
             if (!bp.blas) continue;
             const auto geoms = BuildGeometryDescs(*m, part);
             D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
             d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-            d.Inputs.Flags = m->Role() == ModelRole::Stage
+            d.Inputs.Flags = m->Role() == ModelRole::Stage && !m->Dynamic()
                                  ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
                                  : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
             d.Inputs.NumDescs = (UINT)geoms.size();
@@ -487,13 +488,13 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
             const MaterialConstants& c = m->MaterialConstantsCpu()[mi];
             const float alphaKey = PackAlphaKeyFromClass(c.packClass);
             const bool alphaTest = m2.alphaTested || c.diffuse.w < 0.999f || alphaKey > 0.0f ||
-                                   (m2.morphable && m->Role() == ModelRole::Stage);
+                                   (m2.morphable && m->Role() == ModelRole::Stage && !m->Dynamic());
             RtGeometry e{};
             e.vertexSrv = rt.srv;
             e.indexSrv = rt.srv + 1;
             e.indexStart = m2.indexStart;
             e.flags = c.flags | (m2.castShadow ? RtGeom_CastShadow : 0) | (alphaTest ? RtGeom_AlphaTest : 0) |
-                      (m->Role() == ModelRole::Character ? RtGeom_Character : 0);
+                      ((m->Role() == ModelRole::Character || m->Dynamic()) ? RtGeom_Character : 0);
             e.diffuse = c.diffuse;
             e.specular = c.specular;
             e.specularPower = c.specularPower;

@@ -59,6 +59,14 @@ struct AppSettings {
     std::map<std::string, ShaderChoice> characterShaders;  // character id -> shader pack (absent = default shading)
     ShaderChoice CharacterShader(const std::string& id) const;
     void SetCharacterShader(const std::string& id, const ShaderChoice& choice);  // empty pack removes the entry
+    // M6a: per-character / per-stage MME object effect choice (render/ShaderPack.h MmeChoice). Absent = the default
+    // (characters None, stages Auto). Persisted as "characterMme=<mode>|<file or ->|<id>" / "stageMme=..."
+    std::map<std::string, MmeChoice> characterMmes;
+    std::map<std::string, MmeChoice> stageMmes;
+    MmeChoice CharacterMme(const std::string& id) const;
+    void SetCharacterMme(const std::string& id, const MmeChoice& choice);   // None removes the entry
+    MmeChoice StageMme(const std::string& id) const;
+    void SetStageMme(const std::string& id, const MmeChoice& choice);
     // (pack, character) pairs the app already suggested once (ShaderPack "suggest" fits the model's data): never
     // suggested again. Persisted as "characterShaderSuggested=<pack id>|<character id>" lines (pack ids hold no '|').
     // Old "characterShaderAuto" lines are ignored on load.
@@ -69,6 +77,11 @@ struct AppSettings {
     void SetShaderSuggested(const std::string& packId, const std::string& characterId) {
         characterShaderSuggested.insert(packId + "|" + characterId);
     }
+    // M6b: character ids the app already suggested an MME object effect for (the model ships an .emd / same-name
+    // .fx and has no saved MME choice): never suggested again. Persisted as "characterMmeSuggested=<character id>".
+    std::set<std::string> characterMmeSuggested;
+    bool MmeSuggested(const std::string& characterId) const { return characterMmeSuggested.count(characterId) != 0; }
+    void SetMmeSuggested(const std::string& characterId) { characterMmeSuggested.insert(characterId); }
     // P5 per-character PBR material source (Default / Ray-MMD + optional explicit .emd). Persisted as
     // "characterMaterial=<ray|default>|<emd path or empty>|<character id>" lines (the id last, like the other
     // lines). Absent = Default.
@@ -92,6 +105,9 @@ struct AppSettings {
     // video / still renders (the real-time renderers; GI / PT output skips it). Persisted as
     // "effect=<pack id>|<enabled>|<key>:<value>,...|<texture folder or ->|" ini lines, oldest first.
     std::vector<EffectStackEntry> effectStack;
+    // M6b: the play-mode MME post stack (RenderSettings::mmeEffects). Persisted as
+    // "mmeEffect=<enabled 0|1>|<path>" ini lines, oldest first; --mme overrides it for one run.
+    std::vector<MmeEffectEntry> mmeEffects;
     int shaderSort[2] = {0, 0};   // 0 recommended, 1 name, 2 updated, 3 params
     int shaderType[2] = {0, 0};   // 0 all, 1 surface, 2 effect
     int windowWidth = 1600, windowHeight = 900;
@@ -106,6 +122,11 @@ struct AppSettings {
     };
     std::map<std::string, SavedFormation> songFormations; // song id -> saved formation
     std::map<std::string, std::string> songCameras;       // song id -> chosen camera VMD file name (songs with several)
+    std::map<std::string, std::string> songStages;        // song id -> chosen stage library id ("-" = none; absent = bundled default)
+    std::map<std::string, std::string> songAudios;        // song id -> chosen audio file name (songs with several versions)
+    // M8b: per-song video override. song id -> "<overlay|background|off>[:<black|screen|add|normal>]|<file name>"
+    // (file empty = the classification; "off" = no video layers for this song). See App::ResolveSongVideos.
+    std::map<std::string, std::string> songVideos;
 
     const VideoProbe* FindVideoProbe(uint64_t key) const;
     void SetVideoProbe(uint64_t key, double secondsPerFrame);  // replaces an entry with the same key

@@ -1717,3 +1717,45 @@ over cross-session messages, files kept disjoint.
   dance), (2) content fallback (keys on ~every frame + length ~2x audio), (3) per-song override auto / 30 / 60 in the
   library card menu (`library_overrides.json`, `mmdx.json`), (4) studio import of a 60 fps VMD resamples to the 30 fps
   timeline with a toast (saves an ordinary 30 fps VMD).
+
+## 2026-10-14 (2) - MME (MikuMikuEffect) compatibility: own parser/runtime on DX12, effect library, Dreamin Chuchu MV
+Design / checklist: `docs/mme/mme_design.md` (research in `docs/mme/research/`). Milestones M1..M8 implemented by
+opencode/deepseek workers from Claude's specs; Claude reviewed, did the E2E / visual QA and surgical fixes.
+- Pipeline: own .fx parser + preprocessor + IR (`asset/MmeEffect`, `MmePreprocessor`, `MmeAssign` for .emd / same-name
+  .fx / `name[fx].pmx`) -> FXC SM5 wrappers (`render/MmeCompiler`, object mode = host MRT: linear colour x sun, octa
+  normal with nt.z = -1, velocity) -> reflection -> `render/MmeRuntime` (instances per (file, objectMode), persistent
+  SRV tables, sampler heap, constant ring, root sig with the host cbuffer at b13), `MmeScriptVM` (Script annotations,
+  loops, RenderColorTarget), `MmeSemantics` (MMD semantics + CONTROLOBJECT; missing object = bool false, items 0).
+- Passes: object effects in the scene pass, MMD self-shadow (`MmeShadowPass`, ortho light camera fitted to the posed
+  bones, zplot with the plain instance), offscreen render targets with DefaultEffect lists + `shaders/mme/standard.fx`
+  fallback + GenerateMips (`PassMmeOffscreen`), post chain (`PassMme`); PT / offline GI draw an MME layer
+  (`DrawMmeModelToMrt`, waits for readiness). Object techniques that switch RenderColorTarget run through the VM with
+  the plain instance. DDS loader, animated textures, video layer (`asset/VideoReader`, `PassVideo`: background where
+  depth is far, black-keyed overlay).
+- Product: per-model MME choice None / Auto / File (characters None, stages Auto; ini `characterMme=` / `stageMme=`,
+  project `"mme"`, CLI `--mme-auto`, `--stage-mme`, `--mme`, `--mme-model`, `--mme-object`), MME post stack (ini
+  `mmeEffect=`, lobby / play bar "효과 파일" row, shader manager MME tab with diagnostics, studio project
+  `"mmeEffects"`), effect objects (`.x` accessory + same-stem `.fx`: studio "MME 효과", drag and drop, project kind
+  `"effect"`), hot reload, `effects/` library folder. Song packages (M8): bundled stage + its motion (bone-match score),
+  audio versions (`songAudio=`), `bg.avi` / overlay videos (`songVideo=`), MME TIME from the scene clock.
+- Ray-MMD vs the native PBR: MME Auto skips `IsRayMaterialFx` assignments (native PBR reads them); adding a Ray-MMD
+  main effect (`IsRayMmdMainEffect`: includes ray.conf / ray_controller.pmx) to a stack or as an effect object opens a
+  confirm modal (`App::GuardRayMme` / `DrawRayMmeConfirm`); scripts / CLI add it with a `[W]`.
+- Library / harness: 58 popular effects in `captures/mme_lib` (git-ignored downloads), `tools/mme/mme_compat_run.py`
+  (static + render, tiers, contact sheet, `docs/mme/compat_list.md`, final tiers in `docs/mme/compat_overrides.json`):
+  57 run, auto A 42 / B 8 / C 6; final notes per effect.
+- Fixes in the QA round: RTV / DSV heaps 64/192 -> 1024/512 (AutoLuminous's targets exhausted it: white frame, then a
+  crash; `Texture::Create` now fails cleanly), offscreen sub-effects still compiling draw nothing (the standard
+  fallback painted whole models into AL's emitter), offline edge pass always restores its state after the MME layer
+  (crash with effect objects), effect-object meshes out of the TLAS / offline depth pass, a post effect's controller
+  `.x` hidden, host-MRT alpha = the effect's alpha (particles were opaque), studio drops of effects alone were dropped
+  before the effects loop (pre-existing).
+- Verified: raster / RT / PT / offline GI object effects, self-shadow, SvSSAO / AL4 / Diffusion / WorldSnow /
+  BillboardSet etc., Dreamin Chuchu with 5 performers in play mode and as an offline video (frame-identical to play at
+  78 s), Ray .emd test model goes to the native PBR in raster / RT / PT, tests (mme_parse 20/20, mme_compile 15/15,
+  mme_script, dds 15/15, anim_texture, raymat, studio_project 194) pass.
+### Not verified / left
+- C tier: HgDOF (no change), TrueCameraLX (0 programs), HAToon2 (FXC X4555), SimpleToon (PSO E_INVALIDARG), MMDShadow
+  via its .x (0 programs), NCHLShader2 (needs its controller). B: WorkingFloorAL reflection darker than MMD, WorkingRay
+  plane too high, RealFigureShader blocky hair shadow, Hg lights unverified without a placed light.
+- The compat harness's 60-frame capture can race a cold shader compile (re-run with a warm cache).

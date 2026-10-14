@@ -15,6 +15,7 @@ const char* ModelKindName(ModelKind k) {
     switch (k) {
     case ModelKind::Stage: return "stage";
     case ModelKind::Prop: return "prop";
+    case ModelKind::Effect: return "effect";
     case ModelKind::Character: break;
     }
     return "character";
@@ -24,6 +25,7 @@ bool ParseModelKind(const std::string& s, ModelKind& out) {
     if (s == "character") { out = ModelKind::Character; return true; }
     if (s == "stage") { out = ModelKind::Stage; return true; }
     if (s == "prop") { out = ModelKind::Prop; return true; }
+    if (s == "effect") { out = ModelKind::Effect; return true; }
     return false;
 }
 
@@ -521,10 +523,10 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
             jm["name"] = m.name;
             jm["kind"] = ModelKindName(m.kind);
             jm["path"] = RelPath(m.path, dir);
-            jm["libraryId"] = m.libraryId;
-            jm["visible"] = m.visible;
+            if (m.kind == ModelKind::Effect && !m.fx.empty()) jm["fx"] = RelPath(m.fx, dir);
+            jm["libraryId"] = m.libraryId;            jm["visible"] = m.visible;
             if (m.physicsOff) jm["physics"] = false;  // P2.2: only written when off (absent = physics on)
-            if (m.kind != ModelKind::Prop && !(m.place == PropAttach{})) {  // identity placement is not written
+            if (m.kind != ModelKind::Prop && m.kind != ModelKind::Effect && !(m.place == PropAttach{})) {  // identity placement is not written
                 jm["place"] = {
                     {"t", {m.place.translation.x, m.place.translation.y, m.place.translation.z}},
                     {"r", {m.place.rotationDeg.x, m.place.rotationDeg.y, m.place.rotationDeg.z}},
@@ -561,7 +563,20 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                 jm["material"] = {{"ray", true}};
                 if (!m.material.emd.empty()) jm["material"]["emd"] = RelPath(Utf8ToPath(m.material.emd), dir);
             }
-            if (m.kind == ModelKind::Prop) {  // "attach" is written for props only
+            // M6a: the per-model MME choice (absent = characters None / stages Auto); the file is relative.
+            {
+                const MmeChoice mmeDefault = m.kind == ModelKind::Stage ? MmeChoice{MmeChoice::Auto, {}}
+                                                                        : MmeChoice{};
+                if (!(m.mme == mmeDefault)) {
+                    jm["mme"] = {{"mode", m.mme.mode == MmeChoice::Auto ? "auto"
+                                             : m.mme.mode == MmeChoice::File ? "file"
+                                                                             : "none"}};
+                    if (m.mme.mode == MmeChoice::File && !m.mme.file.empty())
+                        jm["mme"]["file"] = RelPath(m.mme.file, dir);
+                }
+            }
+            // M5c: an effect object shares the accessory key track (its keys drive the controller panel).
+            if (m.kind == ModelKind::Prop || m.kind == ModelKind::Effect) {
                 const PropAttach& a = m.attach;
                 jm["attach"] = {
                     {"parent", a.parent},
@@ -591,6 +606,13 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
         }
         j["models"] = std::move(models);
         j["camera"] = camName.empty() ? nlohmann::json(nullptr) : nlohmann::json(WideToUtf8(camName));
+        // M6b: the project's own MME post stack (effects after the scene, replaces the play-mode stack).
+        {
+            nlohmann::json mme = nlohmann::json::array();
+            for (const MmePostEntry& e : data.mmePost)
+                mme.push_back({{"path", RelPath(e.path, dir)}, {"enabled", e.enabled}});
+            j["mmeEffects"] = std::move(mme);
+        }
         if (data.audioPath.empty()) {
             j["audio"] = nullptr;
         } else {
@@ -734,6 +756,7 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                 pm.name = ReadString(m, "name", "");
                 pm.kind = kind;
                 pm.path = ResolvePath(ReadString(m, "path", ""), dir);
+                if (kind == ModelKind::Effect) pm.fx = ResolvePath(ReadString(m, "fx", ""), dir);
                 pm.libraryId = ReadString(m, "libraryId", "");
                 pm.visible = ReadBool(m, "visible", true);
                 pm.physicsOff = !ReadBool(m, "physics", true);  // absent = physics on; false = baked / off
@@ -775,8 +798,20 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                         if (!emd.empty()) pm.material.emd = PathToUtf8(ResolvePath(emd, dir));
                     }
                 }
-                if (kind == ModelKind::Prop && m.contains("attach") && m["attach"].is_object()) {
-                    const nlohmann::json& a = m["attach"];  // "attach" is read for props only
+                // M6a: the per-model MME choice (absent = characters None / stages Auto)
+                pm.mme = kind == ModelKind::Stage ? MmeChoice{MmeChoice::Auto, {}} : MmeChoice{};
+                if (m.contains("mme") && m["mme"].is_object()) {
+                    const nlohmann::json& mm = m["mme"];
+                    const std::string mode = ReadString(mm, "mode", "none");
+                    pm.mme.mode = mode == "auto" ? MmeChoice::Auto : mode == "file" ? MmeChoice::File : MmeChoice::None;
+                    if (pm.mme.mode == MmeChoice::File) {
+                        const std::string file = ReadString(mm, "file", "");
+                        if (!file.empty()) pm.mme.file = ResolvePath(file, dir);
+                    }
+                }
+                if ((kind == ModelKind::Prop || kind == ModelKind::Effect) && m.contains("attach") &&
+                    m["attach"].is_object()) {
+                    const nlohmann::json& a = m["attach"];  // "attach" is read for props / effect objects only
                     pm.attach.parent = ReadInt(a, "parent", -1);
                     pm.attach.bone = ReadString(a, "bone", "");
                     pm.attach.translation = ReadVec3(a, "t", pm.attach.translation);
@@ -784,7 +819,8 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                     pm.attach.scale = (float)ReadDouble(a, "s", pm.attach.scale);
                 }
                 // the accessory keys (a parent is 1 + the project model index here; converted by the caller)
-                if (kind == ModelKind::Prop && m.contains("accessory") && m["accessory"].is_array()) {
+                if ((kind == ModelKind::Prop || kind == ModelKind::Effect) && m.contains("accessory") &&
+                    m["accessory"].is_array()) {
                     for (const nlohmann::json& jk : m["accessory"]) {
                         if (!jk.is_object()) continue;
                         AccessoryKf k;
@@ -834,6 +870,17 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
         if (j.contains("audio") && j["audio"].is_object()) {
             out.audioPath = ResolvePath(ReadString(j["audio"], "path", ""), dir);
             out.audioOffset = ReadDouble(j["audio"], "offset", out.audioOffset);
+        }
+
+        // M6b: the project's own MME post stack.
+        if (j.contains("mmeEffects") && j["mmeEffects"].is_array()) {
+            for (const auto& je : j["mmeEffects"]) {
+                if (!je.is_object()) continue;
+                MmePostEntry e;
+                e.path = ResolvePath(ReadString(je, "path", ""), dir);
+                e.enabled = ReadBool(je, "enabled", true);
+                if (!e.path.empty()) out.mmePost.push_back(std::move(e));
+            }
         }
 
         // The editor state. A version 1 file's lighting (a source choice + spot rig, or only "useLightTrack") is converted
@@ -946,7 +993,7 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
         // Remap prop "parent" indices through the old->new map; a parent that points at a skipped
         // model, or out of range, becomes -1 (the world origin).
         for (ProjectModel& pm : out.models) {
-            if (pm.kind != ModelKind::Prop) continue;
+            if (pm.kind != ModelKind::Prop && pm.kind != ModelKind::Effect) continue;
             const auto it = remap.find(pm.attach.parent);
             pm.attach.parent = it == remap.end() ? -1 : it->second;
             // accessory keys: a parent is 1 + the old model index (0 = the world); remap through the same map

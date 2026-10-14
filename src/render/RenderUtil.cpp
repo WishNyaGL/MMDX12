@@ -43,6 +43,10 @@ bool Texture::Create(Dx12Context& ctx, uint32_t w, uint32_t h, DXGI_FORMAT fmt, 
 
     if (isRt) {
         rtv = ctx.RtvHeap().Allocate(arrayCount);
+        if (rtv == DescriptorHeap::kInvalid) {   // heap exhausted: fail instead of writing a bad handle
+            LOG_ERROR("Texture::Create: RTV heap exhausted");
+            return false;
+        }
         for (uint32_t i = 0; i < arrayCount; ++i) {
             D3D12_RENDER_TARGET_VIEW_DESC d{};
             d.Format = fmt;
@@ -58,6 +62,10 @@ bool Texture::Create(Dx12Context& ctx, uint32_t w, uint32_t h, DXGI_FORMAT fmt, 
     }
     if (isDepth) {
         dsv = ctx.DsvHeap().Allocate(arrayCount);
+        if (dsv == DescriptorHeap::kInvalid) {
+            LOG_ERROR("Texture::Create: DSV heap exhausted");
+            return false;
+        }
         if (dsv == DescriptorHeap::kInvalid) {
             LOG_ERROR("Texture::Create: out of DSV descriptors for %u slices (heap capacity %u, used %u)",
                       arrayCount, ctx.DsvHeap().Capacity(), ctx.DsvHeap().Used());

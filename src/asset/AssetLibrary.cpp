@@ -1,7 +1,9 @@
 #include "asset/AssetLibrary.h"
 #include "asset/BinaryReader.h"
+#include "asset/MmeEffect.h"
 #include "asset/ModelImport.h"
 #include "asset/PmxModel.h"
+#include "asset/VideoReader.h"
 #include "asset/VmdMotion.h"
 #include "core/AudioProbe.h"
 #include "core/Log.h"
@@ -42,6 +44,16 @@ bool ContainsBoneName(const std::vector<std::string>& names, std::string_view n)
     for (const auto& name : names) {
         if (name == n) return true;
     }
+    return false;
+}
+
+// M8a: does a keyed VMD bone name (truncated to 15 bytes) name one of the model's bones? Names shorter than 15
+// bytes must match exactly; a 15-byte name may be a truncated model bone name (prefix match).
+bool StageBoneMatches(const std::string& keyed, const std::set<std::string>& modelBones) {
+    if (modelBones.count(keyed)) return true;
+    if (keyed.size() < 15) return false;
+    for (const auto& b : modelBones)
+        if (b.size() > keyed.size() && b.compare(0, keyed.size(), keyed) == 0) return true;
     return false;
 }
 
@@ -284,6 +296,12 @@ struct AudioEntry {
     double sec = 0;
 };
 
+// M8b: a video file found under a song folder (mp4, mov, wmv, avi, mkv), with its duration from the reader's open.
+struct VideoEntry {
+    std::filesystem::path path;
+    double sec = 0;
+};
+
 bool IsGenericStem(const std::string& stem) {
     static const std::set<std::string> kGeneric = {"model", "scene", "untitled", "character", "avatar", "mesh", "export",
                                                    "stage", "main", "default", "body"};
@@ -383,9 +401,28 @@ bool SaveLibraryScanResult(const LibraryScanResult& result) {
         nlohmann::json jcams = nlohmann::json::array();
         for (const auto& c : s.cameraVmds) jcams.push_back(PathToUtf8(c));
         js["cameraVmds"] = std::move(jcams);
+        js["bundledStageId"] = s.bundledStageId;
+        js["stageVmd"] = PathToUtf8(s.stageVmd);
+        nlohmann::json jaudio = nlohmann::json::array();
+        for (const auto& a : s.audioPaths) jaudio.push_back(PathToUtf8(a));
+        js["audioPaths"] = std::move(jaudio);
+        js["overlayVideo"] = PathToUtf8(s.overlayVideo);
+        js["backgroundVideo"] = PathToUtf8(s.backgroundVideo);
         songs.push_back(std::move(js));
     }
     j["songs"] = std::move(songs);
+
+    nlohmann::json effects = nlohmann::json::array();
+    for (const auto& e : result.effects) {
+        nlohmann::json je;
+        je["id"] = e.id;
+        je["path"] = PathToUtf8(e.path);
+        je["displayName"] = e.displayName;
+        je["kind"] = e.kind;
+        je["readmeImage"] = PathToUtf8(e.readmeImage);
+        effects.push_back(std::move(je));
+    }
+    j["effects"] = std::move(effects);
 
     WriteJsonAtomically(resultFile, j);
     return true;
@@ -472,7 +509,26 @@ bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult&
             if (js.contains("cameraVmds") && js["cameraVmds"].is_array())
                 for (const auto& c : js["cameraVmds"])
                     if (c.is_string()) s.cameraVmds.push_back(Utf8ToPath(c.get<std::string>()));
+            s.bundledStageId = js.value("bundledStageId", "");
+            s.stageVmd = Utf8ToPath(js.value("stageVmd", ""));
+            if (js.contains("audioPaths") && js["audioPaths"].is_array())
+                for (const auto& a : js["audioPaths"])
+                    if (a.is_string()) s.audioPaths.push_back(Utf8ToPath(a.get<std::string>()));
+            s.overlayVideo = Utf8ToPath(js.value("overlayVideo", ""));
+            s.backgroundVideo = Utf8ToPath(js.value("backgroundVideo", ""));
             out.songs.push_back(std::move(s));
+        }
+    }
+    if (j.contains("effects") && j["effects"].is_array()) {
+        for (const auto& je : j["effects"]) {
+            if (!je.is_object()) continue;
+            EffectAsset e;
+            e.id = je.value("id", "");
+            e.path = Utf8ToPath(je.value("path", ""));
+            e.displayName = je.value("displayName", "");
+            e.kind = je.value("kind", "");
+            e.readmeImage = Utf8ToPath(je.value("readmeImage", ""));
+            out.effects.push_back(std::move(e));
         }
     }
     return true;
@@ -481,8 +537,14 @@ bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult&
 bool LibraryScanResultsEqual(const LibraryScanResult& a, const LibraryScanResult& b) {
     if (a.characters.size() != b.characters.size() ||
         a.stages.size() != b.stages.size() ||
-        a.songs.size() != b.songs.size()) {
+        a.songs.size() != b.songs.size() ||
+        a.effects.size() != b.effects.size()) {
         return false;
+    }
+    for (size_t i = 0; i < a.effects.size(); ++i) {
+        if (a.effects[i].id != b.effects[i].id || a.effects[i].kind != b.effects[i].kind ||
+            a.effects[i].path != b.effects[i].path)
+            return false;
     }
     for (size_t i = 0; i < a.characters.size(); ++i) {
         if (a.characters[i].id != b.characters[i].id ||
@@ -507,6 +569,11 @@ bool LibraryScanResultsEqual(const LibraryScanResult& a, const LibraryScanResult
             a.songs[i].cameraVmd != b.songs[i].cameraVmd ||
             a.songs[i].audioPath != b.songs[i].audioPath ||
             a.songs[i].extraVmds != b.songs[i].extraVmds ||
+            a.songs[i].bundledStageId != b.songs[i].bundledStageId ||
+            a.songs[i].stageVmd != b.songs[i].stageVmd ||
+            a.songs[i].audioPaths != b.songs[i].audioPaths ||
+            a.songs[i].overlayVideo != b.songs[i].overlayVideo ||
+            a.songs[i].backgroundVideo != b.songs[i].backgroundVideo ||
             std::fabs(a.songs[i].durationSec - b.songs[i].durationSec) > 0.01f)
             return false;
         if (a.songs[i].parts.size() != b.songs[i].parts.size() || a.songs[i].centerPart != b.songs[i].centerPart ||
@@ -541,7 +608,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
 
     // ---- 1. walk ----
     std::vector<ModelEntry> models;
-    std::vector<std::filesystem::path> vmdFiles, audioFiles, sidecarFiles;
+    std::vector<std::filesystem::path> vmdFiles, audioFiles, sidecarFiles, videoFiles, fxFiles;
     {
         std::error_code walkEc;
         std::filesystem::recursive_directory_iterator it(root, std::filesystem::directory_options::skip_permission_denied, walkEc);
@@ -560,7 +627,10 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                     m.format = fmt;
                     models.push_back(std::move(m));
                 } else if (ext == ".vmd") vmdFiles.push_back(p);
+                else if (ext == ".fx") fxFiles.push_back(p);
                 else if (ext == ".wav" || ext == ".mp3" || ext == ".flac" || ext == ".ogg") audioFiles.push_back(p);
+                else if (ext == ".mp4" || ext == ".mov" || ext == ".wmv" || ext == ".avi" || ext == ".mkv")
+                    videoFiles.push_back(p);
                 else if (ToLowerAscii(FileNameUtf8(p)) == "mmdx.json") sidecarFiles.push_back(p);
             }
             std::error_code incEc;
@@ -611,6 +681,8 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     models.erase(std::remove_if(models.begin(), models.end(), [&](const ModelEntry& m) { return isIgnored(m.path); }), models.end());
     vmdFiles.erase(std::remove_if(vmdFiles.begin(), vmdFiles.end(), isIgnored), vmdFiles.end());
     audioFiles.erase(std::remove_if(audioFiles.begin(), audioFiles.end(), isIgnored), audioFiles.end());
+    videoFiles.erase(std::remove_if(videoFiles.begin(), videoFiles.end(), isIgnored), videoFiles.end());
+    fxFiles.erase(std::remove_if(fxFiles.begin(), fxFiles.end(), isIgnored), fxFiles.end());
 
     // Folders that hold PMX files: other model formats there are usually conversions of the same
     // thing (FBX/OBJ exports shipped next to the PMX) and are skipped unless named explicitly.
@@ -771,6 +843,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                         p.cameraKeyCount = jp.value("cameraKeyCount", 0u);
                         p.maxFrame = jp.value("maxFrame", 0u);
                         p.stageStep = jp.value("stageStep", 0u);
+                        if (jp.contains("boneNames") && jp["boneNames"].is_array())
+                            for (const auto& bn : jp["boneNames"])
+                                if (bn.is_string()) p.boneNames.push_back(bn.get<std::string>());
                         if (jp.contains("stageX") && jp["stageX"].is_array())
                             for (const auto& v : jp["stageX"]) p.stageX.push_back(v.get<float>());
                         vmdProbes[i] = std::move(p);
@@ -821,6 +896,32 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     });
     const auto audioEnd = std::chrono::steady_clock::now();
     audioSec = std::chrono::duration<double>(audioEnd - vmdEnd).count();
+
+    // M8b: video durations (header only, from the new reader's open). Cached like the audio.
+    std::vector<VideoEntry> videos(videoFiles.size());
+    for (size_t i = 0; i < videoFiles.size(); ++i) {
+        videos[i].path = videoFiles[i];
+        const std::string rel = RelKey(videoFiles[i], root);
+        std::error_code ecFs;
+        const uintmax_t sz = std::filesystem::file_size(videoFiles[i], ecFs);
+        const auto lwt = std::filesystem::last_write_time(videoFiles[i], ecFs);
+        const int64_t mt = ecFs ? 0 : lwt.time_since_epoch().count();
+        bool hit = false;
+        if (cacheValid) {
+            auto it = probeCacheMap.find(rel);
+            if (it != probeCacheMap.end() && it->second.value("size", uint64_t(0)) == sz &&
+                it->second.value("mtime", int64_t(0)) == mt) {
+                videos[i].sec = it->second.value("sec", 0.0);
+                hit = true;
+            }
+        }
+        if (!hit) {
+            VideoReader reader;
+            std::string err;
+            if (reader.Open(videoFiles[i], &err)) videos[i].sec = reader.Duration();
+            else LOG_WARN("library: video probe failed: %s: %s", rel.c_str(), err.c_str());
+        }
+    }
 
     // Save updated probe cache atomically (dropping vanished entries) if scan not cancelled
     if (!cancelled()) {
@@ -886,6 +987,11 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                 jp["morphKeyCount"] = vmdProbes[i]->morphKeyCount;
                 jp["cameraKeyCount"] = vmdProbes[i]->cameraKeyCount;
                 jp["maxFrame"] = vmdProbes[i]->maxFrame;
+                if (!vmdProbes[i]->boneNames.empty()) {
+                    nlohmann::json bn = nlohmann::json::array();
+                    for (const auto& n : vmdProbes[i]->boneNames) bn.push_back(n);
+                    jp["boneNames"] = std::move(bn);
+                }
                 if (!vmdProbes[i]->stageX.empty()) {
                     jp["stageStep"] = vmdProbes[i]->stageStep;
                     nlohmann::json xs = nlohmann::json::array();
@@ -905,6 +1011,17 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             ent["size"] = sz;
             ent["mtime"] = mt;
             ent["sec"] = audios[i].sec;
+            newFiles[rel] = std::move(ent);
+        }
+        for (size_t i = 0; i < videoFiles.size(); ++i) {
+            const std::string rel = RelKey(videoFiles[i], root);
+            std::error_code ecFs;
+            uintmax_t sz = std::filesystem::file_size(videoFiles[i], ecFs);
+            int64_t mt = ecFs ? 0 : std::filesystem::last_write_time(videoFiles[i], ecFs).time_since_epoch().count();
+            nlohmann::json ent;
+            ent["size"] = sz;
+            ent["mtime"] = mt;
+            ent["sec"] = videos[i].sec;
             newFiles[rel] = std::move(ent);
         }
         nlohmann::json rootJ;
@@ -1135,6 +1252,8 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             audioByPath[a.path] = &a;
             audioByDir[a.path.parent_path()].push_back(&a);
         }
+        std::map<std::filesystem::path, std::vector<const VideoEntry*>> videoByDir;
+        for (const auto& v : videos) videoByDir[v.path.parent_path()].push_back(&v);
         std::set<std::filesystem::path> claimedVmd, claimedAudio;
 
         auto genericDirName = [&](const std::filesystem::path& dir) {
@@ -1174,6 +1293,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                 if (audioByPath.count(s.audio)) song.audioPath = s.audio, claimedAudio.insert(s.audio);
                 else result.warnings.push_back(RelKey(s.dir, root) + "/mmdx.json: audio not found: " + RelKey(s.audio, root));
             }
+            if (!song.audioPath.empty()) song.audioPaths.push_back(song.audioPath);
             for (const auto& x : s.extra)
                 if (vmdByPath.count(x)) song.extraVmds.push_back(x), claimedVmd.insert(x);
             song.parts.push_back({song.displayName, song.danceVmd, song.extraVmds});
@@ -1194,13 +1314,55 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         for (const auto& v : vmds)
             if (!claimedVmd.count(*v.path)) groups[groupDirOf(*v.path)].push_back(&v);
 
+        // M8a: a song's bundled stage = a stage asset whose parts all lie in a sub-folder of the song folder
+        // (any depth). The song folder itself is not a bundled stage: a stray non-humanoid PMX directly in the
+        // folder (e.g. a camera model) must not become the song's default stage.
+        auto bundledStageOf = [&](const std::filesystem::path& songDir) -> const StageAsset* {
+            for (const auto& st : result.stages) {
+                if (st.parts.empty()) continue;
+                bool under = true;
+                for (const auto& p : st.parts)
+                    if (!IsUnder(p, songDir) || p.parent_path() == songDir) { under = false; break; }
+                if (under) return &st;
+            }
+            return nullptr;
+        };
+        auto stageBoneNamesOf = [&](const StageAsset& st) {
+            std::set<std::string> names;
+            for (const auto& p : st.parts) {
+                auto it = modelByPath.find(p);
+                if (it != modelByPath.end() && it->second->pmx)
+                    for (const auto& b : it->second->pmx->boneNames) names.insert(b);
+            }
+            return names;
+        };
+        // M8a: stage-motion score = matched keyed bones / keyed bones (>= 0.5 wins). A motion that keys a
+        // humanoid core bone (センター / 上半身 / 下半身) is a performer, never a stage motion.
+        // VMD bone names are truncated to 15 bytes, so a model bone that begins with the keyed name also matches.
+        auto stageMotionScore = [](const VmdEntry& e, const std::set<std::string>& stageBones) {
+            if (e.probe->boneNames.empty()) return -1.0;
+            static const char* kCore[] = {"\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xBC",  // センター
+                                          "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB",              // 上半身
+                                          "\xE4\xB8\x8B\xE5\x8D\x8A\xE8\xBA\xAB"};             // 下半身
+            for (const char* c : kCore)
+                if (ContainsBoneName(e.probe->boneNames, c)) return -1.0;
+            size_t matched = 0;
+            for (const auto& n : e.probe->boneNames)
+                if (StageBoneMatches(n, stageBones)) ++matched;
+            return (double)matched / (double)e.probe->boneNames.size();
+        };
+
         for (auto& [dir, group] : groups) {
-            std::vector<const VmdEntry*> dances, layers, cameras;
+            const StageAsset* bundledStage = bundledStageOf(dir);
+            const std::set<std::string> stageBones = bundledStage ? stageBoneNamesOf(*bundledStage)
+                                                                  : std::set<std::string>{};
+            std::vector<const VmdEntry*> dances, layers, cameras, stageMotions;
             uint32_t maxBoneKeys = 0;
             for (const auto* e : group) maxBoneKeys = std::max(maxBoneKeys, e->probe->boneKeyCount);
             for (const auto* e : group) {
                 const VmdProbe& p = *e->probe;
                 if (p.cameraKeyCount > 0 && p.boneKeyCount == 0) cameras.push_back(e);
+                else if (!stageBones.empty() && stageMotionScore(*e, stageBones) >= 0.5) stageMotions.push_back(e);
                 else if (p.boneKeyCount > 0 && p.boneKeyCount >= 0.1 * maxBoneKeys) dances.push_back(e);
                 else if (p.boneKeyCount > 0 || p.morphKeyCount > 0) layers.push_back(e);  // facial / lip / eye motions
             }
@@ -1434,6 +1596,30 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             std::vector<Draft*> all;
             for (auto& d : drafts) all.push_back(&d);
 
+            // M8a: the song-bundled stage and its stage motion. The stage id goes on every draft of the folder;
+            // the stage motion VMD (best score) is assigned to the song of the closest dance length.
+            if (bundledStage) {
+                for (auto& d : drafts) d.song.bundledStageId = bundledStage->id;
+                if (!stageMotions.empty()) {
+                    const VmdEntry* best = nullptr;
+                    double bestScore = -1.0;
+                    for (const auto* e : stageMotions) {
+                        const double s = stageMotionScore(*e, stageBones);
+                        if (s > bestScore) bestScore = s, best = e;
+                    }
+                    if (best) {
+                        Draft* target = nullptr;
+                        for (auto& d : drafts)
+                            if (!target || std::fabs(d.dance->sec - best->sec) < std::fabs(target->dance->sec - best->sec))
+                                target = &d;
+                        if (target) target->song.stageVmd = *best->path;
+                        result.notes.push_back(RelKey(dir, root) + ": stage motion " + RelKey(*best->path, root) +
+                                               " for stage " + bundledStage->id +
+                                               " (score " + std::to_string(bestScore) + ")");
+                    }
+                }
+            }
+
             // Cameras: in the folder; a lone song also takes cameras from child folders without dances.
             {
                 std::vector<std::pair<std::filesystem::path, double>> camItems;
@@ -1491,6 +1677,17 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                         if (!best || key < bestKey) best = &p, bestKey = key;
                     }
                     drafts[0].song.audioPath = *best;
+                    // M8a: audio versions of one song = own files whose length matches the default within 0.5 s.
+                    const double defSec = [&] {
+                        for (const auto* a : audioByDir[dir])
+                            if (a->path == *best) return a->sec;
+                        return 0.0;
+                    }();
+                    for (const auto* a : audioByDir[dir]) {
+                        if (claimedAudio.count(a->path)) continue;
+                        if (a->path == *best || (defSec > 0 && std::fabs(a->sec - defSec) <= 0.5))
+                            drafts[0].song.audioPaths.push_back(a->path);
+                    }
                 } else if (!own.empty()) {
                     assign(all, own, 15.0, 0.15, [](Draft& d, const std::filesystem::path& p) { d.song.audioPath = p; });
                 }
@@ -1505,8 +1702,57 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                     assign(missing, parent, 15.0, 0.15, [](Draft& d, const std::filesystem::path& p) { d.song.audioPath = p; });
                 }
             }
+
+            // M8b: the song's videos (docs/mme/mme_design.md §5b). A video whose duration is within +-3 % of the
+            // song (or >= 90 % of it) is the overlay; the longest of the rest is the background. One song of the
+            // folder (the one whose dance length is closest to the overlay) takes the folder's videos.
+            if (!videoByDir[dir].empty()) {
+                const SongAsset& song = drafts[0].song;
+                const double songSec = drafts[0].dance->sec;
+                const VideoEntry* overlay = nullptr;
+                const VideoEntry* background = nullptr;
+                double overlayDelta = 0, backgroundSec = 0;
+                for (const auto* v : videoByDir[dir]) {
+                    if (v->sec <= 0.0) continue;
+                    const bool overlayLike = DurationsMatch(songSec, v->sec, 0.0, 0.03) || v->sec >= 0.90 * songSec;
+                    if (overlayLike) {
+                        const double d = std::fabs(v->sec - songSec);
+                        if (!overlay || d < overlayDelta) overlay = v, overlayDelta = d;
+                    } else if (!background || v->sec > backgroundSec) {
+                        background = v, backgroundSec = v->sec;
+                    }
+                }
+                // the draft (of a multi-song folder) whose dance length is closest to the background video length
+                auto closestDraft = [&](double sec) -> Draft* {
+                    Draft* best = nullptr;
+                    for (auto& d : drafts)
+                        if (!best || std::fabs(d.dance->sec - sec) < std::fabs(best->dance->sec - sec)) best = &d;
+                    return best;
+                };
+                if (overlay) {
+                    Draft* target = closestDraft(overlay->sec);
+                    target->song.overlayVideo = overlay->path;
+                    result.notes.push_back(RelKey(dir, root) + ": overlay video " + RelKey(overlay->path, root) +
+                                           " (" + std::to_string(overlay->sec) + " s, song " +
+                                           std::to_string(songSec) + " s)");
+                }
+                if (background) {
+                    Draft* target = closestDraft(background->sec);
+                    target->song.backgroundVideo = background->path;
+                    result.notes.push_back(RelKey(dir, root) + ": background video " + RelKey(background->path, root) +
+                                           " (" + std::to_string(background->sec) + " s)");
+                }
+            }
             for (auto& d : drafts) {
                 if (d.song.audioPath.empty()) result.notes.push_back("no audio found for " + d.song.id);
+                // M8a: the chosen audio is always the first (default) version; keep at least one entry.
+                if (!d.song.audioPath.empty()) {
+                    std::vector<std::filesystem::path> ordered;
+                    ordered.push_back(d.song.audioPath);
+                    for (const auto& a : d.song.audioPaths)
+                        if (a != d.song.audioPath) ordered.push_back(a);
+                    d.song.audioPaths = std::move(ordered);
+                }
                 const auto cam = d.song.cameraVmd.empty() ? vmdByPath.end() : vmdByPath.find(d.song.cameraVmd);
                 const bool fps60 = d.dance->fps == 60.0 || (cam != vmdByPath.end() && cam->second->fps == 60.0);
                 d.song.motionFps = fps60 ? 60.0f : 30.0f;
@@ -1517,6 +1763,46 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         }
     }
 
+    // ---- 8b. effects/ (M6b) ----
+    {
+        const std::string want = "effects";
+        // One effect entry per `.fx` under an `effects/` folder at any depth. Entry points only: a `.fx` any sibling
+        // `.fx` of the same folder #includes is a helper, not an entry point (the parser already resolved the
+        // include chain). `.fxsub` has a different extension and is never listed.
+        std::vector<std::filesystem::path> underEffects;
+        for (const auto& p : fxFiles) {
+            const std::string lo = ToLowerAscii(RelKey(p, root));
+            const bool under = lo.rfind(want + "/", 0) == 0 || lo.find("/" + want + "/") != std::string::npos;
+            if (!under) continue;
+            if (LowerExt(p) != ".fx") continue;
+            underEffects.push_back(p);
+        }
+        // Parse every candidate once: reuse the include chain (helpers) and the kind classification.
+        std::vector<MmeEffectDesc> descs;
+        descs.reserve(underEffects.size());
+        std::set<std::filesystem::path> includedBy;
+        for (const auto& p : underEffects) {
+            descs.push_back(LoadMmeEffect(p, MmeLoadOptions{}));
+            for (const auto& inc : descs.back().includes) includedBy.insert(inc.lexically_normal());
+        }
+        for (size_t i = 0; i < underEffects.size(); ++i) {
+            const std::filesystem::path& p = underEffects[i];
+            if (includedBy.count(p.lexically_normal())) continue;   // a helper of another effect in this folder
+            EffectAsset e;
+            e.id = RelKey(p, root);
+            e.path = p;
+            e.displayName = PathToUtf8(p.stem());
+            e.kind = descs[i].kind();
+            // a readme image next to the effect
+            for (const char* name : {"readme.png", "readme.jpg", "readme.jpeg", "preview.png", "preview.jpg"}) {
+                const std::filesystem::path cand = p.parent_path() / Utf8ToPath(name);
+                std::error_code ec2;
+                if (std::filesystem::exists(cand, ec2)) { e.readmeImage = cand; break; }
+            }
+            result.effects.push_back(std::move(e));
+        }
+    }
+
     // ---- 9. sort ----
     auto byLowerName = [](const auto& a, const auto& b) {
         return ToLowerAscii(a.displayName) < ToLowerAscii(b.displayName);
@@ -1524,15 +1810,17 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     std::sort(result.characters.begin(), result.characters.end(), byLowerName);
     std::sort(result.stages.begin(), result.stages.end(), byLowerName);
     std::sort(result.songs.begin(), result.songs.end(), byLowerName);
+    std::sort(result.effects.begin(), result.effects.end(), byLowerName);
     result.scanSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - timerStart).count();
     classifySec = std::chrono::duration<double>(std::chrono::steady_clock::now() - audioEnd).count();
 
     for (const auto& n : result.notes) LOG_INFO("library: %s", n.c_str());
     LOG_INFO("library scan phases: walk=%.3fs, model_probes=%.3fs, vmd_probes=%.3fs, audio_durations=%.3fs, classification=%.3fs (total=%.3fs)",
              walkSec, modelSec, vmdSec, audioSec, classifySec, result.scanSeconds);
-    LOG_INFO("library scan: %d characters, %d stages, %d songs, %d warnings in %.2fs",
+    LOG_INFO("library scan: %d characters, %d stages, %d songs, %d effects, %d warnings in %.2fs",
              static_cast<int>(result.characters.size()), static_cast<int>(result.stages.size()),
-             static_cast<int>(result.songs.size()), static_cast<int>(result.warnings.size()), result.scanSeconds);
+             static_cast<int>(result.songs.size()), static_cast<int>(result.effects.size()),
+             static_cast<int>(result.warnings.size()), result.scanSeconds);
     if (!cancelled()) {
         SaveLibraryScanResult(result);
     }

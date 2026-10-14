@@ -1,6 +1,7 @@
 #pragma once
 #include <DirectXMath.h>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -8,6 +9,41 @@ namespace mmdx {
 
 class GpuModel;
 struct EffectStackEntry;
+
+// The controller accessory panel of an MME effect (docs/mme/mme_design.md §2.9): CONTROLOBJECT `(self)` reads these.
+// `si` is the panel size; CONTROLOBJECT `Si` returns si*10. `rx/ry/rz` are radians.
+struct MmeControllerPanel {
+    float x = 0, y = 0, z = 0;
+    float rx = 0, ry = 0, rz = 0;   // radians
+    float si = 1, tr = 1;
+    bool visible = true;
+};
+
+// One MME post effect (--mme): the effect file plus the controller accessory's panel values
+// (CONTROLOBJECT `(self)` / `Si`). `si` is the panel value; CONTROLOBJECT `Si` returns si*10.
+struct MmeEffectEntry {
+    std::filesystem::path file;
+    bool enabled = true;
+    float x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0;   // degrees
+    float si = 1.0f, tr = 1.0f;
+    bool visible = true;
+    bool operator==(const MmeEffectEntry&) const = default;
+};
+
+// M5c: one MME effect object -- an accessory `.x` plus its same-stem `.fx`, the way MMD users load effects. The
+// scene carries these next to `models`. The runtime treats each as a post/scene effect (with `panel` as its `(self)`
+// controller, CONTROLOBJECT-addressable by `fileName`) whose object techniques draw `mesh` (the accessory's own
+// model, world-space; the App inserts it into FrameView::models so every draw path covers it). `mesh` is null when
+// the effect ships no `.x` (`.fx`-only use).
+struct MmeEffectObject {
+    std::filesystem::path fx;          // effect file
+    std::filesystem::path meshFile;    // the `.x` file (empty when none)
+    GpuModel* mesh = nullptr;          // the accessory mesh (prop role), null when none
+    std::string fileName;              // `.x` file name, no folder (CONTROLOBJECT match), lower-cased
+    std::string displayName;
+    MmeControllerPanel panel;          // (self) controller panel
+    bool enabled = true;
+};
 
 // Temporal upscalers behind IUpscaler (see Upscaler.h).
 enum class UpscalerKind : uint8_t { None = 0, DLSS, FSR, XeSS };
@@ -81,6 +117,8 @@ struct RenderSettings {
     // Effect packs ("type": "effect"), the user's ordered stack: PackEffectPass runs the enabled entries
     // (PackEffectStage from each pack's manifest) before Bloom / after Post. Empty = no cost, no targets.
     std::vector<EffectStackEntry> packEffects;
+    // MME post effects (--mme), run in list order on the LDR image (MmePostPass). Empty = no cost.
+    std::vector<MmeEffectEntry> mmeEffects;
     // Output area in the back buffer (Studio viewport between its panels). viewportW/H == 0: the whole window.
     // The output resolution follows the area's size; the image is letterboxed into it.
     uint32_t viewportX = 0, viewportY = 0, viewportW = 0, viewportH = 0;
@@ -180,6 +218,39 @@ struct OfflineSceneProps {
     float floorReflectivity = 0.42f;
 };
 
+// M8b: one video layer of the frame (docs/mme/mme_design.md §5b). Filled by the App for the play scene from the
+// song's resolved video package; the renderer composites it (render/PassVideo.cpp, video.hlsl) both in play mode
+// and in offline renders. `time` is seconds into the video (the background layer is already looped by the caller
+// for play mode; the offline renderer loops it itself).
+enum class VideoLayerKind : uint8_t { Background = 0, Overlay };
+enum class VideoBlend : uint8_t { BlackKey = 0, Screen, Add, Normal };
+struct VideoLayerDesc {
+    std::filesystem::path path;
+    VideoLayerKind kind = VideoLayerKind::Background;
+    VideoBlend blend = VideoBlend::BlackKey;
+    double time = 0.0;
+};
+
+// M5a: one scene drawable the MME runtime can address through CONTROLOBJECT (§2.9) and match against an offscreen
+// target's DefaultEffect table (§2.3). Filled by the App next to FrameView::models (one entry per model, in the same
+// order); `gpu` correlates the entry with its FrameView::models pointer. The bone / morph name and value arrays are
+// owned by the App and valid for the frame (pointers into the model instance's per-frame data).
+struct MmeSceneObject {
+    std::string fileName;      // UTF-8, no folder (the model's source file name), lower-case for matching
+    std::string displayName;   // PMX display name
+    bool visible = true;
+    DirectX::XMFLOAT4X4 rootWorld{};   // model root world matrix (identity for PMX)
+    const GpuModel* gpu = nullptr;     // correlation with FrameView::models
+    // M5c: an accessory `.x` (an MME effect object's mesh): its vertices are model space, so the MME draw must
+    // transform them by the controller panel (`panel`), not treat them as world space like a PMX model.
+    bool accessory = false;
+    MmeControllerPanel panel{};
+    std::vector<std::string> boneNames;
+    std::vector<DirectX::XMFLOAT4X4> boneWorld;
+    std::vector<std::string> morphNames;
+    std::vector<float> morphWeights;
+};
+
 // An extra view of the same scene drawn into a rectangle of the render target (Studio quad view). Raster only, and
 // always drawn flat (Unlit / Wireframe): the view is orthographic, `height` world units from bottom to top.
 struct ExtraView {
@@ -196,6 +267,13 @@ struct FrameView {
     std::vector<ExtraView> extraViews;  // at most kMaxExtraViews; non-empty: the extra views draw flat, the camera view keeps its shading; no TAA / upscaler
     LightParams light;
     std::vector<GpuModel*> models;  // drawn in this order (stage parts first, then characters)
+    // M5a: MME scene objects (CONTROLOBJECT / DefaultEffect matching), parallel to `models` (same order, same count);
+    // empty when the App did not fill them.
+    std::vector<MmeSceneObject> mmeObjects;
+    // M5c: MME effect objects (accessory `.x` + same-stem `.fx`, docs/mme/mme_design.md §2.9). Their post/scene
+    // part runs in the post chain with `panel` as `(self)`; their object part draws `mesh` (the App also appends
+    // `mesh` to `models` so the MME draw paths cover it). Empty when the scene has none.
+    std::vector<MmeEffectObject> mmeEffectObjects;
     bool studioFloor = false;       // draw the procedural studio floor at y = 0
     bool cameraCut = false;         // discard temporal history (seek, VMD camera cut)
     float focusDistance = 0.0f;     // DoF focus plane as view-space z (MMD units); <= 0: autofocus on the screen centre
@@ -211,6 +289,16 @@ struct FrameView {
     float effectDt = 0.0f;           // >0: override effect dt (seconds; deterministic runs, video exports)
     bool effectStateReset = false;   // force effect state reset (job start, cut)
     bool effectStateAdvance = true;  // advance effect state this frame (false: read latest without advancing)
+    // M8a: the MME scene clock (docs/mme/mme_design.md §5b). sceneTime = seconds since the song / motion start
+    // (the frame time at the scene's fps); sceneElapsed = this frame's scene-clock delta. These feed MME TIME /
+    // ELAPSEDTIME with SyncInEditMode. In studio edit mode (mmeEditMode) MME TIME without SyncInEditMode uses the
+    // wall clock since effect load instead (spec draft §4.6).
+    float sceneTime = 0.0f;
+    float sceneElapsed = 0.0f;
+    bool mmeEditMode = false;
+    // M8b: the video layers of this frame (background behind the scene, overlay over the final image). Empty when
+    // the song has no video package / videos are off.
+    std::vector<VideoLayerDesc> videoLayers;
 };
 
 struct RenderStats {

@@ -8,14 +8,20 @@
 #include "render/RenderTypes.h"
 #include "render/ShaderInterop.h"
 #include "render/Upscaler.h"
+#include "render/MmeRuntime.h"
+#include "render/MmeSkin.h"
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace mmdx {
+
+class MmeRuntime;
+class MmeSkin;
 
 struct PmxModel;
 struct ImageRGBA8;
@@ -45,6 +51,15 @@ public:
                                           const std::vector<ImageRGBA8>& textures,
                                           ModelRole role = ModelRole::Character,
                                           const PbrModelData* pbr = nullptr);
+
+    // Frees the per-model MME resources (object-draw SRV tables, skinned vertex buffer) when a GpuModel is
+    // destroyed. RecordScene calls it automatically; call it explicitly before dropping a model between frames.
+    void ForgetModel(const GpuModel* model);
+
+    // M6b: hot-reload failure / success messages (the UI shows a toast). Set once at startup.
+    void SetMmeMessage(std::function<void(const std::string&, bool /*error*/)> cb) {
+        if (mme_) mme_->SetErrorCallback([cb](const std::string& m) { if (cb) cb(m, true); });
+    }
 
     void SetSettings(const RenderSettings& s) { settings_ = s; }
     // Colour LUT for PostPass (strip layout in render/ColorLut.h); null or empty clears it.
@@ -82,6 +97,9 @@ public:
     bool SceneVisible() const { return sceneVisible_; }
 
     const RenderStats& Stats() const { return stats_; }
+    // M8b: releases the video layers (decode threads, staging buffers, textures). Call when the scene ends
+    // (App::UnloadScene) so nothing is left running; the passes reload on the next frame with layers.
+    void ReleaseVideoLayers();
     // DXR paths (RayTraced / PathTraced) need tier 1.1, shader model 6.5 and dxcompiler.dll;
     // otherwise Render falls back to Raster.
     bool RayTracingSupported() const { return rtSupported_; }
@@ -114,6 +132,7 @@ private:
     void ReleaseTargets();
     void CreateBuiltinTextures();
     void ReadGpuTimer();
+    void DrainMmeForget();   // frees MME resources of models destroyed kFramesInFlight+1 frames ago
     void RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t w, uint32_t h,
                      uint32_t cbSlot, uint64_t frame, bool offscreen);
     // Fills jitterPx_ (render pixels, FSR convention) for this frame and the constants.
@@ -137,6 +156,17 @@ private:
     bool upscalerAvailable_[4] = {true, false, false, false};
     std::unique_ptr<PackTextures> packTextures_;
     std::unique_ptr<RtScene> rt_;
+    // Models whose MME resources were released with ForgetModel; freed kFramesInFlight frames later so the
+    // in-flight command lists that still reference their descriptors are done (same idea as GpuModel's ring).
+    struct PendingMmeForget { const GpuModel* model; uint64_t frame; };
+    std::vector<PendingMmeForget> pendingMmeForget_;
+    // The on-screen frame's model set (RecordScene). A model that drops out of it (destroyed or replaced) has
+    // its per-model MME resources released; see Renderer::ForgetModel.
+    std::vector<const GpuModel*> frameModels_;
+    // MME runtime + object skinning (M4b): created in Initialize, released with the renderer. Both passes read
+    // them through PassContext::mme / mmeSkin.
+    std::unique_ptr<MmeRuntime> mme_;
+    std::unique_ptr<MmeSkin> mmeSkin_;
     std::unique_ptr<OfflineRenderer> offline_;   // null without ray tracing / offline pipelines
     bool offlinePresent_ = true;
     bool rtSupported_ = false;

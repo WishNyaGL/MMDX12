@@ -10,9 +10,24 @@
 #include "core/Log.h"
 #include "core/TextUtil.h"
 
+namespace mmdx {
+// M5c: pairs an MME effect object path with its same-stem partner (defined in app/App.cpp; declared in App.h,
+// which this file cannot include because asset/ModelImport.h and render/GpuModel.h both declare ModelRole).
+void ResolveMmeObjectPair(const std::filesystem::path& path, std::filesystem::path& fx,
+                          std::filesystem::path& meshFile);
+} // namespace mmdx
+
+namespace mmdx {
+// M5c: pairs an MME effect object path with its same-stem partner (defined in app/App.cpp; declared in App.h,
+// which this file cannot include because asset/ModelImport.h and render/GpuModel.h both declare ModelRole).
+void ResolveMmeObjectPair(const std::filesystem::path& path, std::filesystem::path& fx,
+                          std::filesystem::path& meshFile);
+} // namespace mmdx
+
 namespace mmdx::studio {
 
 namespace {
+
 // The model's MME hints: the default shader-pack texture folder (the directory of the face texture the model's own
 // MME files reference, e.g. a face SDF a pack samples) and the per-material blend hints from its .emd. Never
 // guesses names: only the asset's references are followed.
@@ -73,6 +88,7 @@ bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage,
                 if (progress) progress->SetStatus(Tr("스테이지 로드: ") + label);
                 StudioPackageModel part;
                 part.kind = ModelKind::Stage;
+                part.mme = MmeChoice{MmeChoice::Auto, {}};   // M6a: stages default to Auto
                 part.libraryId = stage->id;   // P5: a stage's material choice is keyed by its library id
                 std::string err;
                 const float f0 = 0.05f + 0.35f * (float)k / (float)n, f1 = 0.05f + 0.35f * (float)(k + 1) / (float)n;
@@ -129,6 +145,26 @@ bool LoadStudioModel(const std::filesystem::path& path, ModelKind kind, const st
             if (error) *error = Tr("모델 파일이 없습니다: ") + PathToUtf8(path);
             return false;
         }
+        // M5c: an MME effect object ("MME 효과") is an accessory `.x` plus its same-stem `.fx`. The mesh loads as a
+        // prop; the `.fx` is stored on the package model and applied to the mesh's materials.
+        std::filesystem::path effFx;
+        if (kind == ModelKind::Effect) {
+            std::filesystem::path mesh;
+            ResolveMmeObjectPair(path, effFx, mesh);
+            if (mesh.empty()) mesh = path;   // a `.fx` given alone: no mesh (post-only effect object)
+            if (!mesh.empty() && std::filesystem::exists(mesh)) {
+                std::string err;
+                if (!LoadModel(mesh, ModelRole::Prop, label, progress, 0.05f, 0.95f, out, &err, choice)) {
+                    if (error) *error = Tr("모델을 불러오지 못했습니다: ") + err;
+                    return false;
+                }
+            }
+            out.kind = ModelKind::Effect;
+            out.fx = effFx;
+            out.name = label;
+            if (progress) progress->fraction.store(1.0f, std::memory_order_relaxed);
+            return true;
+        }
         const ModelRole role = kind == ModelKind::Character ? ModelRole::Character
                                : kind == ModelKind::Prop    ? ModelRole::Prop
                                                             : ModelRole::Stage;
@@ -159,6 +195,7 @@ bool LoadStudioStage(const StageAsset& stage, std::vector<StudioPackageModel>& o
             if (progress) progress->SetStatus(Tr("스테이지 로드: ") + label);
             StudioPackageModel part;
             part.kind = ModelKind::Stage;
+            part.mme = MmeChoice{MmeChoice::Auto, {}};   // M6a: stages default to Auto
             part.libraryId = stage.id;   // P5: a stage's material choice is keyed by its library id
             std::string err;
             const float f0 = 0.05f + 0.9f * (float)k / (float)n;
@@ -257,6 +294,7 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
         out.warnings = warn;
         out.recovered = recovery;
         out.projectPath = recovery ? pd.recoveryOf : file;
+        out.mmePost = pd.mmePost;
 
         const size_t n = pd.models.size();
         std::vector<int> remap(n, -1);
@@ -267,10 +305,20 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
             if (progress) progress->SetStatus(Tr("모델 로드: ") + pm.name);
             
             StudioPackageModel m;
-            const ModelRole role = pm.kind == ModelKind::Character ? ModelRole::Character
-                                  : pm.kind == ModelKind::Prop    ? ModelRole::Prop
-                                                                  : ModelRole::Stage;
+            const ModelRole role = (pm.kind == ModelKind::Character) ? ModelRole::Character
+                                  : (pm.kind == ModelKind::Prop || pm.kind == ModelKind::Effect) ? ModelRole::Prop
+                                                                                                 : ModelRole::Stage;
             std::string merr;
+            if (pm.kind == ModelKind::Effect && pm.path.empty()) {
+                // M5c: an `.fx`-only effect object (no `.x` mesh): the post/scene part still runs.
+                m.name = pm.name;
+                m.kind = ModelKind::Effect;
+                m.fx = pm.fx;
+                m.visible = pm.visible;
+                remap[i] = (int)out.models.size();
+                out.models.push_back(std::move(m));
+                continue;
+            }
             if (!LoadModel(pm.path, role, pm.name, progress, f0, f1, m, &merr, pm.material)) {
                 out.warnings.push_back(Tr("모델을 불러오지 못했습니다: ") + pm.name + " (" + PathToUtf8(pm.path) + ")");
                 continue;
@@ -278,15 +326,19 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
             m.name = pm.name;
             m.libraryId = pm.libraryId;
             m.kind = pm.kind;
+            m.fx = pm.fx;   // M5c: effect objects carry their `.fx`
             m.visible = pm.visible;
             m.physicsOff = pm.physicsOff;
             m.attach = pm.attach;
             m.place = pm.place;
             m.shader = pm.shader;
             m.material = pm.material;
+            m.mme = pm.mme;
             m.motion = std::move(pm.motion);
-            m.motion.CanonicalizeNames(*m.pmx);
-            if (m.motion.modelName.empty()) m.motion.modelName = m.pmx->name;
+            if (m.pmx) {
+                m.motion.CanonicalizeNames(*m.pmx);
+                if (m.motion.modelName.empty()) m.motion.modelName = m.pmx->name;
+            }
             
             remap[i] = (int)out.models.size();
             out.models.push_back(std::move(m));

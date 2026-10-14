@@ -287,6 +287,7 @@ static void TestRoundTrip() {
         m.shader.materials["body|01"] = kMaterialPackOff;                              // ... and a material with the pack off
         m.material.ray = true;                                                        // P5: Ray-MMD material source
         m.material.emd = (kTemp / "models" / "miku.emd").lexically_normal().string();  // ... with an explicit .emd
+        m.mme = MmeChoice{MmeChoice::File, kTemp / "models" / "miku.fx"};              // M6a: an MME object effect
         b0 = BoneKf{};
         b0.frame = 0;
         b0.t = {1, 2, 3};
@@ -315,6 +316,7 @@ static void TestRoundTrip() {
         m.libraryId = "stage-1";                                                      // P5: a stage's material choice key
         m.material.ray = true;                                                        // ... saved for every kind
         m.material.emd = (kTemp / "models" / "stage.emd").lexically_normal().string();
+        m.mme = MmeChoice{MmeChoice::Auto, {}};                                       // M6a: stages default to Auto
         data.models.push_back(m);
     }
     // 3: prop with attach and one bone key
@@ -352,6 +354,21 @@ static void TestRoundTrip() {
         a30.parentUid = 1;  // 1 + model index 0
         a30.bone = "\xE5\x8F\xB3\xE6\x89\x8B\xE9\xA6\x96";  // 右手首
         m.motion.accessory = {a0, a30};
+        data.models.push_back(m);
+    }
+    // 3b: M5c MME effect object (an accessory `.x` + its same-stem `.fx`), written as kind "effect"
+    {
+        ProjectModel m;
+        m.name = "AirDust";
+        m.kind = ModelKind::Effect;
+        m.path = kTemp / "effects" / "AirDust.x";
+        m.fx = kTemp / "effects" / "AirDust.fx";
+        AccessoryKf k;
+        k.frame = 0;
+        k.scale = 1.0f;
+        k.opacity = 1.0f;
+        k.visible = true;
+        m.motion.accessory = {k};
         data.models.push_back(m);
     }
     // camera: 2 camera keys, 1 light key, 1 shadow key
@@ -400,6 +417,8 @@ static void TestRoundTrip() {
     data.editor.camDistance = 30.0f;
     data.editor.camFovDeg = 40.0f;
     data.editor.lights = MakeTestLights();  // every kind of scene light
+    // M6b: the project's own MME post stack
+    data.mmePost = {{kTemp / "fx" / "o_Monochrome.fx", true}, {kTemp / "fx" / "o_Vignette.fx", false}};
 
     std::string err;
     Check(SaveProject(projFile, data, &err), "SaveProject round trip", "%s", err.c_str());
@@ -425,6 +444,10 @@ static void TestRoundTrip() {
         Check(text.find("\"material\"") != std::string::npos && text.find("miku.emd") != std::string::npos,
               "stored material choice (ray + relative .emd path)");
         Check(text.find("stage.emd") != std::string::npos, "stored stage material choice (every kind)");
+        Check(text.find("\"mme\"") != std::string::npos && text.find("miku.fx") != std::string::npos,
+              "stored MME choice (file mode + relative .fx path)");
+        Check(text.find("\"mmeEffects\"") != std::string::npos && text.find("o_Monochrome.fx") != std::string::npos,
+              "stored project MME post stack (relative .fx paths)");
     }
 
     ProjectData loaded;
@@ -462,6 +485,7 @@ static void TestRoundTrip() {
         Check(!loaded.models[1].physicsOff, "physics on by default for a model without the flag");
         Check(b.shader == a.shader, "shader choice kept (pack, params, textureFolder)");
         Check(b.material == a.material, "material choice kept (ray + explicit .emd)");
+        Check(b.mme == a.mme && b.mme.mode == MmeChoice::File, "MME choice kept (file mode + path)");
 
         Check(b.place == data.models[0].place, "character placement kept (t/r/s)");
         const ProjectModel& st = loaded.models[1];
@@ -470,6 +494,7 @@ static void TestRoundTrip() {
               "stage kept: name, kind, visible=false, no keys, placement");
         Check(st.libraryId == data.models[1].libraryId, "stage library id kept");
         Check(st.material == data.models[1].material, "stage material choice kept (ray + explicit .emd)");
+        Check(st.mme.mode == MmeChoice::Auto && st.mme == data.models[1].mme, "stage MME choice kept (auto)");
 
         const ProjectModel& p = loaded.models[2];
         Check(p.kind == ModelKind::Prop && p.attach == data.models[2].attach,
@@ -478,6 +503,13 @@ static void TestRoundTrip() {
         Check(p.motion.accessory.size() == 2 && p.motion.accessory[0] == data.models[2].motion.accessory[0] &&
                   p.motion.accessory[1] == data.models[2].motion.accessory[1],
               "prop accessory keys kept (placement, scale, opacity, visible, parent, bone)");
+
+        // M5c: the effect object (kind "effect") keeps its `.x` mesh + its same-stem `.fx` and its accessory keys
+        const ProjectModel& efo = loaded.models[3];
+        Check(efo.kind == ModelKind::Effect, "effect object kind kept");
+        Check(efo.path == std::filesystem::absolute(data.models[3].path).lexically_normal(), "effect object mesh path kept");
+        Check(efo.fx == std::filesystem::absolute(data.models[3].fx).lexically_normal(), "effect object fx path kept");
+        Check(efo.motion.accessory.size() == 1, "effect object accessory key kept");
 
         // camera from the "camera" VMD: only camera/light/shadow
         Check(loaded.camera.camera.size() == 2 && loaded.camera.light.size() == 1 && loaded.camera.shadow.size() == 1,
@@ -499,6 +531,16 @@ static void TestRoundTrip() {
     Check(loaded.audioPath == std::filesystem::absolute(data.audioPath).lexically_normal(),
           "audio path resolved absolute");
     Check(loaded.audioOffset == -0.5, "audio offset kept");
+    // M6b: the project MME post stack
+    Check(loaded.mmePost.size() == data.mmePost.size(), "MME post stack entry count kept");
+    if (loaded.mmePost.size() == data.mmePost.size()) {
+        Check(loaded.mmePost[0].path == std::filesystem::absolute(data.mmePost[0].path).lexically_normal() &&
+                  loaded.mmePost[0].enabled,
+              "MME post entry 0 kept (absolute path + enabled)");
+        Check(loaded.mmePost[1].path == std::filesystem::absolute(data.mmePost[1].path).lexically_normal() &&
+                  !loaded.mmePost[1].enabled,
+              "MME post entry 1 kept (absolute path + disabled)");
+    }
     const ProjectEditor& ed = loaded.editor;
     Check(ed.frame == 120 && ed.selectedModel == 2 && ed.loop && ed.rangeStart == 10 && ed.rangeEnd == 50 &&
               ed.pxPerFrame == 3.5f && ed.camYaw == 0.5f && ed.camPitch == 0.2f && ed.camDistance == 30.0f &&
@@ -1067,7 +1109,8 @@ static void TestUnknownKindRemap() {
     { "name": "char", "kind": "character", "path": "char.pmx" },
     { "name": "x", "kind": "alien", "path": "x.pmx" },
     { "name": "prop", "kind": "prop", "path": "p.pmx", "attach": { "parent": 0 } },
-    { "name": "prop2", "kind": "prop", "path": "p2.pmx", "attach": { "parent": 1 } }
+    { "name": "prop2", "kind": "prop", "path": "p2.pmx", "attach": { "parent": 1 } },
+    { "name": "eff", "kind": "effect", "path": "e.x", "fx": "e.fx" }
   ]
 })";
     }
@@ -1075,14 +1118,16 @@ static void TestUnknownKindRemap() {
     std::string err;
     std::vector<std::string> warnings;
     Check(LoadProject(projFile, loaded, &err, &warnings), "LoadProject with unknown kind -> true", "%s", err.c_str());
-    Check(loaded.models.size() == 3, "3 models loaded (unknown one skipped)", "size=%zu", loaded.models.size());
+    Check(loaded.models.size() == 4, "4 models loaded (unknown one skipped)", "size=%zu", loaded.models.size());
     Check(warnings.size() == 1, "one warning for the unknown kind", "size=%zu", warnings.size());
-    if (loaded.models.size() == 3) {
-        // after skipping the unknown kind: char -> 0, prop -> 1, prop2 -> 2
+    if (loaded.models.size() == 4) {
+        // after skipping the unknown kind: char -> 0, prop -> 1, prop2 -> 2, eff -> 3
         Check(loaded.models[1].kind == ModelKind::Prop && loaded.models[1].attach.parent == 0,
               "prop parent 0 remapped to index 0");
         Check(loaded.models[2].kind == ModelKind::Prop && loaded.models[2].attach.parent == -1,
               "prop2 parent pointing at the skipped model becomes -1");
+        Check(loaded.models[3].kind == ModelKind::Effect && !loaded.models[3].fx.empty(),
+              "effect object kind + fx read");
     }
 }
 

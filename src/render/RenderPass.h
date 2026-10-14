@@ -14,6 +14,7 @@
 namespace mmdx {
 
 struct BuiltinTextures;
+struct SceneConstants;
 
 // A GPU texture with its tracked resource state and optional views.
 struct Texture {
@@ -94,6 +95,8 @@ struct RenderTargets {
 
 class RtScene;
 class IUpscaler;
+class MmeRuntime;
+class MmeSkin;
 
 struct PassContext {
     Dx12Context& ctx;
@@ -115,6 +118,12 @@ struct PassContext {
     float jitterPxX, jitterPxY;                // projection jitter in render pixels (see Renderer.cpp)
     float frameTimeMs;                         // wall time since the previous on-screen frame
     D3D12_GPU_VIRTUAL_ADDRESS extraSceneConstants[3] = {};  // one per FrameView::extraViews entry (set after construction)
+    // MME runtime + object skinning (M4b), owned by Renderer. Both null without MME; passes that do not draw MME
+    // ignore them.
+    MmeRuntime* mme = nullptr;
+    MmeSkin* mmeSkin = nullptr;
+    // CPU copy of sceneConstants (ScenePass's MME object matrices, M4b); set by the renderer, null elsewhere.
+    const SceneConstants* sceneConstantsCpu = nullptr;
 };
 
 class IRenderPass {

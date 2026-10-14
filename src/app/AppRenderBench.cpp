@@ -210,7 +210,12 @@ void App::RecordRenderBenchFrame(ID3D12GraphicsCommandList* cmd) {
                                     : DirectX::XMFLOAT3{0, 15, 0};
     BuildRenderBenchView(h, view);
     view.models.push_back(scene_->characterGpu.get());
-    for (auto& e : scene_->extras) view.models.push_back(e.gpu.get());
+    AppendMmeObject(view, scene_->characterGpu.get(), scene_->character.get(), true, scene_->characterDisplayName);
+    for (auto& e : scene_->extras) {
+        view.models.push_back(e.gpu.get());
+        AppendMmeObject(view, e.gpu.get(), e.instance.get(), true,
+                        !e.displayName.empty() ? e.displayName : e.gpu->Name());
+    }
     OfflineJobDesc job;
     job.width = renderBench_.width;
     job.height = renderBench_.height;

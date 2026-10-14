@@ -344,6 +344,15 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   RunOffline). Gallery examples on it: lens_dirt, lens_reflection, lens_flare, bokeh_dof, screen_ao (and
   chromatic_aberration 2.0.0, still v3). MMD scenes rarely hold HDR lights (a lit window is ~0.4 linear): the lens packs
   pick "lights" by luminance x local contrast, not a plain threshold.
+- MME (docs/mme/mme_design.md; compatibility list docs/mme/compat_list.md): own .fx parser / preprocessor / IR in
+  `asset/Mme*`, FXC SM5 wrappers `render/MmeCompiler` (object mode = host MRT), `render/MmeRuntime` (instances per
+  (file, objectMode), targets, samplers, constant ring), `MmeScriptVM`, `MmeSemantics` (CONTROLOBJECT: missing object =
+  bool false / items 0), passes `PassMme` (post chain), `PassMmeOffscreen` (DefaultEffect lists, MMD self-shadow),
+  scene-pass object draws, PT / offline GI MME layer. Per-model choice None / Auto / File (characters None, stages Auto),
+  post stack `mmeEffect=`, effect objects (`.x` + same-stem `.fx`, `--mme-object`). Ray-MMD material files stay with the
+  native PBR (Auto skips them; adding ray.x asks first). Compat harness: `python -I tools/mme/mme_compat_run.py
+  [--only ranks] [--no-static] [--sheet-only]` over `captures/mme_lib` (git-ignored downloads: never execute anything
+  there). Song packages: bundled stage + stage motion, audio versions, `bg.avi` / overlay video layers (`PassVideo`).
 - MCP (docs/mcp.md): `tools/mmdx12_mcp.cpp` is the stdio MCP bridge; it forwards tool calls over the named pipe
   `\\.\pipe\mmdx12_mcp[_<pid>]` to `McpServer` (app/McpServer.*, worker thread), which queues them for the main thread:
   `App::PumpMcp` / `ExecuteMcp` (app/AppMcp.cpp) before ImGui::NewFrame. Tool schemas + timeouts live in app/McpTools.h

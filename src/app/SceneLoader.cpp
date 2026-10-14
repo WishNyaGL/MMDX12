@@ -107,6 +107,53 @@ static ModelMmeHints ModelHints(const std::filesystem::path& modelPath) {
     return out;
 }
 
+// M8a: binds a song's stage motion VMD (song.stageVmd) to the loaded stage part whose model bones it matches. The
+// stage model animates on the song clock like a character (no physics, no IK surprises: the normal pose path).
+static bool StageBoneNameMatches(const std::string& keyed, const std::set<std::string>& modelBones) {
+    if (modelBones.count(keyed)) return true;
+    if (keyed.size() < 15) return false;   // VMD bone names are truncated to 15 bytes
+    for (const auto& b : modelBones)
+        if (b.size() > keyed.size() && b.compare(0, keyed.size(), keyed) == 0) return true;
+    return false;
+}
+
+static void LoadStageMotion(const SongAsset& song, ScenePackage& out) {
+    if (song.stageVmd.empty() || out.stageParts.empty()) return;
+    VmdMotion stageVmd;
+    std::string err;
+    if (!LoadVmd(song.stageVmd, stageVmd, &err)) {
+        LOG_WARN("stage motion load failed: %s: %s", PathToUtf8(song.stageVmd).c_str(), err.c_str());
+        return;
+    }
+    // The stage part whose bones the motion's keyed bones match best (the bundled stage model normally has one part).
+    int bestPart = -1;
+    double bestScore = -1.0;
+    for (size_t i = 0; i < out.stageParts.size(); ++i) {
+        const PmxModel& pmx = *out.stageParts[i].pmx;
+        std::set<std::string> bones;
+        for (const PmxBone& b : pmx.bones) bones.insert(b.name);
+        if (bones.empty()) continue;
+        size_t keyed = 0, matched = 0;
+        std::set<std::string> names;
+        for (const auto& bf : stageVmd.boneKeys) names.insert(bf.boneName);
+        for (const auto& n : names) {
+            ++keyed;
+            if (StageBoneNameMatches(n, bones)) ++matched;
+        }
+        if (keyed == 0) continue;
+        const double score = (double)matched / (double)keyed;
+        if (score > bestScore) bestScore = score, bestPart = (int)i;
+    }
+    if (bestPart < 0) {
+        LOG_WARN("stage motion %s: no stage part to bind", PathToUtf8(song.stageVmd).c_str());
+        return;
+    }
+    const std::vector<const VmdMotion*> layers = {&stageVmd};
+    out.stageMotion = BoundMotion::Bind(*out.stageParts[(size_t)bestPart].pmx, layers);
+    out.stageMotionPart = bestPart;
+    LOG_INFO("stage motion bound: %s part %d (score %.2f)", PathToUtf8(song.stageVmd).c_str(), bestPart, bestScore);
+}
+
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
                       ScenePackage& out, LoadProgress* progress, std::string* error,
                       const std::vector<PerformerCast>* formation, const MaterialChoiceFn& materialChoice) {
@@ -115,6 +162,7 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
     };
     try {
         out = ScenePackage{};
+        out.stageId = stage ? stage->id : std::string();   // M8a: the loaded stage's id (bundled stage keys)
 
         if (formation && !formation->empty()) {
             // Find center performer and extra performers
@@ -282,6 +330,8 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
             if (out.camera) endFrame = std::max(endFrame, out.camera->EndFrame());
             out.endFrame = endFrame;
             out.motionFps = song.motionFps;
+            // M8a: the song-bundled stage's motion (bound to the part whose model its bones match).
+            LoadStageMotion(song, out);
 
             if (progress) {
                 progress->fraction.store(1.0f, std::memory_order_relaxed);
@@ -382,6 +432,9 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
         if (out.camera) endFrame = std::max(endFrame, out.camera->EndFrame());
         out.endFrame = endFrame;
         out.motionFps = song.motionFps;
+        // M8a: the song-bundled stage's motion (bound to the part whose model its bones match).
+        LoadStageMotion(song, out);
+        if (out.stageMotion) out.endFrame = std::max(out.endFrame, out.stageMotion->EndFrame());
 
         // 7. Done (GPU upload happens on the main thread).
         if (progress) {
