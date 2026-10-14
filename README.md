@@ -54,6 +54,25 @@ Straight out of the built-in renderer, no touch-ups.
   </tr>
 </table>
 
+## MME effects
+
+The effects people have collected for MikuMikuDance for years (.fx / .x: bloom, diffusion, colour grading, DOF, SSAO, mirror floors, fire, snow, toon shaders) now run natively on DirectX 12, with no MMD and no DirectX 9 needed.
+
+<img src="docs/media/mme-2.1.0.jpg" width="100%" alt="The same frame with MME off and on (Diffusion7 + o_LikeHDR, third-party MME effects, not bundled)">
+<br><sub>The same frame with MME off and on (Diffusion7 + o_LikeHDR, third-party MME effects, not bundled).</sub>
+
+<img src="docs/media/mme-closeup-2.1.0.jpg" width="100%" alt="Close-ups of the affected parts, off | on: the glow around hair and sleeves, the colour grade of the dress and hair, the soft glow and reflection around the legs">
+<br><sub>Close-ups of the affected parts, off | on: the glow around hair and sleeves, the colour grade of the dress and hair, the soft glow and reflection around the legs.</sub>
+
+- Post effects (stack), per-model object effects (a model's own `.emd` / same-name `.fx` is picked up automatically) and effect objects (`.x` + `.fx`, e.g. snow, dust, fire).
+- Works in raster, ray tracing, path tracing, offline GI and video render; MMD self-shadow and offscreen render targets are supported.
+- One global switch plus a "Fully automatic" workflow (every model gets its effect and Ray-MMD material by itself) or "Advanced manual"; a separate switch for Ray-MMD materials. MME tab in the top navigation; the play screen has a right-side "Screen effects" panel.
+- Song packages: a song folder may bring its own stage, stage motion, audio versions and background / overlay video.
+- 58 popular effects were tested: 57 run, 42 of them like MMD (list: [docs/mme/compat_list.md](docs/mme/compat_list.md)).
+- Effects are not bundled (copyright): put your own `.fx` / `.x` files anywhere or into the library's `effects/` folder.
+
+> 📖 **[MME user guide](https://mmdx.codingbot.kr/en/docs/mme/)**
+
 ## Videos
 
 Full songs rendered with MMDX12's video mode, uploaded as-is.
@@ -100,7 +119,8 @@ Full songs rendered with MMDX12's video mode, uploaded as-is.
 - **Any DirectX 12 graphics card.** The default renderer (soft shadows, ambient occlusion, reflections, bloom) needs no ray-tracing GPU; ray tracing, path tracing and offline GI switch on where the card supports them.
 - **Drag and drop.** Drop a model, a VMD and a song onto the window and they open in the Studio, posed and with music. MMD `.pmm` projects open too (read-only import).
 - **AutoLuminous built in.** Materials set up for そぼろ's AutoLuminous (black specular, power 100 or more) glow on their own in every renderer, no MME needed.
-- **MME · Ray-MMD tab.** Turn MME effects (a model's own bundled effect, the post-effect stack) and Ray-MMD material data on or off with one global switch, and choose them per model. Pick the **Fully automatic** workflow and every model gets the fitting effect and material on its own. The play bar's effect buttons open one **화면 효과** panel (slides in from the right) with three tabs — screen effects, shaders and MME · Ray-MMD; the MME tab edits everything loaded at once and only applies when you press **Apply**.
+- **MME effects, natively.** Runs `.fx` MikuMikuEffect shaders and effect objects in every renderer, no MMD needed.
+- **MME · Ray-MMD tab.** Turn MME effects (a model's own bundled effect, the post-effect stack) and Ray-MMD material data on or off with one global switch, and choose them per model. Pick the **Fully automatic** workflow and every model gets the fitting effect and material on its own. The play bar's effect buttons open one **화면 효과** panel (slides in from the right) with three tabs — screen effects, shaders and MME · Ray-MMD; the MME tab edits everything loaded at once and only applies when you press **Apply** (see [MME effects](#mme-effects)).
 - **Transparent video.** Export a PNG sequence with alpha for After Effects, Premiere or DaVinci.
 - **Studio extras**: auto-IK (drag a wrist and the arm follows), keyframed accessories (position, rotation, scale, opacity, parent bone), and baking hair/skirt physics into ordinary keys.
 - **A benchmark** with an online leaderboard, just for fun.
