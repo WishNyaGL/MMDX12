@@ -1127,7 +1127,7 @@ const Entry kChinese[] = {
     {"이 앱은 Ray-MMD를 네이티브 PBR로 지원합니다. 캐릭터의 재질 소스를 'Ray-MMD'로 바꾸면 그대로 쓸 수 있습니다. MME로 함께 실행하면 조명과 후처리가 두 번 적용됩니다.",
      "本应用通过原生 PBR 支持 Ray-MMD。将角色的材质源切换为「Ray-MMD」即可直接使用。与 MME 同时运行会重复应用光照和后期处理。"},
     {"그래도 MME로 추가", "仍用 MME 添加"},
-    {"Ray-MMD: 네이티브 PBR로 지원 (MME 실행은 비권장)", "Ray-MMD：由原生 PBR 支持（不建议通过 MME 运行）"}
+    {"Ray-MMD: 네이티브 PBR로 지원 (MME 실행은 비권장)", "Ray-MMD：由原生 PBR 支持（不建议通过 MME 运行）"},
     // 2.1.0 i18n gap fix (MME screen, play panel, song stage)
     {"MME 효과를 다시 컴파일하지 못했습니다", "无法重新编译 MME 效果"},
     {"자동 제외 · 컨트롤러 필요: ", "自动排除 · 需要控制器: "},
