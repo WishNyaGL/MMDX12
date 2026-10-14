@@ -1787,3 +1787,25 @@ kills), reviewed and QA'd by Claude over MCP user paths (antigravity QA run stop
 - 완전 자동 with ps_luka inside a unit song, the studio inspector MME rows in Auto / off, persistence across a restart.
 - Lobby at 1280x720 x 1.5 (~853x480 logical): the play button overlaps the stage dropdown (pre-existing layout).
 - antigravity-launched app windows are invisible (its runner passes SW_HIDE; the first ShowWindow obeys it).
+
+## 2026-10-15 (2) - Separate Ray-MMD master switch; MME 완전 자동 per-frame filesystem stall removed
+Diagnosed by Claude (frame-segment CPU timers + an ad-hoc suspend/StackWalk sampling profiler, no admin needed),
+implemented by an opencode/deepseek worker from Claude's contract spec, reviewed / measured / E2E'd by Claude.
+- Ray-MMD switch split from the MME switch: `AppSettings::rayMmdEnabled` (ini `rayMmdEnabled=`, `--ray-global 0|1`,
+  `App::RayMmdGlobalEnabled()`) now alone decides whether material sources resolve to Default
+  (`ResolveMaterialChoice*`, `EffectiveMaterialChoice`, Ray suggestion toast, studio material row). `mmeEnabled` covers
+  MME object / post / effect objects only. The workflow stays shared. UI: second switch on the MME screen and in the
+  play panel draft (`MmeDraft::rayEnabled`, reload detection), MME / material parts of each model row disabled by their
+  own switch. Script `rayglobal 0|1`, MMESTATE `ray=`.
+- Perf root cause (5 performers, 완전 자동: ~23 fps, CPU 42 ms vs GPU 20 ms): `mmetext::PathKey` ran
+  `weakly_canonical` (CreateFile / GetFinalPathNameByHandle) per material per draw via `MmeRuntime::Instance` (37 % of
+  main-thread samples), and `App::ApplyMmeEffect` Auto re-read `.emd` / stat'ed `.fx` every frame per model (~15 %).
+  Fix: PathKey memoized (mutex, 8192-entry cap); Auto resolution cached per (model path, material count) for 1 s.
+  Result: ~46 fps, render CPU 17.6 -> 2.1 ms, UpdateScene 24 -> 10 ms, GPU-bound like the MME-off path; max frame
+  25-28 ms (no 1 Hz TTL spikes; MME-off run max 27-35 ms).
+- Verified: MME off + Ray on keeps Alcander's Ray PBR (ray1); MME on + Ray off = all ray0; auto + Ray off = MME
+  objects applied with Default materials; play panel capture.
+### Not verified / left
+- Studio inspector Ray toggle interaction, `rayMmdEnabled=` persistence across a restart, slow-disk TTL spikes.
+- Remaining main-thread cost is Bullet physics (~10 ms for 5 performers, same with MME off); 60 fps at this size is
+  GPU-limited (~20-25 ms) on both paths.

@@ -59,6 +59,7 @@ App::MmeDraft App::CaptureMmeDraft() const {
     MmeDraft d;
     d.valid = true;
     d.enabled = settings_.mmeEnabled;
+    d.rayEnabled = settings_.rayMmdEnabled;
     d.workflow = settings_.mmeWorkflow;
     d.mmeEffects = settings_.mmeEffects;
     d.characterMmes = settings_.characterMmes;
@@ -69,6 +70,7 @@ App::MmeDraft App::CaptureMmeDraft() const {
 
 void App::WriteMmeDraft(const MmeDraft& d) {
     settings_.mmeEnabled = d.enabled;
+    settings_.rayMmdEnabled = d.rayEnabled;
     settings_.mmeWorkflow = d.workflow;
     settings_.mmeEffects = d.mmeEffects;
     // prune the "no choice" entries so the ini stays as the setters would write it
@@ -103,6 +105,7 @@ void App::DrawMme() {
     const float panelW = std::clamp(ds.x - pad - panelX, Dp(280.0f), Dp(760.0f));
 
     const bool enabled = MmeGlobalEnabled();
+    const bool rayEnabled = RayMmdGlobalEnabled();
     const bool autoWf = MmeAutoWorkflow();
 
     // ---- header
@@ -120,7 +123,7 @@ void App::DrawMme() {
         SectionLabel(Tr("전역 설정"));
         bool on = enabled;
         // The switch edits the saved setting; a run-wide --mme-global override just shows disabled.
-        if (Switch("##mme_global", Tr("MME 사용"), &on, Tr("끄면 모든 MME / Ray-MMD 기능이 꺼집니다"))) {
+        if (Switch("##mme_global", Tr("MME 사용"), &on, Tr("끄면 MME 효과가 모두 꺼집니다"))) {
             settings_.mmeEnabled = on;
             settings_.Save(settingsPath_);
             ApplyRenderSettings();
@@ -130,11 +133,23 @@ void App::DrawMme() {
             ImGui::TextDisabled("%s", Tr("명령줄 설정이 이번 실행 동안 우선합니다"));
             PopFont();
         }
+        bool rayOn = rayEnabled;
+        if (Switch("##ray_global", Tr("Ray-MMD 재질 사용"), &rayOn, Tr("끄면 모든 모델이 기본 재질을 씁니다"))) {
+            settings_.rayMmdEnabled = rayOn;
+            settings_.Save(settingsPath_);
+            ApplyRenderSettings();
+        }
+        if (options_.rayGlobal >= 0) {
+            PushFont(Font::Regular, size::Caption);
+            ImGui::TextDisabled("%s", Tr("명령줄 설정이 이번 실행 동안 우선합니다"));
+            PopFont();
+        }
         Gap(16.0f);
 
         SectionLabel(Tr("워크플로"));
         // two option cards: 고급 수동 / 완전 자동
         {
+            const bool anyEnabled = enabled || rayEnabled;   // the workflow applies to both switches
             const float w = ImGui::GetContentRegionAvail().x;
             const float cw = (w - Dp(12.0f)) * 0.5f;
             const float ch = Dp(74.0f);
@@ -146,8 +161,8 @@ void App::DrawMme() {
                 bool hovered = false;
                 const bool clicked = CardItem(id, a, b, &hovered, title);
                 const bool sel = settings_.mmeWorkflow == index;
-                const float hv = Anim(ImGui::GetID(id), hovered && enabled);
-                const float fade = enabled ? 1.0f : 0.4f;   // the switch is off: the cards read as disabled
+                const float hv = Anim(ImGui::GetID(id), hovered && anyEnabled);
+                const float fade = anyEnabled ? 1.0f : 0.4f;   // both switches off: the cards read as disabled
                 dl->AddRectFilled(a, b, WithAlpha(sel ? p.accentSoft : Mix(p.surface, p.sunken, 0.3f + 0.5f * hv), fade),
                                   Dp(12.0f));
                 dl->AddRect(a, b, WithAlpha(sel ? p.accent : Mix(p.line, p.lineStrong, hv), fade), Dp(12.0f), 0,
@@ -157,7 +172,7 @@ void App::DrawMme() {
                      WithAlpha(sel ? p.ink : p.ink2, fade), title);
                 TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(a.x + Dp(14.0f), a.y + Dp(38.0f)),
                              b.x - Dp(14.0f), WithAlpha(p.ink3, fade), desc);
-                return clicked && enabled;
+                return clicked && anyEnabled;
             };
             if (card("##mme_workflow_manual", 0, Tr("고급 수동"),
                      Tr("모델마다 저장한 MME · 재질 설정을 그대로 씁니다"))) {
@@ -265,8 +280,9 @@ void App::DrawMme() {
                         if (ImGui::IsRectVisible(ImVec2(lw, Dp(20.0f)))) MmeSkipCaption(MmeControllerSkip(ch.modelPath), p.warn);
                 }
                 ImGui::EndDisabled();
-                // P5: material source, only when the model has options
-                if (enabled && !autoWf) {
+                // P5: material source, only when the model has options (its own switch: the Ray-MMD one)
+                ImGui::BeginDisabled(!rayEnabled || autoWf);
+                if (rayEnabled && !autoWf) {
                     MaterialChoice material = settings_.CharacterMaterial(ch.id);
                     if (HasMaterialOptions(ch.id, ch.modelPath, (int)ch.materialCount, material)) {
                         if (DrawMaterialSelector("##mmemat", material, ch.id, ch.modelPath, (int)ch.materialCount, lw)) {
@@ -282,6 +298,7 @@ void App::DrawMme() {
                         ImGui::Dummy(ImVec2(lw, Dp(20.0f)));
                     }
                 }
+                ImGui::EndDisabled();
                 Gap(14.0f);
                 ImGui::PopID();
             }
@@ -315,7 +332,8 @@ void App::DrawMme() {
                 }
                 ImGui::EndDisabled();
                 const int stageMaterialCount = ModelMaterialCount(st.id, st.parts[0]);
-                if (enabled && !autoWf) {
+                ImGui::BeginDisabled(!rayEnabled || autoWf);
+                if (rayEnabled && !autoWf) {
                     MaterialChoice material = settings_.CharacterMaterial(st.id);
                     if (HasMaterialOptions(st.id, st.parts[0], stageMaterialCount, material)) {
                         if (DrawMaterialSelector("##mmemat", material, st.id, st.parts[0], stageMaterialCount, lw)) {
@@ -331,6 +349,7 @@ void App::DrawMme() {
                         ImGui::Dummy(ImVec2(lw, Dp(20.0f)));
                     }
                 }
+                ImGui::EndDisabled();
                 Gap(14.0f);
                 ImGui::PopID();
             }
@@ -345,7 +364,8 @@ void App::DrawMme() {
 
 bool App::PlayMmeDraftDirty() const {
     const MmeDraft& d = playMmeDraft_;
-    return !(d.enabled == settings_.mmeEnabled && d.workflow == settings_.mmeWorkflow && d.mmeEffects == settings_.mmeEffects &&
+    return !(d.enabled == settings_.mmeEnabled && d.rayEnabled == settings_.rayMmdEnabled &&
+             d.workflow == settings_.mmeWorkflow && d.mmeEffects == settings_.mmeEffects &&
              d.characterMmes == settings_.characterMmes && d.stageMmes == settings_.stageMmes &&
              d.characterMaterials == settings_.characterMaterials);
 }
@@ -359,14 +379,19 @@ void App::DrawPlayMmeTab(float w) {
     MmeDraft& draft = playMmeDraft_;
     const bool autoWf = draft.workflow == 1;
 
-    // global switch + workflow (draft)
+    // global switches + workflow (draft)
     bool on = draft.enabled;
-    if (Switch("##mme_global", Tr("MME 사용"), &on, Tr("끄면 모든 MME / Ray-MMD 기능이 꺼집니다"))) {
+    if (Switch("##mme_global", Tr("MME 사용"), &on, Tr("끄면 MME 효과가 모두 꺼집니다"))) {
         draft.enabled = on;
+    }
+    bool rayOn = draft.rayEnabled;
+    if (Switch("##ray_global", Tr("Ray-MMD 재질 사용"), &rayOn, Tr("끄면 모든 모델이 기본 재질을 씁니다"))) {
+        draft.rayEnabled = rayOn;
     }
     Gap(10.0f);
     SectionLabel(Tr("워크플로"));
     {
+        const bool anyEnabled = draft.enabled || draft.rayEnabled;   // the workflow applies to both switches
         const float cw = (w - Dp(12.0f)) * 0.5f;
         const float ch = Dp(66.0f);
         const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -376,7 +401,7 @@ void App::DrawPlayMmeTab(float w) {
             bool hovered = false;
             const bool clicked = CardItem(id, a, b, &hovered, title);
             const bool sel = draft.workflow == index;
-            const float hv = Anim(ImGui::GetID(id), hovered && draft.enabled);
+            const float hv = Anim(ImGui::GetID(id), hovered && anyEnabled);
             dl->AddRectFilled(a, b, sel ? p.accentSoft : Mix(p.surface, p.sunken, 0.3f + 0.5f * hv), Dp(12.0f));
             dl->AddRect(a, b, sel ? p.accent : Mix(p.line, p.lineStrong, hv), Dp(12.0f), 0, sel ? Dp(2.0f) : Dp(1.0f));
             if (sel) Icon(dl, icon::Check, 14.0f, ImVec2(b.x - Dp(16.0f), a.y + Dp(14.0f)), p.accentInk);
@@ -384,7 +409,7 @@ void App::DrawPlayMmeTab(float w) {
                          sel ? p.ink : p.ink2, title);
             TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(a.x + Dp(12.0f), a.y + Dp(34.0f)), b.x - Dp(12.0f),
                          p.ink3, desc);
-            return clicked && draft.enabled;
+            return clicked && anyEnabled;
         };
         if (card("##mme_workflow_manual", 0, Tr("고급 수동"), Tr("모델마다 저장한 설정을 그대로"))) draft.workflow = 0;
         if (card("##mme_workflow_auto", 1, Tr("완전 자동"), Tr("모든 모델에 자동 효과 · Ray 재질"))) draft.workflow = 1;
@@ -394,18 +419,19 @@ void App::DrawPlayMmeTab(float w) {
     if (MmeCliOverrideActive()) {
         PushFont(Font::Regular, size::Caption);
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
-        ImGui::TextWrapped("%s", Tr("이번 실행은 --mme-workflow / --mme-global 이 우선합니다"));
+        ImGui::TextWrapped("%s", Tr("이번 실행은 --mme-workflow / --mme-global / --ray-global 이 우선합니다"));
         ImGui::PopStyleColor();
         PopFont();
     }
     Gap(10.0f);
 
-    ImGui::BeginDisabled(!draft.enabled);
     if (autoWf) Para(Tr("완전 자동: 모든 모델이 자동 효과 · Ray 재질을 씁니다."), p.ink3, size::Caption);
 
     const auto modelRow = [&](const char* id, const std::string& label, const std::string& modelId,
                               const std::filesystem::path& modelPath, int materialCount, bool isStage) {
         SectionLabel(label.empty() ? Tr("(이름 없음)") : label.c_str());
+        // MME part: its own switch
+        ImGui::BeginDisabled(!draft.enabled);
         if (!draft.enabled || autoWf) {
             const MmeChoice mme = draft.enabled
                                       ? ResolveMmeChoiceFor(isStage ? settings_.StageMme(modelId)
@@ -419,13 +445,6 @@ void App::DrawPlayMmeTab(float w) {
             ImGui::Dummy(ImVec2(w, Dp(20.0f)));
             if (draft.enabled && mme.mode == MmeChoice::Auto)
                 MmeSkipCaption(MmeControllerSkip(modelPath), p.warn, size::Small);
-            const MaterialChoice mc = ResolveMaterialChoiceFrom(draft.characterMaterials, draft.enabled, autoWf,
-                                                               modelId, modelPath);
-            if (HasMaterialOptions(modelId, modelPath, materialCount, mc)) {
-                Text(dl, Font::Regular, size::Small, ImGui::GetCursorScreenPos(), p.ink3,
-                     (std::string(Tr("재질: ")) + (mc.ray ? "Ray-MMD" : Tr("기본"))).c_str());
-                ImGui::Dummy(ImVec2(w, Dp(18.0f)));
-            }
         } else {
             const auto stIt = draft.stageMmes.find(modelId);
             const auto chIt = draft.characterMmes.find(modelId);
@@ -438,7 +457,20 @@ void App::DrawPlayMmeTab(float w) {
             }
             if (mme.mode == MmeChoice::Auto)
                 MmeSkipCaption(MmeControllerSkip(modelPath), p.warn);
-            if (modelId.empty() || modelPath.empty()) { Gap(12.0f); return; }
+        }
+        ImGui::EndDisabled();
+        if (modelId.empty() || modelPath.empty()) { Gap(12.0f); return; }
+        // material source part: the Ray-MMD switch
+        ImGui::BeginDisabled(!draft.rayEnabled);
+        if (!draft.rayEnabled || autoWf) {
+            const MaterialChoice mc = ResolveMaterialChoiceFrom(draft.characterMaterials, draft.rayEnabled, autoWf,
+                                                               modelId, modelPath);
+            if (HasMaterialOptions(modelId, modelPath, materialCount, mc)) {
+                Text(dl, Font::Regular, size::Small, ImGui::GetCursorScreenPos(), p.ink3,
+                     (std::string(Tr("재질: ")) + (mc.ray ? "Ray-MMD" : Tr("기본"))).c_str());
+                ImGui::Dummy(ImVec2(w, Dp(18.0f)));
+            }
+        } else {
             MaterialChoice material = draft.characterMaterials.count(modelId)
                                           ? draft.characterMaterials[modelId]
                                           : settings_.CharacterMaterial(modelId);
@@ -449,6 +481,7 @@ void App::DrawPlayMmeTab(float w) {
                 }
             }
         }
+        ImGui::EndDisabled();
         Gap(12.0f);
     };
 
@@ -482,6 +515,7 @@ void App::DrawPlayMmeTab(float w) {
     }
 
     Gap(6.0f);
+    ImGui::BeginDisabled(!draft.enabled);
     SectionLabel(Tr("MME 효과 (후처리 스택)"));
     DrawMmePostStackEditor(draft.mmeEffects, false);
     ImGui::EndDisabled();
@@ -499,7 +533,7 @@ void App::DrawPlayMmeFooter(float w) {
         if (path.empty()) return;
         const MaterialChoice before = ResolveMaterialChoice(id, path);
         const MaterialChoice after =
-            ResolveMaterialChoiceFrom(draft.characterMaterials, draft.enabled, autoAfter, id, path);
+            ResolveMaterialChoiceFrom(draft.characterMaterials, draft.rayEnabled, autoAfter, id, path);
         if (!(before == after)) reload = true;
     };
     if (scene_->character) checkMat(scene_->characterId, scene_->character->Model().sourcePath);

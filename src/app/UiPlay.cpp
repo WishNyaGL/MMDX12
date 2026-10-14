@@ -538,7 +538,8 @@ void App::DrawPlayOverlay() {
         panelEntry("##shader", icon::Diamond, Tr("셰이더"), hasPack, 1);
     }
     panelEntry("##effects", icon::Sparkle, Tr("화면 효과"), !settings_.effectStack.empty(), 0);
-    panelEntry("##mmepanel", icon::Sliders, Tr("MME · Ray-MMD"), !MmeGlobalEnabled() || MmeAutoWorkflow(), 2);
+    panelEntry("##mmepanel", icon::Sliders, Tr("MME · Ray-MMD"),
+               (!MmeGlobalEnabled() && !RayMmdGlobalEnabled()) || MmeAutoWorkflow(), 2);
     dl->AddLine(ImVec2(x, cy - Dp(14.0f)), ImVec2(x, cy + Dp(14.0f)), WithAlpha(p.ink, 0.12f));
     x += Dp(11.0f);
     ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(20.0f)));

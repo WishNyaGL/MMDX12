@@ -32,10 +32,13 @@ struct AppSettings {
     // そぼろ AutoLuminous convention: PMX materials the author marked (black specular, power >= 100) glow. Default on.
     bool autoLuminous = true;
     bool readOnly = false;     // runtime only, never saved: Save() is a no-op (--classic runs)
-    // Global MME / Ray-MMD switch (ini mmeEnabled=0|1, CLI --mme-global). Off = no MME object effect, no MME post
-    // stack, no MME effect objects, Ray-MMD material source treated as Default, everywhere (play / lobby / studio /
-    // offline). Saved per-model choices are kept, they just do not apply.
+    // Global MME switch (ini mmeEnabled=0|1, CLI --mme-global). Off = no MME object effect, no MME post stack, no
+    // MME effect objects, everywhere (play / lobby / studio / offline). Does not cover the Ray-MMD PBR material
+    // source (see rayMmdEnabled). Saved per-model choices are kept, they just do not apply.
     bool mmeEnabled = true;
+    // Ray-MMD PBR material source switch (ini rayMmdEnabled=0|1, CLI --ray-global). Off = every model's material
+    // source resolves to Default; on = the saved / auto / CLI choice. Independent of mmeEnabled.
+    bool rayMmdEnabled = true;
     // MME workflow (ini mmeWorkflow=manual|auto, CLI --mme-workflow). Manual (0) = today's per-model behaviour.
     // Auto (1) = every model always gets the automatic choices, ignoring the saved per-model ones.
     int mmeWorkflow = 0;       // 0 manual, 1 auto

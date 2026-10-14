@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <fstream>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
 
 #include "core/TextUtil.h"
 
@@ -120,14 +122,30 @@ bool ResolveRel(const std::filesystem::path& base, const std::string& relIn, std
     return false;
 }
 
+// Memoized: the computed key for an input path string is cached process-wide (guarded by a mutex; the expensive
+// weakly_canonical call runs outside the lock).
 std::string PathKey(const std::filesystem::path& p) {
+    static std::mutex mutex;
+    static std::unordered_map<std::wstring, std::string> cache;
+    const std::wstring in = p.native();
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto it = cache.find(in);
+        if (it != cache.end()) return it->second;
+    }
     std::error_code ec;
     std::filesystem::path abs = std::filesystem::weakly_canonical(p, ec);
     if (ec) abs = p;
     std::string s = PathToUtf8(abs);
     for (char& c : s)
         if (c == '\\') c = '/';
-    return Lower(s);
+    s = Lower(s);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (cache.size() > 8192) cache.clear();   // bounded: never grows past the cap
+        cache[in] = s;
+    }
+    return s;
 }
 
 } // namespace mmdx::mmetext

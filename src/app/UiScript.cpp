@@ -679,6 +679,12 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             settings_.Save(settingsPath_);
             ApplyRenderSettings();
         }
+    } else if (cmd == "rayglobal") {  // rayglobal <0|1>: the saved global Ray-MMD material-source switch
+        if (!args.empty()) {
+            settings_.rayMmdEnabled = std::atoi(args[0].c_str()) != 0;
+            settings_.Save(settingsPath_);
+            ApplyRenderSettings();
+        }
     } else if (cmd == "mmeworkflow") {  // mmeworkflow <auto|manual>: the saved MME workflow
         if (!args.empty()) {
             const std::string v = ToLowerAscii(args[0]);
@@ -714,8 +720,9 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 if (e.instance) addModel(e.characterId, e.instance->Model().sourcePath, false);
             for (const auto& st : scene_->stages) addModel(scene_->stageId, st->Model().sourcePath, true);
         }
-        LOG_INFO("MMESTATE enabled=%d workflow=%s models=%s", (int)MmeGlobalEnabled(),
-                 MmeAutoWorkflow() ? "auto" : "manual", models.empty() ? "-" : models.c_str());
+        LOG_INFO("MMESTATE enabled=%d ray=%d workflow=%s models=%s", (int)MmeGlobalEnabled(),
+                 (int)RayMmdGlobalEnabled(), MmeAutoWorkflow() ? "auto" : "manual",
+                 models.empty() ? "-" : models.c_str());
     } else if (cmd == "log") {
         LOG_INFO("UISCRIPT %s", args.empty() ? "" : args[0].c_str());
     } else if (cmd == "updatecheck") {  // synchronous update-feed check, logs UPDATECHECK

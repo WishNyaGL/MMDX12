@@ -38,7 +38,7 @@ bool ReadTextFileText(const std::filesystem::path& p, std::string& out);
 // component. `rel` accepts both separators; "..", "." and absolute (drive) paths are handled.
 bool ResolveRel(const std::filesystem::path& base, const std::string& relIn, std::filesystem::path& out);
 
-// Canonical key for path caches: the absolute path lowercased (ASCII), separators normalised to '/'.
+// Canonical key for path caches: the absolute path lowercased (ASCII), separators normalised to '/'. Memoized.
 std::string PathKey(const std::filesystem::path& p);
 
 } // namespace mmdx::mmetext

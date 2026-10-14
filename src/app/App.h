@@ -116,7 +116,9 @@ namespace mmdx {
 //                                whole project; motion camera; project audio) and quits; --offline-still renders the
 //                                --seek frame (GI).
 //   --theme <auto|light|dark>    colour theme for this run instead of the saved one (auto = follow Windows)
-//   --mme-global <0|1>          global MME / Ray-MMD switch for this run (0 = off everywhere; default: settings.mmeEnabled)
+//   --mme-global <0|1>          global MME switch for this run (0 = off everywhere; default: settings.mmeEnabled)
+//   --ray-global <0|1>          global Ray-MMD material-source switch for this run (0 = Default everywhere;
+//                                default: settings.rayMmdEnabled)
 //   --mme-workflow <auto|manual>  MME workflow for this run (auto = every model gets the automatic choices)
 //   --material-source <default|ray>  per-material PBR data source (work unit P2); default renders as before and
 //                                never reads Ray .md/.fx data
@@ -163,6 +165,7 @@ struct AppOptions {
     int materialSource = 0;    // --material-source <default|ray>: per-material PBR source for this run (0 default, 1 ray)
     bool materialSourceSet = false;   // --material-source was given: it wins over the saved per-character choices
     int mmeGlobal = -1;        // --mme-global <0|1>: global MME switch for this run (-1 = settings.mmeEnabled)
+    int rayGlobal = -1;        // --ray-global <0|1>: global Ray-MMD material-source switch (-1 = settings.rayMmdEnabled)
     int mmeWorkflow = -1;      // --mme-workflow <auto|manual>: workflow for this run (-1 = settings.mmeWorkflow)
     int pbrDebug = 0;          // --pbr-debug <none|albedo|...>: PBR debug channel for this run (0 none .. 7 model)
     std::string packIndex;     // --pack-index <url|path>: the online shader pack gallery index (testing)
@@ -357,6 +360,7 @@ private:
     struct MmeDraft {
         bool valid = false;
         bool enabled = true;
+        bool rayEnabled = true;
         int workflow = 0;
         std::vector<MmeEffectEntry> mmeEffects;
         std::map<std::string, MmeChoice> characterMmes;
@@ -821,6 +825,16 @@ private:
     // The controller an Auto workflow assignment skipped for this model path (ui: the "자동 제외" caption); empty when
     // the model was not skipped. Keyed by (model path, scene-names key).
     std::map<std::string, std::string> mmeAutoSkip_;
+    // The Auto resolution ApplyMmeEffect builds from the model's files on disk (per-material paths + hidden +
+    // ray-skipped), keyed by (model path, material count) and reused for up to 1.0 s so an unchanged scene does no
+    // filesystem work per frame (a .emd edit still applies while running).
+    struct MmeAutoResolved {
+        std::vector<std::filesystem::path> perMaterial;
+        bool hidden = false;
+        size_t raySkipped = 0;
+        std::chrono::steady_clock::time_point at;
+    };
+    std::unordered_map<std::string, MmeAutoResolved> mmeAutoResolved_;
     std::set<std::string> mmeSkipLogged_;   // (model path utf8 | controller) reasoned once
     std::vector<std::string> mmeSceneNames_;        // MmeSceneNames cache
     std::string mmeSceneNamesKey_;                  // inputs the cache was built from
@@ -830,10 +844,11 @@ private:
     std::vector<MmeEffectEntry> StudioMmeEntries() const;
     // M6b: applies a studio MME stack change (add / remove / toggle) to the project and the renderer.
     void StudioMmeChanged();
-    // P5: the per-character PBR material source. The global switch off forces Default; the Auto workflow picks Ray for
-    // a model with a Ray .emd candidate (Default otherwise); --material-source wins over every mode.
+    // P5: the per-character PBR material source. The global Ray-MMD switch off forces Default; the Auto workflow picks
+    // Ray for a model with a Ray .emd candidate (Default otherwise); --material-source wins over every mode.
     MaterialChoice ResolveMaterialChoice(const std::string& characterId, const std::filesystem::path& modelPath = {}) const;
-    // The same resolution over an explicit saved map / switch / workflow (the MME panel's draft comparison).
+    // The same resolution over an explicit saved map / switch / workflow (the MME panel's draft comparison). `enabled`
+    // is the Ray-MMD switch (--ray-global 0 wins over everything).
     MaterialChoice ResolveMaterialChoiceFrom(const std::map<std::string, MaterialChoice>& materials, bool enabled,
                                              bool autoWorkflow, const std::string& id,
                                              const std::filesystem::path& modelPath) const;
@@ -906,16 +921,21 @@ private:
     // MME post stack and the per-model list. The play-mode panel is the MME tab of DrawPlayFxPanel (UiPlayPanel.cpp).
     void DrawMme();
     // The resolved global MME switch / workflow (the run's CLI override wins over the settings). With the switch off
-    // every MME / Ray-MMD feature falls back to its off / Default state.
+    // every MME object / post / effect-object feature falls back to its off state.
     bool MmeGlobalEnabled() const { return options_.mmeGlobal >= 0 ? options_.mmeGlobal != 0 : settings_.mmeEnabled; }
+    // The resolved global Ray-MMD material-source switch (CLI --ray-global wins). Off = every model's material source
+    // resolves to Default.
+    bool RayMmdGlobalEnabled() const { return options_.rayGlobal >= 0 ? options_.rayGlobal != 0 : settings_.rayMmdEnabled; }
     bool MmeAutoWorkflow() const { return options_.mmeWorkflow >= 0 ? options_.mmeWorkflow == 1 : settings_.mmeWorkflow == 1; }
     // True when a run-wide CLI override makes the saved MME switch / workflow not what this run uses (the UI shows a
     // "명령줄 설정이 우선합니다" hint).
-    bool MmeCliOverrideActive() const { return options_.mmeGlobal >= 0 || options_.mmeWorkflow >= 0; }
-    // The material source the renderers use for a model: the saved / auto choice, forced to Default while MME is
-    // globally off.
+    bool MmeCliOverrideActive() const {
+        return options_.mmeGlobal >= 0 || options_.rayGlobal >= 0 || options_.mmeWorkflow >= 0;
+    }
+    // The material source the renderers use for a model: the saved / auto choice, forced to Default while the Ray-MMD
+    // switch is globally off.
     MaterialChoice EffectiveMaterialChoice(const std::string& id) const {
-        if (!MmeGlobalEnabled()) return MaterialChoice{};
+        if (!RayMmdGlobalEnabled()) return MaterialChoice{};
         return ResolveMaterialChoice(id);
     }
     void DrawShaderPackDetail(float x0, float y0, float x1, float y1);    // M6b: the shader manager's MME tab detail pane (compile status per pass, unsupported features, missing textures).

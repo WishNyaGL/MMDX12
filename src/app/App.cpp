@@ -293,8 +293,11 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.mmeAuto = _wtoi(next().c_str()) != 0 ? 1 : 0;
             opt.mmeAutoSet = true;
         } else if (arg == L"--mme-global") {
-            // --mme-global <0|1>: global MME / Ray-MMD switch for this run (not saved). 0 wins over everything.
+            // --mme-global <0|1>: global MME switch for this run (not saved). 0 wins over everything.
             opt.mmeGlobal = _wtoi(next().c_str()) != 0 ? 1 : 0;
+        } else if (arg == L"--ray-global") {
+            // --ray-global <0|1>: global Ray-MMD material-source switch for this run (not saved). 0 wins over everything.
+            opt.rayGlobal = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--mme-workflow") {
             // --mme-workflow <auto|manual>: MME workflow for this run (not saved)
             const std::string v = ToLowerAscii(WideToUtf8(next()));

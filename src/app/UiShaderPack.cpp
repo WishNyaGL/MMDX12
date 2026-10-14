@@ -198,25 +198,36 @@ void App::ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::file
     }
     // Auto: what the model's own files ask for, mapped to per-material paths (subset -1 = every material,
     // subset n = material n; later entries override earlier; hidden = hide the model, ignored for now).
-    std::vector<std::filesystem::path> perMaterial(count);
-    const std::vector<MmeAssignment> assigns = FindModelEffects(modelPath);
-    bool hidden = false;
-    size_t raySkipped = 0;
-    for (const MmeAssignment& a : assigns) {
-        if (a.hidden && a.subset < 0) hidden = true;
-        // Ray-MMD material files (material_2.0 / ray macros) are what the native PBR reads (asset/RayMaterial): Auto
-        // leaves them to it. Run as MME objects they need ray.x's deferred G-buffer and render dark. File mode still
-        // forces any effect.
-        if (!a.effect.empty() && IsRayMaterialFx(a.effect)) {
-            ++raySkipped;
-            continue;
+    // The filesystem-dependent resolution (FindModelEffects + the IsRayMaterialFx skip) is cached per
+    // (model path, material count) for 1.0 s, so a typical frame does no disk I/O here.
+    const std::string cacheKey = PathToUtf8(modelPath) + "|" + std::to_string(count);
+    const auto now = std::chrono::steady_clock::now();
+    MmeAutoResolved& resolved = mmeAutoResolved_[cacheKey];
+    if (resolved.at == std::chrono::steady_clock::time_point{} ||
+        now - resolved.at >= std::chrono::duration<double>(1.0)) {
+        resolved = MmeAutoResolved{};
+        resolved.perMaterial.assign(count, {});
+        const std::vector<MmeAssignment> assigns = FindModelEffects(modelPath);
+        for (const MmeAssignment& a : assigns) {
+            if (a.hidden && a.subset < 0) resolved.hidden = true;
+            // Ray-MMD material files (material_2.0 / ray macros) are what the native PBR reads (asset/RayMaterial):
+            // Auto leaves them to it. Run as MME objects they need ray.x's deferred G-buffer and render dark. File
+            // mode still forces any effect.
+            if (!a.effect.empty() && IsRayMaterialFx(a.effect)) {
+                ++resolved.raySkipped;
+                continue;
+            }
+            if (a.subset < 0) {
+                for (auto& p : resolved.perMaterial) p = a.effect;
+            } else if ((size_t)a.subset < resolved.perMaterial.size() && !a.hidden) {
+                resolved.perMaterial[(size_t)a.subset] = a.effect;
+            }
         }
-        if (a.subset < 0) {
-            for (auto& p : perMaterial) p = a.effect;
-        } else if ((size_t)a.subset < perMaterial.size() && !a.hidden) {
-            perMaterial[(size_t)a.subset] = a.effect;
-        }
+        resolved.at = now;
     }
+    std::vector<std::filesystem::path> perMaterial = resolved.perMaterial;
+    const bool hidden = resolved.hidden;
+    const size_t raySkipped = resolved.raySkipped;
     if (autoWorkflow && !modelPath.empty()) {
         // Auto (완전 자동) only: an effect that reads a required external controller object which is not in the scene
         // renders the whole model as a dark translucent silhouette (the binder uses the missing-object defaults). Such
@@ -1115,15 +1126,16 @@ bool App::DrawShaderPackParams(ShaderChoice& choice) {
 // ---- PBR material source (P5) ---------------------------------------------------------------------------------------
 
 MaterialChoice App::ResolveMaterialChoice(const std::string& characterId, const std::filesystem::path& modelPath) const {
-    return ResolveMaterialChoiceFrom(settings_.characterMaterials, MmeGlobalEnabled(), MmeAutoWorkflow(), characterId,
+    return ResolveMaterialChoiceFrom(settings_.characterMaterials, RayMmdGlobalEnabled(), MmeAutoWorkflow(), characterId,
                                      modelPath);
 }
 
-// The resolution over an explicit saved map / switch / workflow: the MME panel's draft comparison uses it.
+// The resolution over an explicit saved map / switch / workflow: the MME panel's draft comparison uses it. `enabled`
+// is the Ray-MMD switch: --ray-global 0 wins over everything.
 MaterialChoice App::ResolveMaterialChoiceFrom(const std::map<std::string, MaterialChoice>& materials, bool enabled,
                                               bool autoWorkflow, const std::string& characterId,
                                               const std::filesystem::path& modelPath) const {
-    // --mme-global 0 wins over everything: Ray-MMD material data is treated as Default.
+    // --ray-global 0 wins over everything: Ray-MMD material data is treated as Default.
     if (!enabled) return MaterialChoice{};
     // --material-source wins over saved choices and the workflow: Ray for every model, Default for none.
     if (options_.materialSourceSet) {
@@ -1280,7 +1292,7 @@ bool App::DrawMaterialSelector(const char* id, MaterialChoice& choice, const std
 
 void App::SuggestRayMaterial(const std::string& characterId, const std::filesystem::path& modelPath, int pmxMaterialCount) {
     if (characterId.empty() || options_.materialSourceSet || HeadlessRun()) return;
-    if (!MmeGlobalEnabled() || MmeAutoWorkflow()) return;   // no suggestions with MME off / in 완전 자동
+    if (!RayMmdGlobalEnabled() || MmeAutoWorkflow()) return;   // no suggestions with Ray-MMD off / in 완전 자동
     if (ImportedPbrCandidates(characterId, modelPath)) return;   // P6: imported models get no suggestion toast
     if (!materialSuggestChecked_.emplace(characterId, true).second) return;
     if (settings_.CharacterMaterial(characterId).ray || settings_.MaterialSuggested(characterId)) return;
@@ -1375,11 +1387,11 @@ void App::DrawStudioMaterialRow(float w) {
         Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("재질 데이터"));
         ImGui::Dummy(ImVec2(w, Dp(20.0f)));
     }
-    // The global switch off / the Auto workflow decide the material source: show what applies, disabled.
-    if (!MmeGlobalEnabled() || MmeAutoWorkflow()) {
+    // The Ray-MMD switch off / the Auto workflow decide the material source: show what applies, disabled.
+    if (!RayMmdGlobalEnabled() || MmeAutoWorkflow()) {
         const MaterialChoice resolved = ResolveMaterialChoice(m->libraryId, m->path);
         PushFont(Font::Regular, size::Caption);
-        ImGui::TextDisabled("%s", Tr("완전 자동 / MME 꺼짐: 재질 소스가 자동으로 정해집니다"));
+        ImGui::TextDisabled("%s", Tr("완전 자동 / Ray-MMD 꺼짐: 재질 소스가 자동으로 정해집니다"));
         PopFont();
         const std::string label = std::string(Tr("적용: ")) + (resolved.ray ? "Ray-MMD" : Tr("기본"));
         ImGui::BeginDisabled(true);
