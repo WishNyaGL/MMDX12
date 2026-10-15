@@ -1848,3 +1848,21 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - Seen in the real app: the light row field and the RGB tab popup (`captures/studio/colorfield_a.png` / `_b.png`,
   script `captures/studio/colorfield.txt`). NOT seen: HSV / OKLab tabs, hex input, the camera-VMD light row; keyed-edit
   begin / end behaviour (undo steps, auto-key) after the change was not exercised; worker diff not read line by line.
+
+## 2026-10-15 (5) - Library scan: parallel + cached .fx pass; props / effect objects / dummies no longer stages
+- `.fx` pass (section 8b of `ScanLibrary`): `LoadMmeEffect` ran sequentially with no cache (16k files under
+  `effects/mme_lib/_bowlroll`, ~59 s). Now `std::execution::par` + `cache/fx_probes.json` (size + mtime of the .fx AND of
+  every include it resolved; `kFxCacheVersion`). Measured: scan 60.0 s -> 8.2 s cold / 2.8 s cached (fx 1.6 s), effect list
+  identical cold vs cached (16283: object 16107, post 173, pre 3). The phases log line gained `fx=`.
+- Stage classification (automatic only; sidecars / overrides untouched): `.x` with a same-stem `.fx` or under `effects/` =
+  MME effect object, skipped; auto entries < 100 vertices skipped (camera / controller / shader dummies); prop-named
+  folders / stems (prop, accessory, 小物, 소품...) skipped; inside a song folder (directly holds a VMD keying センター /
+  上半身 / 下半身, not the library root) several sub-folder stage candidates keep the stage-named ones, else the largest;
+  `bundledStageOf` prefers stage-named, then the largest (was: the first match, so fire_flower got GlowStick, Supernova got
+  Confetti). The library root never gets a bundled stage. Real library: 55 -> 16 stages.
+- Both done by deepseek opencode workers from contract specs, smoke review (Claude fixed the root bundled-stage case).
+### Not verified / left
+- Pitfall: `--screen select --frames 30` quits before a background scan finishes (cancelled = nothing saved); use
+  `--frames 30000` to time a scan in the app.
+- `by StarNoodle495/.../kamKnife 80cm` (a weapon outside a character folder) is still a stage (hide it by right click).
+- The 16k MME objects still flood the effect list (separate UI / dump-filter problem). Stage list not checked in the app UI.
