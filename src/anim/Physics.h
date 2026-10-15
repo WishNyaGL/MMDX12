@@ -28,9 +28,11 @@ public:
     void Reset(const std::vector<DirectX::XMFLOAT4X4>& boneWorld, float settleSeconds);
 
     // Moves kinematic bodies to boneWorld and advances the simulation by dt seconds
-    // (fixed 1/120 s substeps). dt <= 0 only refreshes the kinematic targets. If a kinematic body
-    // jumps more than 10 units (a teleport in the motion), this resets instead of simulating.
-    void Step(const std::vector<DirectX::XMFLOAT4X4>& boneWorld, float dt);
+    // (fixed 1/120 s substeps, at most maxSubsteps of them: simulated time beyond that is dropped
+    // instead of accumulating, so a slow frame makes physics run slower, not spiral). dt <= 0 only
+    // refreshes the kinematic targets. If a kinematic body jumps more than 10 units (a teleport in
+    // the motion), this resets instead of simulating.
+    void Step(const std::vector<DirectX::XMFLOAT4X4>& boneWorld, float dt, int maxSubsteps = 10);
 
     // Per simulated body attached to a bone: the bone's new world matrix.
     struct BoneResult { int bone; DirectX::XMFLOAT4X4 world; };

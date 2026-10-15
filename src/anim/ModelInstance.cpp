@@ -505,7 +505,7 @@ void ModelInstance::RunPhysics(float dt) {
         physics_->Reset(physicsPose_, 1.0f);
         physicsResetPending_ = false;
     } else {
-        physics_->Step(physicsPose_, dt);
+        physics_->Step(physicsPose_, dt, physicsMaxSubsteps_);
     }
     physics_->Results(physicsPose_, physicsOut_);
     if (physicsOut_.empty()) return;

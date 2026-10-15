@@ -236,11 +236,12 @@ void CameraMotion::ToView(const CameraPose& pose, XMFLOAT4X4* view, XMFLOAT3* ey
     const XMMATRIX r = XMMatrixRotationRollPitchYaw(-pose.rotation.x, -pose.rotation.y, -pose.rotation.z);
     const XMVECTOR target = XMLoadFloat3(&pose.target);
     const XMVECTOR eyePos = XMVectorAdd(XMVector3TransformCoord(XMVectorSet(0, 0, pose.distance, 0), r), target);
+    // MMD always looks along the camera's own forward axis R * (0, 0, 1), whatever the distance sign.
+    // A positive distance passes the camera in front of the target but still faces the same way (a
+    // few rips hover their distance around 0, and looking at the target there would flip the view).
+    const XMVECTOR forward = XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), r);
     const XMVECTOR up = XMVector3TransformNormal(XMVectorSet(0, 1, 0, 0), r);
-    XMVECTOR at = target;
-    if (std::fabs(pose.distance) < 1e-4f)  // degenerate: look along the camera's forward axis
-        at = XMVectorAdd(eyePos, XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), r));
-    if (view) XMStoreFloat4x4(view, XMMatrixLookAtLH(eyePos, at, up));
+    if (view) XMStoreFloat4x4(view, XMMatrixLookToLH(eyePos, forward, up));
     if (eye) XMStoreFloat3(eye, eyePos);
 }
 

@@ -222,7 +222,7 @@ void PhysicsWorld::Reset(const std::vector<XMFLOAT4X4>& boneWorld, float settleS
     for (float t = 0; t < settleSeconds; t += 1.0f / 60.0f) s.world.stepSimulation(1.0f / 60.0f, kMaxSubsteps, kSubstep);
 }
 
-void PhysicsWorld::Step(const std::vector<XMFLOAT4X4>& boneWorld, float dt) {
+void PhysicsWorld::Step(const std::vector<XMFLOAT4X4>& boneWorld, float dt, int maxSubsteps) {
     Impl& s = *impl_;
     // Some dance motions teleport the model between cuts. Simulating that would drag every body
     // across the jump, so a kinematic body moving that far in one update resets like a seek.
@@ -237,7 +237,7 @@ void PhysicsWorld::Step(const std::vector<XMFLOAT4X4>& boneWorld, float dt) {
         }
     }
     s.boneWorld = boneWorld;
-    if (dt > 0) s.world.stepSimulation(dt, kMaxSubsteps, kSubstep);
+    if (dt > 0) s.world.stepSimulation(dt, maxSubsteps, kSubstep);
 }
 
 void PhysicsWorld::Results(const std::vector<XMFLOAT4X4>& boneWorld, std::vector<BoneResult>& out) const {

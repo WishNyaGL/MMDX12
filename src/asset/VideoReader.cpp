@@ -232,7 +232,9 @@ struct MfReader {
     uint32_t width = 0, height = 0;
     double fps = 30.0, duration = 0.0;
     uint64_t frameCount = 0;
-    LONGLONG lastReadTime = -1;   // 100ns time of the last decoded sample (sequential-read fast path)
+    LONGLONG lastReadTime = -1;   // 100ns time of the last returned sample (-1 = none yet)
+    LONGLONG lastReadDur = 0;     // 100ns duration of the last returned sample (0 = unknown)
+    ComPtr<IMFSample> lastSample; // last returned sample: re-fill path without re-reading
 
     bool Open(const std::filesystem::path& path, std::string* error) {
         HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -305,6 +307,8 @@ struct MfReader {
         PropVariantClear(&var);
         if (duration > 0.0 && fps > 0.0) frameCount = (uint64_t)std::llround(duration * fps);
         lastReadTime = -1;
+        lastReadDur = 0;
+        lastSample.Reset();
         return true;
     }
 
@@ -314,38 +318,11 @@ struct MfReader {
         if (cleanupCom_) CoUninitialize();
     }
 
-    bool ReadFrame(double seconds, std::vector<uint8_t>& bgra) {
-        if (!reader || width == 0 || height == 0) return false;
-        const LONGLONG target = (LONGLONG)std::llround(std::max(0.0, seconds) * 10000000.0);
-        // Sequential fast path: the next sample's time is at / after the target.
-        const bool seek = lastReadTime < 0 || target < lastReadTime ||
-                          frameCount == 0 || (uint64_t)(target - lastReadTime) > 10000000ull / std::max(1.0, fps) * 4;
-        if (seek) {
-            PROPVARIANT var;
-            PropVariantInit(&var);
-            var.vt = VT_I8;
-            var.hVal.QuadPart = target;
-            HRESULT hr = reader->SetCurrentPosition(GUID_NULL, var);
-            PropVariantClear(&var);
-            if (FAILED(hr)) return false;
-        }
-
-        ComPtr<IMFSample> sample;
-        DWORD flags = 0;
-        LONGLONG ts = 0;
-        for (int guard = 0; guard < 8; ++guard) {
-            DWORD actualStream = 0;
-            HRESULT hr = reader->ReadSample((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &actualStream, &flags, &ts, sample.ReleaseAndGetAddressOf());
-            if (FAILED(hr)) return false;
-            if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return false;
-            if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) continue;
-            if (sample) break;
-        }
-        if (!sample) return false;
-        lastReadTime = ts;
-
+    // Converts one decoded sample to top-down BGRA with an opaque alpha.
+    bool CopyToBgra(IMFSample* s, std::vector<uint8_t>& bgra) {
+        if (!s) return false;
         ComPtr<IMFMediaBuffer> buf;
-        if (FAILED(sample->ConvertToContiguousBuffer(buf.GetAddressOf()))) return false;
+        if (FAILED(s->ConvertToContiguousBuffer(buf.GetAddressOf()))) return false;
         BYTE* data = nullptr;
         DWORD maxLen = 0, curLen = 0;
         if (FAILED(buf->Lock(&data, &maxLen, &curLen))) return false;
@@ -363,6 +340,64 @@ struct MfReader {
         }
         buf->Unlock();
         return true;
+    }
+
+    bool ReadFrame(double seconds, std::vector<uint8_t>& bgra) {
+        if (!reader || width == 0 || height == 0) return false;
+        const double t = std::max(0.0, seconds);
+        const LONGLONG target = (LONGLONG)std::llround(t * 10000000.0);
+        const LONGLONG nominalDur = (LONGLONG)std::llround(10000000.0 / std::max(1.0, fps));
+        const LONGLONG tol = nominalDur / 2;   // half-frame tolerance: float times must not skip the right frame
+
+        // Fast path: the target is still inside the last returned sample's interval -> no new sample, but the
+        // frame is copied again (callers reuse and modify their vector, e.g. PassVideo's BGRA -> RGBA swap).
+        if (lastReadTime >= 0 && lastSample) {
+            const LONGLONG dur = lastReadDur > 0 ? lastReadDur : nominalDur;
+            if (target >= lastReadTime - tol && target < lastReadTime + dur) return CopyToBgra(lastSample.Get(), bgra);
+        }
+
+        // Seek only when the target is behind the last decoded sample, on the first read, or far ahead
+        // (decoding forward within a keyframe interval is cheaper than a seek).
+        const bool first = lastReadTime < 0;
+        const bool behind = !first && target + tol < lastReadTime;
+        const bool farAhead = !first && (target - lastReadTime) > 20000000ll;   // > 2 s
+        if (first || behind || farAhead) {
+            PROPVARIANT var;
+            PropVariantInit(&var);
+            var.vt = VT_I8;
+            var.hVal.QuadPart = target;
+            HRESULT hr = reader->SetCurrentPosition(GUID_NULL, var);
+            PropVariantClear(&var);
+            if (FAILED(hr)) return false;
+            lastReadTime = -1;
+            lastReadDur = 0;
+            lastSample.Reset();
+        }
+
+        // Decode forward and DISCARD samples whose interval ends before the target; only the returned sample is
+        // converted. The discard count is bounded (a few seconds at the stream fps) and then the latest sample wins.
+        const int maxDiscard = std::max(8, (int)std::ceil(std::max(1.0, fps) * 4.0));
+        ComPtr<IMFSample> sample;
+        LONGLONG ts = 0, dur = 0;
+        for (int i = 0; i <= maxDiscard; ++i) {
+            DWORD flags = 0, actualStream = 0;
+            sample.Reset();
+            HRESULT hr = reader->ReadSample((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &actualStream, &flags, &ts,
+                                            sample.GetAddressOf());
+            if (FAILED(hr)) return false;
+            if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return false;
+            if (!sample || (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)) continue;
+            dur = 0;
+            sample->GetSampleDuration(&dur);
+            const LONGLONG d = dur > 0 ? dur : nominalDur;
+            if (ts + d > target) break;   // this sample contains the target (or starts after it, right after a seek)
+        }
+        if (!sample) return false;
+
+        lastReadTime = ts;
+        lastReadDur = dur;
+        lastSample = sample;
+        return CopyToBgra(sample.Get(), bgra);
     }
 
     ComPtr<IMFSourceReader> readerFor() const { return reader; }

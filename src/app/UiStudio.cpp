@@ -534,6 +534,8 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
             inst.SetRootTransform(root);
         }
         inst.EnablePhysics(d.physics && !m.physicsOff);
+        // Interactive playback caps Bullet substeps (drops simulated time on a slow frame); offline renders keep full.
+        inst.SetPhysicsMaxSubsteps(offline_.mode == OfflineMode::None ? 4 : 10);
         if (!(m.placeApplied == m.place)) {  // moved by hand: the bodies restart at the new place
             m.placeApplied = m.place;
             resetPhysics = true;

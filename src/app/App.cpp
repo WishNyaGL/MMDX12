@@ -1996,26 +1996,26 @@ void App::PollMmeControllers() {
 }
 
 void App::UpdateScene(float frame) {
+    // 1/30 s of physics per frame at most: a slow frame then drops simulated time instead of asking for more substeps
+    // (five ~400-body performers spiralled to 6 fps with the 10-substep cap).
+    constexpr int kInteractivePhysicsSubsteps = 4;
     // Auto workflow (완전 자동): load queued CONTROLOBJECT controller models before the models' MME choices are
     // applied below, so a controller loaded this frame is visible to the skip re-evaluation the same frame.
     PollMmeControllers();
     const uint64_t slot = ctx_.FrameNumber();
-    if (scene_->motion) {
-        scene_->motion->Evaluate(frame, *scene_->character);
-    } else {
-        scene_->character->ResetPose();
-    }
     // Physics follows the motion clock. Backward jumps (seek, loop) and forward jumps beyond a
     // normal frame step reset the bodies to the animated pose instead of simulating the jump.
     // The benchmark always simulates (fixed workload).
     ModelInstance& ch = *scene_->character;
-    // The saved per-character display scale (never in the benchmarks: they measure a fixed scene).
-    ch.SetScale(screen_ == Screen::BenchRun || screen_ == Screen::BenchRender || scene_->characterId.empty()
-                    ? 1.0f
-                    : settings_.CharacterScale(scene_->characterId));
-    ch.EnablePhysics(screen_ == Screen::BenchRun || (settings_.physics && !options_.noPhysics));
+    // Main-thread decisions for the parallel posing below: workers may only touch their own instance.
+    const bool benchMode = screen_ == Screen::BenchRun || screen_ == Screen::BenchRender;
+    const bool physicsOn = screen_ == Screen::BenchRun || (settings_.physics && !options_.noPhysics);
+    // Interactive play caps Bullet's substeps (see kInteractivePhysicsSubsteps); offline renders and benchmarks
+    // keep the full cap so the simulated time stays exact.
+    const int physicsMaxSubsteps =
+        (offline_.mode == OfflineMode::None && !benchMode) ? kInteractivePhysicsSubsteps : 10;
     // A slow frame is not a jump: when the motion advanced about as much as the wall clock, keep stepping (Bullet
-    // caps the work at kMaxSubsteps). Resetting there settles every body for a second, which made a six-performer
+    // caps the work at the substep limit). Resetting there settles every body for a second, which made a six-performer
     // frame slower than 0.25 s, so every following frame reset again (stuck at 2-5 fps until a pause).
     const auto now = std::chrono::steady_clock::now();
     const float wallDt = std::chrono::duration<float>(now - scene_->physicsClock).count();
@@ -2024,12 +2024,42 @@ void App::UpdateScene(float frame) {
     if (scene_->physicsFrame >= 0.0f) physicsDt = (frame - scene_->physicsFrame) / scene_->motionFps;
     const bool resetPhysics = scene_->physicsFrame < 0.0f || physicsDt < 0.0f ||
                               (physicsDt > 0.25f && physicsDt > wallDt * 1.5f + 0.1f);
-    if (resetPhysics) {
-        ch.ResetPhysics();
-        physicsDt = 0.0f;
-    }
+    if (resetPhysics) physicsDt = 0.0f;
     scene_->physicsFrame = frame;
+    // The saved per-character display scale (never in the benchmarks: they measure a fixed scene).
+    const float characterScale = benchMode || scene_->characterId.empty()
+                                     ? 1.0f
+                                     : settings_.CharacterScale(scene_->characterId);
+    // Pose the center character and the extras in parallel: only the CPU posing runs off the main thread, the GPU
+    // uploads below stay sequential. The center runs on this thread, each extra on the Windows thread pool.
+    std::vector<std::future<void>> pendingPoses;
+    if (screen_ != Screen::BenchRender) {
+        for (auto& extra : scene_->extras) {
+            if (!extra.instance || !extra.gpu) continue;
+            ModelInstance* inst = extra.instance.get();
+            const BoundMotion* motion = extra.motion.get();
+            const float scale = screen_ == Screen::BenchRun || extra.characterId.empty()
+                                    ? 1.0f
+                                    : settings_.CharacterScale(extra.characterId);
+            pendingPoses.push_back(std::async(std::launch::async, [=]() {
+                if (motion) motion->Evaluate(frame, *inst);
+                else inst->ResetPose();
+                inst->SetScale(scale);
+                inst->EnablePhysics(physicsOn);
+                inst->SetPhysicsMaxSubsteps(physicsMaxSubsteps);
+                if (resetPhysics) inst->ResetPhysics();
+                inst->UpdatePose(physicsDt);
+            }));
+        }
+    }
+    if (scene_->motion) scene_->motion->Evaluate(frame, ch);
+    else ch.ResetPose();
+    ch.SetScale(characterScale);
+    ch.EnablePhysics(physicsOn);
+    ch.SetPhysicsMaxSubsteps(physicsMaxSubsteps);
+    if (resetPhysics) ch.ResetPhysics();
     ch.UpdatePose(physicsDt);
+    for (std::future<void>& f : pendingPoses) f.get();
     scene_->characterGpu->UpdateSkinning(slot, scene_->character->SkinMatrices());
     scene_->characterGpu->UpdateMorphs(slot, scene_->character->VertexMorphDeltas(),
                                        scene_->character->MorphVersion());
@@ -2081,17 +2111,6 @@ void App::UpdateScene(float frame) {
     }
     if (screen_ != Screen::BenchRender) {
         for (auto& extra : scene_->extras) {            if (!extra.instance || !extra.gpu) continue;
-            if (extra.motion) {
-                extra.motion->Evaluate(frame, *extra.instance);
-            } else {
-                extra.instance->ResetPose();
-            }
-            extra.instance->SetScale(screen_ == Screen::BenchRun || extra.characterId.empty()
-                                         ? 1.0f
-                                         : settings_.CharacterScale(extra.characterId));
-            extra.instance->EnablePhysics(screen_ == Screen::BenchRun || (settings_.physics && !options_.noPhysics));
-            if (resetPhysics) extra.instance->ResetPhysics();
-            extra.instance->UpdatePose(physicsDt);
             extra.gpu->UpdateSkinning(slot, extra.instance->SkinMatrices());
             extra.gpu->UpdateMorphs(slot, extra.instance->VertexMorphDeltas(),
                                     extra.instance->MorphVersion());

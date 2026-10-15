@@ -46,6 +46,9 @@ public:
     // Models without simulated bodies stay a no-op.
     void EnablePhysics(bool enabled);
     bool PhysicsEnabled() const { return physicsEnabled_; }
+    // Bullet substep cap per UpdatePose. A slow frame then drops simulated time instead of asking
+    // for more substeps (spiral of death). Interactive play uses a low cap, offline renders 10.
+    void SetPhysicsMaxSubsteps(int n) { physicsMaxSubsteps_ = n > 0 ? n : 1; }
     // The next UpdatePose teleports the bodies to the animated pose and lets them settle
     // instead of simulating the jump. Call after seeks, loops, and on the first frame.
     void ResetPhysics() { physicsResetPending_ = true; }
@@ -116,6 +119,7 @@ private:
 
     std::unique_ptr<PhysicsWorld> physics_;
     bool physicsEnabled_ = false;
+    int physicsMaxSubsteps_ = 10;   // Bullet substep cap per Step (see SetPhysicsMaxSubsteps)
     bool physicsResetPending_ = true;
     std::vector<XMFLOAT4X4> physicsPose_;   // scratch: animated bone worlds handed to physics
     std::vector<PhysicsWorld::BoneResult> physicsOut_;  // scratch: simulated bone worlds
