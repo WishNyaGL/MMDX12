@@ -68,6 +68,7 @@ OUT_DIR = REPO_ROOT / "captures" / "mme_compat"
 RESULTS = OUT_DIR / "results.json"
 SHEET = OUT_DIR / "sheet.png"
 COMPAT_MD = REPO_ROOT / "docs" / "mme" / "compat_list.md"
+THUMB_DIR = REPO_ROOT / "docs" / "mme" / "compat"   # tracked thumbnails (captures/ is git-ignored)
 OVERRIDES = REPO_ROOT / "docs" / "mme" / "compat_overrides.json"
 BASELINE_PNG = OUT_DIR / "_baseline.png"
 BASELINE_LOG = OUT_DIR / "_baseline.log"
@@ -781,7 +782,10 @@ def write_report(entries, store, overrides, baseline_ok):
         if mmm_only:
             notes = (notes + " " if notes else "") + "MMM-only (tier N)"
         png = OUT_DIR / ("%s_%s.png" % (e["rank"], e["id"]))
-        link = "[png](captures/mme_compat/%s_%s.png)" % (e["rank"], e["id"]) if png.is_file() else "—"
+        link = "—"
+        if png.is_file():
+            link = "[jpg](compat/%s_%s.jpg)" % (e["rank"], e["id"])
+            publish_thumb(png, THUMB_DIR / ("%s_%s.jpg" % (e["rank"], e["id"])))
         name = e["name"]
         if skipped:
             notes = (notes + " " if notes else "") + skipped
@@ -792,6 +796,19 @@ def write_report(entries, store, overrides, baseline_ok):
     COMPAT_MD.parent.mkdir(parents=True, exist_ok=True)
     COMPAT_MD.write_text("\n".join(lines), encoding="utf-8")
     log("  report: %s" % COMPAT_MD)
+
+
+def publish_thumb(src, dst):
+    """Downscaled JPEG copy of a capture for the tracked docs (the full PNGs stay in captures/)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(src) as im:
+        im = im.convert("RGB")
+        im.thumbnail((640, 360))
+        im.save(dst, "JPEG", quality=82, optimize=True)
 
 
 # ---------------------------------------------------------------------------------------------
