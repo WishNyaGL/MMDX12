@@ -287,6 +287,7 @@ ID3D12GraphicsCommandList* Dx12Context::BeginFrame() {
         cmdList_->ResourceBarrier(1, &toRt);
     }
     ++frameNumber_;
+    recording_ = true;
     return cmdList_.Get();
 }
 
@@ -340,6 +341,10 @@ void Dx12Context::EndFrame(bool vsync) {
     ++fenceValue_;
     queue_->Signal(fence_.Get(), fenceValue_);
     slotFence_[frameSlot_] = fenceValue_;
+    // Resources released while this frame was recorded live until this frame's fence.
+    for (Deferred& d : deferred_)
+        if (d.fence == kPendingFrame) d.fence = fenceValue_;
+    recording_ = false;
     if (captureIssued) {
         captureFence_ = fenceValue_;
         captureInFlightPath_ = capturePath_;
@@ -435,12 +440,15 @@ void Dx12Context::WaitForGpu() {
     CheckHr(fence_->SetEventOnCompletion(fenceValue_, fenceEvent_), "SetEventOnCompletion");
     WaitForSingleObject(fenceEvent_, INFINITE);
     ProcessCapture();
-    for (auto& d : deferred_) d.res.Reset();
-    deferred_.clear();
+    // Everything submitted so far has completed; the open frame's command list has not been submitted yet, so
+    // what it references (kPendingFrame) stays.
+    deferred_.erase(std::remove_if(deferred_.begin(), deferred_.end(),
+                                   [](const Deferred& d) { return d.fence != kPendingFrame; }),
+                    deferred_.end());
 }
 
 void Dx12Context::DeferRelease(ComPtr<ID3D12Resource> res) {
-    deferred_.push_back({fenceValue_ + 1, std::move(res)});
+    deferred_.push_back({recording_ ? kPendingFrame : fenceValue_ + 1, std::move(res)});
 }
 
 void Dx12Context::RequestCapture(const std::filesystem::path& pngPath) {

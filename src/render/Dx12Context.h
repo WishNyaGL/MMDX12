@@ -134,8 +134,13 @@ private:
     bool deviceLost_ = false;   // latched on the first device-removed detection (see DeviceLost())
     DeviceCaps caps_;
     DescriptorHeap srvHeap_, rtvHeap_, dsvHeap_;
+    // A resource released while a frame is being recorded is tagged kPendingFrame until EndFrame signals that
+    // frame's fence: a WaitForGpu in the middle of recording (passes creating targets / PSOs) must not free it, the
+    // still-open command list references it.
+    static constexpr uint64_t kPendingFrame = UINT64_MAX;
     struct Deferred { uint64_t fence; ComPtr<ID3D12Resource> res; };
     std::vector<Deferred> deferred_;
+    bool recording_ = false;    // between BeginFrame and EndFrame's submit
     // capture
     std::filesystem::path capturePath_, captureInFlightPath_;
     MemoryCaptureCallback captureMemoryCallback_, captureInFlightMemoryCallback_;
