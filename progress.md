@@ -1919,3 +1919,21 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - Pitfalls: the in-app update summary shows only the bold headings of the notes, so headings must read as full
   sentences; a list built by `python -c` in Git Bash carries `\r` (pipe through `tr -d '\r'`); the first redeploy
   after `gh release edit` can still fetch the old body (redeploy once more and check `/latest.json`).
+
+## 2026-10-16 - Device-loss hotfix (deferred releases freed mid-frame), release 2.1.2
+- Report: 2.1.1 still lost the device (DEVICE_HUNG, DRED op 8 COPYTEXTUREREGION, page fault on freed allocs) on the
+  Dreamin Chuchu 5-Alcander scene, on the first frame of a reload after the render size / MSAA had changed.
+- Root cause: `Dx12Context::WaitForGpu` freed every `DeferRelease`d resource, including ones released while the
+  current frame was being recorded (not yet submitted). Passes call WaitForGpu mid-recording
+  (`PackEffectPass::AllocTargets` on an output-size change, PSO / MME / upscaler recreation), so the MME
+  ANIMATEDTEXTURE staging buffer recorded earlier in the frame was freed before the copy ran. The 2.1.1 "fix"
+  (256-byte pitch) was real but not this; its log's freed `mme.target` / `dof.blurA` were this bug, not noise.
+- Fix: resources deferred while recording are tagged pending and get the frame's fence at EndFrame; WaitForGpu
+  frees only submitted ones. Written by Claude (lifetime logic), not delegated.
+- Verified: repro script (scratch `resize_repro.py`: the scene + bokeh_dof/chromatic_aberration, window resized over
+  MCP-paced frames) lost the device on the 2.1.1 release exe after 8 target reallocations; 2.1.2: 60 resizes / 122
+  reallocations, 0 `[E]`. A plain scene reload (no size change) did not reproduce on 2.1.1 (targets not reallocated).
+- Release 2.1.2: hotfix only (the spec A worker changes - VMD visibility keys, per-part stage motions - were stashed
+  and are not in it). `package_release.ps1` (170.5 / 14.9 MB), packaged smoke (select screen, 0 `[E]`, leftovers
+  removed), delta manifest 3 new objects uploaded (live hashes match), GitHub v2.1.2 (digests = local zips), website
+  deployed (`/latest.json` -> 2.1.2 with manifest).
