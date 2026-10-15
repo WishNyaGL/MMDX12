@@ -1291,8 +1291,11 @@ void MmeEffectInstance::UpdateAnimatedTextures(PassContext& pc) {
                 a.res->SetName(L"mme.animated");
                 a.state = D3D12_RESOURCE_STATE_COPY_DEST;
             }
-            const uint64_t rowPitch = (uint64_t)f.width * 4;
-            const uint64_t bytes = rowPitch * f.height;
+            // The staging buffer must use a 256-byte aligned row pitch (D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            // a tight width * 4 pitch is invalid for a non-aligned width and faults the GPU on the copy. Rows are
+            // copied individually (the source frames are tightly packed).
+            const uint32_t rowPitch = (f.width * 4u + 255u) & ~255u;
+            const uint64_t bytes = (uint64_t)rowPitch * f.height;
             CD3DX12_RESOURCE_DESC bd = CD3DX12_RESOURCE_DESC::Buffer(bytes);
             D3D12_HEAP_PROPERTIES uh{D3D12_HEAP_TYPE_UPLOAD};
             ComPtr<ID3D12Resource> staging;
@@ -1304,8 +1307,11 @@ void MmeEffectInstance::UpdateAnimatedTextures(PassContext& pc) {
                 continue;
             }
             void* mapped = nullptr;
-            if (SUCCEEDED(staging->Map(0, nullptr, &mapped)) && mapped)
-                std::memcpy(mapped, f.rgba.data(), (size_t)bytes);
+            D3D12_RANGE readRange{0, 0};
+            if (SUCCEEDED(staging->Map(0, &readRange, &mapped)) && mapped)
+                for (uint32_t y = 0; y < f.height; ++y)
+                    std::memcpy((uint8_t*)mapped + (size_t)y * rowPitch,
+                                f.rgba.data() + (size_t)y * f.width * 4, (size_t)f.width * 4);
             if (mapped) staging->Unmap(0, nullptr);
             if (a.state != D3D12_RESOURCE_STATE_COPY_DEST) {
                 D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(
