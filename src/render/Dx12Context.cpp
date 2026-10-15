@@ -118,6 +118,17 @@ bool Dx12Context::Initialize(HWND hwnd, uint32_t width, uint32_t height, bool en
     UINT factoryFlags = enableDebugLayer ? DXGI_CREATE_FACTORY_DEBUG : 0;
     if (!CheckHr(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory_)), "CreateDXGIFactory2")) return false;
 
+    // DRED settings must be applied before the device is created. Auto-breadcrumbs + page-fault reporting give the
+    // command-list breadcrumb history and the allocations around a page fault after a device removal. Works without
+    // the debug layer; a missing interface is silently ignored.
+    {
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
+            dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+        }
+    }
+
     // Adapter: first hardware adapter that creates a D3D12 device.
     for (UINT i = 0;; ++i) {
         ComPtr<IDXGIAdapter1> a;
@@ -255,6 +266,7 @@ bool Dx12Context::Initialize(HWND hwnd, uint32_t width, uint32_t height, bool en
 }
 
 ID3D12GraphicsCommandList* Dx12Context::BeginFrame() {
+    if (deviceLost_) return nullptr;   // the device is gone: no fences, no D3D calls
     frameSlot_ = (uint32_t)(frameNumber_ % kFramesInFlight);
     if (fence_ && fenceEvent_ && fence_->GetCompletedValue() < slotFence_[frameSlot_]) {
         CheckHr(fence_->SetEventOnCompletion(slotFence_[frameSlot_], fenceEvent_), "SetEventOnCompletion");
@@ -280,6 +292,7 @@ ID3D12GraphicsCommandList* Dx12Context::BeginFrame() {
 
 void Dx12Context::EndFrame(bool vsync) {
     if (!cmdList_ || !queue_ || !swapChain_) return;
+    if (deviceLost_) return;   // no waits / D3D calls after the device is gone
     bool captureIssued = false;
     ID3D12Resource* bb = BackBuffer();
     const bool wantsCapture = (!capturePath_.empty() || captureMemoryCallback_ != nullptr);
@@ -322,7 +335,8 @@ void Dx12Context::EndFrame(bool vsync) {
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     queue_->ExecuteCommandLists(1, lists);
-    swapChain_->Present(vsync ? 1 : 0, (!vsync && caps_.tearingSupported) ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    const HRESULT presentHr =
+        swapChain_->Present(vsync ? 1 : 0, (!vsync && caps_.tearingSupported) ? DXGI_PRESENT_ALLOW_TEARING : 0);
     ++fenceValue_;
     queue_->Signal(fence_.Get(), fenceValue_);
     slotFence_[frameSlot_] = fenceValue_;
@@ -333,6 +347,50 @@ void Dx12Context::EndFrame(bool vsync) {
         capturePath_.clear();
         captureMemoryCallback_ = nullptr;
         captureInFlight_ = true;
+    }
+    CheckDeviceLost(presentHr);
+}
+
+void Dx12Context::CheckDeviceLost(HRESULT presentHr) {
+    if (deviceLost_) return;
+    const bool presentLost = presentHr == DXGI_ERROR_DEVICE_REMOVED || presentHr == DXGI_ERROR_DEVICE_RESET;
+    HRESULT reason = S_OK;
+    if (device_) reason = device_->GetDeviceRemovedReason();
+    if (!presentLost && SUCCEEDED(reason)) return;
+
+    deviceLost_ = true;
+    LOG_ERROR("device lost (present=0x%08X, removed reason=0x%08X)", (unsigned)presentHr, (unsigned)reason);
+
+    // DRED: breadcrumb history + page-fault allocations, when the device exposes the interface. Compact: one line
+    // per item (the breadcrumb that did not finish, up to 16 existing / 16 recently freed allocations).
+    ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+    if (device_ && SUCCEEDED(device_.As(&dred))) {
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc{};
+        if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&bc))) {
+            for (const D3D12_AUTO_BREADCRUMB_NODE* n = bc.pHeadAutoBreadcrumbNode; n; n = n->pNext) {
+                if (!n->pLastBreadcrumbValue || *n->pLastBreadcrumbValue >= n->BreadcrumbCount) continue;
+                const UINT32 last = *n->pLastBreadcrumbValue;
+                const char* cl = n->pCommandListDebugNameA ? n->pCommandListDebugNameA : "?";
+                const char* q = n->pCommandQueueDebugNameA ? n->pCommandQueueDebugNameA : "?";
+                const UINT32 op = n->pCommandHistory ? (UINT32)n->pCommandHistory[last] : 0xFFFFFFFFu;
+                LOG_ERROR("DRED breadcrumb: cl=%s queue=%s op=%u (%u/%u completed)", cl, q, op, last,
+                          n->BreadcrumbCount);
+            }
+        }
+        D3D12_DRED_PAGE_FAULT_OUTPUT pf{};
+        if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&pf))) {
+            LOG_ERROR("DRED page fault: VA=0x%llX", (unsigned long long)pf.PageFaultVA);
+            auto logNodes = [](const char* kind, const D3D12_DRED_ALLOCATION_NODE* head) {
+                int count = 0;
+                for (const D3D12_DRED_ALLOCATION_NODE* n = head; n && count < 16; n = n->pNext, ++count) {
+                    const std::string name =
+                        n->ObjectNameW ? WideToUtf8(n->ObjectNameW) : (n->ObjectNameA ? n->ObjectNameA : "");
+                    LOG_ERROR("DRED %s alloc: type=%u name=%s", kind, (unsigned)n->AllocationType, name.c_str());
+                }
+            };
+            logNodes("existing", pf.pHeadExistingAllocationNode);
+            logNodes("freed", pf.pHeadRecentFreedAllocationNode);
+        }
     }
 }
 
@@ -394,13 +452,14 @@ void Dx12Context::RequestCaptureMemory(MemoryCaptureCallback callback) {
 }
 
 void Dx12Context::Resize(uint32_t width, uint32_t height) {
+    if (deviceLost_) return;   // no fence waits / D3D calls after the device is gone
     if (width == 0 || height == 0 || (width == width_ && height == height_)) return;
     WaitForGpu();
     ReleaseBackBuffers();
     UINT flags = caps_.tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
-    if (CheckHr(swapChain_->ResizeBuffers(kBackBufferCount, width, height, kBackBufferFormat, flags),
-                "ResizeBuffers"))
-        CreateBackBuffers();
+    const HRESULT hr = swapChain_->ResizeBuffers(kBackBufferCount, width, height, kBackBufferFormat, flags);
+    CheckDeviceLost(hr);
+    if (CheckHr(hr, "ResizeBuffers")) CreateBackBuffers();
     width_ = width;
     height_ = height;
 }

@@ -142,6 +142,13 @@ namespace {
 // Auto workflow (docs/mme/mme_design.md §2.12): an effect whose CONTROLOBJECT scalar / vector / matrix reads a
 // separate controller object the MMD user loads next to the character renders as a dark silhouette without it. A
 // bool CONTROLOBJECT is only an existence check (`if (light_check)`), never "required".
+//
+// Exceptions (a missing controller of a known optional family changes nothing, so it is not required):
+//  - the controller is MES40's `mes40 controller.pmx` / `.pmd` (every read is guarded with `if (Controller)`), or
+//  - every non-bool CONTROLOBJECT param that reads it carries an `item` annotation (case-insensitive) in
+//    {AMBIENT_R, AMBIENT_G, AMBIENT_B, AMBIENT_INT} (the anonRipper / Chips ambient controller: missing = weight 0 =
+//    unchanged colour), whatever the controller's name.
+// Everything else keeps the plain rule (e.g. `Rim_Luka.pmx` and `mes40 spotlight*/pointlight*` stay required).
 struct ControllerCacheEntry {
     std::filesystem::file_time_type stamp{};
     std::vector<std::string> controllers;
@@ -149,18 +156,40 @@ struct ControllerCacheEntry {
 std::mutex gControllerCacheMutex;
 std::map<std::string, ControllerCacheEntry> gControllerCache;
 
+// True when a controller read through `p` (a non-bool CONTROLOBJECT) is in a known optional family.
+bool OptionalControllerRead(const MmeParam& p, const std::string& name) {
+    if (name == "mes40 controller.pmx" || name == "mes40 controller.pmd") return true;
+    if (const MmeAnnotation* item = FindAnnotation(p.annotations, "item")) {
+        const std::string v = Lower(Trim(item->value.str));
+        if (v == "ambient_r" || v == "ambient_g" || v == "ambient_b" || v == "ambient_int") return true;
+    }
+    return false;
+}
+
 std::vector<std::string> RequiredControllersUncached(const std::filesystem::path& fx) {
     std::vector<std::string> out;
     const MmeEffectDesc desc = LoadMmeEffect(fx);
     if (!desc.ok) return out;
+    // A controller is required unless EVERY non-bool CONTROLOBJECT param that reads it is in an optional family.
+    std::vector<std::string> order;              // controller names, first-seen order
+    std::map<std::string, bool> allOptional;     // name -> every reader so far optional
     for (const MmeParam& p : desc.params) {
         if (p.semantic != "CONTROLOBJECT") continue;
         if (Lower(p.type) == "bool") continue;   // existence check
         const MmeAnnotation* a = FindAnnotation(p.annotations, "name");
         std::string name = a ? Lower(Trim(a->value.str)) : std::string();
         if (name.empty() || name == "(self)" || name == "(offscreenowner)") continue;
-        if (std::find(out.begin(), out.end(), name) == out.end()) out.push_back(std::move(name));
+        const bool optional = OptionalControllerRead(p, name);
+        auto it = allOptional.find(name);
+        if (it == allOptional.end()) {
+            order.push_back(name);
+            allOptional[name] = optional;
+        } else if (!optional) {
+            it->second = false;
+        }
     }
+    for (const std::string& name : order)
+        if (!allOptional[name]) out.push_back(name);
     return out;
 }
 

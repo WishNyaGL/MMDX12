@@ -1,6 +1,7 @@
 // M3a: MME runtime — GPU resources and pipelines. See MmeRuntime.h for the interface and the documented
 // deviations. Any remaining open points are marked "DECISION:".
 #include "render/MmeRuntime.h"
+#include "render/GpuModel.h"
 #include "asset/ImageLoader.h"
 #include "asset/MmeText.h"
 #include "core/Log.h"
@@ -545,9 +546,13 @@ bool MmeEffectInstance::ResolveTexture(const std::string& bindingName, ID3D12Res
     return false;
 }
 
-void MmeEffectInstance::SetObjectShadowMap(Texture* tex) {
-    if (shadowMap_ != tex) {
+void MmeEffectInstance::SetObjectShadowMap(Texture* tex, uint64_t generation) {
+    // A null tex unbinds (generation ignored); otherwise the (tex, generation) pair identifies the resource.
+    const bool changed = tex == nullptr ? (shadowMap_ != nullptr)
+                                        : (shadowMap_ != tex || shadowMapGen_ != generation);
+    if (changed) {
         shadowMap_ = tex;
+        shadowMapGen_ = generation;
         ++targetGen_;   // invalidate cached stage SRV tables that referenced the old shadow map
     }
 }
@@ -1134,7 +1139,8 @@ MmeEffectInstance::StageSrvCache& MmeEffectInstance::EnsureSrvTable(PassContext&
     if (!animated_.empty()) UpdateAnimatedTextures(pc);
     const MmeStage& st = pixelStage ? programs_[program].ps : programs_[program].vs;
     const uint32_t count = StageTextureCount(st);
-    const SrvKey key{model, (uint32_t)program, pixelStage, materialSrvTable};
+    // Cache identity is the model's uid, never its address: a freed model's address may be reused by a new model.
+    const SrvKey key{model ? model->Uid() : 0, (uint32_t)program, pixelStage, materialSrvTable};
     auto it = srvCache_.find(key);
     if (it == srvCache_.end()) {
         StageSrvCache c;
@@ -1233,10 +1239,10 @@ void MmeEffectInstance::FreeSrvTable(Dx12Context& ctx, StageSrvCache& c) {
     c.first = DescriptorHeap::kInvalid;
 }
 
-void MmeEffectInstance::ForgetModel(Dx12Context& ctx, const GpuModel* model) {
-    if (!model) return;
+void MmeEffectInstance::ForgetModel(Dx12Context& ctx, uint64_t modelUid) {
+    if (modelUid == 0) return;
     for (auto it = srvCache_.begin(); it != srvCache_.end();) {
-        if (it->first.model == model) {
+        if (it->first.modelUid == modelUid) {
             FreeSrvTable(ctx, it->second);
             it = srvCache_.erase(it);
         } else {
@@ -1548,13 +1554,13 @@ MmeEffectInstance* MmeRuntime::EnsureInstance(const std::filesystem::path& file,
     return raw;
 }
 
-void MmeRuntime::SetObjectShadowMap(Texture* tex) {
+void MmeRuntime::SetObjectShadowMap(Texture* tex, uint64_t generation) {
     objectShadowMap_ = tex;
-    for (auto& inst : instances_) inst->SetObjectShadowMap(tex);
+    for (auto& inst : instances_) inst->SetObjectShadowMap(tex, generation);
 }
 
-void MmeRuntime::ForgetModel(Dx12Context& ctx, const GpuModel* model) {
-    for (auto& inst : instances_) inst->ForgetModel(ctx, model);
+void MmeRuntime::ForgetModel(Dx12Context& ctx, uint64_t modelUid) {
+    for (auto& inst : instances_) inst->ForgetModel(ctx, modelUid);
 }
 
 void MmeRuntime::Update(Dx12Context& ctx, const std::vector<MmeWanted>& wanted, uint32_t outW, uint32_t outH) {

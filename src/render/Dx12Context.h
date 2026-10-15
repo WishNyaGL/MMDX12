@@ -71,8 +71,14 @@ public:
     ID3D12GraphicsCommandList* BeginFrame();
     // Handles a pending capture, transitions back buffer -> PRESENT, closes, executes,
     // presents (vsync ? 1 : 0, ALLOW_TEARING when !vsync and supported), signals the fence.
+    // Detects device loss from the Present HRESULT.
     void EndFrame(bool vsync);
     void WaitForGpu();
+
+    // True once the device is lost (Present / ResizeBuffers returned DEVICE_REMOVED / DEVICE_RESET, or
+    // GetDeviceRemovedReason is a failure). The first detection logs the reason + DRED data; while it is set,
+    // BeginFrame / EndFrame / Resize do no D3D work so the app can shut down cleanly.
+    bool DeviceLost() const { return deviceLost_; }
 
     // Writes the back buffer content of the next EndFrame (including UI) to a PNG file.
     void RequestCapture(const std::filesystem::path& pngPath);
@@ -103,6 +109,9 @@ private:
     void CreateBackBuffers();
     void ReleaseBackBuffers();
     void ProcessCapture();
+    // Once per EndFrame: checks the device's removed reason; on the first failure logs the DRED data and latches
+    // deviceLost_. `presentHr` is the Present / ResizeBuffers result that may itself report the removal.
+    void CheckDeviceLost(HRESULT presentHr = S_OK);
 
     ComPtr<IDXGIFactory6> factory_;
     ComPtr<IDXGIAdapter1> adapter_;
@@ -122,6 +131,7 @@ private:
     uint64_t frameNumber_ = 0;
     uint32_t width_ = 0, height_ = 0;
     HWND hwnd_ = nullptr;
+    bool deviceLost_ = false;   // latched on the first device-removed detection (see DeviceLost())
     DeviceCaps caps_;
     DescriptorHeap srvHeap_, rtvHeap_, dsvHeap_;
     struct Deferred { uint64_t fence; ComPtr<ID3D12Resource> res; };

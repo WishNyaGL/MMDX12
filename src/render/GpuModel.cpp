@@ -8,6 +8,7 @@
 #include "core/Log.h"
 #include <directx/d3dx12.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +32,12 @@ bool IsFlatFaceMaterial(const std::string& name) {
 }
 
 } // namespace
+
+GpuModel::GpuModel() {
+    // Process-wide model id. Never 0 (0 means "no model" in the MME cache keys).
+    static std::atomic<uint64_t> sNextUid{1};
+    uid_ = sNextUid.fetch_add(1, std::memory_order_relaxed);
+}
 
 // Persistently mapped, CPU-written per-frame buffer (UPLOAD heap, GENERIC_READ).
 static ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device* device, uint32_t bytes, const wchar_t* name) {

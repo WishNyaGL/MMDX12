@@ -108,12 +108,15 @@ public:
     D3D12_GPU_DESCRIPTOR_HANDLE StageSrvTableObject(PassContext& pc, int program, bool pixelStage,
                                                     uint32_t materialSrvTable, const GpuModel* model);
 
-    // Frees the object-draw SRV tables built for `model` (called when a GpuModel is destroyed).
-    void ForgetModel(Dx12Context& ctx, const GpuModel* model);
+    // Frees the object-draw SRV tables built for `modelUid` (called when a GpuModel is destroyed).
+    void ForgetModel(Dx12Context& ctx, uint64_t modelUid);
 
     // M5a: the MMD-style self-shadow map (R32_FLOAT) bound at register(s0) for `object_ss` draws. Owned by the
     // renderer (PassContext::mme), created on demand by the shadow-map pass. Pass nullptr to unbind.
-    void SetObjectShadowMap(Texture* tex);
+    // `generation` identifies the map's current resource: a (tex, generation) pair that differs from the last one
+    // seen invalidates the cached stage SRV tables (a released / recreated map at the same address would otherwise
+    // keep the freed resource). A null `tex` ignores `generation`.
+    void SetObjectShadowMap(Texture* tex, uint64_t generation);
     // M5a: the MMD-style light camera (view/proj) the shadow map is rendered with; used for the object_ss compare.
     MmeRuntime* Runtime() const { return rt_; }
 
@@ -227,21 +230,21 @@ private:
         uint32_t targetGen = 0;
     };
 
-    // Key of a persistent stage SRV table: the owning model (null for post tables) + program + stage +
+    // Key of a persistent stage SRV table: the owning model's uid (0 for post tables) + program + stage +
     // material SRV table index (object draws; kInvalid for post tables).
     struct SrvKey {
-        const GpuModel* model = nullptr;
+        uint64_t modelUid = 0;
         uint32_t program = 0;
         bool pixelStage = false;
         uint32_t materialSrvTable = DescriptorHeap::kInvalid;
         bool operator==(const SrvKey& o) const {
-            return model == o.model && program == o.program && pixelStage == o.pixelStage &&
+            return modelUid == o.modelUid && program == o.program && pixelStage == o.pixelStage &&
                    materialSrvTable == o.materialSrvTable;
         }
     };
     struct SrvKeyHash {
         size_t operator()(const SrvKey& k) const {
-            size_t h = (size_t)(uintptr_t)k.model;
+            size_t h = (size_t)k.modelUid;
             h = h * 1099511628211ull ^ (size_t)k.program;
             h = h * 1099511628211ull ^ (size_t)k.pixelStage;
             h = h * 1099511628211ull ^ (size_t)k.materialSrvTable;
@@ -264,7 +267,9 @@ private:
     uint32_t targetGen_ = 0;   // bumped when an effect render target / image is (re)created
     uint32_t targetW_ = 0, targetH_ = 0;
     // M5a: the MMD-style self-shadow map bound to a register(s0) sampler (no `texture=` state). Renderer-owned.
+    // shadowMapGen_ is the resource generation that came with it (a released / recreated map bumps it).
     Texture* shadowMap_ = nullptr;
+    uint64_t shadowMapGen_ = ~0ull;
     uint32_t missingFrames_ = 0;
 };
 
@@ -291,11 +296,11 @@ public:
     // M5a: all loaded instances (the offscreen pass iterates them for OFFSCREENRENDERTARGET owners).
     const std::vector<std::unique_ptr<MmeEffectInstance>>& Instances() const { return instances_; }
     // M5a: the MMD-style self-shadow map bound to register(s0) object_ss draws. Set by the shadow-map pass.
-    void SetObjectShadowMap(Texture* tex);
+    void SetObjectShadowMap(Texture* tex, uint64_t generation);
     bool HasObjectShadowMap() const { return objectShadowMap_ != nullptr; }
     Texture* ObjectShadowMap() const { return objectShadowMap_; }
-    // Frees the object-draw SRV tables every instance built for `model` (a GpuModel was destroyed).
-    void ForgetModel(Dx12Context& ctx, const GpuModel* model);
+    // Frees the object-draw SRV tables every instance built for `modelUid` (a GpuModel was destroyed).
+    void ForgetModel(Dx12Context& ctx, uint64_t modelUid);
     ID3D12RootSignature* RootSignature() const { return rootSig_.Get(); }
     ID3D12DescriptorHeap* SamplerHeap() const { return samplerHeap_.Heap(); }
     D3D12_GPU_VIRTUAL_ADDRESS AllocConstants(const void* data, uint32_t size);

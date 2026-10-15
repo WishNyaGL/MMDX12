@@ -900,6 +900,20 @@ void App::MainLoop() {
 }
 
 void App::RenderFrame() {
+    // Device loss (TDR / driver reset): the swap chain and every GPU resource are gone, so nothing may record or
+    // present any more. Surface it once and quit; no device re-creation (spec fix C).
+    if (ctx_.DeviceLost()) {
+        audio_.Unload();   // stop audio before leaving
+        if (!HeadlessRun()) {
+            // Unattended runs (--frames / --ui-script / benchmarks / offline CLI jobs) must not block on a dialog.
+            MessageBoxW(hwnd_, Utf8ToWide(Tr("GPU 드라이버가 재설정되어(디바이스 제거) 렌더링을 계속할 수 없습니다. "
+                                             "프로그램을 종료합니다.\n자세한 내용은 mmdx12.log 를 확인하세요.")).c_str(),
+                        L"MMDX12", MB_ICONERROR);
+        }
+        running_ = false;
+        return;
+    }
+
     LARGE_INTEGER freq, now;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&now);

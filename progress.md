@@ -1866,3 +1866,35 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   `--frames 30000` to time a scan in the app.
 - `by StarNoodle495/.../kamKnife 80cm` (a weapon outside a character folder) is still a stage (hide it by right click).
 - The 16k MME objects still flood the effect list (separate UI / dump-filter problem). Stage list not checked in the app UI.
+
+## 2026-10-15 (6) - GPU device-removed fixes (MME cache ABA, MME shadow map on resize), device-loss detection
+- Report: after GPU 업로드 the screen froze (audio kept playing) on the 2nd Ray-MMD toggle reload from the play panel,
+  sometimes when switching songs. Log: first error `ResizeBuffers failed: 0x887A0005` then endless
+  `Texture::Create failed`; System log `nvlddmkm` 153 (TDR). The app ignored `Present`'s HRESULT, so a removed device
+  looked like a frozen window.
+- Cause A (the reported one): MME caches keyed by `const GpuModel*` (`MmeEffectInstance::srvCache_` + material SRV table
+  index, `MmeSkin::entries_`); the menu / loading branch of `Renderer::Render` cleared `frameModels_` without
+  `ForgetModel`, so entries outlived their models. Reload D (Ray on) -> E (off, other descriptor layout) -> F (on, same
+  layout as D) hit D's stale table = freed textures. Fix: `GpuModel::Uid()` keys, forget + drain in the menu branch,
+  MmeSkin resizes a too-small buffer.
+- Cause B (found while reproducing; user maximized the window): `MmeShadowPass` released its fixed 2048 map on every
+  target resize and re-registered the same `&im.map`, so cached tables kept the freed map. Fix: generation per creation
+  (`SetObjectShadowMap(tex, gen)`), no release in `OnResize`.
+- Device loss: DRED on, `Dx12Context::DeviceLost()`, one log dump (reason, breadcrumbs, page-fault allocations), message
+  box + quit (none in unattended runs). Fixes the ImGui upload-buffer null crash after a loss too.
+- Auto workflow controller skip: `MES40 Controller.pmx/.pmd` (MES40 guards reads with `if (Controller)`) and controllers
+  read only through `AMBIENT_R/G/B/INT` (anonRipper / Chips Project Sekai stage shader, missing = lerp weight 0) are no
+  longer "required" (Dreamin Chuchu, fire_flower, liar_dancer, pjsk_fireflower, empty_sekai). `Rim_Luka.pmx` (ps_luka also
+  declares a bool existence check, so that is NOT a safe rule) and MES40 spot / point lights stay required.
+- Implemented by a deepseek opencode worker (effort low) from a contract spec, smoke review. The pre-existing
+  controller auto-load work was committed separately first.
+### Verified (1600x900 window)
+- Ray toggle + 적용 reload x4 (off/on/off/on): every scene entered, 0 `[E]`. Maximize / restore x3 in an MME shadow-map
+  scene: 0 errors, no nvlddmkm event. Dreamin Chuchu: stage MME applied, no controller skip, frame looks right.
+### Not verified / left
+- The device-loss message box / DRED dump were not triggered for real.
+- MCP `ui_click` / `ui_input` clicks on the play bar's panel buttons (`##mmepanel`) do not open the panel (the E2E used
+  `--ui-script` `fxpanel open mme`); not investigated.
+- `mmdx12.previous.log` is not written (CLAUDE.md says it is); a repro run overwrote the user's log.
+- A model's material SRV table rewritten in place (texture replaced while loaded) would still leave copied MME tables
+  stale; not addressed.

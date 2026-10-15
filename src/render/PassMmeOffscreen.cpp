@@ -538,6 +538,9 @@ struct MmeShadowPass::Impl {
     Texture depth;                     // companion D32_FLOAT depth
     WriterCache writers;
     uint32_t size = 2048;
+    // Bumped every time map / depth are (re)created; passed to SetObjectShadowMap so a released / recreated map at
+    // the same Texture address still invalidates the cached stage SRV tables (spec fix B).
+    uint64_t gen = 0;
     bool loggedSize = false;
 
     // M5a fix 3 debug switch: MMDX12_MME_DUMP_SHADOW=<png path> reads the R32_FLOAT self-shadow map back once and
@@ -567,8 +570,11 @@ bool MmeShadowPass::CreatePipelines(Dx12Context&, const std::filesystem::path& s
 }
 
 void MmeShadowPass::OnResize(Dx12Context& ctx, RenderTargets&) {
-    impl_->map.Release(ctx);
-    impl_->depth.Release(ctx);
+    // M5a fix B: the map / depth size (im.size) does not depend on the screen, so a resize must NOT release them.
+    // Releasing here recreated them at the same Texture address and SetObjectShadowMap saw no change (cached SRV
+    // tables kept the freed resource -> GPU page fault). ReleaseTargets still drops them on device / target teardown;
+    // the Impl::gen counter makes any recreation safe.
+    (void)ctx;
 }
 void MmeShadowPass::ReleaseTargets(Dx12Context& ctx) {
     impl_->map.Release(ctx);
@@ -624,7 +630,7 @@ void MmeShadowPass::Execute(PassContext& pc) {
 
     const bool shadowsOn = !pc.view.shadowsOff && pc.settings.shadows;
     if (!pc.mme || !pc.mmeSkin || !shadowsOn) {
-        if (pc.mme) pc.mme->SetObjectShadowMap(nullptr);
+        if (pc.mme) pc.mme->SetObjectShadowMap(nullptr, 0);
         return;
     }
     // The map is needed only when some loaded effect actually uses an object_ss / zplot technique: an MME model's
@@ -652,7 +658,7 @@ void MmeShadowPass::Execute(PassContext& pc) {
         }
     }
     if (!wanted) {
-        pc.mme->SetObjectShadowMap(nullptr);
+        pc.mme->SetObjectShadowMap(nullptr, 0);
         return;
     }
 
@@ -665,6 +671,7 @@ void MmeShadowPass::Execute(PassContext& pc) {
                              D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE,
                              L"mme.shadowmap.depth"))
             return;
+        ++im.gen;   // the (address, gen) pair changed -> cached object_ss SRV tables rebuild
         if (!im.loggedSize) {
             im.loggedSize = true;
             LOG_INFO("MME SHADOWMAP %ux%u (MMD self-shadow light camera)", im.size, im.size);
@@ -672,7 +679,7 @@ void MmeShadowPass::Execute(PassContext& pc) {
     }
 
     // Bind the map to every instance before drawing (object_ss SRV tables reference it).
-    pc.mme->SetObjectShadowMap(&im.map);
+    pc.mme->SetObjectShadowMap(&im.map, im.gen);
 
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     ID3D12DescriptorHeap* heaps[2] = {pc.ctx.SrvHeap().Heap(), pc.mme->SamplerHeap()};
@@ -751,7 +758,7 @@ bool RenderMmeSelfShadowMap(PassContext& pc, Texture& map, Texture& depth, uint3
     if (!pc.mme || !pc.mmeSkin) return false;
     const bool shadowsOn = !pc.view.shadowsOff && pc.settings.shadows;
     if (!shadowsOn) {
-        pc.mme->SetObjectShadowMap(nullptr);
+        pc.mme->SetObjectShadowMap(nullptr, 0);
         return false;
     }
     // Wanted only when some loaded effect actually uses an object_ss / zplot technique (as MmeShadowPass::Execute).
@@ -778,10 +785,13 @@ bool RenderMmeSelfShadowMap(PassContext& pc, Texture& map, Texture& depth, uint3
         }
     }
     if (!wanted) {
-        pc.mme->SetObjectShadowMap(nullptr);
+        pc.mme->SetObjectShadowMap(nullptr, 0);
         return false;
     }
 
+    // Generation of the caller-owned offline map resource: bumped whenever it is (re)created, so cached object_ss
+    // SRV tables drop a freed one at the same Texture address (spec fix B).
+    static uint64_t sOfflineShadowGen = 0;
     if (!map.res) {
         if (!map.Create(pc.ctx, size, size, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, L"offline.mme.shadowmap", 1, 1, nullptr))
@@ -790,10 +800,12 @@ bool RenderMmeSelfShadowMap(PassContext& pc, Texture& map, Texture& depth, uint3
                           D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE,
                           L"offline.mme.shadowmap.depth"))
             return false;
+        ++sOfflineShadowGen;   // the map resource was (re)created: cached object_ss SRV tables must rebuild
     }
 
-    // Bind the map to every instance before drawing (object_ss SRV tables reference it).
-    pc.mme->SetObjectShadowMap(&map);
+    // Bind the map to every instance before drawing (object_ss SRV tables reference it). The generation changes
+    // whenever the caller-owned map resource is (re)created, so cached SRV tables drop the freed one.
+    pc.mme->SetObjectShadowMap(&map, sOfflineShadowGen);
 
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     ID3D12DescriptorHeap* heaps[2] = {pc.ctx.SrvHeap().Heap(), pc.mme->SamplerHeap()};

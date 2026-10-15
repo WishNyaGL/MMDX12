@@ -1177,6 +1177,7 @@ const Entry kChinese[] = {
     {"MME 효과", "MME 效果"},
     {"실시간 효과", "实时效果"},
     {"고품질 CJK 글꼴", "高质量 CJK 字体"},
+    {"GPU 드라이버가 재설정되어(디바이스 제거) 렌더링을 계속할 수 없습니다. 프로그램을 종료합니다.\n자세한 내용은 mmdx12.log 를 확인하세요.", "GPU 驱动已被重置(设备移除),无法继续渲染。程序将退出。\n详情请查看 mmdx12.log。"},
 };
 const int kChineseCount = (int)(sizeof(kChinese) / sizeof(kChinese[0]));
 

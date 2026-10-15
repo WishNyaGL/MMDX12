@@ -176,6 +176,12 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     Translucent pixels (alpha < 0.98) write nt.z = -1 (no AO / no SSR): SSAO no longer greys sheer curtains.
     Colour LUTs (`ColorLut.h`) are 32³ strips uploaded with `Renderer::SetColorLut`; PostPass applies them after the sRGB encode.
   - `GpuModel` keeps a 3-frame ring of bone/morph buffers so the previous pose (motion vectors) stays valid.
+  - Per-model GPU caches key by `GpuModel::Uid()` (process-unique), never the pointer: a freed model's address is
+    reused by the next scene's model (stale MME SRV tables = GPU page fault / TDR). A model leaving the drawn set
+    (menu / loading frames included) gets `Renderer::ForgetModel(uid)`. A cached descriptor of a recreatable texture
+    needs a generation (e.g. `SetObjectShadowMap(tex, gen)`), not a pointer compare.
+  - Device loss: `Dx12Context::DeviceLost()` (Present / ResizeBuffers / GetDeviceRemovedReason); DRED is on, the first
+    detection logs the reason + breadcrumbs + page-fault allocation names; the app shows a message box and quits.
   - `GpuModel` handles GPU skinning. `RtScene` (RayTracing.h) skins every model into world-space `RtVertex` buffers with a compute shader and builds BLAS (characters every frame, stages once) + TLAS; shaders read geometry bindlessly (`rt_common.hlsli`, `RtGeometry` table, unbounded tables over the whole SRV heap, root signature 1.0 so descriptors stay volatile).
   - Render resolution (`targets.width/height`) vs output resolution (`outWidth/outHeight`): the upscaler (DLSS/FSR/XeSS behind `IUpscaler`) runs after TAA/composite; bloom, post, backdrop and present work at output size. Jitter uses the FSR convention (`jitterPx`), motion vectors are uv(cur) − uv(prev) so SDK MV scale is −renderSize.
 - Theme: `ui::P()` is the live palette (light / dark, `ui::SetTheme`); never cache colours in statics. `App::ApplyTheme` (settings `theme`, `--theme auto|light|dark`) runs before the next ImGui frame and re-runs `ui::ApplyStyle`. Capture both: `--theme dark|light`.

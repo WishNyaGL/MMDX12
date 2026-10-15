@@ -1177,6 +1177,7 @@ const Entry kEnglish[] = {
     {"MME 효과", "MME effect"},
     {"실시간 효과", "Real-time effects"},
     {"고품질 CJK 글꼴", "High-quality CJK font"},
+    {"GPU 드라이버가 재설정되어(디바이스 제거) 렌더링을 계속할 수 없습니다. 프로그램을 종료합니다.\n자세한 내용은 mmdx12.log 를 확인하세요.", "The GPU driver has been reset (device removed), so rendering cannot continue. The program will exit.\nSee mmdx12.log for details."},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

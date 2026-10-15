@@ -52,10 +52,6 @@ public:
                                           ModelRole role = ModelRole::Character,
                                           const PbrModelData* pbr = nullptr);
 
-    // Frees the per-model MME resources (object-draw SRV tables, skinned vertex buffer) when a GpuModel is
-    // destroyed. RecordScene calls it automatically; call it explicitly before dropping a model between frames.
-    void ForgetModel(const GpuModel* model);
-
     // M6b: hot-reload failure / success messages (the UI shows a toast). Set once at startup.
     void SetMmeMessage(std::function<void(const std::string&, bool /*error*/)> cb) {
         if (mme_) mme_->SetErrorCallback([cb](const std::string& m) { if (cb) cb(m, true); });
@@ -133,6 +129,9 @@ private:
     void CreateBuiltinTextures();
     void ReadGpuTimer();
     void DrainMmeForget();   // frees MME resources of models destroyed kFramesInFlight+1 frames ago
+    // Schedules the per-model MME resource release for a model that left the drawn set (uids only, never pointers:
+    // a freed address may be reused). Deduped against the pending list.
+    void ForgetModel(uint64_t modelUid);
     void RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t w, uint32_t h,
                      uint32_t cbSlot, uint64_t frame, bool offscreen);
     // Fills jitterPx_ (render pixels, FSR convention) for this frame and the constants.
@@ -158,11 +157,11 @@ private:
     std::unique_ptr<RtScene> rt_;
     // Models whose MME resources were released with ForgetModel; freed kFramesInFlight frames later so the
     // in-flight command lists that still reference their descriptors are done (same idea as GpuModel's ring).
-    struct PendingMmeForget { const GpuModel* model; uint64_t frame; };
+    struct PendingMmeForget { uint64_t modelUid; uint64_t frame; };
     std::vector<PendingMmeForget> pendingMmeForget_;
-    // The on-screen frame's model set (RecordScene). A model that drops out of it (destroyed or replaced) has
+    // The on-screen frame's model uids (RecordScene). A model that drops out of it (destroyed or replaced) has
     // its per-model MME resources released; see Renderer::ForgetModel.
-    std::vector<const GpuModel*> frameModels_;
+    std::vector<uint64_t> frameModels_;
     // MME runtime + object skinning (M4b): created in Initialize, released with the renderer. Both passes read
     // them through PassContext::mme / mmeSkin.
     std::unique_ptr<MmeRuntime> mme_;

@@ -265,25 +265,25 @@ std::unique_ptr<GpuModel> Renderer::CreateModel(UploadBatch& batch, const PmxMod
     return model;
 }
 
-void Renderer::ForgetModel(const GpuModel* model) {
-    if (!model || !ctx_) return;
-    // Frees the model's MME resources (object SRV tables + skinned buffer). Keyed by pointer, they may live in
+void Renderer::ForgetModel(uint64_t modelUid) {
+    if (modelUid == 0 || !ctx_) return;
+    // Frees the model's MME resources (object SRV tables + skinned buffer). Keyed by uid, they may live in
     // in-flight command lists, so the free is deferred by the number of frames in flight plus one (matching the
     // GpuModel ring logic). DrainMmeForget runs it once those frames are done.
     for (const PendingMmeForget& p : pendingMmeForget_)
-        if (p.model == model) return;
-    pendingMmeForget_.push_back({model, ctx_->FrameNumber() + Dx12Context::kFramesInFlight + 1});
+        if (p.modelUid == modelUid) return;
+    pendingMmeForget_.push_back({modelUid, ctx_->FrameNumber() + Dx12Context::kFramesInFlight + 1});
 }
 
 void Renderer::DrainMmeForget() {
-    if (pendingMmeForget_.empty()) return;
+    if (pendingMmeForget_.empty() || !ctx_) return;
     const uint64_t now = ctx_->FrameNumber();
     pendingMmeForget_.erase(
         std::remove_if(pendingMmeForget_.begin(), pendingMmeForget_.end(),
                        [&](const PendingMmeForget& p) {
                            if (p.frame > now) return false;
-                           if (mme_) mme_->ForgetModel(*ctx_, p.model);
-                           if (mmeSkin_) mmeSkin_->Forget(*ctx_, p.model);
+                           if (mme_) mme_->ForgetModel(*ctx_, p.modelUid);
+                           if (mmeSkin_) mmeSkin_->Forget(*ctx_, p.modelUid);
                            return true;
                        }),
         pendingMmeForget_.end());
@@ -650,10 +650,15 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     // A model destroyed or replaced since the last drawn frame leaves the model set: release its per-model MME
     // resources (object SRV tables + skinned buffer) after the frames that still reference them.
     if (!offscreen) {
-        for (const GpuModel* old : frameModels_) {
-            if (std::find(view.models.begin(), view.models.end(), old) == view.models.end()) ForgetModel(old);
+        for (uint64_t old : frameModels_) {
+            bool stillDrawn = false;
+            for (const GpuModel* m : view.models)
+                if (m && m->Uid() == old) { stillDrawn = true; break; }
+            if (!stillDrawn) ForgetModel(old);
         }
-        frameModels_.assign(view.models.begin(), view.models.end());
+        frameModels_.clear();
+        for (const GpuModel* m : view.models)
+            if (m) frameModels_.push_back(m->Uid());
     }
     // MME runtime: one Update per frame with the union of the post effects and every model's object effect (M4b).
     // The MME instance lifetime / async loads / target (re)creation live here, not in a pass.
@@ -758,7 +763,12 @@ void Renderer::Render(ID3D12GraphicsCommandList* cmd, const FrameView& view) {
         sceneVisible_ = false;
         havePrev_ = false;
         lastFrameQpc_ = 0;
-        frameModels_.clear();   // no model is drawable: drop the MME model set (nothing to compare against)
+        // No model is drawable: release the MME resources of the model set that just left the frame. Schedule
+        // before clearing, then drain here (today the drain only ran from RecordScene) so the frees complete during
+        // menu / loading frames instead of leaking until the next scene.
+        for (uint64_t uid : frameModels_) ForgetModel(uid);
+        frameModels_.clear();
+        DrainMmeForget();
         ClearBackBuffer(cmd);
         return;
     }

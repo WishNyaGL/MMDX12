@@ -93,18 +93,27 @@ bool MmeSkin::Init(Dx12Context& ctx, const std::filesystem::path& shaderDir) {
 }
 
 MmeSkin::Entry* MmeSkin::FindOrCreate(Dx12Context& ctx, const GpuModel& model) {
-    auto it = entries_.find(&model);
-    if (it != entries_.end()) return &it->second;
+    const uint64_t uid = model.Uid();
+    const uint64_t bytes = (uint64_t)model.VertexCount() * sizeof(RtVertex);
+    auto it = entries_.find(uid);
+    if (it != entries_.end()) {
+        // Defensive: an entry under a reused uid (or a vertex count change) may be too small. Replace it — the old
+        // buffer is deferred because in-flight frames may still read it.
+        if (it->second.buffer && it->second.bytes >= bytes) return &it->second;
+        if (it->second.buffer) ctx.DeferRelease(it->second.buffer);
+        entries_.erase(it);
+    }
     if (model.VertexCount() == 0) return nullptr;
     Entry e;
-    e.buffer = CreateMmeBuffer(ctx.Device(), (uint64_t)model.VertexCount() * sizeof(RtVertex),
+    e.bytes = bytes;
+    e.buffer = CreateMmeBuffer(ctx.Device(), bytes,
                                D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"mme.skin");
     if (!e.buffer) return nullptr;
     e.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     e.skinnedFrame = UINT64_MAX;
     e.skinnedGeneration = UINT64_MAX;
-    auto [ins, ok] = entries_.emplace(&model, std::move(e));
+    auto [ins, ok] = entries_.emplace(uid, std::move(e));
     return ok ? &ins->second : nullptr;
 }
 
@@ -150,7 +159,7 @@ void MmeSkin::Skin(PassContext& pc, GpuModel& model, uint64_t generation, float 
 
 D3D12_VERTEX_BUFFER_VIEW MmeSkin::Vb(const GpuModel& model) const {
     D3D12_VERTEX_BUFFER_VIEW vbv{};
-    auto it = entries_.find(&model);
+    auto it = entries_.find(model.Uid());
     if (it == entries_.end() || !it->second.buffer) return vbv;
     vbv.BufferLocation = it->second.buffer->GetGPUVirtualAddress();
     vbv.SizeInBytes = (UINT)((uint64_t)model.VertexCount() * sizeof(RtVertex));
@@ -158,8 +167,8 @@ D3D12_VERTEX_BUFFER_VIEW MmeSkin::Vb(const GpuModel& model) const {
     return vbv;
 }
 
-void MmeSkin::Forget(Dx12Context& ctx, const GpuModel* model) {
-    auto it = entries_.find(model);
+void MmeSkin::Forget(Dx12Context& ctx, uint64_t modelUid) {
+    auto it = entries_.find(modelUid);
     if (it == entries_.end()) return;
     if (it->second.buffer) ctx.DeferRelease(it->second.buffer);
     entries_.erase(it);

@@ -50,7 +50,7 @@ public:
         float edgeSize = 0;
     };
 
-    GpuModel() = default;
+    GpuModel();
     ~GpuModel();
     GpuModel(const GpuModel&) = delete;
     GpuModel& operator=(const GpuModel&) = delete;
@@ -128,6 +128,9 @@ public:
     }
 
     const std::string& Name() const { return name_; }
+    // Per-process unique id (1, 2, ...), stable for the model's lifetime. MME caches key by this instead of the
+    // address: a freed model's address may be reused by a new model, which would otherwise hit a stale cache.
+    uint64_t Uid() const { return uid_; }
     ModelRole Role() const { return role_; }
     // M8a: an animated stage (a song-bundled stage with a stage motion) is not a static stage: its BLAS is rebuilt
     // when it moves and its own shaders shade it as geometry that can move. Set after creation (stages are built
@@ -209,6 +212,7 @@ public:
 
 private:
     Dx12Context* ctx_ = nullptr;
+    uint64_t uid_ = 0;   // assigned in the constructor from a process-wide atomic counter
     std::string name_;
     uint32_t boneCount_ = 0, vertexCount_ = 0, indexCount_ = 0;
     ComPtr<ID3D12Resource> vb_, ib_, sdef_, addUv_;

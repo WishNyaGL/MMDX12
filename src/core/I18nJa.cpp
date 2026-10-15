@@ -1177,6 +1177,7 @@ const Entry kJapanese[] = {
     {"MME 효과", "MME エフェクト"},
     {"실시간 효과", "リアルタイムエフェクト"},
     {"고품질 CJK 글꼴", "高品質 CJK フォント"},
+    {"GPU 드라이버가 재설정되어(디바이스 제거) 렌더링을 계속할 수 없습니다. 프로그램을 종료합니다.\n자세한 내용은 mmdx12.log 를 확인하세요.", "GPU ドライバーがリセットされたため(デバイス除去)、レンダリングを続行できません。プログラムを終了します。\n詳しくは mmdx12.log を確認してください。"},
 };
 const int kJapaneseCount = (int)(sizeof(kJapanese) / sizeof(kJapanese[0]));
 
