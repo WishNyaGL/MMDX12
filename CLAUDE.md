@@ -352,7 +352,9 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   (file, objectMode), targets, samplers, constant ring), `MmeScriptVM`, `MmeSemantics` (CONTROLOBJECT: missing object =
   bool false / items 0), passes `PassMme` (post chain), `PassMmeOffscreen` (DefaultEffect lists, MMD self-shadow),
   scene-pass object draws, PT / offline GI MME layer. Per-model choice None / Auto / File (characters None, stages Auto),
-  post stack `mmeEffect=`, effect objects (`.x` + same-stem `.fx`, `--mme-object`). Ray-MMD material files stay with the
+  post stack `mmeEffect=`, effect objects (`.x` + same-stem `.fx`, `--mme-object`). In the Auto workflow play scenes
+  auto-load a required CONTROLOBJECT controller when its file exists (`asset/MmeAssign.cpp` `FindMmeControllerFile`,
+  Ray-MMD files refused by `IsRayMmdControllerFile`; they are CONTROLOBJECT-visible but never drawn). Ray-MMD material files stay with the
   native PBR (Auto skips them; adding ray.x asks first). App-level controls: global MME switch `AppSettings::mmeEnabled`
   (ini `mmeEnabled=`, `--mme-global 0|1`; off = no MME object effect / no post stack / no effect objects, everywhere)
   and the separate global Ray-MMD material-source switch `AppSettings::rayMmdEnabled` (ini `rayMmdEnabled=`,

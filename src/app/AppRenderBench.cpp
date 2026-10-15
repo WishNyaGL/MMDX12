@@ -216,6 +216,12 @@ void App::RecordRenderBenchFrame(ID3D12GraphicsCommandList* cmd) {
         AppendMmeObject(view, e.gpu.get(), e.instance.get(), true,
                         !e.displayName.empty() ? e.displayName : e.gpu->Name());
     }
+    // Auto workflow (완전 자동): the auto-loaded CONTROLOBJECT controllers are MME-visible (mmeObjects,
+    // visible = false) but never drawn (not pushed into view.models).
+    for (const SceneRuntime::Controller& c : scene_->controllers) {
+        if (!c.gpu) continue;
+        AppendMmeObject(view, c.gpu.get(), c.inst.get(), /*visible=*/false, c.displayName);
+    }
     OfflineJobDesc job;
     job.width = renderBench_.width;
     job.height = renderBench_.height;

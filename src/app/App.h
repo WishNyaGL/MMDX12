@@ -272,6 +272,18 @@ private:
             std::string fileName, displayName;
         };
         std::vector<EffectObject> effectObjects;
+        // Auto workflow (완전 자동): the MME controllers a play scene auto-loaded (a model's effect needed a
+        // CONTROLOBJECT object and `FindMmeControllerFile` located its file). They are CONTROLOBJECT-visible
+        // (MmeSceneNames / view.mmeObjects) but never drawn: not in view.models, not in BLAS, not in shadows.
+        // Freed with the scene.
+        struct Controller {
+            std::filesystem::path path;
+            std::unique_ptr<ModelInstance> inst;   // identity root transform, posed once at rest
+            std::unique_ptr<GpuModel> gpu;
+            std::string fileName;    // lower case (the CONTROLOBJECT match key)
+            std::string displayName; // the PMX name
+        };
+        std::vector<Controller> controllers;
         // The camera VMD's light / self-shadow tracks (empty when absent or only MMD's defaults); used when
         // AppSettings::motionLighting is on.
         std::vector<studio::LightKf> lightTrack;
@@ -825,6 +837,17 @@ private:
     // The controller an Auto workflow assignment skipped for this model path (ui: the "자동 제외" caption); empty when
     // the model was not skipped. Keyed by (model path, scene-names key).
     std::map<std::string, std::string> mmeAutoSkip_;
+    // Auto workflow (완전 자동), play scenes only: when a required controller is missing but its file exists in the
+    // library (FindMmeControllerFile, non-Ray), queue its load for this scene (RequestMmeController); the effect
+    // applies from the frame after PollMmeControllers loaded it. Never queued twice (key = lower-case file name).
+    void RequestMmeController(const std::filesystem::path& modelPath, const std::string& skip);
+    // Loads queued controller models synchronously, once per play-scene frame before the models' MME choices are
+    // applied. A failed load is LOG_WARN'd once and marked failed (never retried).
+    void PollMmeControllers();
+    // The queued (not yet loaded) controller files + the requester that needed them, and the failed ones, this scene.
+    std::vector<std::pair<std::filesystem::path, std::string>> mmeControllerQueue_;   // (file, requester path utf8)
+    std::set<std::string> mmeControllerQueued_;    // queued / loaded file names (lower case), this scene
+    std::set<std::string> mmeControllerFailed_;    // failed file names (lower case), never retried
     // The Auto resolution ApplyMmeEffect builds from the model's files on disk (per-material paths + hidden +
     // ray-skipped), keyed by (model path, material count) and reused for up to 1.0 s so an unchanged scene does no
     // filesystem work per frame (a .emd edit still applies while running).

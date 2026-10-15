@@ -7,13 +7,18 @@
 #include <chrono>
 #include <map>
 #include <mutex>
+#include <set>
 #include <system_error>
 
 #include "asset/MmeEffect.h"
 #include "asset/MmeText.h"
+#include "asset/PmmLoader.h"
+#include "asset/RayMaterial.h"
+#include "core/Log.h"
 #include "core/TextUtil.h"
 
 namespace mmdx {
+
 namespace {
 
 using mmetext::Lower;
@@ -180,6 +185,123 @@ std::vector<std::string> MmeRequiredControllers(const std::filesystem::path& fx)
         return controllers;
     } catch (...) {
         return {};   // includes / macros failing to resolve: do not block the effect
+    }
+}
+
+// ---- the automatic controller load (Auto workflow, play scenes) ----------------------------------------------------
+
+// The automatic controller-load Ray-MMD guard: a Ray-MMD main effect (ray.x / ray.fx), a file (or the requested
+// lower-case `controllerName` itself) that classifies as a Ray-MMD controller (PmmLoader's table) is refused for
+// automatic loads: Ray-MMD stays with the native PBR (no double ray.x next to it). One rule for every automatic
+// load; never throws.
+bool IsRayMmdControllerFile(const std::filesystem::path& file, const std::string& controllerName) {
+    try {
+        if (!file.empty() && IsRayMmdMainEffect(file)) return true;
+        if (!file.empty() && ClassifyMmeController(mmetext::Lower(PathToUtf8(file.filename()))) ==
+                                 MmeController::Ray) return true;
+        if (!controllerName.empty() && ClassifyMmeController(controllerName) == MmeController::Ray) return true;
+    } catch (...) {
+        // never throw
+    }
+    return false;
+}
+
+namespace {
+
+// Automatic controller search: hard caps that keep a pathological folder tree from stalling a frame.
+constexpr int kMaxSearchDepth = 4;
+constexpr size_t kMaxVisitedEntries = 5000;
+
+// Finds inside `dir` (recursion depth < kMaxSearchDepth) the first file matching `name` (lower case: an exact
+// case-insensitive file-name equality, or — when `matchStem`, i.e. `name` carries no extension — a file whose
+// stem equals it with extension .pmx / .pmd / .x). Unreadable directories are skipped (error_code overloads
+// everywhere); `visited` bounds the total entries across the roots. Never throws.
+std::filesystem::path SearchControllerDir(const std::filesystem::path& dir, const std::string& name,
+                                          bool matchStem, int depth, size_t& visited) {
+    if (depth >= kMaxSearchDepth || visited >= kMaxVisitedEntries) return {};
+    std::error_code ec;
+    std::filesystem::directory_iterator it(dir, std::filesystem::directory_options::skip_permission_denied, ec);
+    if (ec) return {};
+    std::filesystem::directory_iterator end;
+    for (; it != end; it.increment(ec)) {
+        if (ec) return {};   // the iteration itself failed: stop this branch
+        if (visited >= kMaxVisitedEntries) return {};
+        ++visited;
+        const std::filesystem::directory_entry& entry = *it;
+        std::error_code entryEc;
+        const bool isDir = entry.is_directory(entryEc);
+        if (entryEc) continue;   // unreadable entry
+        if (isDir) {
+            std::filesystem::path hit = SearchControllerDir(entry.path(), name, matchStem, depth + 1, visited);
+            if (!hit.empty()) return hit;
+            continue;
+        }
+        const std::string fileName = mmetext::Lower(PathToUtf8(entry.path().filename()));
+        if (fileName.empty()) continue;
+        if (fileName == name) return entry.path();
+        if (matchStem) {
+            const std::string stem = mmetext::Lower(PathToUtf8(entry.path().stem()));
+            const std::string ext = mmetext::Lower(PathToUtf8(entry.path().extension()));
+            if (stem == name && (ext == ".pmx" || ext == ".pmd" || ext == ".x")) return entry.path();
+        }
+    }
+    return {};
+}
+
+} // namespace
+
+std::filesystem::path FindMmeControllerFile(const std::filesystem::path& modelPath,
+                                            const std::string& controllerName) {
+    // Cached per (model path, controller name); a negative result is cached too (empty = not found).
+    struct ControllerFileCacheEntry {
+        std::filesystem::path file;
+    };
+    static std::mutex gControllerFileCacheMutex;
+    static std::map<std::string, ControllerFileCacheEntry> gControllerFileCache;
+    if (modelPath.empty() || controllerName.empty()) return {};
+    try {
+        const bool matchStem = controllerName.find('.') == std::string::npos;
+        const std::string key = PathToUtf8(modelPath) + "|" + controllerName;
+        {
+            std::lock_guard<std::mutex> lock(gControllerFileCacheMutex);
+            const auto it = gControllerFileCache.find(key);
+            if (it != gControllerFileCache.end()) return it->second.file;
+        }
+        std::filesystem::path found;
+        auto accept = [&](const std::filesystem::path& candidate) -> bool {
+            if (candidate.empty()) return false;
+            if (IsRayMmdControllerFile(candidate, controllerName)) {
+                LOG_INFO("MME auto: controller file %s refused (Ray-MMD stays with the native PBR)",
+                         PathToUtf8(candidate).c_str());
+                return false;
+            }
+            found = candidate;
+            return true;
+        };
+        size_t visited = 0;
+        // (a) the model's folder, recursively
+        const std::filesystem::path modelDir = modelPath.parent_path();
+        if (!modelDir.empty()) {
+            std::filesystem::path hit = SearchControllerDir(modelDir, controllerName, matchStem, 0, visited);
+            if (!hit.empty() && accept(hit)) {
+                std::lock_guard<std::mutex> lock(gControllerFileCacheMutex);
+                gControllerFileCache[key] = ControllerFileCacheEntry{found};
+                return found;
+            }
+        }
+        // (b) the folders of the model's Auto effects, recursively (stop at the first match)
+        for (const MmeAssignment& a : FindModelEffects(modelPath)) {
+            if (a.effect.empty() || visited >= kMaxVisitedEntries) break;
+            const std::filesystem::path dir = a.effect.parent_path();
+            if (dir.empty() || dir == modelDir) continue;
+            std::filesystem::path hit = SearchControllerDir(dir, controllerName, matchStem, 0, visited);
+            if (!hit.empty() && accept(hit)) break;
+        }
+        std::lock_guard<std::mutex> lock(gControllerFileCacheMutex);
+        gControllerFileCache[key] = ControllerFileCacheEntry{found};   // a negative result is cached too
+        return found;
+    } catch (...) {
+        return {};   // never throw
     }
 }
 

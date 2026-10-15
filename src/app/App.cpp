@@ -3,6 +3,7 @@
 #include "core/I18n.h"
 #include "app/App.h"
 #include "asset/ImageLoader.h"
+#include "asset/MmeAssign.h"
 #include "asset/RayMaterial.h"
 
 #include <ShlObj.h>
@@ -1909,6 +1910,9 @@ void App::UnloadScene() {
     renderer_.ReleaseVideoLayers();   // M8b: stop the song's video decode threads, free their buffers
     haveLastLiveCamera_ = false;
     scene_.reset();
+    mmeControllerQueue_.clear();      // auto-loaded MME controllers are per scene (freed with it)
+    mmeControllerQueued_.clear();
+    mmeControllerFailed_.clear();
     playAutoFocus_.Reset();
     playEditPerformer_ = 0;
     playPanelOpen_ = playPanelReopen_;   // the 화면 효과 panel does not carry into the next scene, except
@@ -1919,7 +1923,68 @@ void App::UnloadScene() {
     playing_ = false;
 }
 
+// Auto workflow (완전 자동), play scenes only: a required CONTROLOBJECT controller was missing, but its file may
+// exist next to the model / its effects (FindMmeControllerFile). Queue the load (deduped by lower-case file name;
+// never a name already in the scene, already queued / loaded, or failed before). A Ray file is refused inside
+// FindMmeControllerFile (treated as not found).
+void App::RequestMmeController(const std::filesystem::path& modelPath, const std::string& skip) {
+    if (!scene_ || studio_ || skip.empty()) return;
+    const std::filesystem::path file = FindMmeControllerFile(modelPath, skip);
+    if (file.empty()) return;
+    const std::string key = ToLowerAscii(PathToUtf8(file.filename()));
+    if (key.empty()) return;
+    if (mmeControllerQueued_.count(key) || mmeControllerFailed_.count(key)) return;
+    const std::vector<std::string>& names = MmeSceneNames();
+    if (std::find(names.begin(), names.end(), key) != names.end()) return;   // already in the scene
+    mmeControllerQueued_.insert(key);
+    mmeControllerQueue_.push_back({file, PathToUtf8(modelPath)});
+}
+
+// Loads queued controller models synchronously (controller PMX files are small), before the models' MME choices
+// are applied. A failed load is LOG_WARN'd once and the name is marked failed (never retried).
+void App::PollMmeControllers() {
+    if (!scene_ || mmeControllerQueue_.empty()) return;
+    for (const auto& [file, requester] : mmeControllerQueue_) {
+        SceneRuntime::Controller c;
+        c.path = file;
+        c.fileName = ToLowerAscii(PathToUtf8(file.filename()));
+        LoadedModelCpu cpu;
+        studio::StudioPackageModel spm;
+        std::string err;
+        LoadProgress progress;
+        if (!studio::LoadStudioModel(file, studio::ModelKind::Prop, PathToUtf8(file.stem()), spm, &progress, &err)) {
+            LOG_WARN("MME auto: controller load failed: %s: %s", PathToUtf8(file).c_str(), err.c_str());
+            mmeControllerFailed_.insert(c.fileName);
+            continue;
+        }
+        cpu.pmx = spm.pmx;
+        cpu.textures = std::move(spm.textures);
+        c.inst = std::make_unique<ModelInstance>(cpu.pmx);
+        c.inst->SetRootTransform(DirectX::XMFLOAT4X4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+        c.inst->UpdatePose();
+        {
+            UploadBatch batch(ctx_);
+            c.gpu = renderer_.CreateModel(batch, *cpu.pmx, cpu.textures, ModelRole::Stage);
+            batch.Submit();
+        }
+        if (!c.gpu) {
+            LOG_WARN("MME auto: controller GPU upload failed: %s", PathToUtf8(file).c_str());
+            mmeControllerFailed_.insert(c.fileName);
+            continue;
+        }
+        c.displayName = cpu.pmx->name;
+        LOG_INFO("MME auto: loaded controller %s for %s", PathToUtf8(file).c_str(), requester.c_str());
+        scene_->controllers.push_back(std::move(c));
+        // the scene model set changed: the per-model skip cache no longer applies (the effect applies from here on)
+        mmeAutoSkip_.clear();
+    }
+    mmeControllerQueue_.clear();
+}
+
 void App::UpdateScene(float frame) {
+    // Auto workflow (완전 자동): load queued CONTROLOBJECT controller models before the models' MME choices are
+    // applied below, so a controller loaded this frame is visible to the skip re-evaluation the same frame.
+    PollMmeControllers();
     const uint64_t slot = ctx_.FrameNumber();
     if (scene_->motion) {
         scene_->motion->Evaluate(frame, *scene_->character);
@@ -2139,6 +2204,12 @@ void App::BuildFrameView(float frame, FrameView& view) {
     // M5c: the MME effect objects' accessory meshes (drawn through the MME object path; appended after the
     // characters so particle / floor accessories sit over the scene as in MMD).
     AppendMmeEffectObjects(view, scene_->effectObjects);
+    // Auto workflow (완전 자동): the auto-loaded CONTROLOBJECT controllers are MME-visible (mmeObjects,
+    // visible = false) but never drawn: not pushed into view.models (not in BLAS, not in shadows).
+    for (const SceneRuntime::Controller& c : scene_->controllers) {
+        if (!c.gpu) continue;
+        AppendMmeObject(view, c.gpu.get(), c.inst.get(), /*visible=*/false, c.displayName);
+    }
 
     // Spotlights follow the performer (center bone when present).
     DirectX::XMFLOAT3 focus{0, 10, 0};

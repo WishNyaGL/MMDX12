@@ -240,6 +240,9 @@ void App::ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::file
             if (mmeSkipLogged_.insert(logKey).second)
                 LOG_INFO("MME auto: %s: skipped (needs controller '%s')", PathToUtf8(modelPath).c_str(),
                          skip.c_str());
+            // 완전 자동, play scene: the controller's file may exist in the library — queue its automatic load
+            // (it applies from the frame after PollMmeControllers loads it; the studio keeps today's skip).
+            if (scene_ && !studio_) RequestMmeController(modelPath, skip);
             gpu.SetMmeEffects({});
             return;
         }
@@ -255,9 +258,10 @@ void App::ApplyMmeEffect(GpuModel& gpu, const MmeChoice& choice, const std::file
 }
 
 // The lower-case names a CONTROLOBJECT lookup can match (render/PassMmeOffscreen.cpp MmeSceneLookup): each loaded
-// model's source file name and display name, plus the MME effect objects' file / display names. Play: center +
-// extras + stages + effect objects. Studio: the project's models. Cached per scene model set (count + pointers): the
-// cheap key is built every call, the name list only when it changed.
+// model's source file name and display name, plus the MME effect objects' and the Auto workflow's auto-loaded
+// controller models' file / display names. Play: center + extras + stages + effect objects + controllers. Studio:
+// the project's models. Cached per scene model set (count + pointers): the cheap key is built every call, the
+// name list only when it changed.
 const std::vector<std::string>& App::MmeSceneNames() {
     std::string key;
     if (studio_) {
@@ -283,6 +287,10 @@ const std::vector<std::string>& App::MmeSceneNames() {
         for (const auto& o : scene_->effectObjects) {
             key += 'o';
             key += std::to_string((uintptr_t)o.mesh.get());
+        }
+        for (const auto& c : scene_->controllers) {
+            key += 'k';
+            key += std::to_string((uintptr_t)c.gpu.get());
         }
     }
     if (key == mmeSceneNamesKey_) return mmeSceneNames_;   // unchanged: no rebuild, no per-frame allocation
@@ -310,6 +318,10 @@ const std::vector<std::string>& App::MmeSceneNames() {
         for (const auto& o : scene_->effectObjects) {
             if (!o.fileName.empty()) names.push_back(ToLowerAscii(o.fileName));
             if (!o.displayName.empty()) names.push_back(ToLowerAscii(o.displayName));
+        }
+        for (const auto& c : scene_->controllers) {
+            if (!c.fileName.empty()) names.push_back(ToLowerAscii(c.fileName));
+            if (!c.displayName.empty()) names.push_back(ToLowerAscii(c.displayName));
         }
     }
     mmeSceneNames_ = std::move(names);

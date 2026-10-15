@@ -28,4 +28,19 @@ std::vector<MmeAssignment> FindModelEffects(const std::filesystem::path& model);
 // existence check, never required. Cached by path + file write time. An unreadable / unparseable file yields {}.
 std::vector<std::string> MmeRequiredControllers(const std::filesystem::path& fx);
 
+// Finds the file of a required CONTROLOBJECT controller (`controllerName` is the lower-case name
+// MmeRequiredControllers returned) so the Auto workflow can load it automatically. Search roots, in order: the
+// model's folder, then the folders of the model's Auto effects (FindModelEffects), each recursively (depth <= 4).
+// A match is a file name equal to `controllerName` (case-insensitive), or — when `controllerName` carries no
+// extension — a file whose stem equals it with extension .pmx / .pmd / .x. A Ray-MMD file is refused
+// (IsRayMmdControllerFile, one LOG_INFO per file). Cached by (model path, controller); an empty result (not
+// found) is cached too. Never throws; an empty path means not found.
+std::filesystem::path FindMmeControllerFile(const std::filesystem::path& modelPath,
+                                            const std::string& controllerName);
+
+// The automatic controller-load Ray-MMD guard: true when `file` (or the requested lower-case `controllerName`
+// itself) classifies as a Ray-MMD controller (ClassifyMmeController) or is a Ray-MMD main effect
+// (IsRayMmdMainEffect). One rule for every automatic load: Ray-MMD files stay with the native PBR.
+bool IsRayMmdControllerFile(const std::filesystem::path& file, const std::string& controllerName = {});
+
 } // namespace mmdx
