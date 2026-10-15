@@ -1898,3 +1898,24 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - `mmdx12.previous.log` is not written (CLAUDE.md says it is); a repro run overwrote the user's log.
 - A model's material SRV table rewritten in place (texture replaced while loaded) would still leave copied MME tables
   stale; not addressed.
+
+## 2026-10-15 (5) - GPU hang fix (MME animated textures), release 2.1.1
+- Report: "GPU device removed" warning in play (5 Alcander performers, Dreamin Chuchu song stage with MME monitor
+  effects, video layers, bokeh_dof, DLSS). Log: `removed reason=0x887A0006` (DEVICE_HUNG), DRED breadcrumb op 8
+  (COPYTEXTUREREGION) unfinished right after the first frame; page-fault freed allocs `mme.target` / `dof.blurA` were
+  the normal deferred releases (ruled out).
+- Root cause: `MmeEffectInstance::UpdateAnimatedTextures` (ANIMATEDTEXTURE, used by the stage's `StageShader.fxsub`)
+  copied from a staging buffer with a tight `width * 4` RowPitch; D3D12 needs 256-byte alignment. Now a 256-aligned
+  layout with per-row copies (as PassVideo). Every other CopyTextureRegion audited: GetCopyableFootprints / StagingPitch.
+  Implementation + audit delegated (opencode, deepseek-v4.1-flash, full review).
+- Verified: same scene (`--formation` 5 Alcanders, `--song Dreamin`, 1600x900), 900 frames, 0 `[E]`, no device loss.
+  The hang was not re-run on the old exe (evidence = the crash log).
+- Also committed (pending from an earlier session): parallel posing of unit performers, interactive Bullet substep cap 4,
+  camera VMD forward-axis view, VideoReader last-sample reuse.
+- Release 2.1.1: `package_release.ps1` (full 170.5 MB, lite 14.9 MB), packaged exe smoke (select screen, 0 `[E]`;
+  smoke leftovers cache/ini/log removed from the stage dir before `make_update.py`), delta manifest 2.1.1 = 3 new
+  objects (exe, mmdx12_mcp, pack_check; 3.7 MB gzip), uploaded, live hashes match; GitHub v2.1.1 (notes
+  `dist/notes_2.1.1.md`, 4 languages; digests = local zips); website deployed (`/latest.json` -> 2.1.1 with manifest).
+- Pitfalls: the in-app update summary shows only the bold headings of the notes, so headings must read as full
+  sentences; a list built by `python -c` in Git Bash carries `\r` (pipe through `tr -d '\r'`); the first redeploy
+  after `gh release edit` can still fetch the old body (redeploy once more and check `/latest.json`).
