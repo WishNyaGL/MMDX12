@@ -80,6 +80,45 @@ ImGuiStorage& AnimStorage() {
 
 bool IsDisabled() { return (ImGui::GetItemFlags() & ImGuiItemFlags_Disabled) != 0; }
 
+// --- sRGB <-> OKLab (ColorField picker). sRGB here means the stored display values 0..1 (no gamma change of
+// stored data); linearisation + Björn Ottosson's published OKLab matrices.
+float SrgbTransferToLinear(float c) { return c <= 0.04045f ? c * (1.0f / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f); }
+float LinearTransferToSrgb(float c) { return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f; }
+
+void SrgbToOklab(const float srgb[3], float lab[3]) {
+    const float r = SrgbTransferToLinear(std::clamp(srgb[0], 0.0f, 1.0f));
+    const float g = SrgbTransferToLinear(std::clamp(srgb[1], 0.0f, 1.0f));
+    const float b = SrgbTransferToLinear(std::clamp(srgb[2], 0.0f, 1.0f));
+    const float l = 0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b;
+    const float m = 0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b;
+    const float s = 0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b;
+    const float l_ = std::cbrt(l), m_ = std::cbrt(m), s_ = std::cbrt(s);
+    lab[0] = 0.2104542553f * l_ + 0.7936177850f * m_ - 0.0040720468f * s_;
+    lab[1] = 1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_;
+    lab[2] = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_;
+}
+
+void OklabToSrgb(const float lab[3], float srgb[3]) {
+    const float l_ = lab[0] + 0.3963377774f * lab[1] + 0.2158037573f * lab[2];
+    const float m_ = lab[0] - 0.1055613458f * lab[1] - 0.0638541728f * lab[2];
+    const float s_ = lab[0] - 0.0894841775f * lab[1] - 1.2914855480f * lab[2];
+    const float l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+    const float lr = 4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s;
+    const float lg = -1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s;
+    const float lb = -0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s;
+    // clamp to the 0..1 display range on the way out (out-of-gamut lab values saturate)
+    srgb[0] = std::clamp(LinearTransferToSrgb(std::clamp(lr, 0.0f, 1.0f)), 0.0f, 1.0f);
+    srgb[1] = std::clamp(LinearTransferToSrgb(std::clamp(lg, 0.0f, 1.0f)), 0.0f, 1.0f);
+    srgb[2] = std::clamp(LinearTransferToSrgb(std::clamp(lb, 0.0f, 1.0f)), 0.0f, 1.0f);
+}
+
+int HexVal(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 } // namespace
 
 const Palette& P() { return g_palette; }
@@ -630,6 +669,206 @@ bool SliderRow(const char* id, const char* label, float* v, float vmin, float vm
     dl->AddCircle(kc, knobR, Mix(p.lineStrong, p.accent, hk), 24, Dp(1.5f));
     ImGui::RenderNavCursor(bb, gid);
     return changed;
+}
+
+// --- colour field: swatch + labelled channel fields + picker popup ------------------------
+// One shared widget for every colour row. `rgb` holds the stored display values 0..1 (no gamma conversion of
+// stored data); the widget returns true on any frame a channel field / the popup picker actually changed the
+// colour, and reports a gesture start / end (any inner control or popup picker drag) through `activated` /
+// `deactivated`, for key-edit capture. Palette colours are read live; the picker mode (RGB / HSV / OKLab) is
+// one shared per-session UI mode.
+bool ColorField(const char* id, float rgb[3], bool* activated, bool* deactivated, bool hdr) {
+    ImGuiWindow* w = ImGui::GetCurrentWindow();
+    if (w->SkipItems) return false;
+    if (activated) *activated = false;
+    if (deactivated) *deactivated = false;
+    const ImGuiID gid = w->GetID(id);
+    const Palette& p = P();
+    ImDrawList* dl = w->DrawList;
+
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    const ImGuiID kHue = ImHashStr("hue", 0, gid);       // so greys keep their hue between edits
+    const ImGuiID kActive = ImHashStr("gesture", 0, gid);
+    const ImGuiID kOpen = ImHashStr("open", 0, gid);
+    const bool wasActive = st->GetBool(kActive, false);
+    const bool wasOpen = st->GetBool(kOpen, false);
+    bool anyActive = false, changedAny = false;
+
+    // per-field state: the hex text and the colour the popup was opened with (the old/new preview)
+    struct State { char hex[8]; float oldCol[3]; };
+    static State s_state;   // only one colour picker popup can be open (or have the hex field focused) at a time
+    State* s = &s_state;
+
+    static int s_mode = 0;   // picker mode shared by every colour field (a UI mode, not a colour)
+    s_mode = std::clamp(s_mode, 0, 2);
+    static const char* const kCh[3][3] = {{"R", "G", "B"}, {"H", "S", "V"}, {"L", "a", "b"}};
+
+    ImGui::PushID(id);
+    const ImVec2 origin = w->DC.CursorPos;
+    const float fieldH = ImGui::GetFrameHeight();
+    const float avail = ImGui::GetContentRegionAvail().x;
+    float col[3] = {std::clamp(rgb[0], 0.0f, 1.0f), std::clamp(rgb[1], 0.0f, 1.0f), std::clamp(rgb[2], 0.0f, 1.0f)};
+
+    // one invisible item over the whole field so uiprobe finds it under the field's id (like Switch); the inner
+    // controls overwrite the last-item state as they submit, so the channel fields remain the last item.
+    ImGui::ItemAdd(ImRect(origin, ImVec2(origin.x + avail, origin.y + fieldH)), gid, nullptr,
+                   ImGuiItemFlags_NoTabStop | ImGuiItemFlags_NoNav);
+    uiprobe::Info(gid, id, nullptr);
+
+    const float gap = Dp(7.0f);
+    const float fieldW = std::max(Dp(42.0f), (avail - fieldH - gap - 2.0f * gap) / 3.0f);
+
+    // swatch: a stock ColorButton (a click opens the picker popup), with a hairline border on top
+    if (ImGui::ColorButton("##cfsw", ImVec4(col[0], col[1], col[2], 1.0f),
+                           ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop, ImVec2(fieldH, fieldH)))
+        ImGui::OpenPopup("##cfpick");
+    anyActive |= ImGui::IsItemActive();
+    const ImVec2 sMin = ImGui::GetItemRectMin(), sMax = ImGui::GetItemRectMax();
+    if (IsDisabled()) dl->AddRectFilled(sMin, sMax, WithAlpha(p.ink3, 0.35f), Dp(3.0f));
+    dl->AddRect(sMin, sMax, WithAlpha(p.lineStrong, 0.9f), Dp(3.0f));
+    ImGui::SameLine(0, gap);
+
+    // channel fields: the letters follow the mode. Seeded from the colour every frame, so only a field that
+    // actually changed this frame writes `rgb` (untouched fields never drift the value).
+    float tmp[3] = {col[0], col[1], col[2]};
+    if (s_mode == 1) {   // HSV: hue is held separately so greys do not lose it
+        ImGui::ColorConvertRGBtoHSV(col[0], col[1], col[2], tmp[0], tmp[1], tmp[2]);
+        if (tmp[1] > 0.0f) st->SetFloat(kHue, tmp[0]);
+        else tmp[0] = st->GetFloat(kHue, tmp[0]);
+    } else if (s_mode == 2) {   // OKLab
+        SrgbToOklab(col, tmp);
+    }
+    for (int i = 0; i < 3; ++i) {
+        ImGui::PushID(i);
+        if (i) ImGui::SameLine(0, gap);
+        ImGui::SetNextItemWidth(fieldW);
+        const char* digits = s_mode == 2 ? "%.3f" : (s_mode == 1 && i == 0 ? "%.0f°" : "%.2f");  // hue in degrees
+        char fmt[16];
+        std::snprintf(fmt, sizeof(fmt), "%s %s", kCh[s_mode][i], digits);
+        bool changed = false;
+        if (s_mode == 2) {
+            changed = ImGui::DragFloat("##cfch", &tmp[i], 0.004f, i == 0 ? 0.0f : -0.4f, i == 0 ? 1.0f : 0.4f, fmt);
+        } else if (s_mode == 1 && i == 0) {
+            float deg = tmp[0] * 360.0f;
+            changed = ImGui::DragFloat("##cfch", &deg, 1.0f, 0.0f, 360.0f, fmt);
+            tmp[0] = deg * (1.0f / 360.0f);
+        } else if (hdr) {
+            changed = ImGui::DragFloat("##cfch", &tmp[i], 0.01f, 0.0f, 0.0f, fmt);  // no max: unclamped (hdr)
+        } else {
+            changed = ImGui::DragFloat("##cfch", &tmp[i], 0.01f, 0.0f, 1.0f, fmt);
+        }
+        anyActive |= ImGui::IsItemActive();
+        if (changed) {
+            if (s_mode == 1) {   // rebuild rgb from the held hsv (hue/sat persist through greys)
+                ImGui::ColorConvertHSVtoRGB(tmp[0], std::clamp(tmp[1], 0.0f, 1.0f), std::clamp(tmp[2], 0.0f, 1.0f),
+                                            col[0], col[1], col[2]);
+            } else if (s_mode == 2) {
+                float out[3];
+                OklabToSrgb(tmp, out);
+                col[0] = out[0]; col[1] = out[1]; col[2] = out[2];
+            } else {
+                col[i] = tmp[i];
+            }
+            changedAny = true;
+        }
+        ImGui::PopID();
+    }
+    if (changedAny) {
+        rgb[0] = col[0]; rgb[1] = col[1]; rgb[2] = col[2];
+    }
+
+    // picker popup: mode tabs, picker / OKLab sliders, hex input, old-new preview
+    const bool open = ImGui::BeginPopup("##cfpick");
+    if (open) {
+        ImDrawList* pdl = ImGui::GetWindowDrawList();
+        if (!wasOpen) {   // capture "old" for the preview and seed the hex field
+            s->oldCol[0] = col[0]; s->oldCol[1] = col[1]; s->oldCol[2] = col[2];
+            std::snprintf(s->hex, sizeof(s->hex), "#%02X%02X%02X", (int)std::lround(col[0] * 255.0f),
+                          (int)std::lround(col[1] * 255.0f), (int)std::lround(col[2] * 255.0f));
+        }
+        const char* tabs[] = {"RGB", "HSV", "OKLab"};
+        Segmented("##cfmode", tabs, 3, &s_mode, 0.0f, 26.0f);
+        anyActive |= ImGui::IsItemActive();
+        ImGui::Dummy(ImVec2(0.0f, Dp(6.0f)));
+
+        bool pickChanged = false;
+        if (s_mode == 2) {
+            float lab[3];
+            SrgbToOklab(col, lab);
+            for (int i = 0; i < 3; ++i) {
+                ImGui::PushID(i);
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                if (ImGui::SliderFloat(kCh[2][i], &lab[i], i == 0 ? 0.0f : -0.4f, i == 0 ? 1.0f : 0.4f,
+                                       i == 0 ? "L %.3f" : (i == 1 ? "a %.3f" : "b %.3f"))) {
+                    float out[3];
+                    OklabToSrgb(lab, out);
+                    col[0] = out[0]; col[1] = out[1]; col[2] = out[2];
+                    pickChanged = true;
+                }
+                anyActive |= ImGui::IsItemActive();
+                ImGui::PopID();
+            }
+        } else {
+            const ImGuiColorEditFlags flags = ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoSidePreview |
+                                              (s_mode == 1 ? ImGuiColorEditFlags_PickerHueWheel
+                                                           : ImGuiColorEditFlags_PickerHueBar);
+            pickChanged = ImGui::ColorPicker3("##cfin", col, flags);
+            anyActive |= ImGui::IsItemActive();
+        }
+
+        // hex input + old/new preview on one line
+        if (pickChanged)   // mirror the picked colour into the hex field (cannot collide with typing: one popup)
+            std::snprintf(s->hex, sizeof(s->hex), "#%02X%02X%02X", (int)std::lround(col[0] * 255.0f),
+                          (int)std::lround(col[1] * 255.0f), (int)std::lround(col[2] * 255.0f));
+        ImGui::SetNextItemWidth(Dp(96.0f));
+        ImGui::PushID("cfhex");
+        const bool hexEdited = ImGui::InputText("##in", s->hex, sizeof(s->hex));
+        const bool hexActive = ImGui::IsItemActive();
+        ImGui::PopID();
+        anyActive |= hexActive;
+        if (hexEdited) {
+            const char* hex = s->hex[0] == '#' ? s->hex + 1 : s->hex;
+            int vals[3] = {};
+            bool ok = true;
+            for (int i = 0; i < 3; ++i) {
+                const int hi = HexVal(hex[i * 2]), lo = HexVal(hex[i * 2 + 1]);
+                if (hi < 0 || lo < 0) { ok = false; break; }
+                vals[i] = hi * 16 + lo;
+            }
+            if (ok) {
+                col[0] = vals[0] / 255.0f; col[1] = vals[1] / 255.0f; col[2] = vals[2] / 255.0f;
+                pickChanged = true;
+            }
+        }
+        const float pv = Dp(20.0f);
+        const ImVec2 lOld = TextSize(Font::Regular, size::Caption, Tr("원래 색"));
+        const ImVec2 lNew = TextSize(Font::Regular, size::Caption, Tr("새 색"));
+        const ImVec2 qq = ImGui::GetCursorScreenPos();
+        const float ty = qq.y + (pv - lOld.y) * 0.5f;
+        pdl->AddRectFilled(qq, ImVec2(qq.x + pv, qq.y + pv),
+                           ImGui::ColorConvertFloat4ToU32(ImVec4(s->oldCol[0], s->oldCol[1], s->oldCol[2], 1.0f)), Dp(4.0f));
+        pdl->AddRect(qq, ImVec2(qq.x + pv, qq.y + pv), p.line, Dp(4.0f));
+        Text(pdl, Font::Regular, size::Caption, ImVec2(qq.x + pv + Dp(5.0f), ty), p.ink2, Tr("원래 색"));
+        const float x2 = qq.x + pv + Dp(5.0f) + lOld.x + Dp(10.0f);
+        pdl->AddRectFilled(ImVec2(x2, qq.y), ImVec2(x2 + pv, qq.y + pv),
+                           ImGui::ColorConvertFloat4ToU32(ImVec4(col[0], col[1], col[2], 1.0f)), Dp(4.0f));
+        pdl->AddRect(ImVec2(x2, qq.y), ImVec2(x2 + pv, qq.y + pv), p.line, Dp(4.0f));
+        Text(pdl, Font::Regular, size::Caption, ImVec2(x2 + pv + Dp(5.0f), ty), p.ink2, Tr("새 색"));
+        ImGui::Dummy(ImVec2(x2 + pv + Dp(5.0f) + lNew.x - qq.x, pv));
+
+        if (pickChanged) {   // the popup edits the same stored values (picker output is already 0..1)
+            rgb[0] = col[0]; rgb[1] = col[1]; rgb[2] = col[2];
+            changedAny = true;
+        }
+        ImGui::EndPopup();
+    }
+    st->SetBool(kOpen, open);
+    ImGui::PopID();
+
+    st->SetBool(kActive, anyActive);
+    if (activated) *activated = anyActive && !wasActive;
+    if (deactivated) *deactivated = !anyActive && wasActive;
+    return changedAny;
 }
 
 bool SearchField(const char* id, char* buf, size_t bufSize, const char* hint, float widthPx) {

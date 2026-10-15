@@ -72,6 +72,11 @@ bool Segmented(const char* id, const char* const* labels, int count, int* curren
 // Label on the left, switch on the right, full available width.
 bool Switch(const char* id, const char* label, bool* v, const char* hint = nullptr);
 bool SliderRow(const char* id, const char* label, float* v, float vmin, float vmax, const char* fmt);
+// Swatch + three labelled channel fields + a picker popup (RGB / HSV / OKLab tabs, hex input, old/new preview).
+// `rgb` holds the display values exactly as stored (sRGB 0..1; no conversion of stored data). `hdr` keeps values
+// unclamped above 1. `activated` / `deactivated` report a gesture starting / ending on any inner control or the
+// popup picker (for key-edit capture), independent of ImGui's last-item state.
+bool ColorField(const char* id, float rgb[3], bool* activated = nullptr, bool* deactivated = nullptr, bool hdr = false);
 bool SearchField(const char* id, char* buf, size_t bufSize, const char* hint, float widthPx);
 bool TextField(const char* id, const char* label, char* buf, size_t bufSize, float widthPx, const char* hint = nullptr);
 // Choice chip with an icon (lighting presets etc.).

@@ -478,6 +478,8 @@ const Entry kEnglish[] = {
     {"모든 채널에 적용 중 (클릭: 선택한 채널만)", "Applying to all channels (click: selected channel only)"},
     {"방향", "Direction"},
     {"색", "Color"},
+    {"원래 색", "Old"},
+    {"새 색", "New"},
     {"섀도 키가 없으면 렌더 설정을 따라요.", "Without shadow keys the render settings decide."},
     {"섀도 키는 보간하지 않아요 (다음 키까지 유지).", "Shadow keys are not interpolated (held until the next key)."},
     {"선택한 채널에만 적용 (클릭: 모든 채널)", "Applying to the selected channel (click: all channels)"},

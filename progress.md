@@ -1834,3 +1834,17 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - `mme_effect_object` capture (drop of a `.x` via `studio_command drop`) added nothing to the outliner; the mme page uses
   the inspector shot instead. Studio PMM / bake / auto-IK / alpha export have no dedicated screenshots beyond the menus.
 - Release gate tests (update_e2e etc.) were not re-run for 2.1.0; the packaged exe ran the whole guide capture without a crash.
+
+## 2026-10-15 (4) - Studio UX: ColorField (labelled channels, picker with RGB / HSV / OKLab / hex)
+- Problem found: every Studio colour row (light, rim, ambient zenith/horizon/ground, shadow, camera-VMD light key) was an
+  unlabeled `DragFloat3` plus a tiny stock `ColorEdit3` swatch: no R/G/B names, no HSV / OKLab / hex.
+- New shared widget `ui::ColorField(id, rgb[3], activated*, deactivated*, hdr)` (`UiKit.{h,cpp}`): swatch + three drag
+  fields with channel letters (R G B / H S V / L a b by mode), swatch popup with RGB | HSV | OKLab tabs, hex input, old /
+  new preview. Replaces the DragFloat3 + ColorEdit3 pairs in `UiStudioLight.cpp` and the VMD light key colour in
+  `UiStudioCamera.cpp` (0..255 storage kept). i18n: "원래 색" / "새 색" in en / ja / zh.
+- Built by a GLM opencode worker (first run stopped OVER-EXPLORING in imgui's gesture internals; Claude decided the
+  gesture API in a note and resumed the same session). Review depth: smoke.
+### Not verified / left
+- Seen in the real app: the light row field and the RGB tab popup (`captures/studio/colorfield_a.png` / `_b.png`,
+  script `captures/studio/colorfield.txt`). NOT seen: HSV / OKLab tabs, hex input, the camera-VMD light row; keyed-edit
+  begin / end behaviour (undo steps, auto-key) after the change was not exercised; worker diff not read line by line.

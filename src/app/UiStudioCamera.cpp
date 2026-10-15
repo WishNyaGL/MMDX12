@@ -412,16 +412,18 @@ bool App::DrawStudioCameraKeyFields(float w, RowKind kind, int frame, bool live)
         row(Tr("색"), [&] { return ImGui::DragInt3("##lightrgb", rgb, 0.5f, 0, 255); });
         row(Tr("방향"), [&] { return ImGui::DragFloat3("##lightdir", dir, 0.01f, -1.0f, 1.0f, "%.2f"); });
         {
-            // colour swatch + picker
+            // colour field (0..255 int storage: convert around the float widget) + MMD default button
             const ImVec2 c = ImGui::GetCursorScreenPos();
             ImGui::SetCursorScreenPos(ImVec2(c.x + Dp(64.0f), c.y));
             float col[3] = {rgb[0] / 255.0f, rgb[1] / 255.0f, rgb[2] / 255.0f};
-            if (ImGui::ColorEdit3("##lightpick", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
+            bool activated = false, deactivated = false;
+            const bool colChanged = ui::ColorField("##lightrgb", col, &activated, &deactivated);
+            if (colChanged) {
                 for (int i = 0; i < 3; ++i) rgb[i] = (int)std::lround(col[i] * 255.0f);
                 changed = true;
             }
-            if (ImGui::IsItemActivated()) StudioBeginKeyEdit(kind);
-            ended |= ImGui::IsItemDeactivated();
+            if (activated) StudioBeginKeyEdit(kind);
+            ended |= deactivated;
             ImGui::SameLine(0, Dp(10.0f));
             if (ui::Button("##lightdefault", Tr("MMD 기본값"), nullptr, ButtonKind::Ghost, ImVec2(0.0f, 26.0f))) {
                 StudioBeginKeyEdit(kind);

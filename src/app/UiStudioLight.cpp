@@ -562,9 +562,7 @@ void App::DrawStudioLightInspector(float w) {
             row(Tr("방향"), [&] { return ImGui::DragFloat3("##sundir", dir, 0.01f, -1.0f, 1.0f, "%.2f"); });
             float col[3] = {cur.color.x, cur.color.y, cur.color.z};
             row(Tr("색"), [&] {
-                ImGui::DragFloat3("##suncol", col, 0.01f, 0.0f, 1.0f, "%.2f");
-                ImGui::SameLine();
-                ImGui::ColorEdit3("##suncolpick", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+                ui::ColorField("##suncol", col);
                 return false;
             });
             ImGui::EndDisabled();
@@ -585,13 +583,7 @@ void App::DrawStudioLightInspector(float w) {
 
             float col[3] = {cur.color.x, cur.color.y, cur.color.z};
             keyedEdit(Tr("색"),
-                [&] {
-                    bool c = false;
-                    c |= ImGui::DragFloat3("##suncol", col, 0.01f, 0.0f, 1.0f, "%.2f");
-                    ImGui::SameLine();
-                    c |= ImGui::ColorEdit3("##suncolpick", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-                    return c;
-                },
+                [&] { return ui::ColorField("##suncol", col); },
                 [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; });
         }
 
@@ -607,13 +599,7 @@ void App::DrawStudioLightInspector(float w) {
 
         float rimCol[3] = {light->rimColor.x, light->rimColor.y, light->rimColor.z};
         basePropEdit(Tr("림 색"),
-            [&] {
-                bool c = false;
-                c |= ImGui::DragFloat3("##rimcol", rimCol, 0.01f, 0.0f, 1.0f, "%.2f");
-                ImGui::SameLine();
-                c |= ImGui::ColorEdit3("##rimcolpick", rimCol, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-                return c;
-            },
+            [&] { return ui::ColorField("##rimcol", rimCol); },
             [&](SceneLight& l) { l.rimColor = {rimCol[0], rimCol[1], rimCol[2]}; });
 
         bool vmdLink = light->vmdLink;
@@ -635,13 +621,7 @@ void App::DrawStudioLightInspector(float w) {
 
         float col[3] = {cur.color.x, cur.color.y, cur.color.z};
         keyedEdit(Tr("색"),
-            [&] {
-                bool c = false;
-                c |= ImGui::DragFloat3("##pointcol", col, 0.01f, 0.0f, 1.0f, "%.2f");
-                ImGui::SameLine();
-                c |= ImGui::ColorEdit3("##pointcolpick", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-                return c;
-            },
+            [&] { return ui::ColorField("##pointcol", col); },
             [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; });
 
         float intensity = cur.intensity;
@@ -741,13 +721,7 @@ void App::DrawStudioLightInspector(float w) {
 
         float col[3] = {cur.color.x, cur.color.y, cur.color.z};
         keyedEdit(Tr("색"),
-            [&] {
-                bool c = false;
-                c |= ImGui::DragFloat3("##spotcol", col, 0.01f, 0.0f, 1.0f, "%.2f");
-                ImGui::SameLine();
-                c |= ImGui::ColorEdit3("##spotcolpick", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-                return c;
-            },
+            [&] { return ui::ColorField("##spotcol", col); },
             [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; });
 
         float intensity = cur.intensity;
@@ -797,13 +771,7 @@ void App::DrawStudioLightInspector(float w) {
 
         float col[3] = {cur.color.x, cur.color.y, cur.color.z};
         keyedEdit(Tr("색"),
-            [&] {
-                bool c = false;
-                c |= ImGui::DragFloat3("##areacol", col, 0.01f, 0.0f, 1.0f, "%.2f");
-                ImGui::SameLine();
-                c |= ImGui::ColorEdit3("##areacolpick", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-                return c;
-            },
+            [&] { return ui::ColorField("##areacol", col); },
             [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; });
 
         float intensity = cur.intensity;
@@ -819,35 +787,17 @@ void App::DrawStudioLightInspector(float w) {
     } else if (light->kind == LightKind::Ambient) {
         float zenith[3] = {light->skyZenith.x, light->skyZenith.y, light->skyZenith.z};
         basePropEdit(Tr("하늘 천정"),
-            [&] {
-                bool c = false;
-                c |= ImGui::DragFloat3("##zenith", zenith, 0.01f, 0.0f, 1.0f, "%.2f");
-                ImGui::SameLine();
-                c |= ImGui::ColorEdit3("##zenithpick", zenith, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-                return c;
-            },
+            [&] { return ui::ColorField("##zenith", zenith); },
             [&](SceneLight& l) { l.skyZenith = {zenith[0], zenith[1], zenith[2]}; });
 
         float horizon[3] = {light->skyHorizon.x, light->skyHorizon.y, light->skyHorizon.z};
         basePropEdit(Tr("하늘 지평선"),
-            [&] {
-                bool c = false;
-                c |= ImGui::DragFloat3("##horizon", horizon, 0.01f, 0.0f, 1.0f, "%.2f");
-                ImGui::SameLine();
-                c |= ImGui::ColorEdit3("##horizonpick", horizon, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-                return c;
-            },
+            [&] { return ui::ColorField("##horizon", horizon); },
             [&](SceneLight& l) { l.skyHorizon = {horizon[0], horizon[1], horizon[2]}; });
 
         float ground[3] = {light->groundColor.x, light->groundColor.y, light->groundColor.z};
         basePropEdit(Tr("지면"),
-            [&] {
-                bool c = false;
-                c |= ImGui::DragFloat3("##ground", ground, 0.01f, 0.0f, 1.0f, "%.2f");
-                ImGui::SameLine();
-                c |= ImGui::ColorEdit3("##groundpick", ground, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-                return c;
-            },
+            [&] { return ui::ColorField("##ground", ground); },
             [&](SceneLight& l) { l.groundColor = {ground[0], ground[1], ground[2]}; });
 
         float strength = light->v.intensity;
@@ -888,13 +838,7 @@ void App::DrawStudioLightInspector(float w) {
 
         float shadowCol[3] = {light->shadowColor.x, light->shadowColor.y, light->shadowColor.z};
         basePropEdit(Tr("그림자 색"),
-            [&] {
-                bool c = false;
-                c |= ImGui::DragFloat3("##shadowcol", shadowCol, 0.01f, 0.0f, 1.0f, "%.2f");
-                ImGui::SameLine();
-                c |= ImGui::ColorEdit3("##shadowcolpick", shadowCol, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-                return c;
-            },
+            [&] { return ui::ColorField("##shadowcol", shadowCol); },
             [&](SceneLight& l) { l.shadowColor = {shadowCol[0], shadowCol[1], shadowCol[2]}; });
 
         if (light->kind == LightKind::Point) {
