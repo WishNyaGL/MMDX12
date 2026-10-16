@@ -403,6 +403,9 @@ static void TestRoundTrip() {
     data.audioPath = audioBase / L"\u66F2.wav";  // 曲.wav
     data.audioOffset = -0.5;
     data.audioOffset = -0.5;
+    data.bgVideoPath = kTemp / "video" / "bg.avi";   // background AVI (背景AVI)
+    data.bgVideoOffset = -1.25;
+    data.bgVideoAsBackground = true;
     data.editor.frame = 120;
     data.editor.selectedModel = 2;
     data.editor.aspectW = 9;
@@ -531,6 +534,11 @@ static void TestRoundTrip() {
     Check(loaded.audioPath == std::filesystem::absolute(data.audioPath).lexically_normal(),
           "audio path resolved absolute");
     Check(loaded.audioOffset == -0.5, "audio offset kept");
+    // Background AVI (背景AVI)
+    Check(loaded.bgVideoPath == std::filesystem::absolute(data.bgVideoPath).lexically_normal(),
+          "background video path resolved absolute");
+    Check(loaded.bgVideoOffset == -1.25, "background video offset kept");
+    Check(loaded.bgVideoAsBackground, "background video asBackground kept");
     // M6b: the project MME post stack
     Check(loaded.mmePost.size() == data.mmePost.size(), "MME post stack entry count kept");
     if (loaded.mmePost.size() == data.mmePost.size()) {

@@ -119,6 +119,7 @@ std::shared_ptr<BoundMotion> BoundMotion::Bind(const PmxModel& model, const std:
             m->morphTracks_[it->second].keys.push_back({(float)k.frame, k.weight});
         }
         for (const VmdIkKey& k : vmd->ikKeys) {
+            m->visibility_.push_back({(float)k.frame, k.visible});
             for (const auto& [name, enabled] : k.ikStates) {
                 const int bone = ikBones.Find(name);
                 if (bone < 0 || !(model.bones[bone].flags & PmxBone_IK)) continue;
@@ -133,6 +134,7 @@ std::shared_ptr<BoundMotion> BoundMotion::Bind(const PmxModel& model, const std:
     for (auto& t : m->boneTracks_) { SortAndDedupe(t.keys); endFrame = std::max(endFrame, t.keys.back().frame); }
     for (auto& t : m->morphTracks_) { SortAndDedupe(t.keys); endFrame = std::max(endFrame, t.keys.back().frame); }
     for (auto& t : m->ikTracks_) SortAndDedupe(t.keys);
+    SortAndDedupe(m->visibility_);
     m->endFrame_ = endFrame;
     if (unboundBoneKeys || unboundMorphKeys)
         LOG_INFO("motion bind: %d bone keys and %d morph keys have no matching bone/morph in '%s'",
@@ -184,6 +186,13 @@ void BoundMotion::Evaluate(float frame, ModelInstance& inst) const {
         }
         inst.SetIkEnabled(track.bone, enabled);
     }
+}
+
+bool BoundMotion::Visible(float frame) const {
+    if (visibility_.empty()) return true;
+    if (frame <= visibility_.front().frame || visibility_.size() == 1) return visibility_.front().visible;
+    if (frame >= visibility_.back().frame) return visibility_.back().visible;
+    return visibility_[FindSegment(visibility_, frame)].visible;
 }
 
 std::shared_ptr<CameraMotion> CameraMotion::Create(const VmdMotion& vmd) {

@@ -153,6 +153,7 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     rtSupported_ = rt_->Initialize(ctx, shaderDir);
     if (!rtSupported_) rt_.reset();
     else rt_->SetPackTextures(packTextures_.get());
+    screenVideo_ = std::make_unique<ScreenVideo>();
     if (rtSupported_) {
         offline_ = std::make_unique<OfflineRenderer>();
         if (!offline_->Initialize(ctx, shaderDir)) {
@@ -267,6 +268,7 @@ std::unique_ptr<GpuModel> Renderer::CreateModel(UploadBatch& batch, const PmxMod
 
 void Renderer::ForgetModel(uint64_t modelUid) {
     if (modelUid == 0 || !ctx_) return;
+    if (screenVideo_) screenVideo_->ForgetModel(modelUid);
     // Frees the model's MME resources (object SRV tables + skinned buffer). Keyed by uid, they may live in
     // in-flight command lists, so the free is deferred by the number of frames in flight plus one (matching the
     // GpuModel ring logic). DrainMmeForget runs it once those frames are done.
@@ -732,6 +734,7 @@ void Renderer::ReleaseVideoLayers() {
     ctx_->WaitForGpu();
     for (auto& pass : passes_)
         if (VideoPass* vp = dynamic_cast<VideoPass*>(pass.get())) vp->Clear(*ctx_);
+    if (screenVideo_) screenVideo_->Clear(*ctx_);
 }
 
 void Renderer::ClearBackBuffer(ID3D12GraphicsCommandList* cmd) {
@@ -824,6 +827,8 @@ void Renderer::Render(ID3D12GraphicsCommandList* cmd, const FrameView& view) {
     const uint32_t slot = ctx_->FrameSlot();
     cmd->EndQuery(timestampHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2);
 
+    // Background AVI (背景AVI): update the screen.bmp texture before anything draws models.
+    if (screenVideo_) screenVideo_->Update(*ctx_, cmd, view);
     RecordScene(cmd, view, w, h, slot, ctx_->FrameNumber(), false);
 
     cmd->EndQuery(timestampHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
@@ -1075,6 +1080,10 @@ void Renderer::Shutdown() {
     // M8b: release the video layers (decode threads, staging buffers, textures) with the renderer.
     for (auto& pass : passes_)
         if (VideoPass* vp = dynamic_cast<VideoPass*>(pass.get())) vp->Clear(*ctx_);
+    if (screenVideo_) {
+        screenVideo_->Clear(*ctx_);
+        screenVideo_.reset();
+    }
     targets_.shadowMap.Release(*ctx_);
     targets_.spotShadowMap.Release(*ctx_);
     targets_.pointShadowMap.Release(*ctx_);

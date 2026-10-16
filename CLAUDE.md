@@ -49,11 +49,13 @@ progress.md is the session log. Read its latest entry first.
     `mmeglobal 0|1` / `rayglobal 0|1` set the saved MME / Ray-MMD switches, `mmeworkflow auto|manual` the workflow,
     and `mmestate` logs a `MMESTATE` line (switch, Ray-MMD switch, workflow, per loaded model: id, resolved MME mode, resolved material ray 0|1),
     `fxpanel <open|close> [effects|shader|mme]` opens / closes the play-mode 화면 효과 side panel on a tab,
+    `videorange <all|start end>` sets the lobby video render dialog's range (timecodes or seconds),
     `studioexport`/`studioimport <vmd>` and `studiovpdexport`/`studiovpdimport <vpd>` skip the file dialogs; pose editing:
     `studiobone <name>` clicks that bone's joint, `studiogizmo <x|y|z|yz|zx|xy|rx|ry|rz> <dx> <dy> [steps]` drags a gizmo
     part; `studiostate` also logs `STUDIOPOSE`, `STUDIOPROJ` (including `aspect=`) and one `STUDIOMODEL` line per model). Projects/models
     without dialogs: `studionew`, `studiosave`/`studioopen <file>`, `studioautosave`, `studioadd <character|stage|prop> <file>`,
     `studioaddlib <character|stage> <substr>`, `studiosong <substr>`, `studioaudio <file|none> [offset]`,
+    `studiobgvideo <file|none>`, `studiobgvideoopt <offsetSeconds> <asBackground 0|1>`,
     `studioselect`/`studioremove <index>`, `studioreplace <index> <file>` / `studioreplacelib <index> <substr>` (swap a model's file), `studiorename <text>`, `studiomaterial <default|ray> [emd path]` (PBR material source of the selected model), `studioattach <parent|-1> <bone|-> tx ty tz rx ry rz s`,
     `studioaspect <w:h>` (frame aspect preset, e.g. `9:16`, `16:9`, `2.39:1`).
     Drag and drop: `drop <file>[|<file>...]` injects a drop path list (models → characters/props, `.vmd`/`.vpd` onto

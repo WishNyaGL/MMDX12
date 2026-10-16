@@ -22,6 +22,7 @@
 #include "render/MmeSemantics.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
+#include "core/Timecode.h"
 #include "imgui.h"
 #include "imgui_impl_dx12.h"
 #include "imgui_impl_win32.h"
@@ -325,8 +326,14 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
         } else if (arg == L"--offline-video") {
             opt.offlineVideo = next();
         } else if (arg == L"--offline-range") {
-            opt.offlineRange[0] = _wtof(next().c_str());
-            opt.offlineRange[1] = _wtof(next().c_str());
+            const std::wstring a = next(), b = next();
+            double av = -1.0, bv = -1.0;
+            if (!ParseTimecode(WideToUtf8(a), av))
+                LOG_WARN("--offline-range: cannot parse start '%s' (seconds or HH:MM:SS)", WideToUtf8(a).c_str());
+            if (!ParseTimecode(WideToUtf8(b), bv))
+                LOG_WARN("--offline-range: cannot parse end '%s' (seconds or HH:MM:SS)", WideToUtf8(b).c_str());
+            opt.offlineRange[0] = av;
+            opt.offlineRange[1] = bv;
         } else if (arg == L"--offline-spp") {
             opt.offlineSpp = _wtoi(next().c_str());
         } else if (arg == L"--offline-fps") {
@@ -1251,6 +1258,7 @@ void App::ApplyStartScreen() {
     } else if (options_.startScreen == "video") {
         // needs --character and --song; with --offline-video <file> it starts the render without the dialog
         videoDialogOpen_ = true;
+        ResetVideoRange();
         if (!options_.offlineVideo.empty() && selCharacter_ >= 0 && selSong_ >= 0) {
             if (!renderer_.OfflineSupported()) {
                 LOG_ERROR("offline render unavailable (needs DXR)");
@@ -1669,8 +1677,21 @@ void App::PollLoad() {
         framesInScene_ = 0;
         screen_ = Screen::Play;
         const double duration = scene_->endFrame / scene_->motionFps;
-        StartOfflineVideo(options_.offlineRange[0] >= 0 ? options_.offlineRange[0] : 0.0,
-                          options_.offlineRange[1] >= 0 ? options_.offlineRange[1] : duration, true);
+        // An explicit --offline-range wins; otherwise the dialog's chosen range (else the whole song).
+        double ra = 0.0, rb = duration;
+        if (options_.offlineRange[0] >= 0 || options_.offlineRange[1] >= 0) {
+            ra = options_.offlineRange[0] >= 0 ? options_.offlineRange[0] : 0.0;
+            rb = options_.offlineRange[1] >= 0 ? options_.offlineRange[1] : duration;
+        } else if (lobbyVideoRange_[0] >= 0 || lobbyVideoRange_[1] >= 0) {
+            ra = lobbyVideoRange_[0] >= 0 ? lobbyVideoRange_[0] : 0.0;
+            rb = lobbyVideoRange_[1] >= 0 ? lobbyVideoRange_[1] : duration;
+        }
+        ra = std::clamp(ra, 0.0, duration);
+        rb = std::clamp(rb, 0.0, duration);
+        if (rb <= ra) { ra = 0.0; rb = duration; }   // empty range: fall back to the whole song
+        lobbyVideoRange_[0] = -1.0;
+        lobbyVideoRange_[1] = -1.0;
+        StartOfflineVideo(ra, rb, true);
         return;
     }
 
@@ -1879,13 +1900,13 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     }
 
     batch.Submit();
-    // M8a: the bundled stage's motion (a stage part with no physics). Its model takes the dynamic (character) BLAS path.
-    s->stageMotion = pkg.stageMotion;
-    s->stageMotionPart = pkg.stageMotion && pkg.stageMotionPart >= 0 &&
-                                 (size_t)pkg.stageMotionPart < s->stageGpu.size()
-                             ? pkg.stageMotionPart
-                             : -1;
-    if (s->stageMotionPart >= 0) s->stageGpu[(size_t)s->stageMotionPart]->SetDynamic(true);
+    // M8a: the bundled stage's motions (a stage part with no physics). Their models take the dynamic (character) BLAS
+    // path.
+    for (const StageMotionBinding& b : pkg.stageMotions) {
+        if (!b.motion || b.part < 0 || (size_t)b.part >= s->stageGpu.size()) continue;
+        s->stageMotions.push_back(b);
+        s->stageGpu[(size_t)b.part]->SetDynamic(true);
+    }
 
     s->motion = pkg.motion;
     s->camera = pkg.camera;
@@ -2086,9 +2107,11 @@ void App::UpdateScene(float frame) {
     for (size_t i = 0; i < scene_->stages.size(); ++i) {
         ModelInstance& st = *scene_->stages[i];
         // M8a: the bundled stage's motion animates on the song clock (the normal pose path, no physics).
-        if ((int)i == scene_->stageMotionPart && scene_->stageMotion) {
-            scene_->stageMotion->Evaluate(frame, st);
+        for (const StageMotionBinding& b : scene_->stageMotions) {
+            if (b.part != (int)i || !b.motion) continue;
+            b.motion->Evaluate(frame, st);
             st.UpdatePose(0.0f);
+            break;
         }
         scene_->stageGpu[i]->UpdateSkinning(slot, st.SkinMatrices());
         scene_->stageGpu[i]->UpdateMorphs(slot, st.VertexMorphDeltas(), st.MorphVersion());
@@ -2217,17 +2240,28 @@ void App::BuildFrameView(float frame, FrameView& view) {
         DirectX::XMStoreFloat3(&view.camera.eye, eye);
         view.camera.fovYRadians = DirectX::XMConvertToRadians(cam.fovDeg);
     }
-    for (const auto& g : scene_->stageGpu) {
-        view.models.push_back(g.get());
-        AppendMmeObject(view, g.get(), nullptr, true, g->Name());   // stages: static, no motion instance
+    for (size_t i = 0; i < scene_->stageGpu.size(); ++i) {
+        // M8a: a stage part with a stage motion honours its model visibility keys (stepped).
+        const BoundMotion* sm = nullptr;
+        for (const StageMotionBinding& b : scene_->stageMotions)
+            if (b.part == (int)i) sm = b.motion.get();
+        if (sm && sm->HasVisibilityKeys() && !sm->Visible(frame)) continue;
+        view.models.push_back(scene_->stageGpu[i].get());
+        AppendMmeObject(view, scene_->stageGpu[i].get(), nullptr, true, scene_->stageGpu[i]->Name());  // static
     }
     if (scene_->characterGpu) {
-        view.models.push_back(scene_->characterGpu.get());
-        const bool vis = true;
-        AppendMmeObject(view, scene_->characterGpu.get(), scene_->character.get(), vis, scene_->characterDisplayName);
+        const BoundMotion* cm = scene_->motion.get();
+        const bool vis = !(cm && cm->HasVisibilityKeys() && !cm->Visible(frame));
+        if (vis) {
+            view.models.push_back(scene_->characterGpu.get());
+            AppendMmeObject(view, scene_->characterGpu.get(), scene_->character.get(), true,
+                            scene_->characterDisplayName);
+        }
     }
     for (const auto& extra : scene_->extras) {
         if (extra.gpu) {
+            const BoundMotion* em = extra.motion.get();
+            if (em && em->HasVisibilityKeys() && !em->Visible(frame)) continue;
             view.models.push_back(extra.gpu.get());
             AppendMmeObject(view, extra.gpu.get(), extra.instance.get(), true,
                             !extra.displayName.empty() ? extra.displayName : extra.gpu->Name());

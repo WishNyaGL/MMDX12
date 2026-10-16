@@ -96,6 +96,13 @@ public:
     bool PackActive() const;
     const std::filesystem::path& ShaderTextureFolder() const { return packTextureFolder_; }
 
+    // Background AVI (背景AVI): materials whose diffuse texture file name is screen.bmp show the current video
+    // frame. True when the model has any (render/ScreenVideo.h binds the texture; the renderer keys bind state by
+    // Uid()). `tex` != null rewrites srvTable + 0 and sets MatFlag_HasTexture; null restores the model's own
+    // texture. Waits for the GPU at the caller (descriptor rewrite).
+    bool HasScreenMaterials() const { return !screenMaterials_.empty(); }
+    void BindScreenTexture(Dx12Context& ctx, ID3D12Resource* tex);
+
     // The model's default pack texture folder: where its face SDF / light maps live (found through the model's own MME
     // files by asset/MmeHints), used when a ShaderChoice has no explicit textureFolder. Empty when none was found.
     void SetDefaultPackTextureFolder(const std::filesystem::path& folder) { defaultPackTextureFolder_ = folder; }
@@ -272,6 +279,11 @@ private:
     bool mmeEffectMesh_ = false;
     std::vector<std::filesystem::path> mmeEffects_;   // per material (empty path = native shading)
     std::vector<DirectX::XMFLOAT3> mmeToonColor_;   // per material: bottom-left toon texel (white when none)
+    // Background AVI: per-material original diffuse SRV resource (video feeds these), and the material indices
+    // whose diffuse texture file name is screen.bmp (case-insensitive).
+    std::vector<ComPtr<ID3D12Resource>> screenOrigTex_;
+    std::vector<char> screenOrigHasTex_;   // the material's MatFlag_HasTexture before a video was bound
+    std::vector<uint32_t> screenMaterials_;
 };
 
 } // namespace mmdx

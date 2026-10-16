@@ -17,6 +17,7 @@
 #include "asset/ImageLoader.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
+#include "core/Timecode.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -337,6 +338,8 @@ void App::OfflineView(float frame, FrameView& view) {
     // M8a: an offline render uses the scene clock (the rendered frame's time) for MME TIME, never the edit-mode
     // wall clock, so GI stills / videos are deterministic.
     view.mmeEditMode = false;
+    // Background AVI: decode the screen.bmp video frame for the rendered time exactly (not the async ring).
+    view.videoExact = true;
 }
 
 void App::SaveOfflinePose() {
@@ -916,8 +919,22 @@ void App::StartVideoRenderLoad() {
     if (selCharacter_ < 0 || selSong_ < 0 || !VideoRendererAvailable(settings_.video.Renderer())) return;
     settings_.video.Clamp();
     settings_.Save(settingsPath_);
+    if (videoRangeCustom_) {
+        lobbyVideoRange_[0] = videoRangeSec_[0];
+        lobbyVideoRange_[1] = videoRangeSec_[1];
+    } else {
+        lobbyVideoRange_[0] = -1.0;   // whole song
+        lobbyVideoRange_[1] = -1.0;
+    }
     videoDialogOpen_ = false;
     StartLobbyLoad(LoadTarget::OfflineVideo);
+}
+
+void App::ResetVideoRange() {
+    videoRangeCustom_ = false;
+    videoRangeSec_[0] = 0.0;
+    videoRangeSec_[1] = 0.0;
+    std::memset(videoRangeText_, 0, sizeof(videoRangeText_));
 }
 
 void App::StartOfflineProbe() {
@@ -1101,6 +1118,12 @@ App::VideoEstimate App::EstimateVideoRender() const {
         double a = 0, b = 0;
         StudioRenderRange(a, b);
         duration = b - a;
+    } else if (videoRangeCustom_) {
+        // the dialog's custom range (clamped); an empty range falls back to the whole song
+        const double songDur = duration;
+        const double a = std::clamp(videoRangeSec_[0], 0.0, songDur);
+        const double b = std::clamp(videoRangeSec_[1], 0.0, songDur);
+        duration = b > a ? b - a : songDur;
     }
     e.frames = std::max(1, (int)std::floor(duration * cfg.fps + 1e-6));
     const VideoProbe* probe = studio ? nullptr : settings_.FindVideoProbe(CurrentVideoProbeKey());

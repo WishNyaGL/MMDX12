@@ -81,6 +81,9 @@ int wmain(int argc, wchar_t** argv) {
             printf("    - bundledStage: %s\n", s.bundledStageId.c_str());
         if (!s.stageVmd.empty())
             printf("    - stageMotion: %s\n", Rel(s.stageVmd, scan.root).c_str());
+        if (s.stageVmds.size() >= 2)
+            for (const auto& v : s.stageVmds)
+                printf("    - stageMotion%s: %s\n", v == s.stageVmd ? " (best)" : "", Rel(v, scan.root).c_str());
         if (s.audioPaths.size() >= 2)
             for (const auto& a : s.audioPaths)
                 printf("    - audio%s: %s\n", a == s.audioPath ? " (default)" : "", Rel(a, scan.root).c_str());

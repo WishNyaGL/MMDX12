@@ -23,6 +23,9 @@ bool IsModelExt(const std::string& e) {
            e == ".obj";
 }
 bool IsAudioExt(const std::string& e) { return e == ".wav" || e == ".mp3" || e == ".ogg" || e == ".flac"; }
+bool IsVideoExt(const std::string& e) {
+    return e == ".avi" || e == ".mp4" || e == ".mov" || e == ".wmv" || e == ".mkv";
+}
 
 // A shader-pack zip / folder is left for PollShaderPacks (UiShaders.cpp), not routed into the studio.
 bool IsPackLike(const std::filesystem::path& p) {
@@ -96,7 +99,7 @@ void App::PollDroppedFiles() {
 }
 
 void App::ApplyStudioDrop(std::vector<std::filesystem::path> files) {
-    std::vector<std::filesystem::path> models, vmds, vpds, audios, projects, effects, unsupported;
+    std::vector<std::filesystem::path> models, vmds, vpds, audios, projects, effects, videos, unsupported;
     for (auto& f : files) {
         const std::string e = LowerExt(f);
         if (e == ".mmdxproj" || e == ".pmm") projects.push_back(std::move(f));
@@ -111,6 +114,7 @@ void App::ApplyStudioDrop(std::vector<std::filesystem::path> files) {
         else if (e == ".vpd") vpds.push_back(std::move(f));
         else if (e == ".fx") effects.push_back(std::move(f));
         else if (IsAudioExt(e)) audios.push_back(std::move(f));
+        else if (IsVideoExt(e)) videos.push_back(std::move(f));
         else unsupported.push_back(std::move(f));
     }
 
@@ -123,7 +127,7 @@ void App::ApplyStudioDrop(std::vector<std::filesystem::path> files) {
         return;
     }
 
-    const size_t accepted = models.size() + vmds.size() + vpds.size() + audios.size() + effects.size();
+    const size_t accepted = models.size() + vmds.size() + vpds.size() + audios.size() + effects.size() + videos.size();
     if (accepted == 0) {
         if (!unsupported.empty()) {
             toast_ = {Tr("지원하지 않는 파일"), UnsupportedList(unsupported), {}, true, timeSeconds_ + 6.0};
@@ -161,7 +165,7 @@ void App::ApplyStudioDrop(std::vector<std::filesystem::path> files) {
         // StudioImportVmdFrom / StudioImportVpdFrom report a missing model themselves).
         for (const auto& v : vmds) StudioImportVmdFrom(std::filesystem::absolute(v));
         for (const auto& v : vpds) StudioImportVpdFrom(std::filesystem::absolute(v));
-        if (audios.empty() && effects.empty()) {   // the imports posted their own result toast
+        if (audios.empty() && effects.empty() && videos.empty()) {   // the imports posted their own result toast
             if (!unsupported.empty())
                 toast_ = {Tr("지원하지 않는 파일"), UnsupportedList(unsupported), {}, true, timeSeconds_ + 6.0};
             return;
@@ -185,6 +189,11 @@ void App::ApplyStudioDrop(std::vector<std::filesystem::path> files) {
         });
         studioJobs_.push_back(std::move(job));
         LOG_INFO("drop: audio %s", PathToUtf8(abs).c_str());
+    }
+    // Background AVI (背景AVI): the last dropped video wins; if it cannot be opened the current one is kept.
+    for (const auto& v : videos) {
+        const std::filesystem::path abs = std::filesystem::absolute(v);
+        if (StudioSetBgVideo(abs)) LOG_INFO("drop: background video %s", PathToUtf8(abs).c_str());
     }
 
     // M6b: dropped .fx effects. M5c: a `.x` dropped with a same-stem `.fx` becomes an effect object; a `.fx` with

@@ -13,6 +13,7 @@
 #include "core/I18n.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
+#include "core/Timecode.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "studio/SceneLight.h"
@@ -174,10 +175,12 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             }
             // project + every model (save / reopen comparisons, prop following)
             LOG_INFO("STUDIOPROJ path=%s dirty=%d aspect=%s models=%zu jobs=%zu audio=%s offset=%.3f end=%d camKeys=%zu "
-                     "lightKeys=%zu shadowKeys=%zu",
+                     "lightKeys=%zu shadowKeys=%zu bgvideo=%s bgoffset=%.3f bgasbg=%d",
                      PathToUtf8(d.projectPath.filename()).c_str(), (int)d.Dirty(), d.AspectLabel(), d.models.size(), studioJobs_.size(),
                      d.hasAudio ? PathToUtf8(d.audioPath.filename()).c_str() : "-", d.audioOffset, d.EndFrame(),
-                     d.camera.camera.size(), d.camera.light.size(), d.camera.shadow.size());
+                     d.camera.camera.size(), d.camera.light.size(), d.camera.shadow.size(),
+                     d.bgVideoPath.empty() ? "-" : PathToUtf8(d.bgVideoPath.filename()).c_str(), d.bgVideoOffset,
+                     (int)d.bgVideoAsBackground);
             for (size_t i = 0; i < d.models.size(); ++i) {
                 const studio::StudioModel& mm = *d.models[i];
                 size_t keys = 0;
@@ -543,6 +546,19 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             if (args.size() > 1) studio_->audioOffset = num(1);
             StudioSetAudio(args[0] == "none" ? std::filesystem::path() : std::filesystem::absolute(Utf8ToPath(args[0])));
         }
+    } else if (cmd == "studiobgvideo") {  // studiobgvideo <file|none>: the WHOLE rest of the line is the path
+        if (studio_) {
+            std::string path;
+            for (size_t i = 0; i < args.size(); ++i) { if (i) path += " "; path += args[i]; }
+            StudioSetBgVideo(path.empty() || path == "none" ? std::filesystem::path()
+                                                            : std::filesystem::absolute(Utf8ToPath(path)));
+        }
+    } else if (cmd == "studiobgvideoopt") {  // studiobgvideoopt <offsetSeconds> <asBackground 0|1>
+        if (studio_ && args.size() >= 2) {
+            studio_->bgVideoOffset = num(0);
+            studio_->bgVideoAsBackground = args[1] != "0" && args[1] != "false" && args[1] != "off";
+            ++studio_->projectVersion;
+        }
     } else if (cmd == "studioselect") {
         if (studio_ && !args.empty()) StudioSelectModel(std::atoi(args[0].c_str()));
     } else if (cmd == "studioreplace") {  // studioreplace <model index> <file>
@@ -582,6 +598,16 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             m->attach.translation = {num(2), num(3), num(4)};
             m->attach.rotationDeg = {num(5), num(6), num(7)};
             m->attach.scale = num(8);
+            ++studio_->projectVersion;
+        }
+    } else if (cmd == "studioattachkeep") {  // studioattachkeep <parent index|-1> <bone|->: re-parent, stay in place
+        studio::StudioModel* m = studio_ ? studio_->Selected() : nullptr;
+        if (m && m->IsProp() && args.size() >= 2) {
+            const int pi = std::atoi(args[0].c_str());
+            studio::PropAttach to = m->attach;
+            to.parent = pi >= 0 && pi < (int)studio_->models.size() ? (int)studio_->models[(size_t)pi]->uid : -1;
+            to.bone = args[1] == "-" || to.parent < 0 ? std::string() : args[1];
+            m->attach = StudioKeepWorldAttach(*m, m->attach, to);
             ++studio_->projectVersion;
         }
     } else if (cmd == "studioacckey") {  // studioacckey <frame> tx ty tz rx ry rz s [opacity] [visible 0|1]
@@ -692,6 +718,23 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             else if (v == "manual") settings_.mmeWorkflow = 0;
             settings_.Save(settingsPath_);
             ApplyRenderSettings();
+        }
+    } else if (cmd == "videorange") {  // videorange <all|start end>: the lobby video render dialog's range
+        if (!args.empty() && ToLowerAscii(args[0]) == "all") {
+            videoRangeCustom_ = false;
+        } else if (args.size() >= 2) {
+            double a = 0.0, b = 0.0;
+            if (!ParseTimecode(args[0], a) || !ParseTimecode(args[1], b)) {
+                LOG_WARN("ui script: videorange wants timecodes or seconds (got '%s', '%s')",
+                         args[0].c_str(), args[1].c_str());
+                if (outError) *outError = "Invalid videorange range";
+                return false;
+            }
+            videoRangeCustom_ = true;
+            videoRangeSec_[0] = a;
+            videoRangeSec_[1] = b;
+            std::snprintf(videoRangeText_[0], sizeof(videoRangeText_[0]), "%s", FormatTimecode(a).c_str());
+            std::snprintf(videoRangeText_[1], sizeof(videoRangeText_[1]), "%s", FormatTimecode(b).c_str());
         }
     } else if (cmd == "fxpanel") {  // fxpanel <open|close> [effects|shader|mme]: the play-mode 화면 효과 panel
         if (!args.empty()) playPanelOpen_ = args[0] != "close";

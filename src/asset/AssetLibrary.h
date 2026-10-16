@@ -55,7 +55,8 @@ struct SongAsset {
     std::vector<std::filesystem::path> cameraVmds;  // every camera of the song, the default (cameraVmd) first
     // M8a: MV package (docs/mme/mme_design.md §5b). All content-based; ids/paths empty when absent.
     std::string bundledStageId;                     // a stage found under the song folder (it stays in the stage list too)
-    std::filesystem::path stageVmd;                 // the stage's motion VMD (bone names match the bundled stage model)
+    std::filesystem::path stageVmd;                 // the stage's motion VMD (the best one; bone names match the bundled stage model)
+    std::vector<std::filesystem::path> stageVmds;   // every stage-motion VMD of the song (stageVmd is the best of these)
     std::vector<std::filesystem::path> audioPaths;  // audio versions (lengths within 0.5 s), the default (audioPath) first
     // M8b: the song's videos (docs/mme/mme_design.md §5b). overlayVideo = a video whose duration is within +-3 %
     // of the song (or >= 90 % of it); backgroundVideo = the longest of the rest. Both may be empty.
@@ -107,7 +108,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& root, ScanProgress* p
 bool CreateLibrarySkeleton(const std::filesystem::path& root, const std::filesystem::path& templateDir);
 
 // Persistent library scan result and probe cache (Requirements B.5, B.6, B.7)
-inline constexpr uint32_t kLibraryScanResultVersion = 7;   // 7: M6b effects/ entries (EffectAsset)
+inline constexpr uint32_t kLibraryScanResultVersion = 8;   // 8: SongAsset::stageVmds (every stage motion of a song)
 inline constexpr uint32_t kProbeCacheVersion = 4;
 
 bool SaveLibraryScanResult(const LibraryScanResult& result);

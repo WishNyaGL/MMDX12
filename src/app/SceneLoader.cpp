@@ -107,8 +107,9 @@ static ModelMmeHints ModelHints(const std::filesystem::path& modelPath) {
     return out;
 }
 
-// M8a: binds a song's stage motion VMD (song.stageVmd) to the loaded stage part whose model bones it matches. The
-// stage model animates on the song clock like a character (no physics, no IK surprises: the normal pose path).
+// M8a: binds a song's stage motion VMDs (song.stageVmds, falling back to song.stageVmd) to the loaded stage parts
+// whose model bones / morphs they match, one VMD per part. The stage models animate on the song clock like a
+// character (no physics, no IK surprises: the normal pose path).
 static bool StageBoneNameMatches(const std::string& keyed, const std::set<std::string>& modelBones) {
     if (modelBones.count(keyed)) return true;
     if (keyed.size() < 15) return false;   // VMD bone names are truncated to 15 bytes
@@ -117,41 +118,103 @@ static bool StageBoneNameMatches(const std::string& keyed, const std::set<std::s
     return false;
 }
 
+// The trailing digit run of `s` ("Stage12" -> "12", "Stage.pmx" -> "").
+static std::string TrailingDigits(const std::string& s) {
+    size_t end = s.size();
+    while (end > 0 && s[end - 1] >= '0' && s[end - 1] <= '9') --end;
+    return s.substr(end);
+}
+
+static std::string LowerAscii(std::string s) {
+    for (char& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    return s;
+}
+
 static void LoadStageMotion(const SongAsset& song, ScenePackage& out) {
-    if (song.stageVmd.empty() || out.stageParts.empty()) return;
-    VmdMotion stageVmd;
-    std::string err;
-    if (!LoadVmd(song.stageVmd, stageVmd, &err)) {
-        LOG_WARN("stage motion load failed: %s: %s", PathToUtf8(song.stageVmd).c_str(), err.c_str());
-        return;
-    }
-    // The stage part whose bones the motion's keyed bones match best (the bundled stage model normally has one part).
-    int bestPart = -1;
-    double bestScore = -1.0;
-    for (size_t i = 0; i < out.stageParts.size(); ++i) {
-        const PmxModel& pmx = *out.stageParts[i].pmx;
-        std::set<std::string> bones;
-        for (const PmxBone& b : pmx.bones) bones.insert(b.name);
-        if (bones.empty()) continue;
-        size_t keyed = 0, matched = 0;
-        std::set<std::string> names;
-        for (const auto& bf : stageVmd.boneKeys) names.insert(bf.boneName);
-        for (const auto& n : names) {
-            ++keyed;
-            if (StageBoneNameMatches(n, bones)) ++matched;
+    if (out.stageParts.empty()) return;
+    std::vector<std::filesystem::path> vmds = song.stageVmds;
+    if (vmds.empty() && !song.stageVmd.empty()) vmds.push_back(song.stageVmd);
+    if (vmds.empty()) return;
+
+    // One score per (vmd, part): the share of the VMD's keyed bone/morph names that exist on the part.
+    struct Candidate {
+        int vmd, part;
+        double score;
+        int nameRank;  // 2 = header model name equals the part stem, 1 = shares digits / prefix, 0 = none
+    };
+    std::vector<VmdMotion> loaded(vmds.size());
+    std::vector<std::string> headerNames(vmds.size());
+    for (size_t v = 0; v < vmds.size(); ++v) {
+        std::string err;
+        if (!LoadVmd(vmds[v], loaded[v], &err)) {
+            LOG_WARN("stage motion load failed: %s: %s", PathToUtf8(vmds[v]).c_str(), err.c_str());
+        } else {
+            headerNames[v] = loaded[v].modelName;
         }
-        if (keyed == 0) continue;
-        const double score = (double)matched / (double)keyed;
-        if (score > bestScore) bestScore = score, bestPart = (int)i;
     }
-    if (bestPart < 0) {
-        LOG_WARN("stage motion %s: no stage part to bind", PathToUtf8(song.stageVmd).c_str());
-        return;
+    std::vector<Candidate> candidates;
+    for (size_t v = 0; v < vmds.size(); ++v) {
+        if (loaded[v].sourcePath.empty() && loaded[v].boneKeys.empty() && loaded[v].morphKeys.empty() &&
+            loaded[v].ikKeys.empty())
+            continue;   // failed to load
+        std::set<std::string> keyedBones, keyedMorphs;
+        for (const auto& bf : loaded[v].boneKeys) keyedBones.insert(bf.boneName);
+        for (const auto& mf : loaded[v].morphKeys) keyedMorphs.insert(mf.morphName);
+        const size_t keyed = keyedBones.size() + keyedMorphs.size();
+        for (size_t i = 0; i < out.stageParts.size(); ++i) {
+            const PmxModel& pmx = *out.stageParts[i].pmx;
+            if (pmx.bones.empty() && pmx.morphs.empty()) continue;
+            std::set<std::string> bones, morphs;
+            for (const PmxBone& b : pmx.bones) bones.insert(b.name);
+            for (const PmxMorph& mo : pmx.morphs) morphs.insert(mo.name);
+            if (keyed == 0) continue;
+            size_t matched = 0;
+            for (const auto& n : keyedBones) if (StageBoneNameMatches(n, bones)) ++matched;
+            for (const auto& n : keyedMorphs) if (StageBoneNameMatches(n, morphs)) ++matched;
+            const double score = (double)matched / (double)keyed;
+            int nameRank = 0;
+            if (!headerNames[v].empty() && !pmx.sourcePath.empty()) {
+                const std::string model = LowerAscii(headerNames[v]);
+                const std::string stem = LowerAscii(PathToUtf8(pmx.sourcePath.stem()));
+                const std::string digits = TrailingDigits(stem);
+                if (model == stem) nameRank = 2;
+                else if ((!digits.empty() && TrailingDigits(model) == digits) ||
+                         model.rfind(stem, 0) == 0 || stem.rfind(model, 0) == 0)
+                    nameRank = 1;
+            }
+            candidates.push_back({(int)v, (int)i, score, nameRank});
+        }
     }
-    const std::vector<const VmdMotion*> layers = {&stageVmd};
-    out.stageMotion = BoundMotion::Bind(*out.stageParts[(size_t)bestPart].pmx, layers);
-    out.stageMotionPart = bestPart;
-    LOG_INFO("stage motion bound: %s part %d (score %.2f)", PathToUtf8(song.stageVmd).c_str(), bestPart, bestScore);
+    // Best score first; ties by the header-name match, then by VMD file order, then part order. A part and a VMD each
+    // take at most one binding.
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.score != b.score) return a.score > b.score;
+        if (a.nameRank != b.nameRank) return a.nameRank > b.nameRank;
+        if (a.vmd != b.vmd) return a.vmd < b.vmd;
+        return a.part < b.part;
+    });
+    std::vector<bool> vmdUsed(vmds.size(), false), partUsed(out.stageParts.size(), false), vmdReported(vmds.size(), false);
+    for (const Candidate& c : candidates) {
+        if (vmdUsed[(size_t)c.vmd] || partUsed[(size_t)c.part]) continue;
+        if (c.score < 0.5) {
+            // Best candidate for this VMD falls below the threshold: report once, never bind.
+            if (!vmdReported[(size_t)c.vmd]) {
+                LOG_INFO("stage motion not bound: %s (best score %.2f below 0.5)",
+                         PathToUtf8(vmds[(size_t)c.vmd]).c_str(), c.score);
+                vmdReported[(size_t)c.vmd] = true;
+            }
+            continue;
+        }
+        const std::vector<const VmdMotion*> layers = {&loaded[(size_t)c.vmd]};
+        StageMotionBinding binding;
+        binding.motion = BoundMotion::Bind(*out.stageParts[(size_t)c.part].pmx, layers);
+        binding.part = c.part;
+        out.stageMotions.push_back(std::move(binding));
+        vmdUsed[(size_t)c.vmd] = true;
+        partUsed[(size_t)c.part] = true;
+        LOG_INFO("stage motion bound: %s part %d (score %.2f)", PathToUtf8(vmds[(size_t)c.vmd]).c_str(), c.part,
+                 c.score);
+    }
 }
 
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
@@ -332,6 +395,8 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
             out.motionFps = song.motionFps;
             // M8a: the song-bundled stage's motion (bound to the part whose model its bones match).
             LoadStageMotion(song, out);
+            for (const StageMotionBinding& b : out.stageMotions)
+                if (b.motion) out.endFrame = std::max(out.endFrame, b.motion->EndFrame());
 
             if (progress) {
                 progress->fraction.store(1.0f, std::memory_order_relaxed);
@@ -434,7 +499,8 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
         out.motionFps = song.motionFps;
         // M8a: the song-bundled stage's motion (bound to the part whose model its bones match).
         LoadStageMotion(song, out);
-        if (out.stageMotion) out.endFrame = std::max(out.endFrame, out.stageMotion->EndFrame());
+        for (const StageMotionBinding& b : out.stageMotions)
+            if (b.motion) out.endFrame = std::max(out.endFrame, b.motion->EndFrame());
 
         // 7. Done (GPU upload happens on the main thread).
         if (progress) {

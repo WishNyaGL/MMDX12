@@ -46,6 +46,8 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     }
     GpuLight lights[kMaxPunctualLights] = {};
     const uint32_t count = FillGpuLights(view.light, lights);
+    // Background AVI (背景AVI): the exact frame for the rendered time (view.videoExact) before the TLAS / draws.
+    if (screenVideo_) screenVideo_->Update(*ctx_, cmd, view);
     if (!rt_->Build(cmd, view.models, ctx_->FrameNumber(), ctx_->FrameSlot())) return false;
     // M5b: the offline job's post-effect list is filled by the caller (app) from the same list; this is only a
     // fallback for callers that did not (the renderer's current MME list).

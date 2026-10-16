@@ -619,12 +619,18 @@ inline nlohmann::json GetMcpToolDefinitions() {
                     {"description", "Output MP4 path"}
                 }},
                 {"start", {
-                    {"type", "number"},
-                    {"description", "Start time in seconds"}
+                    {"oneOf", json::array({
+                        json{{"type", "number"}},
+                        json{{"type", "string"}}
+                    })},
+                    {"description", "Start time: seconds (number) or a timecode string (HH:MM:SS / MM:SS / SS)"}
                 }},
                 {"end", {
-                    {"type", "number"},
-                    {"description", "End time in seconds"}
+                    {"oneOf", json::array({
+                        json{{"type", "number"}},
+                        json{{"type", "string"}}
+                    })},
+                    {"description", "End time: seconds (number) or a timecode string (HH:MM:SS / MM:SS / SS); default: the whole song"}
                 }},
                 {"renderer", {
                     {"type", "string"},

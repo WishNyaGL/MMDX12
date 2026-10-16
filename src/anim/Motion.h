@@ -33,16 +33,23 @@ public:
     int BoundBoneCount() const { return (int)boneTracks_.size(); }
     int BoundMorphCount() const { return (int)morphTracks_.size(); }
 
+    // Model visibility (VMD "show/IK" frames): stepped, the last key at or before `frame` wins; before the first
+    // key = the first key's value; no keys = visible.
+    bool HasVisibilityKeys() const { return !visibility_.empty(); }
+    bool Visible(float frame) const;
+
 private:
     struct BoneKey { float frame; DirectX::XMFLOAT3 t; DirectX::XMFLOAT4 r; Bezier bx, by, bz, br; };
     struct MorphKey { float frame; float weight; };
     struct IkKey { float frame; bool enabled; };
+    struct VisibilityKey { float frame; bool visible; };
     struct BoneTrack { int bone; std::vector<BoneKey> keys; };
     struct MorphTrack { int morph; std::vector<MorphKey> keys; };
     struct IkTrack { int bone; std::vector<IkKey> keys; };
     std::vector<BoneTrack> boneTracks_;
     std::vector<MorphTrack> morphTracks_;
     std::vector<IkTrack> ikTracks_;
+    std::vector<VisibilityKey> visibility_;
     float endFrame_ = 0;
 };
 

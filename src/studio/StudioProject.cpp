@@ -618,6 +618,13 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
         } else {
             j["audio"] = {{"path", RelPath(data.audioPath, dir)}, {"offset", data.audioOffset}};
         }
+        if (data.bgVideoPath.empty()) {
+            j["backgroundVideo"] = nullptr;
+        } else {
+            j["backgroundVideo"] = {{"path", RelPath(data.bgVideoPath, dir)},
+                                    {"offset", data.bgVideoOffset},
+                                    {"asBackground", data.bgVideoAsBackground}};
+        }
         {
             nlohmann::json ed;
             ed["frame"] = data.editor.frame;
@@ -870,6 +877,12 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
         if (j.contains("audio") && j["audio"].is_object()) {
             out.audioPath = ResolvePath(ReadString(j["audio"], "path", ""), dir);
             out.audioOffset = ReadDouble(j["audio"], "offset", out.audioOffset);
+        }
+
+        if (j.contains("backgroundVideo") && j["backgroundVideo"].is_object()) {
+            out.bgVideoPath = ResolvePath(ReadString(j["backgroundVideo"], "path", ""), dir);
+            out.bgVideoOffset = ReadDouble(j["backgroundVideo"], "offset", out.bgVideoOffset);
+            out.bgVideoAsBackground = ReadBool(j["backgroundVideo"], "asBackground", out.bgVideoAsBackground);
         }
 
         // M6b: the project's own MME post stack.

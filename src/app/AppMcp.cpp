@@ -13,6 +13,7 @@
 #include "core/I18n.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
+#include "core/Timecode.h"
 #include "render/ShaderPack.h"
 #include "imgui.h"
 #include "studio/SceneLight.h"
@@ -1187,12 +1188,35 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         }
         if (video) {
             const double duration = studio ? studio_->EndFrame() / (double)kMmdFps : scene_->endFrame / scene_->motionFps;
-            const double a = args.value("start", 0.0), b = args.value("end", duration);
+            // start / end: a number (seconds) or a timecode string (HH:MM:SS / MM:SS / SS).
+            double a = 0.0, b = duration;
+            const auto parseBound = [&](const char* key, double dflt, bool& ok, double& out) {
+                if (!args.contains(key)) { out = dflt; return; }
+                const nlohmann::json& v = args[key];
+                if (v.is_number()) { out = v.get<double>(); return; }
+                if (v.is_string()) {
+                    if (ParseTimecode(v.get<std::string>(), out)) return;
+                    ok = false;
+                    promise->Reject(std::string("Invalid ") + key + " timecode: " + v.get<std::string>() +
+                                    " (want seconds or HH:MM:SS)");
+                    return;
+                }
+                ok = false;
+                promise->Reject(std::string(key) + " must be a number (seconds) or an HH:MM:SS string");
+            };
+            bool ok = true;
+            parseBound("start", 0.0, ok, a);
+            if (!ok) return;
+            parseBound("end", duration, ok, b);
+            if (!ok) return;
             if (a < 0.0 || b <= a || a >= duration) {
                 promise->Reject("Invalid range: start " + std::to_string(a) + ", end " + std::to_string(b) + " (duration " +
                                 std::to_string(duration) + " s)");
                 return;
             }
+            mcpRange_[0] = a;
+            mcpRange_[1] = b;
+            mcpRangeSet_ = true;
         }
         // The run's offline overrides are borrowed for this job and restored when it ends (PumpMcp). The output
         // path does not go through options_.offlineStill/Video: those mark a CLI job, which quits the app.
@@ -1221,15 +1245,26 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             else StartOfflineStill();
         } else {
             const double duration = studio ? studio_->EndFrame() / (double)kMmdFps : scene_->endFrame / scene_->motionFps;
-            StartOfflineVideo(args.value("start", 0.0), args.value("end", duration));
+            StartOfflineVideo(mcpRangeSet_ ? mcpRange_[0] : 0.0, mcpRangeSet_ ? mcpRange_[1] : duration);
         }
         mcpOfflineOutput_.clear();
         if (offline_.mode == OfflineMode::None) {
+            mcpRangeSet_ = false;
             promise->Reject(toast_.title.empty() ? std::string("The render could not start") : toast_.title + ": " + toast_.detail);
             return;
         }
-        promise->Resolve({{"status", "started"}, {"mode", video ? "video" : "still"}, {"output", PathToUtf8(offline_.output)},
-                          {"frame_count", offline_.frameCount}});
+        const double rangeStart = offline_.startSeconds;
+        const double rangeEnd = video ? (mcpRangeSet_ ? mcpRange_[1]
+                                                       : offline_.startSeconds + offline_.frameCount / (double)offline_.video.fps)
+                                      : offline_.startSeconds;
+        mcpRangeSet_ = false;
+        nlohmann::json res{{"status", "started"}, {"mode", video ? "video" : "still"},
+                           {"output", PathToUtf8(offline_.output)}, {"frame_count", offline_.frameCount}};
+        if (video) {
+            res["range_start"] = rangeStart;
+            res["range_end"] = rangeEnd;
+        }
+        promise->Resolve(res);
         return;
     }
 

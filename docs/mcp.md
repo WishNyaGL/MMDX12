@@ -148,7 +148,7 @@ Add to your project or user MCP settings:
 
 ### Offline Video & Still Rendering
 28. `render_still`: Starts an offline GI still of the current frame (play mode or studio) to `output` (optional); returns once started, poll `render_status`. The app keeps running afterwards.
-29. `render_video`: Starts a video render with optional resolution, renderer, FPS, bitrate, spp and `start`/`end` seconds; the run's offline overrides go back when it ends.
+29. `render_video`: Starts a video render with optional resolution, renderer, FPS, bitrate, spp and `start`/`end` (each a number of seconds or an `HH:MM:SS` / `MM:SS` / `SS` timecode string; default: the whole song). The answer includes `range_start` / `range_end` in seconds. The run's offline overrides go back when it ends.
 30. `render_status`: Queries current render progress (frames rendered, percentage, ETA).
 31. `render_cancel`: Aborts an ongoing offline render.
 

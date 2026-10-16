@@ -144,6 +144,7 @@ std::vector<VideoLayerDesc> App::ResolveSongVideos(const SongAsset& song) const 
     overlay.blend = VideoBlend::BlackKey;
     background.path = song.backgroundVideo;
     background.kind = VideoLayerKind::Background;
+    background.screen = true;   // the song's background video also feeds screen.bmp materials
 
     const auto it = settings_.songVideos.find(song.id);
     if (it != settings_.songVideos.end() && !it->second.empty()) {

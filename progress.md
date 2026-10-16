@@ -1937,3 +1937,21 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   and are not in it). `package_release.ps1` (170.5 / 14.9 MB), packaged smoke (select screen, 0 `[E]`, leftovers
   removed), delta manifest 3 new objects uploaded (live hashes match), GitHub v2.1.2 (digests = local zips), website
   deployed (`/latest.json` -> 2.1.2 with manifest).
+
+## 2026-10-16 (2) - Lobby video render range (HH:MM:SS)
+- Request: the high-quality video dialog lets the user pick the render range; default whole song, custom as timecodes.
+- Dialog (`UiVideoDialog.cpp`): new first section "범위" (전체 / 구간 지정), start / end text fields (`##vrange_start`,
+  `##vrange_end`, uiprobe ids), "전체로" reset, invalid input = warn line + disabled start button. Footer, frame count,
+  estimate and file size use the range length. State is `App::videoRangeCustom_/videoRangeSec_/videoRangeText_`, reset when
+  the dialog opens or the song changes; handed to the load as `lobbyVideoRange_` (an explicit `--offline-range` still wins).
+- `core/Timecode.h` (header-only): `FormatTimecode`, `ParseTimecode` (HH:MM:SS, MM:SS, SS, decimals). `--offline-range` and
+  MCP `render_video` `start` / `end` accept seconds or timecodes (answer carries `range_start` / `range_end`);
+  `--ui-script` `videorange <all|start end>`; i18n En / Ja / Zh; docs/mcp.md + CLAUDE.md updated.
+- Implemented by an opencode worker (deepseek, low): the first run over-explored (71 reads, no edit) and was resumed with a
+  decision note. Review fix (Claude): the start button read a range only refreshed on commit, now synced every frame; `~`
+  separator and spacing tuned from a capture.
+- Verified (1600x900, `build_a`): dialog capture with `videorange 0:12 1:05` (3180 frames = 53 s x 60 fps in the footer);
+  CLI `--offline-range 00:00:10 0:12` lobby render = exactly 60 frames at 30 fps; 0 `[E]`.
+- Not verified: Start from the dialog with a custom range (code-read only), MCP string `start` / `end`.
+- Committed together with earlier pending work in the tree (VMD / PMM / studio / `ScreenVideo` changes from other sessions);
+  those were not re-tested here.

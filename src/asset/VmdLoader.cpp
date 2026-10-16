@@ -169,7 +169,9 @@ bool LoadVmd(const std::filesystem::path& path, VmdMotion& out, std::string* err
         // ---- IK visibility keys (optional section) ----
         if (r.Remaining() > 0) {
             uint32_t ikCount = 0;
-            if (!r.Read(ikCount) || static_cast<uint64_t>(ikCount) * 25 > r.Remaining()) {
+            // a key is frame + visible + IK count (9 bytes) followed by 21 bytes per IK state; a stage / prop model
+            // has no IK bones, so its keys are 9 bytes each
+            if (!r.Read(ikCount) || static_cast<uint64_t>(ikCount) * 9 > r.Remaining()) {
                 LOG_WARN("VMD %s: corrupt ik section, ignoring the rest",
                          out.modelName.c_str());
                 out.sourcePath = std::filesystem::absolute(path);

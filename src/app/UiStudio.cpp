@@ -152,6 +152,9 @@ bool App::FinishStudioLoad() {
     // a light track that only repeats MMD's defaults says nothing (and would override the lighting): dropped, as in play mode
     if (IsDefaultLightTrack(doc->camera.light)) doc->camera.light.clear();
     doc->audioOffset = pkg.audioOffset;
+    doc->bgVideoPath = pkg.bgVideoPath;
+    doc->bgVideoOffset = pkg.bgVideoOffset;
+    doc->bgVideoAsBackground = pkg.bgVideoAsBackground;
     doc->audioPath = pkg.audioPath;
     doc->hasAudio = !doc->audioPath.empty() && audio_.Load(doc->audioPath);
     if (doc->hasAudio) {
@@ -306,6 +309,7 @@ void App::LeaveStudio() {
     studioJobs_.clear();  // waits for running loads
     StudioDiscardRecovery();
     ctx_.WaitForGpu();
+    renderer_.ReleaseVideoLayers();   // stop the studio's background AVI decode (and any song layers)
     studio_.reset();
     audio_.Unload();
     RenderSettings rs = renderer_.Settings();
@@ -506,7 +510,7 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
     // Re-bind after edits (throttled while a curve is being dragged: binding a long dance takes a while).
     if (m.boundVersion != m.motionVersion && (!d.curveEditing || timeSeconds_ - studioLastBind_ > 0.15)) {
         OpTimer timer{"bind motion"};
-        if (m.motion.bones.empty() && m.motion.morphs.empty() && m.motion.ik.empty()) {
+        if (m.motion.bones.empty() && m.motion.morphs.empty() && m.motion.ik.empty() && m.motion.visibility.empty()) {
             m.bound.reset();
         } else {
             const VmdMotion vmd = m.motion.ToVmd();
@@ -666,6 +670,7 @@ void App::BuildStudioFrameView(FrameView& view) {
         for (const auto& m : d.models) {
             if (!m->visible || m->IsStage() != (pass == 0)) continue;
             if (m->IsProp() && !AccessoryVisible(*m, viewFrame)) continue;  // a hidden accessory key hides the prop
+            if (!m->IsProp() && !ModelVisibleAt(m->motion, viewFrame)) continue;  // VMD show/IK keys hide the model
             view.models.push_back(m->gpu.get());
             AppendMmeObject(view, m->gpu.get(), m->inst.get(), true,
                             !m->pmx->name.empty() ? m->pmx->name : m->gpu->Name());
@@ -716,6 +721,17 @@ void App::BuildStudioFrameView(FrameView& view) {
 
     // DoF: the focus track over the automatic focus (UiStudioFocus.cpp)
     StudioComputeFocus(view);
+    // Background AVI (背景AVI): the video feeds screen.bmp materials; drawn as background only when the project
+    // asks for it. The video time is the timeline time minus the offset (loop handled by the pass / ScreenVideo).
+    if (!d.bgVideoPath.empty()) {
+        VideoLayerDesc bg;
+        bg.path = d.bgVideoPath;
+        bg.kind = VideoLayerKind::Background;
+        bg.screen = true;
+        bg.drawBackground = d.bgVideoAsBackground;
+        bg.time = d.time - d.bgVideoOffset;
+        view.videoLayers.push_back(std::move(bg));
+    }
     // M8a: the studio is edit mode for MME TIME (wall clock without SyncInEditMode); the scene clock follows the
     // timeline (paused = constant).
     view.sceneTime = (float)d.time;

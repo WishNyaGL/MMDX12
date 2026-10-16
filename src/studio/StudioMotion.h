@@ -22,6 +22,8 @@ struct BoneKf {
 };
 struct MorphKf { int frame = 0; float weight = 0; };
 struct IkKf { int frame = 0; bool enabled = true; };
+// Model visibility key (VMD "show/IK" frames): stepped, the last key at or before the frame wins.
+struct VisKf { int frame = 0; bool visible = true; };
 struct CameraKf {
     int frame = 0;
     float distance = -45.0f;
@@ -172,6 +174,7 @@ struct MotionData {
     std::map<std::string, std::vector<BoneKf>> bones;
     std::map<std::string, std::vector<MorphKf>> morphs;
     std::map<std::string, std::vector<IkKf>> ik;  // IK bone name -> enable keys
+    std::vector<VisKf> visibility;                // model visibility keys (VMD show/IK frames)
     std::vector<CameraKf> camera;                 // camera tracks live in the project's camera, not in model motions
     std::vector<LightKf> light;
     std::vector<ShadowKf> shadow;
@@ -179,12 +182,12 @@ struct MotionData {
     std::vector<AccessoryKf> accessory;           // a prop's accessory keys (never written to VMD)
 
     bool Empty() const {
-        return bones.empty() && morphs.empty() && ik.empty() && camera.empty() && light.empty() && shadow.empty() &&
-               focus.empty() && accessory.empty();
+        return bones.empty() && morphs.empty() && ik.empty() && visibility.empty() && camera.empty() && light.empty() &&
+               shadow.empty() && focus.empty() && accessory.empty();
     }
-    // Whether ToVmd() would write anything: a model motion's VMD carries bones, morphs and IK keys only, so a prop
-    // with accessory keys alone writes no VMD (the keys live in the project JSON).
-    bool HasVmdKeys() const { return !bones.empty() || !morphs.empty() || !ik.empty(); }
+    // Whether ToVmd() would write anything: a model motion's VMD carries bones, morphs, IK and visibility keys only, so
+    // a prop with accessory keys alone writes no VMD (the keys live in the project JSON).
+    bool HasVmdKeys() const { return !bones.empty() || !morphs.empty() || !ik.empty() || !visibility.empty(); }
     int EndFrame() const;  // last key frame over everything (0 when empty)
 
     // Frame insert/delete over every track (bones, morphs, IK, camera, light, shadow, focus); see InsertFrameSpan/DeleteFrameSpan.
@@ -221,6 +224,8 @@ ShadowKf SampleShadow(const std::vector<ShadowKf>& keys, float frame);
 // visible and the parent/bone are stepped (the last key at or before `frame`). Before the first key: the first;
 // after the last: the last. `frame` may be fractional. The returned key's frame is (int)floor(frame). `keys` non-empty.
 AccessoryKf SampleAccessory(const std::vector<AccessoryKf>& keys, float frame);
+// Model visibility: stepped, the last key at or before `frame`; before the first key = the first; no keys = visible.
+bool ModelVisibleAt(const MotionData& m, float frame);
 // MMD's self-shadow distance UI value (0..9999) <-> the VMD value.
 inline float ShadowUiFromVmd(float d) { return (0.1f - d) * 100000.0f; }
 // The VMD self-shadow distance -> the renderer's cascade range in MMD units. MMD's default 8875 maps to the

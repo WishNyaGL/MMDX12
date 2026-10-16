@@ -229,6 +229,10 @@ struct VideoLayerDesc {
     VideoLayerKind kind = VideoLayerKind::Background;
     VideoBlend blend = VideoBlend::BlackKey;
     double time = 0.0;
+    // Feeds materials whose diffuse texture file name is screen.bmp (MMD background AVI); drawn as background only
+    // when drawBackground is set (the studio's "배경에도 표시", default off).
+    bool screen = false;
+    bool drawBackground = true;
 };
 
 // M5a: one scene drawable the MME runtime can address through CONTROLOBJECT (§2.9) and match against an offscreen
@@ -299,6 +303,9 @@ struct FrameView {
     // M8b: the video layers of this frame (background behind the scene, overlay over the final image). Empty when
     // the song has no video package / videos are off.
     std::vector<VideoLayerDesc> videoLayers;
+    // Screen-video layers (screen == true) decode synchronously for the rendered time (offline renders): the frame
+    // is exact instead of the async decode-ahead ring. Ignored without a screen layer.
+    bool videoExact = false;
 };
 
 struct RenderStats {

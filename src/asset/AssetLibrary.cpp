@@ -452,6 +452,9 @@ bool SaveLibraryScanResult(const LibraryScanResult& result) {
         js["cameraVmds"] = std::move(jcams);
         js["bundledStageId"] = s.bundledStageId;
         js["stageVmd"] = PathToUtf8(s.stageVmd);
+        nlohmann::json jstageVmds = nlohmann::json::array();
+        for (const auto& v : s.stageVmds) jstageVmds.push_back(PathToUtf8(v));
+        js["stageVmds"] = std::move(jstageVmds);
         nlohmann::json jaudio = nlohmann::json::array();
         for (const auto& a : s.audioPaths) jaudio.push_back(PathToUtf8(a));
         js["audioPaths"] = std::move(jaudio);
@@ -560,6 +563,9 @@ bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult&
                     if (c.is_string()) s.cameraVmds.push_back(Utf8ToPath(c.get<std::string>()));
             s.bundledStageId = js.value("bundledStageId", "");
             s.stageVmd = Utf8ToPath(js.value("stageVmd", ""));
+            if (js.contains("stageVmds") && js["stageVmds"].is_array())
+                for (const auto& v : js["stageVmds"])
+                    if (v.is_string()) s.stageVmds.push_back(Utf8ToPath(v.get<std::string>()));
             if (js.contains("audioPaths") && js["audioPaths"].is_array())
                 for (const auto& a : js["audioPaths"])
                     if (a.is_string()) s.audioPaths.push_back(Utf8ToPath(a.get<std::string>()));
@@ -620,6 +626,7 @@ bool LibraryScanResultsEqual(const LibraryScanResult& a, const LibraryScanResult
             a.songs[i].extraVmds != b.songs[i].extraVmds ||
             a.songs[i].bundledStageId != b.songs[i].bundledStageId ||
             a.songs[i].stageVmd != b.songs[i].stageVmd ||
+            a.songs[i].stageVmds != b.songs[i].stageVmds ||
             a.songs[i].audioPaths != b.songs[i].audioPaths ||
             a.songs[i].overlayVideo != b.songs[i].overlayVideo ||
             a.songs[i].backgroundVideo != b.songs[i].backgroundVideo ||
@@ -1774,10 +1781,15 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                         for (auto& d : drafts)
                             if (!target || std::fabs(d.dance->sec - best->sec) < std::fabs(target->dance->sec - best->sec))
                                 target = &d;
-                        if (target) target->song.stageVmd = *best->path;
-                        result.notes.push_back(RelKey(dir, root) + ": stage motion " + RelKey(*best->path, root) +
-                                               " for stage " + bundledStage->id +
-                                               " (score " + std::to_string(bestScore) + ")");
+                        if (target) {
+                            target->song.stageVmd = *best->path;
+                            for (const auto* e : stageMotions) {
+                                target->song.stageVmds.push_back(*e->path);
+                                result.notes.push_back(RelKey(dir, root) + ": stage motion " + RelKey(*e->path, root) +
+                                                       " for stage " + bundledStage->id +
+                                                       " (score " + std::to_string(stageMotionScore(*e, stageBones)) + ")");
+                            }
+                        }
                     }
                 }
             }

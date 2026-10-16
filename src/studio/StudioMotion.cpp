@@ -65,6 +65,7 @@ int MotionData::EndFrame() const {
     for (const auto& [n, k] : bones) if (!k.empty()) end = std::max(end, k.back().frame);
     for (const auto& [n, k] : morphs) if (!k.empty()) end = std::max(end, k.back().frame);
     for (const auto& [n, k] : ik) if (!k.empty()) end = std::max(end, k.back().frame);
+    if (!visibility.empty()) end = std::max(end, visibility.back().frame);
     if (!camera.empty()) end = std::max(end, camera.back().frame);
     if (!light.empty()) end = std::max(end, light.back().frame);
     if (!shadow.empty()) end = std::max(end, shadow.back().frame);
@@ -79,6 +80,7 @@ bool MotionData::InsertFrames(int at, int count) {
     for (auto& [name, keys] : bones) changed |= InsertFrameSpan(keys, at, count);
     for (auto& [name, keys] : morphs) changed |= InsertFrameSpan(keys, at, count);
     for (auto& [name, keys] : ik) changed |= InsertFrameSpan(keys, at, count);
+    changed |= InsertFrameSpan(visibility, at, count);
     changed |= InsertFrameSpan(camera, at, count);
     changed |= InsertFrameSpan(light, at, count);
     changed |= InsertFrameSpan(shadow, at, count);
@@ -93,6 +95,7 @@ bool MotionData::DeleteFrames(int at, int count) {
     for (auto& [name, keys] : bones) changed |= DeleteFrameSpan(keys, at, count);
     for (auto& [name, keys] : morphs) changed |= DeleteFrameSpan(keys, at, count);
     for (auto& [name, keys] : ik) changed |= DeleteFrameSpan(keys, at, count);
+    changed |= DeleteFrameSpan(visibility, at, count);
     changed |= DeleteFrameSpan(camera, at, count);
     changed |= DeleteFrameSpan(light, at, count);
     changed |= DeleteFrameSpan(shadow, at, count);
@@ -115,6 +118,7 @@ size_t MotionData::ApproxBytes() const {
     bytes += mapBytes(bones);
     bytes += mapBytes(morphs);
     bytes += mapBytes(ik);
+    bytes += visibility.capacity() * sizeof(VisKf);
     bytes += camera.capacity() * sizeof(CameraKf);
     bytes += light.capacity() * sizeof(LightKf);
     bytes += shadow.capacity() * sizeof(ShadowKf);
@@ -133,8 +137,10 @@ MotionData MotionData::FromVmd(const VmdMotion& vmd) {
         UpsertKey(d.bones[k.boneName], kf);
     }
     for (const VmdMorphKey& k : vmd.morphKeys) UpsertKey(d.morphs[k.morphName], MorphKf{(int)k.frame, k.weight});
-    for (const VmdIkKey& k : vmd.ikKeys)
+    for (const VmdIkKey& k : vmd.ikKeys) {
+        UpsertKey(d.visibility, VisKf{(int)k.frame, k.visible});
         for (const auto& [name, enabled] : k.ikStates) UpsertKey(d.ik[name], IkKf{(int)k.frame, enabled});
+    }
     for (const VmdCameraKey& k : vmd.cameraKeys) {
         CameraKf kf;
         kf.frame = (int)k.frame; kf.distance = k.distance; kf.target = k.target; kf.rotation = k.rotation;
@@ -151,6 +157,7 @@ void MotionData::Merge(const MotionData& o) {
     for (const auto& [name, keys] : o.bones) for (const BoneKf& k : keys) UpsertKey(bones[name], k);
     for (const auto& [name, keys] : o.morphs) for (const MorphKf& k : keys) UpsertKey(morphs[name], k);
     for (const auto& [name, keys] : o.ik) for (const IkKf& k : keys) UpsertKey(ik[name], k);
+    for (const VisKf& k : o.visibility) UpsertKey(visibility, k);
     for (const CameraKf& k : o.camera) UpsertKey(camera, k);
     for (const LightKf& k : o.light) UpsertKey(light, k);
     for (const ShadowKf& k : o.shadow) UpsertKey(shadow, k);
@@ -335,6 +342,14 @@ AccessoryKf SampleAccessory(const std::vector<AccessoryKf>& keys, float frame) {
     return out;
 }
 
+bool ModelVisibleAt(const MotionData& m, float frame) {
+    const std::vector<VisKf>& keys = m.visibility;
+    if (keys.empty()) return true;
+    const int f = (int)std::floor(frame);
+    auto it = std::upper_bound(keys.begin(), keys.end(), f, [](int v, const VisKf& k) { return v < k.frame; });
+    return it != keys.begin() ? (it - 1)->visible : keys.front().visible;
+}
+
 VmdMotion MotionData::ToVmd() const {
     VmdMotion v;
     v.modelName = modelName;
@@ -361,13 +376,16 @@ VmdMotion MotionData::ToVmd() const {
     for (const LightKf& k : light) v.lightKeys.push_back({(uint32_t)k.frame, k.color, k.direction});
     for (const ShadowKf& k : shadow) v.shadowKeys.push_back({(uint32_t)k.frame, k.mode, k.distance});
 
-    // IK: one record per frame that has a key in any track, with the state of every track at that frame.
+    // IK / visibility: one record per frame that has an IK key in any track or a visibility key, with the state of
+    // every IK track at that frame and the model visibility (stepped, last key at or before the frame).
     std::set<int> frames;
     for (const auto& [n, keys] : ik) for (const IkKf& k : keys) frames.insert(k.frame);
+    for (const VisKf& k : visibility) frames.insert(k.frame);
     for (int f : frames) {
         VmdIkKey rec;
         rec.frame = (uint32_t)f;
         rec.visible = true;
+        for (const VisKf& k : visibility) { if (k.frame > f) break; rec.visible = k.visible; }
         for (const auto& [name, keys] : ik) {
             bool state = true;
             for (const IkKf& k : keys) { if (k.frame > f) break; state = k.enabled; }

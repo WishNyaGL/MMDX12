@@ -71,6 +71,8 @@ namespace mmdx {
 //                          studioopen <file> | studioautosave (writes the recovery file now) | studioadd
 //                          <character|stage|prop> <file> | studioaddlib <character|stage> <substr> | studiosong <substr>
 //                          (library song onto the selected model + camera + audio) | studioaudio <file|none> [offset s] |
+//                          studiobgvideo <file|none> (the whole rest of the line is the path) |
+//                          studiobgvideoopt <offsetSeconds> <asBackground 0|1> |
 //                          studioreplace <index> <file> | studioreplacelib <index> <substr> (swap a model's file) |
 //                          studioselect <model index|-1> | studioremove <model index> | studiorename <text> |
 //                          studiomaterial <default|ray> [emd path] (selected studio model's PBR material source) |
@@ -100,7 +102,8 @@ namespace mmdx {
 //   --offline-still <file.png>   with --autoplay: render the --seek frame with the offline GI renderer,
 //                                save it to the file and quit
 //   --offline-video <file.mp4>   with --autoplay: offline video render, then quit
-//   --offline-range <a> <b>      video range in song seconds (default: the whole song)
+//   --offline-range <a> <b>      video range; each of a / b is seconds or a timecode (HH:MM:SS, MM:SS, SS;
+//                                default: the whole song)
 //   --offline-spp <n>            testing: cap samples per pixel (min samples = min(min, n))
 //   --offline-size <w> <h>       testing: output size override for stills and videos
 //   --offline-fps <n>            video frame rate for this run (24, 30, 60; default: the lobby dialog's)
@@ -256,10 +259,10 @@ private:
         // The cast a formation (unit song) scene was loaded with; empty for a single-performer scene. Kept so a
         // material-source change can reload the same formation (App::ReloadPlaySceneForMaterial).
         std::vector<PerformerCast> formation;
-        std::shared_ptr<BoundMotion> stageMotion;   // M8a: the bundled stage's motion (may be null)
-        int stageMotionPart = -1;                   // index into `stages` / `stageGpu`
         std::shared_ptr<BoundMotion> motion;
         std::shared_ptr<CameraMotion> camera;
+        // M8a: the bundled stage's motions (may be empty), each bound to one stage part.
+        std::vector<StageMotionBinding> stageMotions;
         // M8b: the song's resolved video layers (background + overlay), from the song / the ini override.
         std::vector<VideoLayerDesc> videos;
         // M5c: MME effect objects (accessory `.x` + same-stem `.fx`). Each `mesh` is appended to `view.models` (so
@@ -611,6 +614,8 @@ private:
     void StudioAddLibraryStage(int index, uint32_t replaceUid = 0);  // replace: the first part replaces, the rest are added
     void StudioApplyLibrarySong(int index);           // dance -> selected character, camera, audio when none
     bool StudioSetAudio(const std::filesystem::path& file);  // empty: remove
+    // Background AVI (背景AVI): set / clear the studio's background video (empty = none). Bumps projectVersion.
+    bool StudioSetBgVideo(const std::filesystem::path& file);
     void StudioAudioDialog();
     void StudioPollJobs();                            // finished loads: GPU upload + append (main thread)
     // --- drag and drop (AppDrop.cpp): WM_DROPFILES / the ui-script "drop" command -> the Studio
@@ -629,6 +634,13 @@ private:
     // A freshly added / opened character with no shader choice: SuggestShaderPack for its library id (never applies).
     void StudioSuggestShader(studio::StudioModel& m);
     DirectX::XMFLOAT4X4 StudioPropRoot(const studio::StudioModel& m) const;  // world matrix of a prop's origin
+    // The world matrix a prop placement `a` hangs from: the parent bone's world (x the parent's display scale), else
+    // the identity (world / missing parent / the prop itself).
+    DirectX::XMMATRIX StudioPropParentWorld(const studio::StudioModel& m, const studio::PropAttach& a) const;
+    // `to` with its offset recomputed so the prop stays where `from` put it in the world at the current frame
+    // (re-parenting keeps the prop in place instead of jumping by the new bone's position).
+    studio::PropAttach StudioKeepWorldAttach(const studio::StudioModel& m, const studio::PropAttach& from,
+                                             studio::PropAttach to) const;
     void StudioSeekAudio();                           // audio cursor <- timeline time (audio offset)
     void DrawStudioAddMenu();                         // the outliner's "+" popup (library / file)
     void DrawStudioModelMenu(int index);              // outliner row context menu
@@ -765,6 +777,7 @@ private:
     void FinishOffline(bool cancelled);  // Offline -> Play (paused); closes the encoder; toast
     void DrawOfflineOverlay();  // progress panel over the preview (screen_ == Offline)
     void DrawVideoRenderDialog();  // video render settings + start (Select, UiVideoDialog.cpp)
+    void ResetVideoRange();        // whole song + empty text fields (called where the dialog / song changes)
     // formation modal (UiFormation.cpp)
     struct FormationSlot {
         std::string characterId;
@@ -1121,6 +1134,11 @@ private:
     CameraParams lastLiveCamera_;       // camera of the last real-time frame (still motion blur)
     bool haveLastLiveCamera_ = false;
     bool videoDialogOpen_ = false;      // the select screen's video render dialog
+    // Video render range (select screen dialog; not persisted). Whole song by default.
+    bool videoRangeCustom_ = false;     // false: whole song, true: the custom [videoRangeSec_]
+    double videoRangeSec_[2] = {0.0, 0.0};
+    char videoRangeText_[2][16] = {};   // "시작" / "끝" text fields (HH:MM:SS)
+    double lobbyVideoRange_[2] = {-1.0, -1.0};  // range handed to the load (-1 = unset)
     // background probe scene (UpdateVideoProbe)
     struct BackgroundProbe {
         std::future<bool> loadFuture;
@@ -1290,6 +1308,8 @@ private:
     std::vector<UiScriptStep> mcpInput_;      // ui_input steps, frame = mcpFrame_ they run at (sorted)
     bool mcpInputActive_ = false;             // real mouse / keyboard input is ignored while steps are queued
     std::filesystem::path mcpOfflineOutput_;  // render_still / render_video output for the job about to start
+    double mcpRange_[2] = {0.0, 0.0};          // render_video's parsed range for the job about to start
+    bool mcpRangeSet_ = false;
     std::unique_ptr<AppOptions> mcpOptionsRestore_;  // the run's options before an MCP render's overrides
 
     struct PendingMcpWait {

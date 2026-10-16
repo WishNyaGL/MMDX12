@@ -128,6 +128,11 @@ struct ProjectData {
     MotionData camera;                 // camera, light and self-shadow keys (camera VMD) + focus keys (editor "focus"); bones/morphs ignored
     std::filesystem::path audioPath;   // absolute; empty = no audio
     double audioOffset = 0.0;          // seconds: the audio starts at this timeline time (may be negative)
+    // Background AVI (背景AVI): absolute path (empty = none), start offset in seconds, and whether it is also drawn
+    // as the screen background (default false: it only feeds screen.bmp materials).
+    std::filesystem::path bgVideoPath;
+    double bgVideoOffset = 0.0;
+    bool bgVideoAsBackground = false;
     ProjectEditor editor;
     // M6b: the project's own MME post stack (docs/mme/mme_design.md §2.10/§2.13). While the studio is open this
     // replaces the play-mode stack (RenderSettings::mmeEffects); offline renders from the studio use it. Empty = none.

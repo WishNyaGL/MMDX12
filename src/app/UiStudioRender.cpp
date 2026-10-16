@@ -13,6 +13,7 @@
 #include "core/TextUtil.h"
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "studio/FileDialog.h"
 
 namespace mmdx {
 
@@ -229,6 +230,54 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
                     ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x - Dp(14.0f), sepY), p.line);
         Gap(8.0f);
 
+        // 배경 AVI (背景AVI): a background video whose frame feeds screen.bmp materials.
+        {
+            StudioDoc& d = *studio_;
+            SectionLabel(Tr("배경 AVI"));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink2));
+            ImGui::TextUnformatted(d.bgVideoPath.empty() ? Tr("없음") : PathToUtf8(d.bgVideoPath.filename()).c_str());
+            ImGui::PopStyleColor();
+            Gap(4.0f);
+            const float colW = ImGui::GetContentRegionAvail().x;
+            const float bw = (colW - Dp(8.0f)) * 0.5f;
+            if (Button("##bgvideochoose", Tr("파일 선택"), icon::FolderOpen, ButtonKind::Secondary, ImVec2(bw, 0))) {
+                const std::filesystem::path f = OpenFileDialog(
+                    hwnd_, {{L"Video", L"*.avi;*.mp4;*.mov;*.wmv;*.mkv"}, {L"AVI", L"*.avi"}});
+                if (!f.empty()) StudioSetBgVideo(f);
+            }
+            ImGui::SameLine(0, Dp(8.0f));
+            ImGui::BeginDisabled(d.bgVideoPath.empty());
+            if (Button("##bgvideoclear", Tr("지우기"), icon::Trash, ButtonKind::Secondary, ImVec2(bw, 0))) {
+                StudioSetBgVideo({});
+            }
+            ImGui::EndDisabled();
+            Gap(6.0f);
+            float off = (float)d.bgVideoOffset;
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink2));
+            ImGui::TextUnformatted(Tr("시작 오프셋 (초)"));
+            ImGui::PopStyleColor();
+            ImGui::SetNextItemWidth(-1.0f);
+            PushFont(Font::Regular, size::Small);
+            if (ImGui::DragFloat("##bgvideooffset", &off, 0.01f, -600.0f, 600.0f, "%+.2f")) {
+                d.bgVideoOffset = off;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) ++d.projectVersion;
+            PopFont();
+            Tooltip(Tr("영상이 타임라인의 이 시간에 시작해요 (양수: 늦게, 음수: 앞부분을 건너뜀)"));
+            Gap(4.0f);
+            if (Switch("##bgvideoasbg", Tr("배경에도 표시"), &d.bgVideoAsBackground,
+                       Tr("끄면 screen.bmp 재질에만 영상이 표시돼요"))) {
+                ++d.projectVersion;
+            }
+            Gap(2.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextUnformatted(Tr("텍스처가 screen.bmp인 재질에 영상이 표시됩니다"));
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+        }
+
+        Gap(12.0f);
         changed |= DrawEffectStackEditor(settings_.effectStack, true);
 
         // M6b: the project's own MME post stack (replaces the play-mode stack while the studio is open).

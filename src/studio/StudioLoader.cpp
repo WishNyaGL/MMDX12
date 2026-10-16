@@ -292,7 +292,15 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
         out.camera = pd.camera;
         out.audioPath = pd.audioPath;
         out.audioOffset = pd.audioOffset;
+        out.bgVideoPath = pd.bgVideoPath;
+        out.bgVideoOffset = pd.bgVideoOffset;
+        out.bgVideoAsBackground = pd.bgVideoAsBackground;
         out.warnings = warn;
+        if (!out.bgVideoPath.empty()) {
+            std::error_code ec;
+            if (!std::filesystem::exists(out.bgVideoPath, ec))
+                out.warnings.push_back(Tr("배경 영상을 찾을 수 없습니다: ") + PathToUtf8(out.bgVideoPath));
+        }
         out.recovered = recovery;
         out.projectPath = recovery ? pd.recoveryOf : file;
         out.mmePost = pd.mmePost;
@@ -668,6 +676,23 @@ bool LoadStudioPmmPackage(const std::filesystem::path& file, const std::vector<C
             }
             if (std::filesystem::exists(audio, ec)) out.audioPath = audio;
             else out.warnings.push_back(Tr("음원을 찾을 수 없습니다: ") + PathToUtf8(doc.audioPath));
+        }
+
+        // Background AVI (背景AVI): MMD drew it, so asBackground = true; resolve like the audio (absolute, then the
+        // PMM folder).
+        if (!doc.backgroundVideoPath.empty() && doc.backgroundVideoEnabled) {
+            std::error_code ec;
+            std::filesystem::path video = doc.backgroundVideoPath;
+            if (!video.is_absolute() || !std::filesystem::exists(video, ec)) {
+                const std::filesystem::path rel = pmmDir / video.filename();
+                if (std::filesystem::exists(rel, ec)) video = std::filesystem::absolute(rel);
+            }
+            if (std::filesystem::exists(video, ec)) {
+                out.bgVideoPath = video;
+                out.bgVideoAsBackground = true;
+            } else {
+                out.warnings.push_back(Tr("배경 영상을 찾을 수 없습니다: ") + PathToUtf8(doc.backgroundVideoPath));
+            }
         }
 
         // Editor defaults: frame range (from PMM if present); the aspect / fps come from the PMM header.

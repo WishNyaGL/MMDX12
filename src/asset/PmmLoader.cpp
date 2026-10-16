@@ -403,8 +403,8 @@ bool LoadPmm(const std::filesystem::path& path, PmmDocument& out, std::string* e
         out.audioEnabled = r.U8() != 0;
         out.audioPath = Utf8ToPath(r.FixedString(256));
         r.Skip(4 + 4 + 4);                 // background video offset x/y + scale
-        r.FixedString(256);                // background video path
-        r.Skip(4);                         // video enabled (i32)
+        out.backgroundVideoPath = Utf8ToPath(r.FixedString(256));  // 背景AVI
+        out.backgroundVideoEnabled = r.I32() != 0;                 // video enabled
         r.Skip(4 + 4 + 4);                 // background image offset x/y + scale
         r.FixedString(256);                // background image path
         r.U8();                            // image enabled

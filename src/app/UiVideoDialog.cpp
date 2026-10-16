@@ -13,6 +13,7 @@
 #include "render/ShaderPack.h"
 #include "studio/StudioDoc.h"
 #include "core/TextUtil.h"
+#include "core/Timecode.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -30,6 +31,37 @@ std::string DurationKo(double seconds) {
     else
         std::snprintf(buf, sizeof(buf), Tr("%d분"), std::max(1, (int)std::lround(seconds / 60.0)));
     return buf;
+}
+
+// A compact timecode text field with a stable automation id (MCP ui_items / ui_click).
+// Returns true when the edited text should be committed (Enter, or focus left after an edit).
+bool RangeField(const char* id, char* buf, size_t bufSize, float widthPx) {
+    using namespace ui;
+    ImGuiWindow* w = ImGui::GetCurrentWindow();
+    if (w->SkipItems) return false;
+    const float width = Dp(widthPx);
+    const float h = Dp(38.0f);
+    const ImVec2 origin = w->DC.CursorPos;
+    const ImGuiID fid = w->GetID(id);
+    const bool focused = ImGui::GetActiveID() == fid;
+    w->DrawList->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + h), P().sunken, Dp(10.0f));
+    w->DrawList->AddRect(origin, ImVec2(origin.x + width, origin.y + h), focused ? P().accent : P().lineStrong,
+                         Dp(10.0f), 0, focused ? Dp(1.5f) : 1.0f);
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + Dp(8.0f), origin.y));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(Dp(4.0f), (h - Dp(size::Body)) * 0.5f - Dp(1.0f)));
+    ImGui::SetNextItemWidth(width - Dp(16.0f));
+    PushFont(Font::Regular, size::Body);
+    const bool enter = ImGui::InputText(id, buf, bufSize, ImGuiInputTextFlags_EnterReturnsTrue);
+    const bool leftEdit = ImGui::IsItemDeactivatedAfterEdit();
+    PopFont();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
+    uiprobe::Info(fid, id, nullptr);
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + h));
+    return enter || leftEdit;
 }
 
 }  // namespace
@@ -54,6 +86,9 @@ void App::DrawVideoRenderDialog() {
     double studioA = 0, studioB = 0;
     if (studio) StudioRenderRange(studioA, studioB);
     const double durationSec = studio ? studioB - studioA : library_.songs[(size_t)selSong_].durationSec;
+    // The range the render will use (lobby only): whole song, or the custom timecode range when valid.
+    double renderStartSec = studio ? studioA : 0.0, renderEndSec = studio ? studioB : durationSec;
+    bool rangeValid = true;   // false: the custom range text is invalid -> "렌더링 시작" disabled
     std::string subtitle;
     if (studio) {
         subtitle = studio_->projectPath.empty() ? std::string(Tr("제목 없음")) : PathToUtf8(studio_->projectPath.stem());
@@ -103,6 +138,100 @@ void App::DrawVideoRenderDialog() {
             const char* rangeLabels[2] = {Tr("타임라인 범위"), Tr("프로젝트 전체")};
             int whole = studioRenderWhole_ ? 1 : 0;
             if (Segmented("##vrange", rangeLabels, 2, &whole, colW / Dpi(), 36.0f)) studioRenderWhole_ = whole == 1;
+            Gap(10.0f);
+        } else if (!studio) {
+            // 0. 범위 (lobby: the whole song or a custom timecode range)
+            SectionLabel(Tr("범위"));
+            const char* rangeLabels[2] = {Tr("전체"), Tr("구간 지정")};
+            int custom = videoRangeCustom_ ? 1 : 0;
+            if (Segmented("##vrange", rangeLabels, 2, &custom, colW / Dpi(), 36.0f)) {
+                videoRangeCustom_ = custom == 1;
+                if (videoRangeCustom_) {
+                    if (videoRangeSec_[1] <= 0.0) videoRangeSec_[1] = durationSec;
+                    std::snprintf(videoRangeText_[0], sizeof(videoRangeText_[0]), "%s",
+                                  FormatTimecode(videoRangeSec_[0]).c_str());
+                    std::snprintf(videoRangeText_[1], sizeof(videoRangeText_[1]), "%s",
+                                  FormatTimecode(videoRangeSec_[1]).c_str());
+                }
+            }
+            if (videoRangeCustom_) {
+                Gap(6.0f);
+                const float fieldW = (colW - Dp(28.0f)) * 0.5f;
+                ImDrawList* rdl = ImGui::GetWindowDrawList();
+                const ImVec2 lp = ImGui::GetCursorScreenPos();
+                Text(rdl, Font::Semibold, size::Small, lp, p.ink2, Tr("시작"));
+                Text(rdl, Font::Semibold, size::Small, ImVec2(lp.x + fieldW + Dp(28.0f), lp.y), p.ink2, Tr("끝"));
+                ImGui::Dummy(ImVec2(colW, Dp(22.0f)));
+                const bool startCommit = RangeField("##vrange_start", videoRangeText_[0],
+                                                    sizeof(videoRangeText_[0]), fieldW / Dpi());
+                const float f1Right = ImGui::GetItemRectMax().x;
+                ImGui::SameLine(0.0f, Dp(28.0f));
+                const float f2Left = ImGui::GetCursorScreenPos().x;
+                const bool endCommit = RangeField("##vrange_end", videoRangeText_[1], sizeof(videoRangeText_[1]),
+                                                  fieldW / Dpi());
+                // "~" between the two fields.
+                {
+                    const ImVec2 fpos = ImGui::GetCursorScreenPos();
+                    const float sepX = (f1Right + f2Left) * 0.5f - TextSize(Font::Regular, size::Body, "~").x * 0.5f;
+                    Text(ImGui::GetWindowDrawList(), Font::Regular, size::Body,
+                         ImVec2(sepX, fpos.y - Dp(38.0f) + Dp(9.0f)), p.ink3, "~");
+                }
+                // Commit (Enter / focus loss) refreshes the stored value and the clamped text.
+                double parsed = 0.0;
+                if (startCommit) {
+                    videoRangeSec_[0] = std::max(0.0, ParseTimecode(videoRangeText_[0], parsed) ? parsed : videoRangeSec_[0]);
+                    std::snprintf(videoRangeText_[0], sizeof(videoRangeText_[0]), "%s",
+                                  FormatTimecode(std::min(videoRangeSec_[0], durationSec)).c_str());
+                }
+                if (endCommit) {
+                    videoRangeSec_[1] = std::min(durationSec, ParseTimecode(videoRangeText_[1], parsed) ? parsed : videoRangeSec_[1]);
+                    std::snprintf(videoRangeText_[1], sizeof(videoRangeText_[1]), "%s",
+                                  FormatTimecode(videoRangeSec_[1]).c_str());
+                }
+                // Validity + clamped range for the footer / load / disabled state.
+                const bool startParsed = ParseTimecode(videoRangeText_[0], parsed);
+                const double startVal = startParsed ? parsed : -1.0;
+                const bool endParsed = ParseTimecode(videoRangeText_[1], parsed);
+                const double endVal = endParsed ? parsed : -1.0;
+                const double start = std::max(0.0, std::min(startVal < 0 ? 0.0 : startVal, durationSec));
+                const double end = std::max(0.0, std::min(endVal < 0 ? durationSec : endVal, durationSec));
+                rangeValid = startParsed && endParsed && startVal >= 0.0 && startVal < durationSec && endVal <= durationSec &&
+                             start < end;
+                renderStartSec = start;
+                renderEndSec = end;
+                if (rangeValid) {   // the load / estimate read these, so keep them in step with the typed text
+                    videoRangeSec_[0] = start;
+                    videoRangeSec_[1] = end;
+                }
+                if (!rangeValid) {
+                    Gap(4.0f);
+                    PushFont(Font::Regular, size::Caption);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.warn));
+                    ImGui::TextWrapped("%s", Tr("시작과 끝을 HH:MM:SS 형식으로 입력하세요. 시작은 끝보다 앞서야 합니다."));
+                    ImGui::PopStyleColor();
+                    PopFont();
+                    Gap(2.0f);
+                } else {
+                    char cap[96];
+                    std::snprintf(cap, sizeof(cap), Tr("%s ~ %s · %d초"), FormatTimecode(start).c_str(),
+                                  FormatTimecode(end).c_str(), (int)std::lround(end - start));
+                    const ImVec2 cp = ImGui::GetCursorScreenPos();
+                    Text(ImGui::GetWindowDrawList(), Font::Regular, size::Caption, ImVec2(cp.x, cp.y + Dp(2.0f)),
+                         p.ink3, cap);
+                    ImGui::Dummy(ImVec2(colW, Dp(20.0f)));
+                }
+                if (Button("##vrange_all", Tr("전체로"), nullptr, ButtonKind::Ghost, ImVec2(0, 30))) {
+                    videoRangeCustom_ = false;
+                    videoRangeSec_[0] = 0.0;
+                    videoRangeSec_[1] = durationSec;
+                    renderStartSec = 0.0;
+                    renderEndSec = durationSec;
+                    rangeValid = true;
+                }
+            } else {
+                renderStartSec = 0.0;
+                renderEndSec = durationSec;
+            }
             Gap(10.0f);
         }
 
@@ -376,7 +505,7 @@ void App::DrawVideoRenderDialog() {
         StudioVideoResolution(cfg.resolution, studio_->AspectRatio(), realW, realH);
     }
     std::snprintf(l2, sizeof(l2), Tr("총 %d프레임 · %s · %u×%u · %d fps · 파일 약 %.1f GB"), est.frames,
-                  MinSec(durationSec).c_str(), realW, realH, cfg.fps, est.fileGigabytes);
+                  MinSec(std::max(0.0, renderEndSec - renderStartSec)).c_str(), realW, realH, cfg.fps, est.fileGigabytes);
     Text(dl, Font::Regular, size::Body, ImVec2(x0, y2), p.ink2, l2);
 
     // Third line: 프레임당 약 X.X초로 측정한 값입니다 / 실제 시간은 PC 성능과 장면에 따라 달라집니다
@@ -411,7 +540,7 @@ void App::DrawVideoRenderDialog() {
     ImGui::SetCursorScreenPos(ImVec2(x1 - startW - Dp(10.0f) - cancelW, y5));
     const bool cancel = Button("##vidcancel", Tr("취소"), nullptr, ButtonKind::Secondary, ImVec2(96, 40));
     ImGui::SameLine(0.0f, Dp(10.0f));
-    ImGui::BeginDisabled(!rendererAvailable);
+    ImGui::BeginDisabled(!rendererAvailable || !rangeValid);
     const bool start = Button("##vidstart", Tr("렌더링 시작"), icon::FilmStrip, ButtonKind::Primary, ImVec2(176, 40));
     ImGui::EndDisabled();
 

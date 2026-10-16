@@ -590,6 +590,7 @@ void App::DrawSelect() {
                 if (CardItem("##row", ra, rb, &hovered, a.displayName.c_str())) {
                     selSong_ = (int)i;
                     settings_.lastSong = a.id;
+                    ResetVideoRange();
                 }
                 const bool sel = selSong_ == (int)i;
                 const float hv = Anim(ImGui::GetID("##hv"), hovered);
@@ -1159,6 +1160,7 @@ void App::DrawSelect() {
         if (Button("##video", Tr("영상 렌더"), icon::FilmStrip, ButtonKind::Secondary, ImVec2(videoW, 52.0f))) {
             settings_.Save(settingsPath_);
             videoDialogOpen_ = true;
+            ResetVideoRange();
         }
         ImGui::EndDisabled();
         // Studio: the selected scene as a starting point, or an empty project when no character is picked; the

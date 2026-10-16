@@ -272,7 +272,9 @@ struct VideoPass::Impl {
 void VideoPass::Impl::SyncLayers(PassContext& pc, bool wantBg) {
     std::vector<const VideoLayerDesc*> wanted;
     for (const VideoLayerDesc& d : pc.view.videoLayers)
-        if ((d.kind == VideoLayerKind::Background) == wantBg && !d.path.empty()) wanted.push_back(&d);
+        if ((d.kind == VideoLayerKind::Background) == wantBg && !d.path.empty() &&
+            (!wantBg || d.drawBackground))
+            wanted.push_back(&d);
 
     for (size_t i = layers.size(); i-- > 0;) {
         bool keep = false;
@@ -460,6 +462,7 @@ bool VideoPass::RunOffline(PassContext& pc, Texture& target, Texture& depthOrScr
     bool drew = false;
     for (const VideoLayerDesc& d : pc.view.videoLayers) {
         if ((d.kind == VideoLayerKind::Background) != wantBg || d.path.empty()) continue;
+        if (wantBg && !d.drawBackground) continue;
         if (impl_->DecodeOffline(pc, d, wantBg, target, depthOrScratch)) drew = true;
     }
     return drew;

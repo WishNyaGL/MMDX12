@@ -10,6 +10,7 @@
 #include "render/Upscaler.h"
 #include "render/MmeRuntime.h"
 #include "render/MmeSkin.h"
+#include "render/ScreenVideo.h"
 #include <atomic>
 #include <filesystem>
 #include <functional>
@@ -40,7 +41,6 @@ struct RenderInitProgress {
 class Renderer {
 public:
     static constexpr uint32_t kMaxPunctualLights = 16;
-
     Renderer() = default;
     ~Renderer();
 
@@ -167,6 +167,7 @@ private:
     std::unique_ptr<MmeRuntime> mme_;
     std::unique_ptr<MmeSkin> mmeSkin_;
     std::unique_ptr<OfflineRenderer> offline_;   // null without ray tracing / offline pipelines
+    std::unique_ptr<ScreenVideo> screenVideo_;   // background AVI (背景AVI) feeding screen.bmp materials
     bool offlinePresent_ = true;
     bool rtSupported_ = false;
     float jitterPx_[2] = {};

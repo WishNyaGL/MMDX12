@@ -11,6 +11,7 @@
 #include "app/Icons.h"
 #include "app/UiKit.h"
 #include "asset/RayMaterial.h"
+#include "asset/VideoReader.h"
 #include "core/I18n.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
@@ -204,6 +205,9 @@ ProjectData App::StudioProjectData() const {
     }
     if (d.hasAudio) pd.audioPath = d.audioPath;
     pd.audioOffset = d.audioOffset;
+    pd.bgVideoPath = d.bgVideoPath;
+    pd.bgVideoOffset = d.bgVideoOffset;
+    pd.bgVideoAsBackground = d.bgVideoAsBackground;
     pd.mmePost = d.mmePost;   // M6b: the project's own MME post stack
     ProjectEditor& e = pd.editor;
     e.frame = d.Frame();
@@ -521,6 +525,27 @@ bool App::StudioSetAudio(const std::filesystem::path& file) {
     return true;
 }
 
+bool App::StudioSetBgVideo(const std::filesystem::path& file) {
+    if (!studio_) return false;
+    StudioDoc& d = *studio_;
+    if (file.empty()) {
+        if (d.bgVideoPath.empty()) return true;
+        d.bgVideoPath.clear();
+        ++d.projectVersion;
+        return true;
+    }
+    std::string err;
+    VideoReader reader;
+    if (!reader.Open(file, &err)) {
+        toast_ = {Tr("배경 영상을 열 수 없습니다"), PathToUtf8(file.filename()), {}, true, timeSeconds_ + 5.0};
+        return false;
+    }
+    d.bgVideoPath = std::filesystem::absolute(file);
+    ++d.projectVersion;
+    toast_ = {Tr("배경 영상을 넣었어요"), PathToUtf8(file.filename()), {}, false, timeSeconds_ + 4.0};
+    return true;
+}
+
 void App::StudioAudioDialog() {
     const std::filesystem::path f =
         OpenFileDialog(hwnd_, {{L"Audio", L"*.wav;*.mp3;*.ogg;*.flac"}, {L"WAV", L"*.wav"}, {L"MP3", L"*.mp3"}});
@@ -831,19 +856,52 @@ DirectX::XMFLOAT4X4 App::StudioPropRoot(const StudioModel& m) const {
     const StudioDoc& d = *studio_;
     // a keyed prop is placed by the evaluated accessory key at the current frame, else by its static attach
     const PropAttach place = AccessoryPlacement(m, (float)(d.time * kMmdFps));
+    const XMMATRIX parent = StudioPropParentWorld(m, place);
+    // MMD draws an accessory (.x / .vac) at 10x its file units (the MME effect-object path does the same through
+    // AccessoryWorld's si * 10); PMX / PMD / imported props keep their own scale.
+    XMMATRIX local = PropOffsetMatrix(place);
+    std::wstring ext = m.path.extension().wstring();
+    for (wchar_t& c : ext) c = (wchar_t)towlower(c);
+    if (ext == L".x" || ext == L".vac") local = XMMatrixMultiply(XMMatrixScaling(10.0f, 10.0f, 10.0f), local);
+    XMFLOAT4X4 out;
+    XMStoreFloat4x4(&out, XMMatrixMultiply(local, parent));
+    return out;
+}
+
+DirectX::XMMATRIX App::StudioPropParentWorld(const StudioModel& m, const PropAttach& a) const {
+    using namespace DirectX;
+    const StudioDoc& d = *studio_;
     XMMATRIX parent = XMMatrixIdentity();
-    const int pi = place.parent >= 0 ? d.IndexOfUid((uint32_t)place.parent) : -1;
+    const int pi = a.parent >= 0 ? d.IndexOfUid((uint32_t)a.parent) : -1;
     if (pi >= 0 && d.models[(size_t)pi].get() != &m) {
         const StudioModel& p = *d.models[(size_t)pi];
-        const int bone = place.bone.empty() ? -1 : p.pmx->FindBone(place.bone);
+        const int bone = a.bone.empty() ? -1 : p.pmx->FindBone(a.bone);
         if (bone >= 0) parent = XMLoadFloat4x4(&p.inst->BoneWorld(bone));
         // the parent's display scale is applied after its bone worlds (ModelInstance::SetScale)
         const float s = p.inst->Scale();
         if (s != 1.0f) parent = XMMatrixMultiply(parent, XMMatrixScaling(s, s, s));
     }
-    XMFLOAT4X4 out;
-    XMStoreFloat4x4(&out, XMMatrixMultiply(PropOffsetMatrix(place), parent));
-    return out;
+    return parent;
+}
+
+PropAttach App::StudioKeepWorldAttach(const StudioModel& m, const PropAttach& from, PropAttach to) const {
+    using namespace DirectX;
+    // world = [accessory x10] * offset * parent world: the x10 factor is the same on both sides, so
+    // offset' = offset * parentWorld(from) * inverse(parentWorld(to)).
+    const XMMATRIX inv = XMMatrixInverse(nullptr, StudioPropParentWorld(m, to));
+    const XMMATRIX off = XMMatrixMultiply(XMMatrixMultiply(PropOffsetMatrix(from), StudioPropParentWorld(m, from)), inv);
+    XMVECTOR s, q, t;
+    if (!XMMatrixDecompose(&s, &q, &t, off)) return to;
+    XMStoreFloat3(&to.translation, t);
+    // PropAttach has one uniform scale: a non-uniformly scaled parent keeps the average
+    to.scale = std::clamp((XMVectorGetX(s) + XMVectorGetY(s) + XMVectorGetZ(s)) / 3.0f, 0.01f, 100.0f);
+    // back to Euler degrees in PropOffsetMatrix's XMMatrixRotationRollPitchYaw(x, y, z) order (as SampleAccessory)
+    XMFLOAT4X4 rm;
+    XMStoreFloat4x4(&rm, XMMatrixRotationQuaternion(q));
+    constexpr float kDeg = 57.295779513f;
+    to.rotationDeg = {std::asin(std::clamp(-rm._32, -1.0f, 1.0f)) * kDeg, std::atan2(rm._31, rm._33) * kDeg,
+                      std::atan2(rm._12, rm._22) * kDeg};
+    return to;
 }
 
 // ---------------------------------------------------------------------------
@@ -1297,6 +1355,8 @@ void App::DrawStudioPropPanel(float w) {
             ImGui::Dummy(ImVec2(w, Dp(4.0f)));
         }
     }
+    // a new parent / bone keeps the prop where it is in the world (the offset absorbs the new bone's transform)
+    if (commit && (a.parent != before.parent || a.bone != before.bone)) a = StudioKeepWorldAttach(*m, before, a);
     bool dragEnded = false;
     const auto dragRow = [&](const char* label, auto&& widget) {
         row(label, [&] {

@@ -29,6 +29,8 @@ void PrintDoc(const PmmDocument& d) {
     std::printf("\n");
     std::printf("audio        : %s%s\n", d.audioPath.empty() ? "(none)" : d.audioPath.string().c_str(),
                 d.audioEnabled ? "" : "  [disabled]");
+    std::printf("background   : %s%s\n", d.backgroundVideoPath.empty() ? "(none)" : d.backgroundVideoPath.string().c_str(),
+                d.backgroundVideoEnabled ? "" : "  [disabled]");
     std::printf("models       : %zu\n", d.models.size());
     for (size_t mi = 0; mi < d.models.size(); ++mi) {
         const PmmModel& m = d.models[mi];

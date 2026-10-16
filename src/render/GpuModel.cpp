@@ -31,6 +31,16 @@ bool IsFlatFaceMaterial(const std::string& name) {
     return n == "face" || n == "eyelash" || n == "eyebrow";
 }
 
+// The MMD background AVI (背景AVI) feeds materials whose diffuse texture file name is screen.bmp (file name only,
+// any directory, case-insensitive).
+bool IsScreenTextureName(const std::string& path) {
+    if (path.empty()) return false;
+    const size_t slash = path.find_last_of("/\\");
+    std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    for (char& ch : name) ch = (char)std::tolower((unsigned char)ch);
+    return name == "screen.bmp";
+}
+
 } // namespace
 
 GpuModel::GpuModel() {
@@ -434,10 +444,10 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         srv.Texture2D.MipLevels = UINT(-1);
 
         // +0 texture
+        ID3D12Resource* texRes = builtin.white.Get();
         if (m.textureIndex >= 0 && (size_t)m.textureIndex < textures_.size() && textures_[m.textureIndex])
-            device->CreateShaderResourceView(textures_[m.textureIndex].Get(), &srv, ctx.SrvHeap().Cpu(alloc + 0));
-        else
-            device->CreateShaderResourceView(builtin.white.Get(), &srv, ctx.SrvHeap().Cpu(alloc + 0));
+            texRes = textures_[m.textureIndex].Get();
+        device->CreateShaderResourceView(texRes, &srv, ctx.SrvHeap().Cpu(alloc + 0));
         // +1 sphere
         if ((m.sphereMode == PmxSphereMode::Multiply || m.sphereMode == PmxSphereMode::Add) &&
             m.sphereTextureIndex >= 0 && (size_t)m.sphereTextureIndex < textures_.size() &&
@@ -460,6 +470,13 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             device->CreateShaderResourceView(builtin.white.Get(), &srv, ctx.SrvHeap().Cpu(alloc + 2));
         }
         materials_.push_back(mat);
+        // Background AVI: remember the material whose diffuse texture file name is screen.bmp and its own texture
+        if (m.textureIndex >= 0 && (size_t)m.textureIndex < pmx.textures.size() &&
+            IsScreenTextureName(pmx.textures[(size_t)m.textureIndex])) {
+            screenMaterials_.push_back((uint32_t)mIdx);
+            screenOrigTex_.push_back(texRes);
+            screenOrigHasTex_.push_back((char)((consts[mIdx].flags & MatFlag_HasTexture) != 0));
+        }
     }
 
     // PBR records and their SRVs (work unit P2): one GpuPbrMaterial per material with a valid Ray record. The
@@ -768,6 +785,30 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
     for (uint64_t& v : materialEntryVersion_) v = ~0ull;
 }
 
+void GpuModel::BindScreenTexture(Dx12Context& ctx, ID3D12Resource* tex) {
+    if (!ctx_ || screenMaterials_.empty()) return;
+    ID3D12Device* device = ctx.Device();
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = tex ? 1 : UINT(-1);
+    for (size_t s = 0; s < screenMaterials_.size(); ++s) {
+        const uint32_t mi = screenMaterials_[s];
+        if (mi >= materials_.size()) continue;
+        ID3D12Resource* res = tex ? tex : screenOrigTex_[s].Get();
+        if (!res) continue;   // no own texture and no video: the white fallback stays
+        device->CreateShaderResourceView(res, &srv, ctx.SrvHeap().Cpu(materials_[mi].srvTable + 0));
+        for (MaterialConstants* c : {mi < baseConsts_.size() ? &baseConsts_[mi] : nullptr,
+                                     mi < materialConsts_.size() ? &materialConsts_[mi] : nullptr}) {
+            if (!c) continue;
+            c->flags &= ~(uint32_t)MatFlag_HasTexture;
+            if (tex || screenOrigHasTex_[s]) c->flags |= MatFlag_HasTexture;
+        }
+    }
+    for (uint64_t& v : materialEntryVersion_) v = ~0ull;   // re-upload the constants on the next UpdateMaterials
+}
+
 void GpuModel::SetMmeEffects(std::vector<std::filesystem::path> perMaterial) {
     mmeEffects_ = std::move(perMaterial);
 }
@@ -872,6 +913,9 @@ void GpuModel::Destroy() {
     materialCb_.Reset();
     textures_.clear();
     materials_.clear();
+    screenMaterials_.clear();
+    screenOrigTex_.clear();
+    screenOrigHasTex_.clear();
     ctx_ = nullptr;
 }
 

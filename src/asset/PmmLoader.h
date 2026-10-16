@@ -147,6 +147,8 @@ struct PmmDocument {
     std::vector<PmmAccessory> accessories;
     std::filesystem::path audioPath;   // as stored (usually absolute); empty = none
     bool audioEnabled = false;
+    std::filesystem::path backgroundVideoPath;   // MMD 背景AVI path as stored (usually absolute); empty = none
+    bool backgroundVideoEnabled = false;         // the PMM's "video enabled" flag
     std::vector<std::string> warnings; // non-fatal notes (unparsable tail, unreachable keys, ...)
 };
 

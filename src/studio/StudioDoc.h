@@ -125,6 +125,12 @@ struct StudioDoc {
     bool hasAudio = false;
     float audioEndFrame = 0;          // timeline frame where the audio ends (includes audioOffset)
     double audioOffset = 0;           // seconds: the audio starts at this timeline time (may be negative)
+    // Background AVI (背景AVI): an absolute video path (empty = none) whose current frame feeds screen.bmp materials
+    // and, with bgVideoAsBackground, is also drawn as the screen background. bgVideoOffset is seconds: the video
+    // starts at this timeline time (may be negative, like audioOffset).
+    std::filesystem::path bgVideoPath;
+    double bgVideoOffset = 0;
+    bool bgVideoAsBackground = false;
     CommandStack history;
     // Project state: dirty = an undoable edit (history) or a project edit outside the history (models added/removed,
     // audio, visibility, rename) since the last save.
@@ -430,6 +436,10 @@ struct StudioPackage {
     MotionData camera;
     std::filesystem::path audioPath;
     double audioOffset = 0;
+    // Background AVI (背景AVI), from a project or PMM import.
+    std::filesystem::path bgVideoPath;
+    double bgVideoOffset = 0;
+    bool bgVideoAsBackground = false;
     // project loads only
     bool fromProject = false;
     bool fromPmm = false;                    // a .pmm import: a NEW unsaved project (no projectPath / recents)

@@ -37,6 +37,12 @@ struct PerformerCast {
     bool isCenter = false;
 };
 
+// M8a: one stage-motion VMD bound to one stage part (ScenePackage::stageMotions). `part` indexes stageParts.
+struct StageMotionBinding {
+    std::shared_ptr<BoundMotion> motion;
+    int part = -1;
+};
+
 struct ScenePackage {
     LoadedModelCpu character;
     std::string characterId;
@@ -56,10 +62,9 @@ struct ScenePackage {
     std::vector<std::string> extraCharacterIds;
     std::vector<std::string> extraCharacterDisplayNames;
     std::vector<std::shared_ptr<BoundMotion>> extraMotions;
-    // M8a: the song-bundled stage's motion (docs/mme/mme_design.md §5b). `stageMotionPart` is the index into
-    // stageParts it is bound to (-1 when none). Stage motion VMDs are evaluated on the song clock like a dance.
-    std::shared_ptr<BoundMotion> stageMotion;
-    int stageMotionPart = -1;
+    // M8a: the song-bundled stage's motions (docs/mme/mme_design.md §5b), one per stage motion VMD bound to the
+    // stage part whose model it matches. Stage motion VMDs are evaluated on the song clock like a dance.
+    std::vector<StageMotionBinding> stageMotions;
     // M8b: the song's video layers (background + overlay), resolved by the App from the song / ini override and
     // passed through the (copyable) package so the loader worker does not need the App.
     std::vector<VideoLayerDesc> videos;
