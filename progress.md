@@ -1976,3 +1976,16 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   HDD (E:) OS-warm cold-probe 0.96 -> 1.04-1.08 s, cached 0.083 -> 0.078 s; results identical to HEAD in par and seq
   modes. A true cold HDD scan was not measured (purging the standby list needs elevation); a cold-read test on unread
   game files gave path-ordered 125-132 MB/s vs parallel 84-90 MB/s (~1.45x). The app itself was not launched.
+
+## 2026-10-17 (2) - Mode 2 physics chain fix (issue #4 solved), release 2.1.3
+- Root cause of ZZZ clothes stiffness (issue #4): mode 2 (物理+位置合わせ / physics + align position) bodies in `Physics.cpp`
+  previously set the bone's world matrix translation directly from the pre-physics animated pose (`r.world._41 = anim._41...`).
+  In chains of mode 2 bodies (e.g. Star Rail / ZZZ coats, sleeves, hair), each child bone kept its pre-physics animated world
+  translation while rotating, which kept the chain pinned in space and produced stiff, broken physics.
+- Fix: `ModelInstance::RunPhysics` now rebuilds mode 2 bones' world translation through the bone hierarchy: parent's final
+  post-physics world matrix combined with the child's animated local offset (or animated world translation if root). `PhysicsWorld::Results`
+  flags mode 2 bones in `BoneResult::mode2`.
+- `tools/anim_probe.cpp`: added `PHYS_SWING=<sec>` probe to measure dynamic body local rotation speed, travel distance and range.
+- Release cover: `docs/media/physics-2.1.3.jpg` (ZZZ Lycaon performers on stage, flowing coat physics).
+- Version 2.1.3 bumped (patch bump: mode 2 physics fix, HDD scan prefetch, video render time range).
+

@@ -240,7 +240,7 @@ void PhysicsWorld::Step(const std::vector<XMFLOAT4X4>& boneWorld, float dt, int 
     if (dt > 0) s.world.stepSimulation(dt, maxSubsteps, kSubstep);
 }
 
-void PhysicsWorld::Results(const std::vector<XMFLOAT4X4>& boneWorld, std::vector<BoneResult>& out) const {
+void PhysicsWorld::Results(std::vector<BoneResult>& out) const {
     out.clear();
     for (const Impl::Body& b : impl_->bodies) {
         if (b.mode == 0 || b.bone < 0) continue;
@@ -249,11 +249,9 @@ void PhysicsWorld::Results(const std::vector<XMFLOAT4X4>& boneWorld, std::vector
         const XMFLOAT4X4 rbWorld = FromBt(t);
         BoneResult r;
         r.bone = b.bone;
+        r.mode2 = b.mode == 2;
         XMStoreFloat4x4(&r.world, XMMatrixMultiply(XMLoadFloat4x4(&b.invOffset), XMLoadFloat4x4(&rbWorld)));
-        if (b.mode == 2) {
-            const XMFLOAT4X4& anim = boneWorld[b.bone];
-            r.world._41 = anim._41; r.world._42 = anim._42; r.world._43 = anim._43;
-        }
+        // Mode 2 (物理+位置合わせ): ModelInstance::RunPhysics replaces the translation.
         out.push_back(r);
     }
 }

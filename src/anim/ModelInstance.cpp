@@ -497,6 +497,11 @@ void ModelInstance::EvaluateAppendAndIk(int b) {
 // Hands the animated pose to the physics world, steps it, and writes the simulated bones back.
 // Bones are revisited parents-first so non-simulated children of simulated bones follow them;
 // simulated bones get their local matrix rebuilt so later append/IK passes stay consistent.
+// Mode 2 (物理+位置合わせ) bones: world rotation comes from physics, world translation is
+// rebuilt from the bone hierarchy — the animated local offset (relative to the pre-physics pose
+// physicsPose_) carried by the parent's final post-physics world matrix, or, without a parent,
+// the animated world translation. Taking the animated world translation for every mode-2 bone
+// left chains of them (Star Rail / ZZZ hair, sleeves) at their animated positions while they turned.
 void ModelInstance::RunPhysics(float dt) {
     const int n = (int)bones_.size();
     physicsPose_.resize(n);
@@ -507,7 +512,7 @@ void ModelInstance::RunPhysics(float dt) {
     } else {
         physics_->Step(physicsPose_, dt, physicsMaxSubsteps_);
     }
-    physics_->Results(physicsPose_, physicsOut_);
+    physics_->Results(physicsOut_);
     if (physicsOut_.empty()) return;
 
     physicsResult_.assign(n, -1);
@@ -526,6 +531,24 @@ void ModelInstance::RunPhysics(float dt) {
         const bool hasParent = p >= 0 && p < n && p != b;
         if (physicsResult_[b] >= 0) {
             s.world = physicsOut_[physicsResult_[b]].world;
+            if (physicsOut_[physicsResult_[b]].mode2) {
+                if (hasParent) {
+                    const XMMATRIX animWorld = XMLoadFloat4x4(&physicsPose_[b]);
+                    const XMMATRIX animParentInv = XMMatrixInverse(nullptr, XMLoadFloat4x4(&physicsPose_[p]));
+                    XMFLOAT4X4 animLocal;
+                    XMStoreFloat4x4(&animLocal, XMMatrixMultiply(animWorld, animParentInv));
+                    XMFLOAT4X4 w;
+                    XMStoreFloat4x4(&w, XMMatrixMultiply(XMLoadFloat4x4(&animLocal), XMLoadFloat4x4(&bones_[p].world)));
+                    w._11 = s.world._11; w._12 = s.world._12; w._13 = s.world._13; w._14 = s.world._14;
+                    w._21 = s.world._21; w._22 = s.world._22; w._23 = s.world._23; w._24 = s.world._24;
+                    w._31 = s.world._31; w._32 = s.world._32; w._33 = s.world._33; w._34 = s.world._34;
+                    s.world = w;
+                } else {
+                    s.world._41 = physicsPose_[b]._41;
+                    s.world._42 = physicsPose_[b]._42;
+                    s.world._43 = physicsPose_[b]._43;
+                }
+            }
             if (hasParent)
                 XMStoreFloat4x4(&s.local, XMMatrixMultiply(XMLoadFloat4x4(&s.world),
                                                            XMMatrixInverse(nullptr, XMLoadFloat4x4(&bones_[p].world))));

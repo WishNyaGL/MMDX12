@@ -35,9 +35,10 @@ public:
     void Step(const std::vector<DirectX::XMFLOAT4X4>& boneWorld, float dt, int maxSubsteps = 10);
 
     // Per simulated body attached to a bone: the bone's new world matrix.
-    struct BoneResult { int bone; DirectX::XMFLOAT4X4 world; };
-    // boneWorld is the animated pose (mode 2 bodies keep its translation).
-    void Results(const std::vector<DirectX::XMFLOAT4X4>& boneWorld, std::vector<BoneResult>& out) const;
+    struct BoneResult { int bone; DirectX::XMFLOAT4X4 world; bool mode2 = false; };
+    // A mode-2 result (mode2 == true) carries the physics rotation only; the caller rebuilds its
+    // world translation from the bone hierarchy.
+    void Results(std::vector<BoneResult>& out) const;
 
 private:
     struct Impl;

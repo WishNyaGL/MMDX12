@@ -10,6 +10,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <string>
+#include <vector>
 
 using namespace mmdx;
 
@@ -25,6 +29,152 @@ int wmain(int argc, wchar_t** argv) {
     printf("model '%s' bones=%zu morphs=%zu | motion keys=%zu bound tracks bones=%d morphs=%d end=%.0f\n",
            pmx->name.c_str(), pmx->bones.size(), pmx->morphs.size(), vmd.boneKeys.size(),
            motion->BoundBoneCount(), motion->BoundMorphCount(), motion->EndFrame());
+
+    if (const char* swingEnv = getenv("PHYS_SWING"); swingEnv && *swingEnv) {
+        // PHYS_SWING=<seconds>: simulate from frame 0 at 60 fps with physics, then report how far
+        // the dynamic-body bones' LOCAL rotations move. Exits after printing.
+        using namespace DirectX;
+        const float seconds = (float)atof(swingEnv);
+        if (seconds <= 0) { printf("PHYS_SWING: bad seconds '%s'\n", swingEnv); return 2; }
+
+        // dynamic bodies (mode 1 or 2, driving a bone), chain grouping by body name
+        struct Dyn { int bone; int mode; std::string chain; };
+        std::vector<Dyn> dyn;
+        auto chainOf = [](const std::string& n) {
+            // strip trailing digits / '-' / '_' (e.g. 右袖1-3 -> 右袖, HairL4 -> HairL)
+            std::string c = n;
+            while (!c.empty()) {
+                const char ch = c.back();
+                const bool digit = ch >= '0' && ch <= '9';
+                const bool sep = ch == '-' || ch == '_';
+                // multibyte UTF-8 tails are never ASCII digits/separators, so this is safe
+                if (digit || sep) { c.pop_back(); continue; }
+                break;
+            }
+            return c.empty() ? n : c;
+        };
+        for (const PmxRigidBody& r : pmx->rigidBodies)
+            if (r.physicsMode != 0 && r.boneIndex >= 0 && r.boneIndex < (int)pmx->bones.size())
+                dyn.push_back({r.boneIndex, r.physicsMode, chainOf(r.name)});
+
+        // rest-pose local rotations (animated pose at frame 0 before physics, as the baseline)
+        ModelInstance inst(pmx);
+        inst.EnablePhysics(true);
+        motion->Evaluate(0.0f, inst);
+        inst.ResetPhysics();
+        inst.UpdatePose(0.0f);
+        std::vector<XMFLOAT4> restLocal(dyn.size());
+        auto localRot = [&](int bone) {
+            const XMFLOAT4X4& w = inst.BoneWorld(bone);
+            const int p = pmx->bones[bone].parentIndex;
+            XMFLOAT4X4 l;
+            if (p >= 0 && p < (int)pmx->bones.size())
+                XMStoreFloat4x4(&l, XMMatrixMultiply(XMLoadFloat4x4(&w),
+                                                     XMMatrixInverse(nullptr, XMLoadFloat4x4(&inst.BoneWorld(p)))));
+            else
+                XMStoreFloat4x4(&l, XMMatrixMultiply(XMLoadFloat4x4(&w), XMMatrixIdentity()));
+            XMVECTOR s, rot, tr;
+            XMMatrixDecompose(&s, &rot, &tr, XMLoadFloat4x4(&l));
+            XMFLOAT4 q; XMStoreFloat4(&q, rot);
+            return q;
+        };
+        auto angleBetween = [](const XMFLOAT4& a, const XMFLOAT4& b) {
+            const float d = std::min(std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w), 1.0f);
+            return 2.0f * acosf(d);
+        };
+        for (size_t i = 0; i < dyn.size(); ++i) restLocal[i] = localRot(dyn[i].bone);
+
+        // chain accumulators
+        struct Acc {
+            int bones = 0; int modeMask = 0; double speedSum = 0; long long samples = 0; double maxRange = 0;
+            double travelSum = 0; long long travelSamples = 0;
+        };
+        std::map<std::string, Acc> chains;
+        for (const Dyn& d : dyn) chains[d.chain].bones++;
+        for (auto& [name, a] : chains)
+            for (const Dyn& d : dyn) if (d.chain == name) a.modeMask |= 1 << d.mode;
+        double totalSpeed = 0, totalRange = 0, totalTravel = 0;
+        long long totalSamples = 0;
+        int nanFrames = 0;
+
+        // A second instance with physics disabled, driven by the same motion: the baseline the
+        // position metric is measured against (see EnablePhysics in ModelInstance.h).
+        ModelInstance plain(pmx);
+        plain.EnablePhysics(false);
+        motion->Evaluate(0.0f, plain);
+        plain.UpdatePose(0.0f);
+
+        const int frames = (int)(seconds * 60.0f);
+        std::vector<XMFLOAT4> prevLocal(dyn.size());
+        for (int f = 0; f < frames; ++f) {
+            const float t = (float)f / 60.0f;
+            motion->Evaluate(t, inst);
+            inst.UpdatePose(1.0f / 60.0f);
+            motion->Evaluate(t, plain);
+            plain.UpdatePose(0.0f);
+            for (size_t i = 0; i < dyn.size(); ++i) {
+                const XMFLOAT4 q = localRot(dyn[i].bone);
+                const float ang = angleBetween(q, restLocal[i]);
+                Acc& a = chains[dyn[i].chain];
+                if (std::isfinite(ang)) {
+                    // per-frame local rotation change vs the previous frame
+                    XMFLOAT4 prev = prevLocal[i].x || prevLocal[i].y || prevLocal[i].z || prevLocal[i].w ? prevLocal[i] : q;
+                    const float step = angleBetween(q, prev);
+                    a.speedSum += step * 60.0;  // rad/frame * 60 frames/s = rad/s, printed in deg
+                    a.samples++;
+                    a.maxRange = std::max(a.maxRange, (double)ang);
+                    prevLocal[i] = q;
+                    totalSpeed += step * 60.0;
+                    totalSamples++;
+                    totalRange = std::max(totalRange, (double)ang);
+                } else {
+                    ++nanFrames;
+                }
+                // travel: distance between the bone's world position with physics and without
+                const XMFLOAT3 wp = inst.BoneWorldPosition(dyn[i].bone);
+                const XMFLOAT3 wa = plain.BoneWorldPosition(dyn[i].bone);
+                const float d = std::sqrt((wp.x - wa.x) * (wp.x - wa.x) + (wp.y - wa.y) * (wp.y - wa.y) +
+                                          (wp.z - wa.z) * (wp.z - wa.z));
+                if (std::isfinite(d)) {
+                    a.travelSum += d;
+                    a.travelSamples++;
+                    totalTravel += d;
+                }
+            }
+        }
+        (void)nanFrames;  // non-finite samples are skipped and counted, but not currently reported
+
+        // print per-chain lines
+        for (auto& [name, a] : chains) {
+            const double meanSpeedDeg = a.samples ? a.speedSum / a.samples * 180.0 / 3.14159265358979 : 0.0;
+            const double rangeDeg = a.maxRange * 180.0 / 3.14159265358979;
+            const double travel = a.travelSamples ? a.travelSum / a.travelSamples : 0.0;
+            const char* mode = a.modeMask == 2 ? "1" : a.modeMask == 4 ? "2" : "mix";
+            printf("SWING %s bones=%d mode=%s meanSpeed=%.2f range=%.2f travel=%.3f\n", name.c_str(), a.bones, mode,
+                   meanSpeedDeg, rangeDeg, travel);
+        }
+        const double totalSpeedDeg = totalSamples ? totalSpeed / totalSamples * 180.0 / 3.14159265358979 : 0.0;
+        const double totalRangeDeg = totalRange * 180.0 / 3.14159265358979;
+        const double totalTravelAvg = totalSamples ? totalTravel / totalSamples : 0.0;
+        printf("SWING_TOTAL meanSpeed=%.2f range=%.2f travel=%.3f\n", totalSpeedDeg, totalRangeDeg, totalTravelAvg);
+
+        // mode histogram of dynamic bodies
+        int modeCount[3] = {0, 0, 0};
+        for (const Dyn& d : dyn) if (d.mode >= 0 && d.mode <= 2) ++modeCount[d.mode];
+        printf("MODES mode0=%d mode1=%d mode2=%d\n", modeCount[0], modeCount[1], modeCount[2]);
+
+        // angular-damping histogram (<0.5, <0.9, <0.99, <0.999, <1, ==1)
+        int dampBuckets[6] = {0, 0, 0, 0, 0, 0};
+        for (const PmxRigidBody& r : pmx->rigidBodies) {
+            if (r.physicsMode == 0) continue;
+            const float d = r.angularDamping;
+            int b = d < 0.5f ? 0 : d < 0.9f ? 1 : d < 0.99f ? 2 : d < 0.999f ? 3 : d < 1.0f ? 4 : 5;
+            ++dampBuckets[b];
+        }
+        printf("DAMP <0.5=%d <0.9=%d <0.99=%d <0.999=%d <1=%d ==1=%d\n", dampBuckets[0], dampBuckets[1],
+               dampBuckets[2], dampBuckets[3], dampBuckets[4], dampBuckets[5]);
+        return 0;
+    }
 
     {   // material morphs / SDEF: counts, and each material morph alone at weight 1 must give the
         // PMX result (multiply: factor = offset, add: factor = offset) on the materials it targets
