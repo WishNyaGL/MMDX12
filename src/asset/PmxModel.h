@@ -132,7 +132,9 @@ struct PmxRigidBody {
     std::string name, nameEn;
     int32_t boneIndex = -1;
     uint8_t group = 0;
-    uint16_t collisionMask = 0;  // "non-collision group" bitmask as stored in file
+    // Groups this body collides with (bit set = collide), stored like PMD's mask: PMX Editor shows the cleared bits as
+    // "非衝突グループ", but the file holds the collide-with mask. Bullet takes it as is; never invert it (issue #4).
+    uint16_t collisionMask = 0;
     uint8_t shape = 0;           // 0 sphere, 1 box, 2 capsule
     XMFLOAT3 size{}, position{}, rotation{};
     float mass = 0, linearDamping = 0, angularDamping = 0, restitution = 0, friction = 0;

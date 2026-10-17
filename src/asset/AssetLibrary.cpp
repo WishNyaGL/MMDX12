@@ -7,6 +7,7 @@
 #include "asset/VmdMotion.h"
 #include "core/AudioProbe.h"
 #include "core/Log.h"
+#include "core/StorageInfo.h"
 #include "core/TextUtil.h"
 
 #include <json.hpp>
@@ -15,15 +16,69 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstdlib>
 #include <execution>
 #include <fstream>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
+#include <thread>
 
 namespace mmdx {
 
 namespace {
+
+// Seek-penalty drives (HDDs): one thread reads the files front to back in the given order, so the disk streams
+// them instead of seeking between the parallel probes; each probe waits until its file has been read once (it is
+// then in the OS file cache) and parses in parallel as before. Files flagged `whole == false` are not read ahead.
+class SequentialPrefetch {
+public:
+    SequentialPrefetch(std::vector<std::filesystem::path> files, std::vector<bool> whole, std::function<bool()> cancelled)
+        : files_(std::move(files)), whole_(std::move(whole)), cancelled_(std::move(cancelled)),
+          thread_([this] { Run(); }) {}
+    ~SequentialPrefetch() { thread_.join(); }
+    SequentialPrefetch(const SequentialPrefetch&) = delete;
+    SequentialPrefetch& operator=(const SequentialPrefetch&) = delete;
+
+    void WaitFor(size_t i) {
+        std::unique_lock lock(mutex_);
+        cv_.wait(lock, [&] { return done_ > i; });
+    }
+
+private:
+    void Run() {
+        std::vector<char> buffer(1 << 20);
+        for (size_t i = 0; i < files_.size(); ++i) {
+            if (cancelled_()) break;
+            if (whole_[i]) {
+                const HANDLE h = CreateFileW(files_[i].c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                                             OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+                if (h != INVALID_HANDLE_VALUE) {
+                    DWORD got = 0;
+                    while (!cancelled_() && ReadFile(h, buffer.data(), (DWORD)buffer.size(), &got, nullptr) && got) {}
+                    CloseHandle(h);
+                }
+            }
+            std::lock_guard lock(mutex_);
+            done_ = i + 1;
+            cv_.notify_all();
+        }
+        std::lock_guard lock(mutex_);
+        done_ = files_.size();  // cancelled: release every waiter (they check cancelled() themselves)
+        cv_.notify_all();
+    }
+
+    std::vector<std::filesystem::path> files_;
+    std::vector<bool> whole_;
+    std::function<bool()> cancelled_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    size_t done_ = 0;
+    std::thread thread_;  // last: starts after the members above exist
+};
 
 enum class Kind { None, Character, Stage, Song, Ignore };
 
@@ -665,6 +720,14 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     // ---- 1. walk ----
     std::vector<ModelEntry> models;
     std::vector<std::filesystem::path> vmdFiles, audioFiles, sidecarFiles, videoFiles, fxFiles;
+    // Size and mtime of each kept file, cached from the walk's directory_entry (MSVC fills these from
+    // FindNextFileW). Keyed by the lexically-normal path; a missing key falls back to path-based calls.
+    struct FileStat {
+        uintmax_t size = 0;
+        int64_t mtime = 0;
+        bool ok = false;  // false: the size lookup failed (size is then meaningless)
+    };
+    std::map<std::filesystem::path, FileStat> walkStats;
     {
         std::error_code walkEc;
         std::filesystem::recursive_directory_iterator it(root, std::filesystem::directory_options::skip_permission_denied, walkEc);
@@ -676,6 +739,23 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                 const std::filesystem::path& p = it->path();
                 const std::string ext = LowerExt(p);
                 const ModelFormat fmt = ModelFormatFromPath(p);
+                const bool keep = fmt != ModelFormat::Unknown || ext == ".vmd" || ext == ".fx" ||
+                                  ext == ".wav" || ext == ".mp3" || ext == ".flac" || ext == ".ogg" ||
+                                  ext == ".mp4" || ext == ".mov" || ext == ".wmv" || ext == ".avi" || ext == ".mkv";
+                if (keep) {
+                    // A symlink / reparse point (or a failed cached read) falls back to path-based calls.
+                    std::error_code statEc;
+                    const bool symlink = it->is_symlink(statEc);
+                    if (!statEc && !symlink) {
+                        const uintmax_t sz = it->file_size(statEc);
+                        if (!statEc) {
+                            const auto lwt = it->last_write_time(statEc);
+                            if (!statEc)
+                                walkStats[p.lexically_normal()] =
+                                    FileStat{sz, static_cast<int64_t>(lwt.time_since_epoch().count()), true};
+                        }
+                    }
+                }
                 if (fmt != ModelFormat::Unknown) {
                     ModelEntry m;
                     m.path = p;
@@ -697,6 +777,49 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             }
         }
     }
+
+    // Size + mtime for a walked file: from the walk's directory_entry when available, else the
+    // path-based calls (files outside the walk, or the symlink / error fallback). Numbers match the
+    // old path-based calls exactly.
+    const auto fileStatOf = [&](const std::filesystem::path& p) -> FileStat {
+        auto it = walkStats.find(p.lexically_normal());
+        if (it != walkStats.end()) return it->second;
+        std::error_code ecSz, ecFs;
+        const uintmax_t sz = std::filesystem::file_size(p, ecSz);
+        const auto lwt = std::filesystem::last_write_time(p, ecFs);
+        return FileStat{sz, ecFs ? 0 : static_cast<int64_t>(lwt.time_since_epoch().count()), !ecSz};
+    };
+
+    // Sequential I/O on drives that incur a seek penalty (spinning disks); parallel elsewhere.
+    const bool seekPenalty = PathIncursSeekPenalty(root);
+    const char* ioEnv = std::getenv("MMDX12_SCAN_IO");
+    const bool sequentialIo = (ioEnv && std::string(ioEnv) == "seq") ? true
+                            : (ioEnv && std::string(ioEnv) == "par") ? false
+                            : seekPenalty;
+    LOG_INFO("library scan: storage %s -> %s", seekPenalty ? "seek-penalty" : "no seek-penalty/unknown",
+             sequentialIo ? "path-ordered read-ahead + parallel probes" : "parallel probes");
+
+    // Runs a probe-index list in parallel. On seek-penalty drives the list is sorted by path (directory locality)
+    // and a SequentialPrefetch reads the files ahead in that order; `key` maps an index to its file path,
+    // `readsWhole` says whether the probe reads the whole file (else it is not read ahead).
+    const auto runProbes = [&](std::vector<size_t>& indices, auto key, auto readsWhole, auto&& body) {
+        if (!sequentialIo) {
+            std::for_each(std::execution::par, indices.begin(), indices.end(), body);
+            return;
+        }
+        std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) { return key(a) < key(b); });
+        std::vector<std::filesystem::path> files;
+        std::vector<bool> whole;
+        for (size_t i : indices) files.push_back(key(i)), whole.push_back(readsWhole(i));
+        SequentialPrefetch prefetch(std::move(files), std::move(whole), [progress] { return progress && progress->cancel.load(); });
+        std::vector<size_t> order(indices.size());
+        for (size_t k = 0; k < order.size(); ++k) order[k] = k;
+        std::for_each(std::execution::par, order.begin(), order.end(), [&](size_t k) {
+            prefetch.WaitFor(k);
+            body(indices[k]);
+        });
+    };
+    const auto always = [](size_t) { return true; };
 
     // ---- 2. sidecars and overrides ----
     std::vector<SidecarEntry> sidecars;
@@ -785,10 +908,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     std::vector<size_t> modelsToProbe;
     for (size_t i = 0; i < models.size(); ++i) {
         ModelEntry& m = models[i];
-        std::error_code ecFs;
-        const uintmax_t sz = std::filesystem::file_size(m.path, ecFs);
-        const auto lwt = std::filesystem::last_write_time(m.path, ecFs);
-        const int64_t mt = ecFs ? 0 : lwt.time_since_epoch().count();
+        const FileStat st = fileStatOf(m.path);
+        const uintmax_t sz = st.size;
+        const int64_t mt = st.mtime;
         bool hit = false;
         if (cacheValid) {
             auto it = probeCacheMap.find(m.rel);
@@ -843,7 +965,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         else if (progress) ++progress->filesVisited;
     }
 
-    std::for_each(std::execution::par, modelsToProbe.begin(), modelsToProbe.end(), [&](size_t idx) {
+    runProbes(modelsToProbe, [&](size_t idx) { return models[idx].path; }, always, [&](size_t idx) {
         if (cancelled()) return;
         ModelEntry& m = models[idx];
         std::string err;
@@ -881,10 +1003,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     std::vector<size_t> vmdsToProbe;
     for (size_t i = 0; i < vmdFiles.size(); ++i) {
         const std::string rel = RelKey(vmdFiles[i], root);
-        std::error_code ecFs;
-        const uintmax_t sz = std::filesystem::file_size(vmdFiles[i], ecFs);
-        const auto lwt = std::filesystem::last_write_time(vmdFiles[i], ecFs);
-        const int64_t mt = ecFs ? 0 : lwt.time_since_epoch().count();
+        const FileStat st = fileStatOf(vmdFiles[i]);
+        const uintmax_t sz = st.size;
+        const int64_t mt = st.mtime;
         bool hit = false;
         if (cacheValid) {
             auto it = probeCacheMap.find(rel);
@@ -916,7 +1037,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         if (!hit) vmdsToProbe.push_back(i);
         else if (progress) ++progress->filesVisited;
     }
-    std::for_each(std::execution::par, vmdsToProbe.begin(), vmdsToProbe.end(), [&](size_t i) {
+    runProbes(vmdsToProbe, [&](size_t i) { return vmdFiles[i]; }, always, [&](size_t i) {
         if (cancelled()) return;
         VmdProbe probe;
         if (ProbeVmd(vmdFiles[i], probe, &vmdErrors[i])) vmdProbes[i] = std::move(probe);
@@ -930,10 +1051,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     for (size_t i = 0; i < audioFiles.size(); ++i) {
         audios[i].path = audioFiles[i];
         const std::string rel = RelKey(audioFiles[i], root);
-        std::error_code ecFs;
-        const uintmax_t sz = std::filesystem::file_size(audioFiles[i], ecFs);
-        const auto lwt = std::filesystem::last_write_time(audioFiles[i], ecFs);
-        const int64_t mt = ecFs ? 0 : lwt.time_since_epoch().count();
+        const FileStat st = fileStatOf(audioFiles[i]);
+        const uintmax_t sz = st.size;
+        const int64_t mt = st.mtime;
         bool hit = false;
         if (cacheValid) {
             auto it = probeCacheMap.find(rel);
@@ -948,7 +1068,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         if (!hit) audiosToProbe.push_back(i);
         else if (progress) ++progress->filesVisited;
     }
-    std::for_each(std::execution::par, audiosToProbe.begin(), audiosToProbe.end(), [&](size_t i) {
+    // Only MP3 lengths scan the whole file; WAV / FLAC / OGG read their headers.
+    runProbes(audiosToProbe, [&](size_t i) { return audioFiles[i]; }, [&](size_t i) { return LowerExt(audioFiles[i]) == ".mp3"; },
+              [&](size_t i) {
         if (cancelled()) return;
         audios[i].sec = AudioDurationSec(audioFiles[i]);
         if (progress) ++progress->filesVisited;
@@ -961,10 +1083,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     for (size_t i = 0; i < videoFiles.size(); ++i) {
         videos[i].path = videoFiles[i];
         const std::string rel = RelKey(videoFiles[i], root);
-        std::error_code ecFs;
-        const uintmax_t sz = std::filesystem::file_size(videoFiles[i], ecFs);
-        const auto lwt = std::filesystem::last_write_time(videoFiles[i], ecFs);
-        const int64_t mt = ecFs ? 0 : lwt.time_since_epoch().count();
+        const FileStat st = fileStatOf(videoFiles[i]);
+        const uintmax_t sz = st.size;
+        const int64_t mt = st.mtime;
         bool hit = false;
         if (cacheValid) {
             auto it = probeCacheMap.find(rel);
@@ -986,9 +1107,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     if (!cancelled()) {
         nlohmann::json newFiles = nlohmann::json::object();
         for (const auto& m : models) {
-            std::error_code ecFs;
-            uintmax_t sz = std::filesystem::file_size(m.path, ecFs);
-            int64_t mt = ecFs ? 0 : std::filesystem::last_write_time(m.path, ecFs).time_since_epoch().count();
+            const FileStat st = fileStatOf(m.path);
+            uintmax_t sz = st.size;
+            int64_t mt = st.mtime;
             nlohmann::json ent;
             ent["size"] = sz;
             ent["mtime"] = mt;
@@ -1031,9 +1152,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         }
         for (size_t i = 0; i < vmdFiles.size(); ++i) {
             const std::string rel = RelKey(vmdFiles[i], root);
-            std::error_code ecFs;
-            uintmax_t sz = std::filesystem::file_size(vmdFiles[i], ecFs);
-            int64_t mt = ecFs ? 0 : std::filesystem::last_write_time(vmdFiles[i], ecFs).time_since_epoch().count();
+            const FileStat st = fileStatOf(vmdFiles[i]);
+            uintmax_t sz = st.size;
+            int64_t mt = st.mtime;
             nlohmann::json ent;
             ent["size"] = sz;
             ent["mtime"] = mt;
@@ -1063,9 +1184,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         }
         for (size_t i = 0; i < audioFiles.size(); ++i) {
             const std::string rel = RelKey(audioFiles[i], root);
-            std::error_code ecFs;
-            uintmax_t sz = std::filesystem::file_size(audioFiles[i], ecFs);
-            int64_t mt = ecFs ? 0 : std::filesystem::last_write_time(audioFiles[i], ecFs).time_since_epoch().count();
+            const FileStat st = fileStatOf(audioFiles[i]);
+            uintmax_t sz = st.size;
+            int64_t mt = st.mtime;
             nlohmann::json ent;
             ent["size"] = sz;
             ent["mtime"] = mt;
@@ -1074,9 +1195,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         }
         for (size_t i = 0; i < videoFiles.size(); ++i) {
             const std::string rel = RelKey(videoFiles[i], root);
-            std::error_code ecFs;
-            uintmax_t sz = std::filesystem::file_size(videoFiles[i], ecFs);
-            int64_t mt = ecFs ? 0 : std::filesystem::last_write_time(videoFiles[i], ecFs).time_since_epoch().count();
+            const FileStat st = fileStatOf(videoFiles[i]);
+            uintmax_t sz = st.size;
+            int64_t mt = st.mtime;
             nlohmann::json ent;
             ent["size"] = sz;
             ent["mtime"] = mt;
@@ -1113,10 +1234,8 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             for (size_t j = i + 1; j < models.size(); ++j) {
                 if (dropped[j] || models[j].format != ModelFormat::Pmx) continue;
                 if (models[i].path.parent_path() != models[j].path.parent_path()) continue;
-                std::error_code ecA, ecB;
-                const uintmax_t sizeA = std::filesystem::file_size(models[i].path, ecA);
-                const uintmax_t sizeB = std::filesystem::file_size(models[j].path, ecB);
-                if (!ecA && !ecB && sizeA == sizeB && models[i].pmx->name == models[j].pmx->name &&
+                const FileStat stA = fileStatOf(models[i].path), stB = fileStatOf(models[j].path);
+                if (stA.ok && stB.ok && stA.size == stB.size && models[i].pmx->name == models[j].pmx->name &&
                     models[i].vertexCount == models[j].vertexCount)
                     dropped[j] = true;  // sorted by rel: keep the smallest
             }
@@ -1589,13 +1708,11 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                 std::vector<PartGroup> partGroups;
                 for (const auto* d : c) {
                     std::string name = DerivePartLabel(FileStemUtf8(*d->path), genericDirName(dir));
-                    std::error_code ecA;
-                    uintmax_t szA = std::filesystem::file_size(*d->path, ecA);
+                    const FileStat stA = fileStatOf(*d->path);
                     bool matched = false;
                     for (auto& pg : partGroups) {
-                        std::error_code ecB;
-                        uintmax_t szB = std::filesystem::file_size(*pg.kept->path, ecB);
-                        if (!ecA && !ecB && szA == szB &&
+                        const FileStat stB = fileStatOf(*pg.kept->path);
+                        if (stA.ok && stB.ok && stA.size == stB.size &&
                             d->probe->boneKeyCount == pg.kept->probe->boneKeyCount &&
                             d->probe->morphKeyCount == pg.kept->probe->morphKeyCount &&
                             d->probe->cameraKeyCount == pg.kept->probe->cameraKeyCount &&
@@ -1844,9 +1961,8 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                     for (auto& [p, len] : own) {
                         const bool match = NamesMatch(drafts[0].tokens, NameTokens(FileStemUtf8(p))) ||
                                            DurationsMatch(drafts[0].dance->sec, len, 15.0, 0.15);
-                        std::error_code ecSize;
-                        uintmax_t size = std::filesystem::file_size(p, ecSize);
-                        if (ecSize) size = 0;
+                        const FileStat st = fileStatOf(p);
+                        const uintmax_t size = st.ok ? st.size : 0;
                         const std::tuple<int, int, uintmax_t> key{match ? 0 : 1, rank(p), ~size};
                         if (!best || key < bestKey) best = &p, bestKey = key;
                     }
@@ -1978,10 +2094,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         for (size_t i = 0; i < underEffects.size(); ++i) {
             const std::filesystem::path& p = underEffects[i];
             const std::string rel = RelKey(p, root);
-            std::error_code ecFs;
-            const uintmax_t sz = std::filesystem::file_size(p, ecFs);
-            const auto lwt = std::filesystem::last_write_time(p, ecFs);
-            const int64_t mt = ecFs ? 0 : lwt.time_since_epoch().count();
+            const FileStat st = fileStatOf(p);
+            const uintmax_t sz = st.size;
+            const int64_t mt = st.mtime;
             bool hit = false;
             if (fxCacheValid) {
                 auto it = fxCacheMap.find(rel);
@@ -2017,7 +2132,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             else ++fxCached;
         }
 
-        std::for_each(std::execution::par, fxToParse.begin(), fxToParse.end(), [&](size_t i) {
+        runProbes(fxToParse, [&](size_t i) { return underEffects[i]; }, always, [&](size_t i) {
             if (cancelled()) return;
             MmeEffectDesc d = LoadMmeEffect(underEffects[i], MmeLoadOptions{});
             candidates[i].kind = d.kind();
@@ -2053,9 +2168,9 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             for (size_t i = 0; i < underEffects.size(); ++i) {
                 const std::filesystem::path& p = underEffects[i];
                 const std::string rel = RelKey(p, root);
-                std::error_code ecFs;
-                uintmax_t sz = std::filesystem::file_size(p, ecFs);
-                int64_t mt = ecFs ? 0 : std::filesystem::last_write_time(p, ecFs).time_since_epoch().count();
+                const FileStat st = fileStatOf(p);
+                uintmax_t sz = st.size;
+                int64_t mt = st.mtime;
                 nlohmann::json ent;
                 ent["size"] = sz;
                 ent["mtime"] = mt;

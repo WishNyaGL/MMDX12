@@ -149,6 +149,10 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     sidecars > folder names (characters/models, stages, songs/motions, several languages) > content. Several songs in one
     folder are split only when it also holds several audio files or cameras; audio/cameras are matched by length + file name.
     New installs get `assets/library_template` (characters/ stages/ songs/) copied into an empty library.
+    Scan I/O: size / mtime come from the walk's `directory_entry` (no per-file stat calls). On a seek-penalty volume
+    (`core/StorageInfo` `PathIncursSeekPenalty`, HDD) a `SequentialPrefetch` thread reads the to-probe files in path
+    order while the probes still parse in parallel behind it; SSDs / unknown keep the plain parallel probes.
+    `MMDX12_SCAN_IO=seq|par` forces a mode; the log's `library scan: storage ...` line says which ran.
   - `RestPose` (asset/RestPose.h): `LoadModelFile` turns a native PMX/PMD *character* whose upper arms rest above 20 deg below horizontal
     (T-pose: the Project Sekai rips; every other library model measures 28..43 deg) down to MMD's 38 deg A-pose, because VMD rotations
     are relative to the rest pose. Rotates the 腕 subtree (+ IK bones chasing it) about the shoulder: bone positions, vertices (linear

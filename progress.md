@@ -1955,3 +1955,24 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - Not verified: Start from the dialog with a custom range (code-read only), MCP string `start` / `end`.
 - Committed together with earlier pending work in the tree (VMD / PMM / studio / `ScreenVideo` changes from other sessions);
   those were not re-tested here.
+
+## 2026-10-17 - Issue #4 revert, HDD library scan
+- Issue #4 (ZZZ clothes stiff; claimed the PMX rigid-body mask is a "non-collision" mask): an earlier uncommitted
+  change inverted the mask in `Physics.cpp` and broke physics everywhere. Reverted. The stored value is the
+  collide-with mask (bit set = collide, like PMD; saba / MMDAgent / mmd_tools read it as is): over the 142 library
+  PMX files 88% of bodies clear their own group's bit (chains don't self-collide), which the inversion turned into
+  self-colliding chains. `PmxModel.h` comment corrected (it said "non-collision"). The ZZZ stiffness is still open
+  (needs the model; joints / solver suspected, not checked).
+- HDD library scan: two costs in `ScanLibrary` - 2-4 path stat calls per file, and `std::execution::par` probes
+  reading many whole files at once (seek thrash). Now: size / mtime from the walk's `directory_entry` (same values,
+  caches stay valid); `core/StorageInfo` `PathIncursSeekPenalty` (IOCTL seek-penalty query, failure = false); on such
+  a volume `SequentialPrefetch` reads the to-probe files ahead in path order on one thread while the probes still
+  parse in parallel behind it (MP3 read ahead, WAV/FLAC/OGG header-only probes not). `MMDX12_SCAN_IO=seq|par`; log line
+  `library scan: storage ...`.
+- Implemented by an opencode worker (deepseek-v4.1-flash, low) from a contract spec; its plain sequential mode was 4x
+  slower when the files were in the OS cache (3.9 s vs 1.0 s), so Claude replaced it with the prefetch design and
+  restored the size-error guards (dedup / part grouping / audio size).
+- Verified (`asset_probe`, build_scan): SSD (C: NVMe copy) cold-probe 1.07-1.12 -> 1.02-1.04 s, cached 0.155 -> 0.084 s;
+  HDD (E:) OS-warm cold-probe 0.96 -> 1.04-1.08 s, cached 0.083 -> 0.078 s; results identical to HEAD in par and seq
+  modes. A true cold HDD scan was not measured (purging the standby list needs elevation); a cold-read test on unread
+  game files gave path-ordered 125-132 MB/s vs parallel 84-90 MB/s (~1.45x). The app itself was not launched.
