@@ -2063,3 +2063,27 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   lists; MSVC needed 27 GB for ONE translation unit including it (C1060 when several compiled in parallel). Now one JSON raw
   string per tool (`kMcpToolSchemas`, parsed once): 231 MB per TU, the bridge's tools/list is byte-identical. Rule added to
   CLAUDE.md.
+
+## 2026-10-18 (3) - Skill validation runs (V1-V3), release 2.2.0
+- Validation of the three skills by other agents, one app window at a time (build_b1, MCP), all in cinema scope 2.39:1
+  (`studioaspect 2.39:1`); projects built over the pipe by a scratch setup script, before / after videos rendered with the
+  raster offline renderer at 1280x536, 30 fps, 6 Mbps (`--offline-bitrate 6`; the first renders used the saved 20-40 Mbps
+  settings: never ship / hand over ~1 GB validation videos). Deliverables in `captures/skill_validation/` (git-ignored).
+  - V1 モニタリング (Best Friend Remix), one performer, camera + lighting: Antigravity (Gemini 3.8 flash high). Strong
+    treatment; issues seen: yaw "wiper" alternation in the storyboard, a chest-only frame near 1900, a storyboard gap
+    4080-4229, and the lighting SKILL.md names a reference `rig_patterns.md` that does not exist. Agent asks: headroom for
+    tall ears, truck + follow combos, yaw unwrap on spins, a rim-light section.
+  - V2 ライアーダンサー, five performers: singer-led close-ups via `studio_singing` worked (Emu 630, KAITO 1400); the wiper
+    again, a member cut at the frame edge in the drop wide, an off-corner close-up with the head cut.
+  - V3 オーバーライド (Kasane Teto, stiff motion), motion skill: opencode (deepseek-v4.1-flash, low). Diagnosis (baseline
+    motion_quality 47.9; worst ranges near 3180 / 3210 / 1620), a per-range fix plan (ease -> overlap -> spring -> breathe,
+    sync-stop frames kept sharp) and several before / after contact-sheet passes; the run was stopped before it finished
+    (work in progress saved as `override_teto_humanized_wip.mmdxproj`, no V3 videos rendered).
+  - The user's first-round review of V1-V3 is still open; skill fixes (wiper, rig_patterns.md, headroom, yaw unwrap) wait
+    for it. The installed copies in `~/.gemini/config/skills` and `~/.agents/skills` must be re-synced after skill edits.
+- Antigravity and opencode reach the app through an `mmdx12` MCP entry in their own configs (`--timeout 180000`); an older
+  installed skill with the same name shadows the repo one (the old Gemini camera skill was moved to a backup folder).
+- Release 2.2.0 (minor: MCP studio AI tools + agent skills in the zip, PT video accumulation). Cover:
+  `docs/media/studio-ai-2.2.0.jpg` (user's screenshot of an agent directing the studio). Notes `dist/notes_2.2.0.md`
+  (4 languages). The live 2.1.3 delta manifest points its objects at `/updates/objects/objects/` (404): the 2.2.0
+  manifest is built with `--base-url https://mmdx.codingbot.kr/updates`.
