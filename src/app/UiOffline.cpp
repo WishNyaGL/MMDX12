@@ -587,7 +587,7 @@ void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
     // a project's stack is what offline renders from the studio use.
     if (offline_.studio && studio_ && !options_.mmeSet) jd.mmeEffects = StudioMmeEntries();
     if (video) {
-        jd.effectReset = (offline_.renderedFrame == 0) || jumpCut || view.cameraCut;
+        jd.effectReset = (offline_.frame == 0) || jumpCut || view.cameraCut;   // GI images count in frame (renderedFrame is the real-time renderers')
     }
     // the irradiance cache prepass is the render's GI: every image, video frames included
     if (!renderer_.BeginOffline(cmd, view, jd)) {
