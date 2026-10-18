@@ -60,6 +60,10 @@ struct AppSettings {
     bool volumetric = false;
     float volumetricDensity = 1.0f;  // 0.25 .. 4.0
     bool bloomConvolution = false;
+    float bloomIntensity = 0.35f;    // 0 .. 1.5
+    float bloomThreshold = 1.1f;     // 0.2 .. 4
+    BloomLook bloomLook;
+    int bloomKernelPreset = 0;       // 0..3 = BloomKernelPreset(i), 4 = custom
     std::string colorLut;            // ColorLutEntry::id, empty = none
     float lutIntensity = 1.0f;       // 0 .. 1
     VideoRenderConfig video;         // video render (lobby dialog)

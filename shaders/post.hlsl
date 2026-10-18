@@ -1,13 +1,31 @@
 // Final grade: bloom, exposure, contrast/saturation, Khronos PBR Neutral tonemap (keeps
 // MMD albedo colours intact below ~0.8), vignette, sRGB encode with dithering.
-//   t0 HDR, t1 bloom (may be null), t2 colour LUT strip (may be null).
-//   gP0 = (exposure, bloomIntensity, contrast, saturation), gP1 = (vignette, transparentBg, aspect, bloomOn)
-//   gP2.x = LUT intensity (0 = off)
+//   t0 HDR, t1 bloom (may be null; rgb, a = luminance x linear depth), t2 colour LUT strip (may be null), t3 depth.
+//   gP0 = (exposure, bloomIntensity x bloom normalisation, contrast, saturation), gP1 = (vignette, transparentBg, aspect, bloomOn)
+//   gP2 = (LUT intensity (0 = off), bloom depth mask 0..1, bloom blend (0 additive, 1 energy-conserving), threshold)
+//   gP3.x = bloom intensity (the energy-conserving share)
 #include "fullscreen.hlsli"
+#include "bloom_common.hlsli"
 
 Texture2D<float4> gHdr : register(t0);
 Texture2D<float4> gBloomTex : register(t1);
 Texture2D<float4> gLut : register(t2);
+Texture2D<float> gDepth : register(t3);
+
+// Bloom at this pixel. The depth mask fades the light of sources behind the pixel's surface (the bloom's depth is
+// the light-weighted depth of its sources), so far stage lights do not wash over a nearer character.
+float3 BloomAt(FsOut i) {
+    float4 b = gBloomTex.SampleLevel(gLinear, i.uv, 0);
+    float3 c = max(b.rgb, 0.0);
+    if (gP2.y > 0.0) {
+        float lum = Luminance(c);
+        float zb = b.a / max(lum, 1e-6);
+        float zp = LinearZ(gDepth.SampleLevel(gPoint, i.uv, 0));
+        float behind = max(zb - zp, 0.0) / max(zp, 1e-3);
+        if (lum > 1e-6) c *= lerp(1.0, exp2(-behind * 6.0), gP2.y);
+    }
+    return c * gP0.y;
+}
 
 float3 PbrNeutral(float3 color) {
     const float startCompression = 0.8 - 0.04;
@@ -40,7 +58,13 @@ float3 SampleLut(float3 c) {
 float4 PSPost(FsOut i) : SV_Target {
     float4 src = gHdr.SampleLevel(gPoint, i.uv, 0);
     float3 c = max(src.rgb, 0.0);
-    if (gP1.w > 0.5) c += gBloomTex.SampleLevel(gLinear, i.uv, 0).rgb * gP0.y;
+    if (gP1.w > 0.5) {
+        float3 b = BloomAt(i);
+        // energy-conserving: the scattered share of the bright light leaves the pixel and the bloom brings it back
+        // spread out; additive: the bloom is extra light
+        if (gP2.z > 0.5) c += b - c * (BloomContribution(c, gP2.w) * saturate(gP3.x));
+        else c += b;
+    }
     c *= gP0.x;
     // contrast around middle grey in log space, then saturation
     float3 lc = log2(max(c, 1e-5) / 0.18);

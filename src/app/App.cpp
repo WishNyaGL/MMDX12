@@ -196,6 +196,26 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.volumetricDensity = (float)_wtof(next().c_str());
         } else if (arg == L"--bloom-conv") {
             opt.bloomConv = _wtoi(next().c_str()) != 0 ? 1 : 0;
+        } else if (arg == L"--bloom-kernel") {
+            const std::string v = ToLowerAscii(WideToUtf8(next()));
+            if (v == "cinema") opt.bloomKernel = 0;
+            else if (v == "starburst") opt.bloomKernel = 1;
+            else if (v == "glow") opt.bloomKernel = 2;
+            else if (v == "anamorphic") opt.bloomKernel = 3;
+            else LOG_WARN("unknown --bloom-kernel value: %s (want cinema|starburst|glow|anamorphic)", v.c_str());
+        } else if (arg == L"--bloom-blend") {
+            const std::string v = ToLowerAscii(WideToUtf8(next()));
+            if (v == "add") opt.bloomBlend = 0;
+            else if (v == "energy") opt.bloomBlend = 1;
+            else LOG_WARN("unknown --bloom-blend value: %s (want add|energy)", v.c_str());
+        } else if (arg == L"--bloom-depth-mask") {
+            opt.bloomDepthMask = (float)_wtof(next().c_str());
+        } else if (arg == L"--bloom-intensity") {
+            opt.bloomIntensity = (float)_wtof(next().c_str());
+        } else if (arg == L"--bloom-threshold") {
+            opt.bloomThreshold = (float)_wtof(next().c_str());
+        } else if (arg == L"--bloom-radius") {
+            opt.bloomRadius = (float)_wtof(next().c_str());
         } else if (arg == L"--auto-luminous") {
             opt.autoLuminous = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--lut") {
@@ -456,6 +476,15 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.volumetric >= 0) settings_.volumetric = options_.volumetric != 0;
     if (options_.volumetricDensity > 0.0f) settings_.volumetricDensity = std::clamp(options_.volumetricDensity, 0.25f, 4.0f);
     if (options_.bloomConv >= 0) settings_.bloomConvolution = options_.bloomConv != 0;
+    if (options_.bloomKernel >= 0) {
+        settings_.bloomKernelPreset = options_.bloomKernel;
+        settings_.bloomLook.kernel = BloomKernelPreset(options_.bloomKernel);
+    }
+    if (options_.bloomBlend >= 0) settings_.bloomLook.blend = options_.bloomBlend;
+    if (options_.bloomDepthMask >= 0.0f) settings_.bloomLook.depthMask = std::clamp(options_.bloomDepthMask, 0.0f, 1.0f);
+    if (options_.bloomIntensity >= 0.0f) settings_.bloomIntensity = std::clamp(options_.bloomIntensity, 0.0f, 1.5f);
+    if (options_.bloomThreshold >= 0.0f) settings_.bloomThreshold = std::clamp(options_.bloomThreshold, 0.2f, 4.0f);
+    if (options_.bloomRadius >= 0.0f) settings_.bloomLook.radius = std::clamp(options_.bloomRadius, 0.0f, 1.0f);
     if (options_.autoLuminous >= 0) settings_.autoLuminous = options_.autoLuminous != 0;
     if (options_.motionLighting >= 0) settings_.motionLighting = options_.motionLighting != 0;
     if (options_.effectSet) settings_.effectStack = options_.effectStack;   // --effect, this run only
@@ -635,6 +664,15 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.volumetric >= 0) settings_.volumetric = persisted.volumetric;
     if (options_.volumetricDensity > 0.0f) settings_.volumetricDensity = persisted.volumetricDensity;
     if (options_.bloomConv >= 0) settings_.bloomConvolution = persisted.bloomConvolution;
+    if (options_.bloomKernel >= 0) {
+        settings_.bloomKernelPreset = persisted.bloomKernelPreset;
+        settings_.bloomLook.kernel = persisted.bloomLook.kernel;
+    }
+    if (options_.bloomBlend >= 0) settings_.bloomLook.blend = persisted.bloomLook.blend;
+    if (options_.bloomDepthMask >= 0.0f) settings_.bloomLook.depthMask = persisted.bloomLook.depthMask;
+    if (options_.bloomIntensity >= 0.0f) settings_.bloomIntensity = persisted.bloomIntensity;
+    if (options_.bloomThreshold >= 0.0f) settings_.bloomThreshold = persisted.bloomThreshold;
+    if (options_.bloomRadius >= 0.0f) settings_.bloomLook.radius = persisted.bloomLook.radius;
     if (options_.autoLuminous >= 0) settings_.autoLuminous = persisted.autoLuminous;
     if (options_.motionLighting >= 0) settings_.motionLighting = persisted.motionLighting;
     if (!options_.lut.empty()) settings_.colorLut = persisted.colorLut;
@@ -1544,6 +1582,9 @@ void App::ApplyRenderSettings() {
     rs.volumetric = settings_.volumetric;
     rs.volumetricDensity = settings_.volumetricDensity;
     rs.bloomConvolution = settings_.bloomConvolution;
+    rs.bloomIntensity = settings_.bloomIntensity;
+    rs.bloomThreshold = settings_.bloomThreshold;
+    rs.bloomLook = settings_.bloomLook;
     rs.lutIntensity = settings_.lutIntensity;
     rs.packEffects = settings_.effectStack;   // effect packs (the shader screens edit it)
     // M6b: the MME post stack. --mme overrides for one run; while the studio is open the project's own stack

@@ -28,6 +28,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include "render/BloomFft.h"
 #include "render/RenderPass.h"
 #include "render/PtPackVariants.h"
 #include "render/PackTextures.h"
@@ -257,7 +258,6 @@ private:
 class BloomPass final : public IRenderPass {
 public:
     static constexpr uint32_t kMips = 6;
-    static constexpr uint32_t kFftSize = 512;   // convolution grid (power of two; bloom_fft.hlsl FFT_N)
     const char* Name() const override { return "Bloom"; }
     bool CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) override;
     void OnResize(Dx12Context& ctx, RenderTargets& targets) override;
@@ -265,16 +265,12 @@ public:
     void Execute(PassContext& pc) override;
 
 private:
-    void ExecuteConvolution(PassContext& pc);   // settings.bloomConvolution && fft pipelines exist
-
     FullscreenPipeline prefilter_, down_, up_;
-    Texture mips_[kMips];
-    // FFT convolution (bloom_fft.hlsl, ComputePipeline; all null when compute is unavailable)
-    ComputePipeline fftInput_, fftRows_, fftCols_, fftKernel_;
-    FullscreenPipeline fftOutput_;              // writes mips_[0] from the convolved grid
-    Texture gridA_, gridB_;                     // kFftSize^2 RGBA32F (R+iG, B+i0), UAV + SRV
-    Texture kernelSpec_;                        // kFftSize^2 RGBA32F kernel spectrum (rg used), UAV + SRV
-    bool kernelReady_ = false;
+    Texture mips_[kMips];   // RGBA16F: rgb bloom, a = luminance x linear depth (the depth mask)
+    // FFT convolution bloom (null without the compute path). Its grids are created on first use.
+    FftBloom fft_;
+    std::filesystem::path shaderDir_;
+    bool fftTried_ = false;
 };
 
 // Half-res ray-marched participating medium (height fog, volumetric_common.hlsli) lit by the sun

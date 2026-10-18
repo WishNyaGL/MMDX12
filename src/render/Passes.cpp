@@ -2657,12 +2657,20 @@ void PostPass::Execute(PassContext& pc) {
     RenderTargets& t = pc.targets;
     const RenderSettings& s = pc.settings;
     const bool lutOn = t.lut && !pc.offscreen && s.lutIntensity > 0.0f;
-    const float c[12] = {s.exposure, s.bloomIntensity / (float)BloomPass::kMips, s.contrast, s.saturation,
+    const BloomLook& bl = s.bloomLook;
+    const bool energy = bl.blend == 1;
+    const float bloomGain = (energy ? std::min(s.bloomIntensity, 1.0f) : s.bloomIntensity) * t.bloomScale;
+    const bool depthMask = t.bloom && t.depth && bl.depthMask > 0.0f;
+    const float c[16] = {s.exposure, bloomGain, s.contrast, s.saturation,
                          s.vignette, s.transparentBackground ? 1.0f : 0.0f,
                          (float)t.ldr.width / (float)t.ldr.height, t.bloom ? 1.0f : 0.0f,
-                         lutOn ? s.lutIntensity : 0.0f, 0, 0, 0};
+                         lutOn ? s.lutIntensity : 0.0f, depthMask ? bl.depthMask : 0.0f, energy ? 1.0f : 0.0f,
+                         s.bloomThreshold, std::clamp(s.bloomIntensity, 0.0f, 1.0f), 0, 0, 0};
     t.ldr.Transition(pc.cmd, kRt);
-    pipe_.Draw(pc, {&t.ldr}, pc.transient.SrvTable(pc.ctx, {t.hdrFinal ? t.hdrFinal : &t.lit, t.bloom, lutOn ? t.lut : nullptr}), c, 12);
+    pipe_.Draw(pc, {&t.ldr},
+               pc.transient.SrvTable(pc.ctx, {t.hdrFinal ? t.hdrFinal : &t.lit, t.bloom, lutOn ? t.lut : nullptr,
+                                              depthMask ? &t.depth : nullptr}),
+               c, 16);
     t.ldr.Transition(pc.cmd, kSrv);
 }
 

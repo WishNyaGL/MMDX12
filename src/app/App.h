@@ -101,6 +101,9 @@ namespace mmdx {
 //   --dlss-rr <0|1>        DLSS Ray Reconstruction (PathTraced + DLSS only) for this run
 //   --no-physics           disable rigid-body physics for this run
 //   --dof <0|1>  --volumetric <0|1>  --bloom-conv <0|1>   post effects for this run
+//   --bloom-kernel <cinema|starburst|glow|anamorphic>  convolution bloom kernel preset for this run
+//   --bloom-blend <add|energy>  --bloom-depth-mask <0..1>  --bloom-intensity <v>  --bloom-threshold <v>
+//   --bloom-radius <0..1>      bloom look for this run (not saved)
 //   --auto-luminous <0|1>  そぼろ AutoLuminous glow convention for this run
 //   --volumetric-density <0.25..4>  volumetric medium density for this run
 //   --lut <substr|none>    colour LUT for this run (first LUT whose id or name contains substr)
@@ -200,6 +203,12 @@ struct AppOptions {
     int stageMme = -1;                       // --stage-mme <0|1>: force None(0)/Auto(1) for stages only, this run
     bool stageMmeSet = false;
     int dof = -1, volumetric = -1, bloomConv = -1;  // --dof/--volumetric/--bloom-conv <0|1>: override for this run
+    int bloomKernel = -1;      // --bloom-kernel <preset 0..3>: override for this run (-1 = settings)
+    int bloomBlend = -1;       // --bloom-blend <add|energy>: override for this run (-1 = settings)
+    float bloomDepthMask = -1.0f;  // --bloom-depth-mask (0..1; < 0 = settings)
+    float bloomIntensity = -1.0f;  // --bloom-intensity (0..1.5; < 0 = settings)
+    float bloomThreshold = -1.0f;  // --bloom-threshold (0.2..4; < 0 = settings)
+    float bloomRadius = -1.0f;     // --bloom-radius (0..1; < 0 = settings)
     int autoLuminous = -1;     // --auto-luminous <0|1>: override for this run (-1 = settings)
     bool classic = false;      // --classic: vanilla-MMD look for this run (SSAO/SSR/bloom/volumetric/DoF/LUT/effects/soft shadows off)
     int motionLighting = -1;   // --motion-lighting <0|1>: camera VMD light/self-shadow tracks in play mode, this run
@@ -406,6 +415,7 @@ private:
     // The play-mode side panel (UiPlayPanel.cpp): the sliding window + tabs, and one method per tab body.
     void DrawPlayFxPanel();
     void DrawScreenEffectControls(float width);   // shared by the panel's 효과 tab and the lobby 세부 tab
+    void DrawBloomControls(float width, bool* changed);  // bloom detail rows shared by the play / studio effect panels
     void DrawPlayShaderTab(float width);          // the old ##shader popup body
     void DrawPlayMmeTab(float width);             // the old play MME panel body (draft logic unchanged)
     void DrawPlayMmeFooter(float width);          // 되돌리기 / 적용

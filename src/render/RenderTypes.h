@@ -19,6 +19,44 @@ struct MmeControllerPanel {
     bool visible = true;
 };
 
+// Convolution bloom kernel (bloom_fft.hlsl CSKernel): a bright core, a power-law glow and diffraction spikes, built
+// per colour channel (dispersion scales the channels apart) and normalised per channel, so every shape keeps the
+// scattered energy. The kernel spectrum is rebuilt only when this changes.
+struct BloomKernel {
+    int rays = 6;                 // diffraction spikes, even, 0..16 (two rays per line through the centre)
+    float rotation = 15.0f;       // degrees, 0..180
+    float spikeLength = 0.35f;    // 0..1, ray length (1 ~ half the screen)
+    float spikeIntensity = 0.3f;  // 0..1, energy share of the rays
+    float glowRadius = 0.35f;     // 0..1, reach of the glow
+    float glowIntensity = 0.5f;   // 0..1, energy share of the glow (the rest stays in the core)
+    float dispersion = 0.2f;      // 0..1, chromatic spread (red reaches farther than blue)
+    float anamorphic = 0.0f;      // 0..1, horizontal stretch of the glow (anamorphic lens look)
+    bool operator==(const BloomKernel&) const = default;
+};
+
+// Kernel presets the UI starts from: 0 cinema (core + glow + short thin spikes), 1 starburst (long rays),
+// 2 soft glow (no rays), 3 anamorphic (horizontal streak). Out of range = cinema.
+inline constexpr int kBloomKernelPresets = 4;
+inline BloomKernel BloomKernelPreset(int preset) {
+    BloomKernel k;
+    switch (preset) {
+    case 1: k = {6, 15.0f, 0.8f, 0.55f, 0.3f, 0.35f, 0.15f, 0.0f}; break;
+    case 2: k = {0, 0.0f, 0.0f, 0.0f, 0.55f, 0.7f, 0.25f, 0.0f}; break;
+    case 3: k = {2, 0.0f, 0.9f, 0.5f, 0.3f, 0.45f, 0.35f, 0.6f}; break;
+    default: break;
+    }
+    return k;
+}
+
+// Bloom look shared by the mip chain and the convolution bloom.
+struct BloomLook {
+    float radius = 1.0f;     // 0..1, weight of the coarser mip levels (1 = flat, today's wide glow; mip chain only)
+    int blend = 0;           // 0 additive, 1 energy-conserving (intensity = share of the bright energy that scatters)
+    float depthMask = 0.0f;  // 0..1, keeps the bloom of farther lights off nearer surfaces
+    BloomKernel kernel;      // convolution bloom only
+    bool operator==(const BloomLook&) const = default;
+};
+
 // One MME post effect (--mme): the effect file plus the controller accessory's panel values
 // (CONTROLOBJECT `(self)` / `Si`). `si` is the panel value; CONTROLOBJECT `Si` returns si*10.
 struct MmeEffectEntry {
@@ -117,6 +155,7 @@ struct RenderSettings {
     float bloomIntensity = 0.35f;
     float bloomThreshold = 1.1f;    // linear HDR luminance where bloom starts
     bool bloomConvolution = false;  // FFT convolution bloom with a starburst kernel (falls back to the mip chain)
+    BloomLook bloomLook;            // radius / blend / depth mask / convolution kernel
     bool dof = false;               // depth of field (bokeh gather), focus from FrameView::focusDistance
     float dofAperture = 1.0f;       // 0..3, scales the circle of confusion (1 = f/2-ish look)
     float dofMaxRadius = 14.0f;     // max CoC radius in output pixels at 1080p (scaled with output height)

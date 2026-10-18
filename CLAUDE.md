@@ -205,6 +205,13 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     offline GI (emitters light their surroundings there). Switch `RenderSettings::autoLuminous` (ini `autoLuminous=`,
     `--auto-luminous 0|1`, lobby + studio effects toggles) -> `SceneConstants::autoLumParams.x`; off = identical frame.
     Translucent pixels (alpha < 0.98) write nt.z = -1 (no AO / no SSR): SSAO no longer greys sheer curtains.
+    Bloom look (`RenderSettings::bloomLook`, `BloomLook` in RenderTypes.h; ini `bloom*=`, `--bloom-kernel/-blend/-depth-mask/
+    -intensity/-threshold/-radius`, MCP `set_render_settings bloom_*`, UI `App::DrawBloomControls`): mip chain levels
+    weighted falloff^j (radius) and normalised (`RenderTargets::bloomScale`); bloom alpha = luminance x linear depth through
+    every level, so post.hlsl's depth mask knows the sources' depth; energy-conserving blend subtracts the scattered share
+    (`bloom_common.hlsli`) before adding the bloom. Convolution bloom = `render/BloomFft.*` (shared with the offline
+    renderer): procedural per-channel kernel (core + Moffat glow + power-law spikes, dispersion = channel scale),
+    (R,G) and (B,A) as two FFT runs, each channel normalised by its own sum, spectrum rebuilt only when the kernel changes.
     Colour LUTs (`ColorLut.h`) are 32³ strips uploaded with `Renderer::SetColorLut`; PostPass applies them after the sRGB encode.
   - `GpuModel` keeps a 3-frame ring of bone/morph buffers so the previous pose (motion vectors) stays valid.
   - Per-model GPU caches key by `GpuModel::Uid()` (process-unique), never the pointer: a freed model's address is

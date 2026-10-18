@@ -2087,3 +2087,31 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   `docs/media/studio-ai-2.2.0.jpg` (user's screenshot of an agent directing the studio). Notes `dist/notes_2.2.0.md`
   (4 languages). The live 2.1.3 delta manifest points its objects at `/updates/objects/objects/` (404): the 2.2.0
   manifest is built with `--base-url https://mmdx.codingbot.kr/updates`.
+
+## 2026-10-19 - DLSS RR / Frame Generation, pipelined video renders, adjustable bloom, glow_rim in the gallery
+- DLSS 310.9.16 on raw NGX (earlier session, committed now): SR model hint (auto / CNN E / transformer K / transformer 2nd
+  gen M, L at Ultra Performance), Ray Reconstruction on RT / PT (guides from the tracer or `ScenePass::DrawGuides`, albedo
+  guides blended by coverage after the "panda eyes" bug), Frame Generation 2x-4x in play scenes (`DlssFrameGen`,
+  `Dx12Context::EndFrameFrameGen`). Thumbnails now render with default RenderSettings.
+- Video renders (earlier session, committed now): 3-slot final-image readback ring + `AsyncVideoSink` worker encoder,
+  exact-frame preview every 5th frame.
+- Bloom made adjustable (the user wanted the Unreal convolution look: star glints into a diffuse glow; ours threw six
+  very long rays and a screen-wide coloured haze because ~89 % of the kernel energy sat in the halo and rays):
+  - `BloomLook` (RenderTypes.h): mip-chain radius (level weights falloff^j, normalised by `RenderTargets::bloomScale`),
+    blend additive / energy-conserving (post.hlsl removes the scattered share of the bright light, `bloom_common.hlsli`),
+    depth mask (bloom alpha = luminance x linear depth through every level, so post knows the sources' depth).
+  - Convolution: `render/BloomFft.*` shared by BloomPass and the offline renderer; procedural kernel per channel
+    (core Gaussian + Moffat glow + power-law diffraction spikes, each with unit integral, dispersion = channel scale),
+    (R,G) and (B,A) as two FFT runs so every channel has its own kernel, normalised by its own sum; spectrum rebuilt
+    only when `BloomKernel` changes; grids created on first use. Presets cinema (new default) / starburst (old look) /
+    glow / anamorphic + 8 sliders. Checked with an injected point light: GPU kernels match a numpy simulation.
+  - App wiring (settings / ini, CLI `--bloom-*`, MCP `bloom_*`, `App::DrawBloomControls` in the play panel, lobby
+    detail and studio effects tab, 3 languages) delegated to opencode (deepseek-v4.1-flash); reviewed, no fixes needed.
+  - Default mip bloom is unchanged (additive, radius 1, no depth mask); the convolution bloom's default look changed.
+- Temporary build dirs (build_b1 .. build_wc) deleted; the Antigravity / opencode MCP configs now point at
+  `build\bin\mmdx12_mcp.exe` (backups `*.bak-build_b1`). The running bridges keep that exe locked (LNK1168): rebuild
+  `build` once the agent sessions are closed.
+- Gallery: `glow_rim` 1.0.0 (back-light glow rim surface pack, raster/RT + PT/GI) published with the user's before / after
+  shots.
+- Commits split by scope with a hunk/line stager (index blobs built from HEAD + selected hunks); each intermediate commit
+  was build-checked in a scratch worktree.

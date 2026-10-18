@@ -31,6 +31,9 @@ OfflineJobDesc MakeJobDesc(const AppOptions& o, const AppSettings& st, const Vid
     // Effects: a video takes the render dialog's; a still takes the ones chosen when entering the scene.
     j.bloom = video ? v.bloom : st.bloom;
     j.bloomConvolution = video ? v.bloomConvolution : st.bloomConvolution;
+    j.bloomIntensity = st.bloomIntensity;
+    j.bloomThreshold = st.bloomThreshold;
+    j.bloomLook = st.bloomLook;
     j.volumetric = video ? v.volumetric : st.volumetric;
     j.volumetricDensity = video ? v.volumetricDensity : st.volumetricDensity;
     j.dof = video ? v.dof : st.dof;
@@ -1041,6 +1044,9 @@ RenderSettings App::VideoRealtimeSettings(const VideoRenderConfig& cfg) const {
     rs.pbrDebug = (PbrDebug)std::clamp(options_.pbrDebug, 0, 7);
     rs.bloom = cfg.bloom;
     rs.bloomConvolution = cfg.bloomConvolution;
+    rs.bloomIntensity = settings_.bloomIntensity;
+    rs.bloomThreshold = settings_.bloomThreshold;
+    rs.bloomLook = settings_.bloomLook;
     rs.volumetric = cfg.volumetric;
     rs.volumetricDensity = cfg.volumetricDensity;
     rs.dof = cfg.dof;

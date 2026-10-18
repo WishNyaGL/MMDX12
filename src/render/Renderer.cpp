@@ -946,6 +946,7 @@ bool Renderer::RenderToImage(const FrameView& view, uint32_t w, uint32_t h, Imag
     settings_.bloomIntensity = 0.35f;
     settings_.bloomThreshold = 1.1f;
     settings_.bloomConvolution = false;
+    settings_.bloomLook = {};
     settings_.dof = false;
     settings_.volumetric = false;
     settings_.packEffects.clear();   // shader packs are opt-in per character and never applied to thumbnails

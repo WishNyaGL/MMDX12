@@ -87,7 +87,8 @@ struct RenderTargets {
     Texture* ao = nullptr;        // R8 (half res), SsaoPass after blur
     Texture* ssr = nullptr;       // RGBA16F (half res), SsrPass
     Texture* hdrFinal = nullptr;  // input of PostPass: &lit, the TAA output, or the upscaler output (output res)
-    Texture* bloom = nullptr;     // half output res, BloomPass
+    Texture* bloom = nullptr;     // half output res, BloomPass: rgb bloom, a = luminance x linear depth
+    float bloomScale = 1.0f;      // BloomPass: normalisation of `bloom` (1 / sum of the mip level weights)
     Texture* uiBackdrop = nullptr;  // RGBA8, blurred final image for frosted UI panels
     Texture* lut = nullptr;         // colour LUT strip (kColorLutSize^2 x kColorLutSize RGBA8), Renderer::SetColorLut; null = none
     bool ptEdges = false;           // PT mode: ScenePass drew this frame's outline layer into colorMsaa / velocityMsaa
@@ -181,7 +182,8 @@ ComPtr<ID3DBlob> CompileShader(const std::filesystem::path& file, const char* en
 class FullscreenPipeline {
 public:
     // Transmittance: dst = src.rgb + dst.rgb * src.a (dst alpha kept), for participating media.
-    enum class Blend { Opaque, Additive, Alpha, Transmittance };
+    // Additive keeps max(alpha); AdditiveAll adds alpha too (alpha carries a summed quantity).
+    enum class Blend { Opaque, Additive, Alpha, Transmittance, AdditiveAll };
     bool Create(Dx12Context& ctx, const std::filesystem::path& file, const char* psEntry,
                 std::initializer_list<DXGI_FORMAT> rtvFormats, const ShaderDefines& defines = {},
                 Blend blend = Blend::Opaque);

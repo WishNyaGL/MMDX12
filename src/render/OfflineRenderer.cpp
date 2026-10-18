@@ -1,5 +1,6 @@
 // Offline GI renderer (see src/render/OfflineRenderer.h for the design and dispatch order).
 #include "render/OfflineRenderer.h"
+#include "render/BloomFft.h"
 #include "render/Renderer.h"
 #include "render/MmeRuntime.h"
 #include "render/PassCommon.h"
@@ -28,7 +29,6 @@ namespace {
 constexpr uint32_t kSlots = Dx12Context::kFramesInFlight;
 constexpr uint32_t kLightBytes = Renderer::kMaxPunctualLights * sizeof(GpuLight);
 constexpr uint32_t kEdgeIterations = 256;
-constexpr uint32_t kOfflineFftSize = 512;            // convolution bloom grid (bloom_fft.hlsl FFT_N)
 constexpr float kConvolutionBloomGain = 6.0f;        // as the real-time convolution bloom output
 constexpr float kConvolutionBloomIntensity = 0.12f;  // CSFinalize multiplier of the convolved bloom  // outline layers averaged for motion blur / depth of field
 constexpr float kLensScale = 0.007f;       // lens radius / focus distance (~8 px background blur at 1080p)
@@ -123,11 +123,9 @@ struct OfflineRenderer::Impl {
     VideoPass videoBg{VideoStage::Background}, videoOverlay{VideoStage::Overlay};
     // offline_volumetric.hlsl, bloom_fft.hlsl (optional effects: empty pipelines disable them)
     ComputePipeline volMarch, volBlur;
-    ComputePipeline fftInput, fftRows, fftCols, fftKernel, fftOutput;
-    bool fftKernelReady = false;
+    FftBloom fft;                      // convolution bloom (BloomFft.h)
     bool volReady = false;             // volA holds this image's volumetric light (CSFinalize adds it)
     Texture volA, volB;                // half image size RGBA16F
-    Texture gridA, gridB, kernelSpec;  // FFT grids (kFftSize^2 RGBA32F, created once)
     // offline_edge.hlsl (FXC, 4x MSAA raster)
     ComPtr<ID3D12RootSignature> edgeRootSig;
     ComPtr<ID3D12PipelineState> depthCullBack, depthNoCull, edgePso;
@@ -886,66 +884,16 @@ void OfflineRenderer::Impl::Volumetric(PassContext& pc) {
     volReady = true;
 }
 
-// FFT convolution bloom: the thresholded quarter-resolution image (bloomA) goes into a kOfflineFftSize^2
-// grid, is multiplied by the spectrum of a starburst kernel and the convolved result replaces bloomA.
+// FFT convolution bloom: the thresholded quarter-resolution image (bloomA) is convolved with the job's kernel and
+// the result replaces bloomA (bloomB is the source copy).
 void OfflineRenderer::Impl::ConvolveBloom(PassContext& pc) {
     ID3D12GraphicsCommandList* cmd = pc.cmd;
-    const uint32_t n = kOfflineFftSize;
-    const float zero[4] = {0, 0, 0, 0};
-    if (!fftKernelReady) {   // kernel spectrum, once
-        const float kernelC[8] = {0.003f, 36.0f, 0.03f, 64.0f, 0.6f, 3.0f, 0.5236f, 0.9f};
-        gridA.Transition(cmd, kUav);
-        fftKernel.Dispatch(pc, {}, pc.transient.UavTable(*ctx, {&gridA}), kernelC, 8, Groups(n), Groups(n));
-        UavBarrier(cmd);
-        gridA.Transition(cmd, kSrvAll);
-        gridB.Transition(cmd, kUav);
-        fftRows.Dispatch(pc, pc.transient.SrvTable(*ctx, {&gridA}), pc.transient.UavTable(*ctx, {&gridB}), zero, 4, 1, n);
-        UavBarrier(cmd);
-        gridB.Transition(cmd, kSrvAll);
-        kernelSpec.Transition(cmd, kUav);
-        fftCols.Dispatch(pc, pc.transient.SrvTable(*ctx, {&gridB}), pc.transient.UavTable(*ctx, {&kernelSpec}), zero, 4, 1, n);
-        UavBarrier(cmd);
-        kernelSpec.Transition(cmd, kSrvAll);
-        fftKernelReady = true;
-    }
-    const float aspect = (float)width / (float)height;
-    float cw, ch;
-    if (aspect >= 1.0f) {
-        cw = 0.75f * n;
-        ch = cw / aspect;
-    } else {
-        ch = 0.75f * n;
-        cw = ch * aspect;
-    }
-    const float ox = (n - cw) * 0.5f, oy = (n - ch) * 0.5f;
-
     bloomA.Transition(cmd, kSrvAll);
-    gridA.Transition(cmd, kUav);
-    const float inC[4] = {ox, oy, cw, ch};
-    fftInput.Dispatch(pc, pc.transient.SrvTable(*ctx, {&bloomA}), pc.transient.UavTable(*ctx, {&gridA}), inC, 4,
-                      Groups(n), Groups(n));
+    bloomB.Transition(cmd, kUav);
+    fft.Convolve(pc, bloomA, bloomB, (float)width / (float)height, job.bloomLook.kernel,
+                 kConvolutionBloomGain * job.bloomIntensity / 0.35f);
     UavBarrier(cmd);
-    gridA.Transition(cmd, kSrvAll);
-    gridB.Transition(cmd, kUav);
-    fftRows.Dispatch(pc, pc.transient.SrvTable(*ctx, {&gridA}), pc.transient.UavTable(*ctx, {&gridB}), zero, 4, 1, n);
-    UavBarrier(cmd);
-    gridB.Transition(cmd, kSrvAll);
-    gridA.Transition(cmd, kUav);
-    const float convC[4] = {1, 0, 0, 0};
-    fftCols.Dispatch(pc, pc.transient.SrvTable(*ctx, {&gridB, &kernelSpec}), pc.transient.UavTable(*ctx, {&gridA}),
-                     convC, 4, 1, n);
-    UavBarrier(cmd);
-    gridA.Transition(cmd, kSrvAll);
-    gridB.Transition(cmd, kUav);
-    fftRows.Dispatch(pc, pc.transient.SrvTable(*ctx, {&gridA}), pc.transient.UavTable(*ctx, {&gridB}), convC, 4, 1, n);
-    UavBarrier(cmd);
-    gridB.Transition(cmd, kSrvAll);
-    bloomA.Transition(cmd, kUav);
-    const float outC[8] = {ox / n, oy / n, cw / n, ch / n, kConvolutionBloomGain, (float)bloomA.width,
-                           (float)bloomA.height, 0.0f};
-    fftOutput.Dispatch(pc, pc.transient.SrvTable(*ctx, {&gridB}), pc.transient.UavTable(*ctx, {&bloomA}), outC, 8,
-                       Groups(bloomA.width), Groups(bloomA.height));
-    UavBarrier(cmd);
+    std::swap(bloomA, bloomB);
 }
 
 void OfflineRenderer::Impl::Finish(PassContext& pc) {
@@ -975,7 +923,7 @@ void OfflineRenderer::Impl::Finish(PassContext& pc) {
         effectPre.RunOffline(pc, job.effects, litA, litB, fxDepth, fxVel, fxNormal, &job);
     }
 
-    const bool convolve = job.bloomConvolution && fftRows && gridA;
+    const bool convolve = job.bloomConvolution && fft;
     if (job.bloom) {
         const float bd[8] = {1.0f, lit ? 1.0f : 0.0f, 0.0f, 0.0f, (float)w, (float)h, 0.0f, 0.0f};
         DispatchPost(pc, bloomDown, &bloomA, lit ? &litA : nullptr, nullptr, bd, Groups(qw), Groups(qh));
@@ -1067,28 +1015,7 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
             m.volMarch = {};
             m.volBlur = {};
         }
-        const ShaderDefines defs = {{"FFT_N", std::to_string(kOfflineFftSize)}, {"FFT_LOG2", "9"}};
-        const std::filesystem::path ff = shaderDir / L"bloom_fft.hlsl";
-        bool fftOk = m.fftInput.Create(ctx, ff, "CSInput", defs) && m.fftRows.Create(ctx, ff, "CSFftRows", defs) &&
-                     m.fftCols.Create(ctx, ff, "CSFftCols", defs) && m.fftKernel.Create(ctx, ff, "CSKernel", defs) &&
-                     m.fftOutput.Create(ctx, ff, "CSFftOutput", defs);
-        const D3D12_RESOURCE_FLAGS uav = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        if (fftOk) {
-            fftOk = m.gridA.Create(ctx, kOfflineFftSize, kOfflineFftSize, DXGI_FORMAT_R32G32B32A32_FLOAT, uav, kSrvAll,
-                                   L"offline.fftA") &&
-                    m.gridB.Create(ctx, kOfflineFftSize, kOfflineFftSize, DXGI_FORMAT_R32G32B32A32_FLOAT, uav, kSrvAll,
-                                   L"offline.fftB") &&
-                    m.kernelSpec.Create(ctx, kOfflineFftSize, kOfflineFftSize, DXGI_FORMAT_R32G32B32A32_FLOAT, uav,
-                                        kSrvAll, L"offline.fftKernel");
-        }
-        if (!fftOk) {
-            LOG_WARN("offline renderer: convolution bloom unavailable");
-            m.fftInput = {};
-            m.fftRows = {};
-            m.fftCols = {};
-            m.fftKernel = {};
-            m.fftOutput = {};
-        }
+        m.fft.Create(ctx, shaderDir, L"offline.fft");
     }
 
     // Outline layer: raster inverted hull at the offline image size (4x MSAA).
@@ -1242,9 +1169,10 @@ void OfflineRenderer::Shutdown() {
     for (Texture& tex : m.preE) tex.Release(ctx);
     for (Texture& tex : m.preG) tex.Release(ctx);
     m.icFinal.Release(ctx);
+    m.fft.Release(ctx);
     for (Texture* t : {&m.accum, &m.albedo, &m.moments, &m.gbuf, &m.edgeLayer, &m.edgeAccum, &m.denoiseA, &m.denoiseB, &m.ldr, &m.bloomA, &m.bloomB, &m.edgeColorMsaa,
                        &m.edgeDepthMsaa, &m.edgeNormalMsaa, &m.edgeVelocityMsaa, &m.mmeShadowMap, &m.mmeShadowDepth,
-                       &m.counter, &m.volA, &m.volB, &m.gridA, &m.gridB, &m.kernelSpec,
+                       &m.counter, &m.volA, &m.volB, 
                        &m.litA, &m.litB, &m.ldrB, &m.fxDepth, &m.fxNormal, &m.fxVel})
         t->Release(ctx);
     if (m.sceneCb && m.sceneCbMapped) m.sceneCb->Unmap(0, nullptr);

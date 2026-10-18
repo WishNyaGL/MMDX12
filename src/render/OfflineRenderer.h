@@ -68,6 +68,9 @@ struct OfflineJobDesc {
     // Post effects (applied once the image has converged; the preview shows the plain image).
     bool bloom = true;
     bool bloomConvolution = false;   // FFT convolution bloom with the starburst kernel instead of the soft glow
+    float bloomIntensity = 0.35f;    // RenderSettings::bloomIntensity
+    float bloomThreshold = 1.1f;     // RenderSettings::bloomThreshold
+    BloomLook bloomLook;             // RenderSettings::bloomLook
     bool volumetric = false;         // sun shafts + spotlight cones, sun shadowed with ray queries
     float volumetricDensity = 1.0f;  // 0.25 .. 4
     // Thin-lens depth of field focused on FrameView::focusDistance; the lens radius scales with dofAperture and

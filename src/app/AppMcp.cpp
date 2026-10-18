@@ -22,6 +22,10 @@
 
 namespace mmdx {
 
+namespace {
+const char* const kBloomKernelNames[] = {"cinema", "starburst", "glow", "anamorphic"};
+} // namespace
+
 const char* App::ScreenName(Screen s) const {
     switch (s) {
     case Screen::Scanning: return "scanning";
@@ -653,6 +657,24 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         r["dof"] = settings_.dof;
         r["volumetric"] = settings_.volumetric;
         r["bloom_convolution"] = settings_.bloomConvolution;
+        r["bloom_intensity"] = settings_.bloomIntensity;
+        r["bloom_threshold"] = settings_.bloomThreshold;
+        r["bloom_radius"] = settings_.bloomLook.radius;
+        r["bloom_blend"] = settings_.bloomLook.blend == 1 ? "energy" : "add";
+        r["bloom_depth_mask"] = settings_.bloomLook.depthMask;
+        r["bloom_kernel_preset"] = settings_.bloomKernelPreset >= 0 && settings_.bloomKernelPreset < kBloomKernelPresets
+                                       ? kBloomKernelNames[settings_.bloomKernelPreset]
+                                       : "custom";
+        r["bloom_kernel"] = {
+            {"rays", settings_.bloomLook.kernel.rays},
+            {"rotation", settings_.bloomLook.kernel.rotation},
+            {"spike_length", settings_.bloomLook.kernel.spikeLength},
+            {"spike_intensity", settings_.bloomLook.kernel.spikeIntensity},
+            {"glow_radius", settings_.bloomLook.kernel.glowRadius},
+            {"glow_intensity", settings_.bloomLook.kernel.glowIntensity},
+            {"dispersion", settings_.bloomLook.kernel.dispersion},
+            {"anamorphic", settings_.bloomLook.kernel.anamorphic},
+        };
         nlohmann::json fx = nlohmann::json::array();
         for (const EffectStackEntry& e : settings_.effectStack) {
             nlohmann::json params = nlohmann::json::object();
@@ -701,6 +723,97 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             return false;
         };
         if (!intIn("lighting_preset", 0, kLightingPresetCount - 1) || !intIn("quality", 0, 3)) return;
+        // Bloom look: values are clamped like the ini; unknown enum strings are rejected.
+        int bloomBlend = -1;   // -1 = not given
+        if (args.contains("bloom_blend")) {
+            if (!args["bloom_blend"].is_string()) {
+                promise->Reject("bloom_blend must be a string (add|energy)");
+                return;
+            }
+            const std::string v = args["bloom_blend"].get<std::string>();
+            if (v == "add") bloomBlend = 0;
+            else if (v == "energy") bloomBlend = 1;
+            else {
+                promise->Reject("Invalid bloom_blend: " + v + " (want add|energy)");
+                return;
+            }
+        }
+        const auto floatArg = [&](const char* key, float lo, float hi, bool& given, float& out) -> bool {
+            given = args.contains(key);
+            if (!given) return true;
+            if (!args[key].is_number()) {
+                promise->Reject(std::string(key) + " must be a number");
+                return false;
+            }
+            out = std::clamp(args[key].get<float>(), lo, hi);
+            return true;
+        };
+        bool haveIntensity = false, haveThreshold = false, haveRadius = false, haveDepthMask = false;
+        float bloomIntensity = 0.0f, bloomThreshold = 0.0f, bloomRadius = 0.0f, bloomDepthMask = 0.0f;
+        if (!floatArg("bloom_intensity", 0.0f, 1.5f, haveIntensity, bloomIntensity) ||
+            !floatArg("bloom_threshold", 0.2f, 4.0f, haveThreshold, bloomThreshold) ||
+            !floatArg("bloom_radius", 0.0f, 1.0f, haveRadius, bloomRadius) ||
+            !floatArg("bloom_depth_mask", 0.0f, 1.0f, haveDepthMask, bloomDepthMask))
+            return;
+        bool havePreset = false;
+        int bloomPreset = -1;   // -1 = custom (kernel unchanged)
+        if (args.contains("bloom_kernel_preset")) {
+            if (!args["bloom_kernel_preset"].is_string()) {
+                promise->Reject("bloom_kernel_preset must be a string");
+                return;
+            }
+            const std::string v = args["bloom_kernel_preset"].get<std::string>();
+            havePreset = true;
+            if (v == "cinema") bloomPreset = 0;
+            else if (v == "starburst") bloomPreset = 1;
+            else if (v == "glow") bloomPreset = 2;
+            else if (v == "anamorphic") bloomPreset = 3;
+            else if (v == "custom") bloomPreset = -1;
+            else {
+                promise->Reject("Invalid bloom_kernel_preset: " + v +
+                                " (want cinema|starburst|glow|anamorphic|custom)");
+                return;
+            }
+        }
+        bool haveKernelField = false;
+        // preset first, then individual fields on top of it
+        BloomKernel kernel = havePreset && bloomPreset >= 0 ? BloomKernelPreset(bloomPreset)
+                                                            : settings_.bloomLook.kernel;
+        if (args.contains("bloom_kernel")) {
+            const nlohmann::json& k = args["bloom_kernel"];
+            if (!k.is_object()) {
+                promise->Reject("bloom_kernel must be an object");
+                return;
+            }
+            const auto num = [&](const char* key, float lo, float hi, float& out) -> bool {
+                if (!k.contains(key)) return true;
+                if (!k[key].is_number()) {
+                    promise->Reject(std::string("bloom_kernel.") + key + " must be a number");
+                    return false;
+                }
+                out = std::clamp(k[key].get<float>(), lo, hi);
+                haveKernelField = true;
+                return true;
+            };
+            if (k.contains("rays")) {
+                if (!k["rays"].is_number()) {
+                    promise->Reject("bloom_kernel.rays must be an integer");
+                    return;
+                }
+                int rays = std::clamp(k["rays"].get<int>(), 0, 16) & ~1;   // even
+                kernel.rays = rays;
+                haveKernelField = true;
+            }
+            if (!num("rotation", 0.0f, 180.0f, kernel.rotation) ||
+                !num("spike_length", 0.0f, 1.0f, kernel.spikeLength) ||
+                !num("spike_intensity", 0.0f, 1.0f, kernel.spikeIntensity) ||
+                !num("glow_radius", 0.0f, 1.0f, kernel.glowRadius) ||
+                !num("glow_intensity", 0.0f, 1.0f, kernel.glowIntensity) ||
+                !num("dispersion", 0.0f, 1.0f, kernel.dispersion) ||
+                !num("anamorphic", 0.0f, 1.0f, kernel.anamorphic))
+                return;
+        }
+
         const ShaderPackRegistry& reg = ShaderPacks();
         std::string shaderPack;
         if (args.contains("shader_pack")) {
@@ -846,6 +959,20 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         if (args.contains("dof")) settings_.dof = args["dof"].get<bool>();
         if (args.contains("volumetric")) settings_.volumetric = args["volumetric"].get<bool>();
         if (args.contains("bloom_conv")) settings_.bloomConvolution = args["bloom_conv"].get<bool>();
+        if (haveIntensity) settings_.bloomIntensity = bloomIntensity;
+        if (haveThreshold) settings_.bloomThreshold = bloomThreshold;
+        if (haveRadius) settings_.bloomLook.radius = bloomRadius;
+        if (haveDepthMask) settings_.bloomLook.depthMask = bloomDepthMask;
+        if (bloomBlend >= 0) settings_.bloomLook.blend = bloomBlend;
+        if (havePreset && bloomPreset >= 0) {   // preset first, then individual kernel fields
+            settings_.bloomLook.kernel = BloomKernelPreset(bloomPreset);
+            settings_.bloomKernelPreset = bloomPreset;
+        }
+        if (haveKernelField) {
+            settings_.bloomLook.kernel = kernel;
+            settings_.bloomKernelPreset = 4;   // custom
+        }
+        if (havePreset && bloomPreset < 0 && !haveKernelField) settings_.bloomKernelPreset = 4;
         if (args.contains("shader_pack") || args.contains("shader_texture_folder")) {
             ShaderChoice sc = settings_.CharacterShader(scene_->characterId);  // keeps the pack's other choices
             if (args.contains("shader_pack")) {

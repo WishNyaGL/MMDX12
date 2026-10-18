@@ -25,16 +25,17 @@ void App::DrawScreenEffectControls(float width) {
     // bloom / auto-luminous leave the named graphics presets (as the lobby's toggles do); the rest is per-effect.
     bool preset = false;
     preset |= Switch("##bloom", Tr("블룸"), &settings_.bloom);
+    bool bloomFx = false;
+    DrawBloomControls(width, &bloomFx);
     preset |= Switch("##autolum", Tr("오토루미너스 발광"), &settings_.autoLuminous,
                      Tr("AutoLuminous 규격 재질의 자체 발광"));
     Gap(14.0f);
     SectionLabel(Tr("효과"));
-    bool fx = false;
+    bool fx = bloomFx;
     fx |= Switch("##dof", Tr("피사계 심도"), &settings_.dof, Tr("캐릭터에 초점을 맞추고 배경을 흐림"));
     if (settings_.dof) { Gap(6.0f); fx |= SliderRow("##dofap", Tr("조리개"), &settings_.dofAperture, 0.2f, 3.0f, "%.2f"); Gap(6.0f); }
     fx |= Switch("##vol", Tr("볼류메트릭 라이트"), &settings_.volumetric, Tr("빛줄기와 조명 산란"));
     if (settings_.volumetric) { Gap(6.0f); fx |= SliderRow("##vold", Tr("안개 밀도"), &settings_.volumetricDensity, 0.25f, 4.0f, "%.2f"); Gap(6.0f); }
-    fx |= Switch("##bloomconv", Tr("컨볼루션 블룸"), &settings_.bloomConvolution, Tr("FFT 스타버스트 블룸"));
     // DLSS Frame Generation (play scene only; the panel is only drawn in play mode).
     {
         const bool fgOk = renderer_.FrameGenAvailable();
@@ -86,6 +87,75 @@ void App::DrawScreenEffectControls(float width) {
         ApplyRenderSettings();
         settings_.Save(settingsPath_);
     }
+}
+
+// Bloom detail rows shared by the play panel's 효과 tab / the lobby 세부 tab (DrawScreenEffectControls) and the studio
+// effects panel (DrawStudioEffectsPanel). Only drawn while bloom is on; the convolution switch lives here too.
+void App::DrawBloomControls(float width, bool* changed) {
+    if (!settings_.bloom) return;
+    bool c = false;
+    c |= SliderRow("##bloomint", Tr("세기"), &settings_.bloomIntensity, 0.0f, 1.5f, "%.2f");
+    c |= SliderRow("##bloomthr", Tr("임계값"), &settings_.bloomThreshold, 0.2f, 4.0f, "%.2f");
+    const char* blendLabels[] = {Tr("더하기"), Tr("에너지 보존")};
+    const char* blendTips[2] = {nullptr, Tr("빛의 총량을 지키며 번짐 · 화면이 뿌옇게 밝아지지 않음")};
+    {
+        int blend = std::clamp(settings_.bloomLook.blend, 0, 1);
+        if (Segmented("##bloomblend", blendLabels, 2, &blend, width / Dpi(), 34.0f, nullptr, nullptr, blendTips)) {
+            settings_.bloomLook.blend = blend;
+            c = true;
+        }
+    }
+    c |= SliderRow("##bloomdepth", Tr("깊이 마스크"), &settings_.bloomLook.depthMask, 0.0f, 1.0f, "%.2f");
+    if (!settings_.bloomConvolution)
+        c |= SliderRow("##bloomrad", Tr("반경"), &settings_.bloomLook.radius, 0.0f, 1.0f, "%.2f");
+    c |= Switch("##bloomconv", Tr("컨볼루션 블룸"), &settings_.bloomConvolution, Tr("FFT 스타버스트 블룸"));
+    if (settings_.bloomConvolution) {
+        Gap(6.0f);
+        const char* kernelLabels[] = {Tr("시네마"), Tr("별빛"), Tr("글로우"), Tr("아나모픽")};
+        int preset = settings_.bloomKernelPreset >= 0 && settings_.bloomKernelPreset < kBloomKernelPresets
+                         ? settings_.bloomKernelPreset
+                         : -1;   // custom: no segment highlighted
+        if (Segmented("##bloomkernel", kernelLabels, kBloomKernelPresets, &preset, width / Dpi(), 34.0f)) {
+            settings_.bloomLook.kernel = BloomKernelPreset(preset);
+            settings_.bloomKernelPreset = preset;
+            c = true;
+        }
+        Gap(4.0f);
+        if (ImGui::TreeNodeEx(Tr("커널 세부"))) {
+            bool k = false;
+            int rays = settings_.bloomLook.kernel.rays;
+            float raysF = (float)rays;
+            if (SliderRow("##bloomrays", Tr("빛줄기 수"), &raysF, 0.0f, 16.0f, "%.0f")) {
+                rays = (int)std::lround(raysF) & ~1;   // even (two rays per line through the centre)
+                rays = std::clamp(rays, 0, 16);
+                if (rays != settings_.bloomLook.kernel.rays) {
+                    settings_.bloomLook.kernel.rays = rays;
+                    k = true;
+                }
+            }
+            k |= SliderRow("##bloomrot", Tr("회전"), &settings_.bloomLook.kernel.rotation, 0.0f, 180.0f, "%.0f°");
+            k |= SliderRow("##bloomspikel", Tr("빛줄기 길이"), &settings_.bloomLook.kernel.spikeLength, 0.0f, 1.0f, "%.2f");
+            k |= SliderRow("##bloomspikei", Tr("빛줄기 세기"), &settings_.bloomLook.kernel.spikeIntensity, 0.0f, 1.0f, "%.2f");
+            k |= SliderRow("##bloomglowr", Tr("글로우 반경"), &settings_.bloomLook.kernel.glowRadius, 0.0f, 1.0f, "%.2f");
+            k |= SliderRow("##bloomglowi", Tr("글로우 세기"), &settings_.bloomLook.kernel.glowIntensity, 0.0f, 1.0f, "%.2f");
+            k |= SliderRow("##bloomdisp", Tr("색 분산"), &settings_.bloomLook.kernel.dispersion, 0.0f, 1.0f, "%.2f");
+            k |= SliderRow("##bloomanam", Tr("아나모픽"), &settings_.bloomLook.kernel.anamorphic, 0.0f, 1.0f, "%.2f");
+            if (k) {
+                settings_.bloomKernelPreset = 4;   // custom
+                c = true;
+            }
+            if (Button("##bloomreset", Tr("기본값"), nullptr, ButtonKind::Ghost)) {
+                settings_.bloomLook = BloomLook{};
+                settings_.bloomIntensity = 0.35f;
+                settings_.bloomThreshold = 1.1f;
+                settings_.bloomKernelPreset = 0;
+                c = true;
+            }
+            ImGui::TreePop();
+        }
+    }
+    Gap(8.0f);
+    if (c && changed) *changed = true;
 }
 
 // ---- the 셰이더 tab: the old ##shader popup body --------------------------------------------------------------------

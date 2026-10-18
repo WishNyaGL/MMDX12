@@ -263,12 +263,13 @@ bool FullscreenPipeline::Create(Dx12Context& ctx, const std::filesystem::path& f
     if (blend != Blend::Opaque) {
         auto& rt = pso.BlendState.RenderTarget[0];
         rt.BlendEnable = TRUE;
-        rt.SrcBlend = blend == Blend::Additive ? D3D12_BLEND_ONE : D3D12_BLEND_SRC_ALPHA;
-        rt.DestBlend = blend == Blend::Additive ? D3D12_BLEND_ONE : D3D12_BLEND_INV_SRC_ALPHA;
+        const bool add = blend == Blend::Additive || blend == Blend::AdditiveAll;
+        rt.SrcBlend = add ? D3D12_BLEND_ONE : D3D12_BLEND_SRC_ALPHA;
+        rt.DestBlend = add ? D3D12_BLEND_ONE : D3D12_BLEND_INV_SRC_ALPHA;
         rt.BlendOp = D3D12_BLEND_OP_ADD;
         rt.SrcBlendAlpha = D3D12_BLEND_ONE;
         rt.DestBlendAlpha = D3D12_BLEND_ONE;
-        rt.BlendOpAlpha = D3D12_BLEND_OP_MAX;
+        rt.BlendOpAlpha = blend == Blend::AdditiveAll ? D3D12_BLEND_OP_ADD : D3D12_BLEND_OP_MAX;
         if (blend == Blend::Transmittance) {
             rt.SrcBlend = D3D12_BLEND_ONE;
             rt.DestBlend = D3D12_BLEND_SRC_ALPHA;

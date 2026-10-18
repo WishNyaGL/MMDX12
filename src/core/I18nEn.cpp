@@ -1200,6 +1200,26 @@ const Entry kEnglish[] = {
     {"미리보기 · 프레임 ", "Preview · frame "},
     {"영상 인코더를 시작할 수 없습니다", "Could not start the video encoder"},
     {"프레임 렌더링 · 패스 ", "Rendering frame · pass "},
+    // bloom look (App::DrawBloomControls)
+    {"세기", "Intensity"},
+    {"임계값", "Threshold"},
+    {"더하기", "Additive"},
+    {"에너지 보존", "Energy conserving"},
+    {"빛의 총량을 지키며 번짐 · 화면이 뿌옇게 밝아지지 않음", "Glows while keeping the total light · the screen does not wash out"},
+    {"깊이 마스크", "Depth mask"},
+    {"반경", "Radius"},
+    {"시네마", "Cinema"},
+    {"별빛", "Starburst"},
+    {"글로우", "Glow"},
+    {"아나모픽", "Anamorphic"},
+    {"커널 세부", "Kernel detail"},
+    {"빛줄기 수", "Rays"},
+    {"빛줄기 길이", "Spike length"},
+    {"빛줄기 세기", "Spike intensity"},
+    {"글로우 반경", "Glow radius"},
+    {"글로우 세기", "Glow intensity"},
+    {"색 분산", "Dispersion"},
+    {"기본값", "Defaults"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

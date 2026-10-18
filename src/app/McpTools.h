@@ -336,9 +336,98 @@ R"json({
  "description": "Change render and graphics settings",
  "inputSchema": {
   "properties": {
+   "bloom_blend": {
+    "description": "Bloom blend mode: 'add' (additive) or 'energy' (energy conserving)",
+    "enum": [
+     "add",
+     "energy"
+    ],
+    "type": "string"
+   },
    "bloom_conv": {
     "description": "FFT convolution bloom toggle",
     "type": "boolean"
+   },
+   "bloom_depth_mask": {
+    "description": "Bloom depth mask (0..1)",
+    "maximum": 1,
+    "minimum": 0,
+    "type": "number"
+   },
+   "bloom_intensity": {
+    "description": "Bloom intensity (0..1.5)",
+    "maximum": 1.5,
+    "minimum": 0,
+    "type": "number"
+   },
+   "bloom_kernel": {
+    "description": "Convolution bloom kernel fields; any field set makes the preset 'custom'. Omitted fields keep their current values",
+    "properties": {
+     "anamorphic": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+     },
+     "dispersion": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+     },
+     "glow_intensity": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+     },
+     "glow_radius": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+     },
+     "rays": {
+      "maximum": 16,
+      "minimum": 0,
+      "type": "integer"
+     },
+     "rotation": {
+      "maximum": 180,
+      "minimum": 0,
+      "type": "number"
+     },
+     "spike_intensity": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+     },
+     "spike_length": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+     }
+    },
+    "type": "object"
+   },
+   "bloom_kernel_preset": {
+    "description": "Convolution bloom kernel preset: cinema, starburst, glow, anamorphic or custom",
+    "enum": [
+     "cinema",
+     "starburst",
+     "glow",
+     "anamorphic",
+     "custom"
+    ],
+    "type": "string"
+   },
+   "bloom_radius": {
+    "description": "Bloom radius, the mip chain look (0..1)",
+    "maximum": 1,
+    "minimum": 0,
+    "type": "number"
+   },
+   "bloom_threshold": {
+    "description": "Bloom threshold, the HDR luminance where bloom starts (0.2..4)",
+    "maximum": 4,
+    "minimum": 0.2,
+    "type": "number"
    },
    "dof": {
     "description": "Depth of field toggle",

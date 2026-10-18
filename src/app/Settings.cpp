@@ -194,6 +194,42 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "volumetric" && ParseBool(value, b)) volumetric = b;
         else if (key == "volumetricDensity" && ParseFloat(value, f)) volumetricDensity = f;
         else if (key == "bloomConvolution" && ParseBool(value, b)) bloomConvolution = b;
+        else if (key == "bloomIntensity" && ParseFloat(value, f)) bloomIntensity = std::clamp(f, 0.0f, 1.5f);
+        else if (key == "bloomThreshold" && ParseFloat(value, f)) bloomThreshold = std::clamp(f, 0.2f, 4.0f);
+        else if (key == "bloomRadius" && ParseFloat(value, f)) bloomLook.radius = std::clamp(f, 0.0f, 1.0f);
+        else if (key == "bloomBlend" && ParseInt(value, i)) bloomLook.blend = std::clamp(i, 0, 1);
+        else if (key == "bloomDepthMask" && ParseFloat(value, f)) bloomLook.depthMask = std::clamp(f, 0.0f, 1.0f);
+        else if (key == "bloomKernelPreset" && ParseInt(value, i)) bloomKernelPreset = std::clamp(i, 0, 4);
+        else if (key == "bloomKernel") {
+            // bloomKernel=rays,rotation,spikeLength,spikeIntensity,glowRadius,glowIntensity,dispersion,anamorphic
+            std::vector<std::string> parts;
+            size_t pos = 0;
+            while (pos <= value.size()) {
+                const size_t comma = value.find(',', pos);
+                const size_t end = comma == std::string::npos ? value.size() : comma;
+                parts.push_back(Trim(value.substr(pos, end - pos)));
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
+            float v[8];
+            bool ok = parts.size() == 8;
+            for (size_t n = 0; ok && n < 8; ++n) ok = ParseFloat(parts[n], v[n]) && std::isfinite(v[n]);
+            if (ok) {
+                BloomKernel k;
+                int rays = (int)v[0];
+                if (rays < 0) rays = 0;
+                if (rays > 16) rays = 16;
+                k.rays = rays & ~1;
+                k.rotation = std::clamp(v[1], 0.0f, 180.0f);
+                k.spikeLength = std::clamp(v[2], 0.0f, 1.0f);
+                k.spikeIntensity = std::clamp(v[3], 0.0f, 1.0f);
+                k.glowRadius = std::clamp(v[4], 0.0f, 1.0f);
+                k.glowIntensity = std::clamp(v[5], 0.0f, 1.0f);
+                k.dispersion = std::clamp(v[6], 0.0f, 1.0f);
+                k.anamorphic = std::clamp(v[7], 0.0f, 1.0f);
+                bloomLook.kernel = k;
+            }
+        }
         else if (key == "colorLut") colorLut = value;
         else if (key == "lutIntensity" && ParseFloat(value, f)) lutIntensity = f;
         else if (key == "videoResolution" && ParseInt(value, i)) video.resolution = i;
@@ -546,6 +582,14 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     std::fprintf(f, "dof=%d\ndofAperture=%.3f\n", dof ? 1 : 0, dofAperture);
     std::fprintf(f, "volumetric=%d\nvolumetricDensity=%.3f\n", volumetric ? 1 : 0, volumetricDensity);
     std::fprintf(f, "bloomConvolution=%d\n", bloomConvolution ? 1 : 0);
+    std::fprintf(f, "bloomIntensity=%.3f\nbloomThreshold=%.3f\n", bloomIntensity, bloomThreshold);
+    std::fprintf(f, "bloomRadius=%.3f\nbloomBlend=%d\nbloomDepthMask=%.3f\n", bloomLook.radius, bloomLook.blend,
+                 bloomLook.depthMask);
+    std::fprintf(f, "bloomKernelPreset=%d\n", bloomKernelPreset);
+    std::fprintf(f, "bloomKernel=%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n", bloomLook.kernel.rays,
+                 bloomLook.kernel.rotation, bloomLook.kernel.spikeLength, bloomLook.kernel.spikeIntensity,
+                 bloomLook.kernel.glowRadius, bloomLook.kernel.glowIntensity, bloomLook.kernel.dispersion,
+                 bloomLook.kernel.anamorphic);
     std::fprintf(f, "colorLut=%s\nlutIntensity=%.3f\n", colorLut.c_str(), lutIntensity);
     std::fprintf(f, "videoResolution=%d\nvideoFps=%d\nvideoBitrate=%d\nvideoQuality=%d\n", video.resolution, video.fps,
                  video.bitrateMbps, video.quality);
