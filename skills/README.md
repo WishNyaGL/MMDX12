@@ -1,9 +1,12 @@
 # MMDX12 agent skills
 
-These skills let an AI agent direct a Studio project through MMDX12's MCP server: camera work with
-`mmdx12-camera-director`, lighting with `mmdx12-lighting-director` and motion editing with
-`mmdx12-motion-editor`. The agent decides what the shot, cue or edit should be; the app's tools compute the frames,
-solve the camera position and write the keys. No scripts, no VMD parsing, no repository paths are involved.
+These skills are for creative direction, not presets. They teach an AI agent to work the way a director does:
+listen to the song and the performance, commit to a treatment, storyboard with intent, use the app's tools as a crew
+(camera solving, key writing, contact sheets), then look honestly at the result and revise. `mmdx12-camera-director`
+covers camera work, `mmdx12-lighting-director` covers stage lighting and `mmdx12-motion-editor` humanizes stiff
+motion as an animator would;
+each carries a treatment template, a critique rubric and tool recipes as references so the judgement stays the core
+and the procedure stays a means. No scripts, no VMD parsing, no repository paths are involved.
 
 ## Requirements
 

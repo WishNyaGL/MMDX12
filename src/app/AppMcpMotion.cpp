@@ -28,8 +28,18 @@ const char* const kCenterBone = "\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xB
 const char* const kAllParentBone = "\xE5\x85\xA8\xE3\x81\xA6\xE3\x81\xAE\xE8\xA6\xAA";    // 全ての親
 const char* const kNeckBone = "\xE9\xA6\x96";                                            // 首
 const char* const kHeadBone = "\xE9\xA0\xAD";                                            // 頭
+const char* const kUpperBodyBone = "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB";               // 上半身
+const char* const kUpperBody2Bone = "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB\x32";          // 上半身2
+const char* const kGrooveBone = "\xE3\x82\xB0\xE3\x83\xAB\xE3\x83\xBC\xE3\x83\x96";       // グルーブ
 
-enum class OpKind { Rotate, Translate, LookAt, Retime, Copy, Mirror, Smooth, Morph, KeyPose };
+// Default follow-through chains: torso, left arm, right arm (parent -> child).
+const char* const kDefaultChains[3][3] = {
+    {"\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB\x32", "\xE9\xA6\x96", "\xE9\xA0\xAD"},                 // 上半身2, 首, 頭
+    {"\xE5\xB7\xA6\xE8\x85\x95", "\xE5\xB7\xA6\xE3\x81\xB2\xE3\x81\x98", "\xE5\xB7\xA6\xE6\x89\x8B\xE9\xA6\x96"},  // 左腕, 左ひじ, 左手首
+    {"\xE5\x8F\xB3\xE8\x85\x95", "\xE5\x8F\xB3\xE3\x81\xB2\xE3\x81\x98", "\xE5\x8F\xB3\xE6\x89\x8B\xE9\xA6\x96"},  // 右腕, 右ひじ, 右手首
+};
+
+enum class OpKind { Rotate, Translate, LookAt, Retime, Copy, Mirror, Smooth, Morph, KeyPose, Ease, Overlap, Spring, Breathe };
 
 const char* OpName(OpKind k) {
     switch (k) {
@@ -42,6 +52,10 @@ const char* OpName(OpKind k) {
         case OpKind::Smooth: return "smooth";
         case OpKind::Morph: return "morph";
         case OpKind::KeyPose: return "key_pose";
+        case OpKind::Ease: return "ease";
+        case OpKind::Overlap: return "overlap";
+        case OpKind::Spring: return "spring";
+        case OpKind::Breathe: return "breathe";
     }
     return "";
 }
@@ -90,6 +104,21 @@ struct Op {
     int keyFrame = 0;
     int ease = 8;
     std::vector<KeyBoneEdit> keyBones;
+    // ease
+    bool onlyLinear = true;
+    std::vector<int> channels{0, 1, 2, 3};
+    // overlap
+    std::vector<std::vector<std::string>> chains;
+    int lag = 2;
+    // spring
+    float frequency = 3.0f;
+    float damping = 0.45f;
+    float mix = 1.0f;
+    // breathe
+    int period = 105;
+    float amountDeg = 1.2f;
+    bool onlyHolds = true;
+    float headDriftDeg = 0.8f;
 };
 
 bool ReadInt(const nlohmann::json& j, const char* name, int& out, bool required, std::string& error) {
@@ -331,6 +360,10 @@ bool ParseOp(const nlohmann::json& j, const StudioModel& m, const StudioDoc& d, 
     else if (name == "smooth") op.kind = OpKind::Smooth;
     else if (name == "morph") op.kind = OpKind::Morph;
     else if (name == "key_pose") op.kind = OpKind::KeyPose;
+    else if (name == "ease") op.kind = OpKind::Ease;
+    else if (name == "overlap") op.kind = OpKind::Overlap;
+    else if (name == "spring") op.kind = OpKind::Spring;
+    else if (name == "breathe") op.kind = OpKind::Breathe;
     else {
         error = "unknown op: " + name;
         return false;
@@ -575,6 +608,85 @@ bool ParseOp(const nlohmann::json& j, const StudioModel& m, const StudioDoc& d, 
         }
         case OpKind::Morph:
             break;  // handled above
+        case OpKind::Ease: {
+            if (!j.contains("curve")) op.curve = "smooth";
+            if (j.contains("only_linear")) {
+                if (!j["only_linear"].is_boolean()) { error = "only_linear must be a boolean"; return false; }
+                op.onlyLinear = j["only_linear"].get<bool>();
+            }
+            if (j.contains("channels")) {
+                if (!j["channels"].is_array() || j["channels"].empty()) {
+                    error = "channels must be a non-empty array of x / y / z / rotation";
+                    return false;
+                }
+                op.channels.clear();
+                for (const nlohmann::json& c : j["channels"]) {
+                    if (c.is_number_integer()) {
+                        const int ch = c.get<int>();
+                        if (ch < 0 || ch > 3) { error = "channels must be 0..3 or x / y / z / rotation"; return false; }
+                        op.channels.push_back(ch);
+                    } else if (c.is_string()) {
+                        const std::string s = c.get<std::string>();
+                        int ch = -1;
+                        for (int i = 0; i < 4; ++i)
+                            if (s == kBoneCurveNames[i]) ch = i;
+                        if (ch < 0) { error = "unknown bone curve channel: " + s; return false; }
+                        op.channels.push_back(ch);
+                    } else {
+                        error = "channels must be 0..3 or x / y / z / rotation";
+                        return false;
+                    }
+                }
+            }
+            break;
+        }
+        case OpKind::Overlap: {
+            if (!j.contains("step")) op.step = 1;
+            if (j.contains("chains")) {
+                if (!j["chains"].is_array() || j["chains"].empty()) {
+                    error = "chains must be a non-empty array of bone-name arrays";
+                    return false;
+                }
+                for (const nlohmann::json& c : j["chains"]) {
+                    std::vector<std::string> chain;
+                    if (!c.is_array()) { error = "chains must be arrays of bone names"; return false; }
+                    if (!ReadStringList(c, chain, error)) return false;
+                    if (chain.size() < 2) { error = "each chain needs at least two bones"; return false; }
+                    for (const std::string& b : chain)
+                        if (m.pmx->FindBone(b) < 0) { error = "Bone not found: " + b; return false; }
+                    op.chains.push_back(std::move(chain));
+                }
+            }
+            if (j.contains("lag")) {
+                if (!ReadInt(j, "lag", op.lag, true, error)) return false;
+            }
+            if (op.lag < 0 || op.lag > 12) { error = "lag must be within 0..12"; return false; }
+            break;
+        }
+        case OpKind::Spring: {
+            if (!j.contains("step")) op.step = 1;
+            if (!op.hasBones || op.bones.empty()) { error = "spring requires 'bones'"; return false; }
+            if (!ReadNumber(j, "frequency", op.frequency, error)) return false;
+            if (!ReadNumber(j, "damping", op.damping, error)) return false;
+            if (!ReadNumber(j, "mix", op.mix, error)) return false;
+            if (op.frequency <= 0.0f) { error = "frequency must be > 0"; return false; }
+            if (op.damping <= 0.0f) { error = "damping must be > 0"; return false; }
+            if (op.mix < 0.0f || op.mix > 1.0f) { error = "mix must be within 0..1"; return false; }
+            break;
+        }
+        case OpKind::Breathe: {
+            if (j.contains("period")) {
+                if (!ReadInt(j, "period", op.period, true, error)) return false;
+            }
+            if (!ReadNumber(j, "amount_deg", op.amountDeg, error)) return false;
+            if (!ReadNumber(j, "head_drift_deg", op.headDriftDeg, error)) return false;
+            if (j.contains("only_holds")) {
+                if (!j["only_holds"].is_boolean()) { error = "only_holds must be a boolean"; return false; }
+                op.onlyHolds = j["only_holds"].get<bool>();
+            }
+            if (op.period < 20) { error = "period must be >= 20"; return false; }
+            break;
+        }
     }
     return true;
 }
@@ -586,6 +698,37 @@ DirectX::XMFLOAT4 ParentWorldQ(const std::vector<DirectX::XMFLOAT4X4>& row, cons
     const auto it = std::lower_bound(indices.begin(), indices.end(), parent);
     if (it == indices.end() || *it != parent) return rootQ;
     return QFromMatrix(row[(size_t)(it - indices.begin())]);
+}
+
+// Rotation vector (axis * angle) of a unit quaternion, and its inverse.
+DirectX::XMFLOAT3 QLog(const DirectX::XMFLOAT4& qIn) {
+    DirectX::XMFLOAT4 q = QNormalize(qIn);
+    if (q.w < 0) q = {-q.x, -q.y, -q.z, -q.w};
+    const DirectX::XMFLOAT3 v = {q.x, q.y, q.z};
+    const float s = Len3(v);
+    if (s < 1e-8f) return {0, 0, 0};
+    const float angle = 2.0f * std::atan2(s, std::clamp(q.w, -1.0f, 1.0f));
+    return Scale3(v, angle / s);
+}
+
+DirectX::XMFLOAT4 QExp(const DirectX::XMFLOAT3& rv) {
+    const float angle = Len3(rv);
+    if (angle < 1e-8f) return QIdentity();
+    using namespace DirectX;
+    const XMVECTOR axis = XMVector3Normalize(XMLoadFloat3(&rv));
+    XMFLOAT4 out;
+    XMStoreFloat4(&out, XMQuaternionRotationAxis(axis, angle));
+    return QNormalize(out);
+}
+
+bool IsLinearCurve(const uint8_t c[4]) {
+    return std::abs((int)c[0] - (int)c[1]) <= 2 && std::abs((int)c[2] - (int)c[3]) <= 2;
+}
+
+bool BoneHasKeysInRange(const std::vector<BoneKf>& keys, int start, int end) {
+    for (const BoneKf& k : keys)
+        if (k.frame >= start && k.frame <= end) return true;
+    return false;
 }
 
 }  // namespace
@@ -1112,6 +1255,250 @@ bool App::ExecuteMcpMotion(const std::string& tool, const nlohmann::json& args, 
                 }
                 if (failed) goto done;
                 extra["max_change_deg"] = Round3(maxChange);
+                break;
+            }
+
+            // ---- ease: rewrite interpolation curves of existing keys ---------
+            case OpKind::Ease: {
+                std::vector<std::string> names;
+                if (op.hasBones) names = op.bones;
+                else
+                    for (const auto& [name, keys] : m.motion.bones)
+                        if (BoneHasKeysInRange(keys, op.start, op.end)) names.push_back(name);
+                uint8_t target[64];
+                if (!ApplyBoneCurve(op.curve, target, error)) goto done;
+                int curvesChanged = 0;
+                bool failed = false;
+                for (const std::string& name : names) {
+                    const auto it = m.motion.bones.find(name);
+                    if (it == m.motion.bones.end()) continue;
+                    TrackChange* tc = FindChange(changes, false, name);
+                    for (const BoneKf& base : it->second) {
+                        if (base.frame < op.start || base.frame > op.end) continue;
+                        BoneKf k = base;
+                        int changed = 0;
+                        for (int ch : op.channels) {
+                            uint8_t old[4], want[4];
+                            GetBoneCurve(k.interp, ch, old);
+                            GetBoneCurve(target, ch, want);
+                            if (op.onlyLinear && !IsLinearCurve(old)) continue;
+                            if (std::equal(old, old + 4, want)) continue;
+                            SetBoneCurve(k.interp, ch, want);
+                            ++changed;
+                        }
+                        if (changed == 0) continue;
+                        curvesChanged += changed;
+                        ctx.WriteBone(name, k, *tc);
+                        if (ctx.capHit) { failed = true; break; }
+                    }
+                    if (failed) break;
+                }
+                if (failed) goto done;
+                extra["curves_changed"] = curvesChanged;
+                break;
+            }
+
+            // ---- overlap: per-chain follow-through --------------------------
+            case OpKind::Overlap: {
+                std::vector<std::vector<std::string>> chains = op.chains;
+                if (chains.empty())
+                    for (const auto& c : kDefaultChains) chains.push_back({c[0], c[1], c[2]});
+                bool failed = false;
+                for (const std::vector<std::string>& chain : chains) {
+                    for (size_t k = 1; k < chain.size() && !failed; ++k) {
+                        const std::string& name = chain[k];
+                        const auto it = m.motion.bones.find(name);
+                        if (it == m.motion.bones.end()) continue;
+                        const std::vector<BoneKf> orig = it->second;
+                        std::vector<int> frames = LayerFrames(op.start, op.end, op.step, orig);
+                        TrackChange* tc = FindChange(changes, false, name);
+                        const int shift = (int)k * op.lag;
+                        for (int f : frames) {
+                            BoneKf out = SampleBone(orig, f);
+                            out.frame = f;
+                            const float env = Envelope(f, op.start, op.end, op.attack, op.release);
+                            if (env > 0.0f) {
+                                const BoneKf shifted = SampleBone(orig, f - shift);
+                                out.t = Lerp3(out.t, shifted.t, env);
+                                out.r = QNormalize(QSlerp(out.r, shifted.r, env));
+                            }
+                            ctx.WriteBone(name, out, *tc);
+                            if (ctx.capHit) { failed = true; break; }
+                        }
+                    }
+                }
+                if (failed) goto done;
+                break;
+            }
+
+            // ---- spring: second-order damped secondary motion ---------------
+            case OpKind::Spring: {
+                constexpr float kDt = 1.0f / (30.0f * 4.0f);  // 30 fps, 4 substeps
+                const float omega = 2.0f * DirectX::XM_PI * op.frequency;
+                const float c = 2.0f * op.damping * omega;
+                const float kSpring = omega * omega;
+                const int simStart = std::max(0, op.start - op.attack);
+                float maxDev = 0.0f;
+                bool failed = false;
+                for (const std::string& name : op.bones) {
+                    const auto it = m.motion.bones.find(name);
+                    std::vector<BoneKf> base;
+                    if (it != m.motion.bones.end()) base = it->second;
+                    const bool isTranslate = name == kCenterBone || name == kGrooveBone;
+                    BoneKf startKey = base.empty() ? BoneKf{} : SampleBone(base, simStart);
+                    DirectX::XMFLOAT4 qs = startKey.r;
+                    DirectX::XMFLOAT3 w{0, 0, 0};
+                    DirectX::XMFLOAT3 xs = isTranslate ? startKey.t : DirectX::XMFLOAT3{0, 0, 0};
+                    DirectX::XMFLOAT3 v{0, 0, 0};
+                    std::map<int, BoneKf> baked;
+                    for (int f = simStart; f <= op.end; ++f) {
+                        BoneKf orig = base.empty() ? BoneKf{} : SampleBone(base, f);
+                        orig.frame = f;
+                        for (int sub = 0; sub < 4; ++sub) {
+                            if (isTranslate) {
+                                const DirectX::XMFLOAT3 err = Sub3(orig.t, xs);
+                                const DirectX::XMFLOAT3 a = Add3(Scale3(err, kSpring), Scale3(v, -c));
+                                v = Add3(v, Scale3(a, kDt));
+                                xs = Add3(xs, Scale3(v, kDt));
+                            } else {
+                                const DirectX::XMFLOAT3 err = QLog(QMul(QConj(qs), orig.r));
+                                const DirectX::XMFLOAT3 a = Add3(Scale3(err, kSpring), Scale3(w, -c));
+                                w = Add3(w, Scale3(a, kDt));
+                                qs = QNormalize(QMul(qs, QExp(Scale3(w, kDt))));
+                            }
+                        }
+                        if (f >= op.start) baked[f] = orig;
+                        if (!isTranslate) {
+                            baked[f].r = qs;
+                            baked[f].t = orig.t;
+                        } else {
+                            baked[f].t = xs;
+                            baked[f].r = orig.r;
+                        }
+                        if (f >= op.start) {
+                            const float dev = isTranslate ? Len3(Sub3(xs, orig.t))
+                                                          : QAngleDeg(QMul(QConj(orig.r), qs));
+                            maxDev = std::max(maxDev, dev);
+                        }
+                    }
+                    std::vector<int> frames = LayerFrames(op.start, op.end, op.step, base);
+                    TrackChange* tc = FindChange(changes, false, name);
+                    for (int f : frames) {
+                        const BoneKf orig = base.empty() ? BoneKf{} : SampleBone(base, f);
+                        const auto hit = baked.find(f);
+                        BoneKf out = orig;
+                        out.frame = f;
+                        if (hit != baked.end()) {
+                            const float env = Envelope(f, op.start, op.end, op.attack, op.release) * op.mix;
+                            if (isTranslate) out.t = Lerp3(orig.t, hit->second.t, env);
+                            else out.r = QNormalize(QSlerp(orig.r, hit->second.r, env));
+                        }
+                        ctx.WriteBone(name, out, *tc);
+                        if (ctx.capHit) { failed = true; break; }
+                    }
+                    if (failed) break;
+                }
+                if (failed) goto done;
+                extra["max_deviation_deg"] = Round3(maxDev);
+                break;
+            }
+
+            // ---- breathe: additive idle life --------------------------------
+            case OpKind::Breathe: {
+                std::vector<std::string> names = op.bones;
+                if (!op.hasBones) {
+                    if (m.pmx->FindBone(kUpperBody2Bone) >= 0) names = {kUpperBody2Bone};
+                    else if (m.pmx->FindBone(kUpperBodyBone) >= 0) names = {kUpperBodyBone};
+                }
+                const int headIndex = m.pmx->FindBone(kHeadBone);
+                if (headIndex >= 0 && op.headDriftDeg > 0.0f &&
+                    std::find(names.begin(), names.end(), kHeadBone) == names.end())
+                    names.push_back(kHeadBone);
+
+                // Hold ranges of the torso group (same rule as studio_motion_quality).
+                std::vector<std::pair<int, int>> holds;
+                if (op.onlyHolds) {
+                    std::vector<std::string> torso;
+                    for (const char* n : {kUpperBodyBone, kUpperBody2Bone, "\xE4\xB8\x8B\xE5\x8D\x8A\xE8\xBA\xAB"})
+                        if (m.pmx->FindBone(n) >= 0) torso.push_back(n);
+                    std::vector<float> speed((size_t)(op.end - op.start + 1), 0.0f);
+                    bool haveTorso = false;
+                    for (const std::string& name : torso) {
+                        const auto it = m.motion.bones.find(name);
+                        if (it == m.motion.bones.end()) continue;
+                        haveTorso = true;
+                        for (int f = op.start; f <= op.end; ++f) {
+                            BoneKf a = SampleBone(it->second, f);
+                            BoneKf b = SampleBone(it->second, f + 1);
+                            const float deg = QAngleDeg(QMul(QConj(a.r), b.r));
+                            const float dist = Len3(Sub3(a.t, b.t));
+                            const size_t i = (size_t)(f - op.start);
+                            speed[i] = std::max(speed[i], std::max(deg / 0.15f, dist / 0.01f));
+                        }
+                    }
+                    if (haveTorso) {
+                        int runStart = -1;
+                        for (int f = op.start; f <= op.end + 1; ++f) {
+                            const bool still = f <= op.end && speed[(size_t)(f - op.start)] < 1.0f;
+                            if (still && runStart < 0) runStart = f;
+                            if (!still && runStart >= 0) {
+                                if (f - runStart >= 15) holds.push_back({runStart, f - 1});
+                                runStart = -1;
+                            }
+                        }
+                    }
+                }
+
+                auto applyLayer = [&](const std::string& name, int f, float env, bool head) {
+                    const auto it = m.motion.bones.find(name);
+                    std::vector<BoneKf> base;
+                    if (it != m.motion.bones.end()) base = it->second;
+                    BoneKf out = base.empty() ? BoneKf{} : SampleBone(base, f);
+                    out.frame = f;
+                    const float phase = (float)(f - op.start) / (float)op.period * 2.0f * DirectX::XM_PI;
+                    float pitch = std::sin(phase) * op.amountDeg;
+                    if (head) {
+                        // deterministic smooth low-frequency drift, ~2.5 s period (~75 frames)
+                        const float t = (float)f;
+                        const float drift = op.headDriftDeg *
+                                            (0.6f * std::sin(t * 2.0f * DirectX::XM_PI / 75.0f + 1.7f) +
+                                             0.4f * std::sin(t * 2.0f * DirectX::XM_PI / 131.0f + 0.3f));
+                        pitch = drift;
+                    }
+                    out.r = QNormalize(QMul(out.r, EulerToQuat(pitch * env, 0, 0)));
+                    return out;
+                };
+
+                bool failed = false;
+                for (const std::string& name : names) {
+                    if (m.pmx->FindBone(name) < 0) continue;
+                    const bool head = name == kHeadBone;
+                    const auto it = m.motion.bones.find(name);
+                    std::vector<BoneKf> base;
+                    if (it != m.motion.bones.end()) base = it->second;
+                    std::vector<int> frames = LayerFrames(op.start, op.end, op.step, base);
+                    TrackChange* tc = FindChange(changes, false, name);
+                    for (int f : frames) {
+                        float env = Envelope(f, op.start, op.end, op.attack, op.release);
+                        if (op.onlyHolds) {
+                            float holdEnv = 0.0f;
+                            for (const auto& h : holds) {
+                                if (f >= h.first && f <= h.second) { holdEnv = 1.0f; break; }
+                                if (f >= h.first - 8 && f < h.first)
+                                    holdEnv = std::max(holdEnv, SmoothStep((float)(f - (h.first - 8)) / 8.0f));
+                                if (f > h.second && f <= h.second + 8)
+                                    holdEnv = std::max(holdEnv, SmoothStep((float)((h.second + 8) - f) / 8.0f));
+                            }
+                            env = std::min(env, holdEnv);
+                        }
+                        if (env <= 0.0f) continue;
+                        BoneKf out = applyLayer(name, f, env, head);
+                        ctx.WriteBone(name, out, *tc);
+                        if (ctx.capHit) { failed = true; break; }
+                    }
+                    if (failed) break;
+                }
+                if (failed) goto done;
                 break;
             }
 

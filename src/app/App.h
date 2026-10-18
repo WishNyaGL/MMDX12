@@ -700,6 +700,9 @@ private:
     bool ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
     // Layered motion-editing tool (AppMcpMotion.cpp); true when it handled the tool.
     bool ExecuteMcpMotion(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
+    // Stiff-motion diagnosis (AppMcpMotionQuality.cpp); true when it handled the tool.
+    bool ExecuteMcpMotionQuality(const std::string& tool, const nlohmann::json& args,
+                                 std::shared_ptr<McpPromise> promise);
     // Read-only analysis tools (AppMcpAnalysis.cpp); true when it handled the tool.
     bool ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
     // Camera-direction tools (AppMcpCamera.cpp); true when it handled the tool.
@@ -711,6 +714,9 @@ private:
     nlohmann::json McpFrameCheck(int frame, const CameraPose& pose);
     // AI lighting tools (AppMcpLight.cpp); true when it handled the tool.
     bool ExecuteMcpLight(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
+    // Perception tools (AppMcpPerception.cpp): contact sheet + singing analysis.
+    bool ExecuteMcpPerception(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
+    void AdvanceMcpContactSheet();  // one rendered frame of a running contact sheet (PumpMcp)
     // Cached beat analysis of the project's audio (AppMcpAnalysis.cpp); nullptr with `error` set when unavailable.
     const BeatAnalysis* StudioBeats(std::string& error);
     // Poses `m` at each frame (bound motion, placement, no pose layer, no physics) and reads the bones, then restores
@@ -1362,6 +1368,28 @@ private:
         nlohmann::json result;   // resolved with this (null: {"status": "completed"})
     };
     std::vector<PendingMcpInput> pendingMcpInputs_;
+
+    struct PendingMcpContactSheet {
+        bool active = false;
+        std::shared_ptr<McpPromise> promise;
+        std::vector<int> frames;
+        size_t next = 0;
+        int columns = 4;
+        int tileWidth = 320;
+        int settleFrames = 4;
+        int waitFrames = 0;
+        std::string path;
+        bool returnImage = true;
+        bool savedPlaying = false;
+        int savedFrame = 0;
+        bool savedUseMotionCamera = true;
+        bool savedPhysics = true;
+        uint32_t tileW = 0, tileH = 0;
+        uint32_t gridW = 0, gridH = 0;
+        std::vector<uint8_t> pixels;
+        nlohmann::json tiles = nlohmann::json::array();
+    };
+    std::optional<PendingMcpContactSheet> pendingMcpContactSheet_;
 };
 
 } // namespace mmdx

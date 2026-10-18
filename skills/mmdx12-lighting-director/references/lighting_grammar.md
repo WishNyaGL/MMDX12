@@ -1,7 +1,8 @@
 # Lighting grammar
 
-Detailed vocabulary behind `skills/mmdx12-lighting-director/SKILL.md`. All arguments belong to `studio_light_rig`,
-`studio_light_cues`, `studio_set_light` and `studio_scene_info`; no scripts.
+The vocabulary behind `skills/mmdx12-lighting-director/SKILL.md`. All arguments belong to `studio_light_rig`,
+`studio_light_cues`, `studio_set_light` and `studio_scene_info`; no scripts. Use this when you need the exact word
+for an intention, not as a source of intentions.
 
 ## 1. Light kinds
 
@@ -18,13 +19,13 @@ Detailed vocabulary behind `skills/mmdx12-lighting-director/SKILL.md`. All argum
 
 ## 2. Rigs
 
-| Rig | Builds | Default count | Best for |
+| Rig | Builds | Default count | Useful when |
 | :--- | :--- | :--- | :--- |
-| `key_fill_rim` | key spot 35 deg to one side, soft fill area opposite, rim spot behind-above | 3 | the safe base look; solo and small groups |
-| `front_wash` | area lights in an arc in front | 3 | even, soft, readable faces; ballads |
-| `top_spots` | spots above/in front, `aim` `subject` or `down` | 6 | pop chorus beams from above |
-| `side_bars` | two columns of point lights left/right | 4 per side | vertical bars, club/concert depth |
-| `back_beams` | spots behind aimed up/forward, sway phases spread | 4 | silhouettes, halo, concert backlight |
+| `key_fill_rim` | key spot 35 deg to one side, soft fill area opposite, rim spot behind-above | 3 | a readable base for a solo or small group |
+| `front_wash` | area lights in an arc in front | 3 | even, soft faces; ballads and intimacy |
+| `top_spots` | spots above/in front, `aim` `subject` or `down` | 6 | beams from above; pop and group numbers |
+| `side_bars` | two columns of point lights left/right | 4 per side | vertical bars, club depth |
+| `back_beams` | spots behind aimed up/forward, sway phases spread | 4 | silhouettes, halo, backlight |
 
 Common arguments: `subject` (character model index; default the first character), `radius` and `height` in
 character heights (default 1.6), `color` or `palette` (cycled per light), `intensity`, `cone_deg` (spot outer;
@@ -34,17 +35,17 @@ representative pose before building.
 
 ## 3. Patterns
 
-| Pattern | What it does | Timing | Use |
+| Pattern | What it does | Timing | Use when |
 | :--- | :--- | :--- | :--- |
-| `pulse` | intensity bump then decay | `beat`, `downbeat`, `onset` | chorus beats, accents |
-| `chase` | lights in sequence | `half`, `beat` | pre-chorus rise, group energy |
+| `pulse` | intensity bump then decay | `beat`, `downbeat`, `onset` | a chorus needs a physical beat |
+| `chase` | lights in sequence | `half`, `beat` | a build, a group moving as a wave |
 | `alternate` | two groups swap | `beat`, `bar` | simple left/right movement |
-| `strobe` | very short on/off | `onset` | break accents only, 1-2 bars |
+| `strobe` | very short on/off | `onset` | one break accent, 1-2 bars, never everywhere |
 | `sweep` | aim moves across `aim_points` / `aim_targets` | `bar` | beams scanning the stage |
-| `color_cycle` | colour changes | `section`, `bar` | palette shifts |
-| `breathe` | slow intensity swell | `bar`, `section` | verses, ambient life |
+| `color_cycle` | colour changes | `section`, `bar` | a deliberate palette shift |
+| `breathe` | slow intensity swell | `bar`, `section` | life in a quiet passage |
 | `fade` | `from` to `to` colour/intensity | `section` | transitions, outro |
-| `section_levels` | one level per song section | `section` | quick global baseline |
+| `section_levels` | one level per song section | `section` | a global baseline to layer on |
 | `blackout` | intensity to zero | `section` | the very end |
 
 `timing` names the event grid: `beat` (default), `half`, `downbeat`, `bar`, `onset`, `section`. `every` uses each
@@ -53,15 +54,19 @@ Nth event, `offset` shifts the phase, `min_strength` filters onsets (default 0.5
 current intensity x0.3 / x1.0; set them explicitly when you add lights.
 
 `aim_targets` accepts `head`, `center`, `left`, `right`, `audience`; `aim_points` accepts world `[x,y,z]`.
-`sweep` and `pulse` on the same lights at the same timing fight each other - layer on different lights.
+`sweep` and `pulse` on the same lights at the same timing fight each other — layer on different lights.
 
-## 4. Colour theory
+For a follow spot, `studio_set_light` with `create: "spot"` and `props: {"aim_mode": "target",
+"target_model": 0, "target_part": "head"}` tracks the performer without aim keys. Key its `intensity` with
+`keys` instead.
 
-- Warm key (amber/straw) with a cool rim (blue/cyan) is the default readable concert palette.
-- 2-3 colours per section. Change them at section boundaries, not every bar.
-- Saturated colours on beams, rims, bars and backlight; keep the face key near white/warm so skin stays natural.
+## 4. Colour
+
+- Two or three colours per section, changing where the song changes, not every bar.
+- Saturated colour belongs on beams, rims, bars and backlight; keep the face key near white/warm so skin stays true.
 - Linear RGB `0..1+`. Values above 1 are fine for beams; keep the face key near 1.
 - Contrast sells the look: a dark stage with a lit performer reads better than everything at full.
+- Write down what each colour means in this film. If you cannot, it is decoration.
 
 ## 5. Intensity budget
 
@@ -74,21 +79,23 @@ a rig:
 
 Only the key casts shadows (`shadow: hard` or `soft`); set the rest to `nocast`. One shadow source is enough.
 
-## 6. Music mapping
+## 6. Drafting aids (not a recipe book)
 
-| Section | Energy | Pattern | Timing | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| Intro | low | `breathe` / `fade` | `section`/`bar` | settle to the first downbeat |
-| Verse | low | `breathe`, slow `chase` | `bar` | face always lit, palette stable |
-| Pre-chorus | rising | `chase` / `fade` up | `half` | add a colour, raise `peak` |
-| Chorus | full | `pulse` + `alternate`/`chase` | `beat` | one rhythmic layer per light group |
-| Break | peak | `strobe` / `sweep` | `onset`/`bar` | strobe max 1-2 bars; warn about photosensitivity |
-| Bridge | low | `breathe`, single `color_cycle` | `section` | pull back, isolate |
-| Final chorus | full | as chorus, wider palette | `beat` | raise the beams |
-| Outro | fall | `fade` / `blackout` | `section` | keep the final pose readable |
+Section conventions worth knowing, and worth breaking with a reason:
 
-Rules of thumb: one rhythmic layer at a time (a stable base wash + one moving layer + one accent layer); never
-key every light on every beat; the vocal section keeps a lit face even when the rest dims.
+| Section | Common instinct | Why it usually works |
+| :--- | :--- | :--- |
+| Intro | low, one source, settle to the first downbeat | the room exists before the song does |
+| Verse | stable base, slow breathe, face lit | lets the lyric be read |
+| Pre-chorus | add a colour or a rim, raise the beams | the lift is visible before the drop |
+| Chorus | a clear colour event, one rhythm layer on the beams | the release is physical |
+| Break | one big change, strobe only for a bar or two | a breath before the last push |
+| Bridge | pull back, isolate, one colour | intimacy after volume |
+| Final chorus | wider palette, higher beams than the chorus | the same chorus must feel bigger |
+| Outro | fade or blackout, keep the final pose readable | the film ends, not the light |
+
+Rules of thumb: one rhythmic layer at a time (a stable base wash + one moving layer + one accent layer); never key
+every light on every beat; the vocal keeps a lit face even when the rest dims. These are craft defaults, not a plan.
 
 ## 7. Cue sheet columns
 
@@ -96,9 +103,9 @@ Plan with: section, frames, level (low/rising/full/peak), light group (indices o
 pattern, timing, `every`, colours, and the intent. Fill `base`/`peak` from the budget above, then write one cue per
 line. Ranges must not overlap within the same lights unless the later cue uses `mode: "merge"` intentionally.
 
-## 8. Verification checklist
+## 8. Technical checks
 
 - `studio_light_cues` answer: `events` > 0 for every cue, `keys_written` plausible, `bpm` matches the song.
-- One screenshot per section plus a chorus beat, inspected: face lit, palette coherent, beams read, no white clip.
+- One contact sheet per section plus a chorus beat, inspected: face lit, palette coherent, beams read, no white clip.
 - Sun/ambient and user lights unchanged unless deliberately edited.
 - Undo name `AI: studio_light_cues` or `AI: studio_light_rig` for the last write.

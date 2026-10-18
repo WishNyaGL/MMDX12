@@ -328,6 +328,59 @@ the range moves.
   `f`, peak at `f + hold` and base at `f + hold + release` (base = the morph's original value). Overlaps merge by max.
 - `key_pose` `{frame, bones: {name: {rotate_deg?, translate?}}, ease?}`: a held accent pose set absolutely at `frame`,
   blended to / from the original motion over `ease` frames on both sides (baked at `step`).
+- `ease` `{bones?, curve?, only_linear?, channels?}`: rewrites the interpolation curves of the keys that already exist
+  in `[start, end]` (no new keys, no value change). `bones` defaults to every bone track with keys in the range,
+  `curve` to `smooth`, `channels` to all four (`x`, `y`, `z`, `rotation`). With `only_linear` (default true) only keys
+  whose current curve is on the diagonal are touched. Reports `curves_changed`.
+- `overlap` `{chains?, lag?, step?}`: follow-through. `chains` defaults to `上半身2 -> 首 -> 頭`, `左腕 -> 左ひじ ->
+  左手首` and `右腕 -> 右ひじ -> 右手首`; the bone at depth k is re-baked as `original(frame - k * lag)` (`lag`
+  default 2), blended by the envelope at the range ends. The chain root is unchanged.
+- `spring` `{bones, frequency?, damping?, mix?, step?}`: secondary motion. A second-order damped spring
+  (semi-implicit Euler, 30 fps sub-stepped x4) follows the original rotation in rotation-vector space relative to the
+  original (translation for センター / グルーブ), starting at rest on the original at `start - attack`; the output is
+  blended by `mix` (0..1, default 1) and the envelope. `frequency` is Hz (default 3), `damping` a ratio (default 0.45;
+  below 1 overshoots). Reports `max_deviation_deg`.
+- `breathe` `{bones?, period?, amount_deg?, only_holds?, head_drift_deg?}`: additive idle life, a sine pitch on the
+  torso (`bones` default 上半身2, fallback 上半身) plus a deterministic smooth low-frequency drift on 頭. With
+  `only_holds` (default true) it is applied only inside the torso group's dead holds (as detected by
+  `studio_motion_quality`) with 8-frame fades; otherwise over the whole range. `period` is in frames (default 105,
+  minimum 20), `amount_deg` 1.2, `head_drift_deg` 0.8.
+
+#### Stiff-motion diagnosis: `studio_motion_quality`
+
+`studio_motion_quality {model, start?, end?, window?}` is read-only and computes everything from the motion TRACKS
+(`SampleBone` of each bone's local rotation / translation per frame; no posing). `start` / `end` default to the
+motion's key range and `window` (default 60) is the length of the ranked windows. Response:
+
+```
+{model, range: {start, end}, overall,
+ groups: {head|torso|center|arm_l|arm_r|hand_l|hand_r|legs:
+          {bones, linear_ratio, hold_ratio, holds: [{start, end}], hard_stops: [frame], jerk, stiffness}},
+ sync_stops: [{frame, groups: [name]}], chain_lag: {upper_body, arm_l, arm_r}, worst_ranges: [...]}
+```
+
+Bone groups: head (`首`, `頭`), torso (`上半身`, `上半身2`, `下半身`), center (`センター`, `グルーブ`), arm_l / arm_r
+(`左/右肩`, `左/右腕`, `左/右ひじ`), hand_l / hand_r (`左/右手首`), legs (`左/右足ＩＫ`, `左/右足`). Missing bones are
+skipped.
+
+- `linear_ratio`: share of keys in range whose rotation curve (and translation curves for center / IK) is linear —
+  `x1 == y1` and `x2 == y2` within 2 units.
+- `hold_ratio` / `holds`: runs of >= 15 frames where every bone of the group turns < 0.15 deg/frame and moves <
+  0.01 units/frame.
+- `hard_stops`: frames where the group's angular speed drops from > 2 deg/frame to < 0.2 deg/frame within 2 frames (a
+  move ends without deceleration). `jerk` is the mean absolute change of angular speed at key frames.
+- `sync_stops`: frames where >= 3 groups hard-stop within +-1 frame (the robot "freeze").
+- `chain_lag`: mean lag in frames between adjacent bones' angular-speed peaks (cross-correlation over +-6 frames) for
+  `上半身2 -> 首 -> 頭`, `左腕 -> 左ひじ -> 左手首` and `右腕 -> 右ひじ -> 右手首`; ~0 is rigid, 1-3 natural.
+- `stiffness` 0..100 per group:
+  `100 * (0.35 * linear_ratio + 0.25 * hold_ratio + 0.20 * hard_rate + 0.20 * lag_deficit)`, where `hard_rate` is
+  hard stops per second divided by 2 (capped at 1) and `lag_deficit = clamp(1 - chain_lag / 2, 0, 1)` (a group
+  without a chain uses 1 when it takes part in a sync stop, else 0). `overall` =
+  `clamp(0.85 * mean(group stiffness) + 15 * sync_stop_rate, 0, 100)` with the sync-stop rate normalized to one per
+  10 seconds.
+- `worst_ranges`: the 5 highest-scoring `window`-frame windows
+  (`100 * (0.45 * linear + 0.25 * hold + 0.20 * stops/2 + 0.10 * sync)`, each term capped at 1) with `reasons`
+  (`"linear curves"`, `"dead hold"`, `"hard stopN"`, `"sync stop at F"`).
 
 IK note: leg / foot IK bones (足ＩＫ etc.) drive the legs, so edit feet through the IK bones; IK overwrites rotations
 written on the leg bones.
@@ -389,3 +442,30 @@ When an AI agent interacts with MMDX12 over MCP, following these domain rules en
   3. Call `wait_frames` (e.g. `n: 60`) so physics and TAA converge.
   4. Call `screenshot` with `scene_only: true` to get the clean 3D viewport without UI overlays.
 
+
+### Perception tools (contact sheet + singing)
+
+- `studio_contact_sheet`: renders a list of timeline frames through the studio's real renderer (the viewport image) and
+  returns ONE grid PNG (storyboard). Each tile carries its frame number and `mm:ss.ff` in the top-left, drawn with a
+  built-in 5x7 bitmap font scaled x2 on a dark box; 2 px dark gutters separate tiles. Playback pauses for the sheet and
+  the playhead, `playing` and `useMotionCamera` are restored afterwards; the motion camera is forced on when the project
+  has camera keys. Physics stays as the studio has it unless `physics: false` (then it is disabled for the sheet and
+  restored). A second sheet while one runs is rejected.
+  Args: `frames` [int] OR `start`, `end` + (`step` or `count`, default count 12); `columns` (default 4); `tile_width`
+  (96..640, default 320); `settle_frames` (default 4, rendered frames to wait after each seek); `path` (save PNG);
+  `return_image` (default true when no path); `max_tiles` 48.
+  Result: `{image_base64?, path?, width, height, tiles: [{index, frame, time, x, y, w, h}]}`.
+  Example: `{"name": "studio_contact_sheet", "arguments": {"start": 0, "end": 600, "count": 12, "columns": 4, "path": "sheet.png"}}`
+- `studio_singing`: reports who is singing from the characters' lip-sync morph tracks only (no posing), sampled every
+  frame at 30 fps and smoothed with a 3-frame mean. `mouth(f)` = max over the mouth morphs present (vowels あ い う え お
+  plus ワ ∧ ω ▲ □ when present; ん counts as closed).
+  Per character: `phrases` runs where `mouth > threshold` (gaps < 6 frames merged, runs < 12 frames dropped), each
+  `{start, end, mean_open (0..1), syllables}` where syllables counts local maxima above the threshold; `breaths` the
+  gaps between consecutive phrases; `held_notes` runs inside phrases where one vowel morph stays >= 0.5 with a change
+  < 0.15 for >= 18 frames `{start, end, vowel}`; `has_lipsync` false when no mouth morph has keys (all lists empty);
+  `share` = sung frames / total frames.
+  Across characters: `timeline` contiguous segments `{start, end, singers: [model indices]}` covering `[start, end]`
+  (empty singers = instrumental / nobody singing), merged when consecutive segments have the same singers.
+  Args: `models` (indices, default every character), `start`, `end` (default whole timeline), `threshold` (default
+  0.12). Result: `{fps: 30, characters: [...], timeline: [...]}`.
+  Example: `{"name": "studio_singing", "arguments": {"start": 0, "end": 900, "threshold": 0.12}}`

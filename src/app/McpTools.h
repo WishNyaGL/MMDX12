@@ -1886,7 +1886,7 @@ R"json({
  "name": "studio_camera_shots"
 })json",
 R"json({
- "description": "Layered motion editing: ONE undo step ('AI: studio_motion_edit') over every bone / morph track touched. model = character model index. ops apply in order (later ops see earlier output). Everything is validated first; the call is rejected (nothing written) on an unknown bone / morph, a bad field or >100000 written keys. dry_run reports per-op tracks and added / modified key counts (track_changes) and writes nothing.\nCommon op fields: start / end (inclusive frames), bones (PMX names), attack / release (smoothstep envelope fade in / out, default 6 / 6), step (frames between baked keys, default 2), curve (easing of the written keys, default linear). Baked layers also write start-1 / end+1 anchor keys holding the original value, so the motion outside the range is unchanged.\nrotate {bones, rotate_deg [x,y,z], space}: ADDITIVE rotation layer, Euler XYZ degrees like XMQuaternionRotationRollPitchYaw. space 'local' (default) is the bone's parent frame like VMD; 'world' converts the world-space offset into the bone's local frame using the parent's sampled world rotation.\ntranslate {bones? (default センター), offset [x,y,z]}: additive translation with the same envelope; the offset is WORLD for センター (center) and 全ての親 (all-parent), LOCAL (parent frame) for other bones.\nlook_at {target: 'camera' | [x,y,z] | {model, bone}, bones? (default ['首','頭']), weights? (default even), max_deg? (default 60)}: turns the head's forward axis (local -Z of 頭, MMD faces -Z) toward the target each sampled frame, clamps the turn to max_deg, splits the world-space offset across the bones by weights and applies it additively with the envelope. The op result reports mean_error_deg (mean remaining angle between the head and the target, sampled after the edit).\nretime {offset (frames, may be negative), scale? (default 1, about start), bones?}: moves keys in [start,end] (default every bone and morph track) to round(start + (frame-start)*scale) + offset; moved keys replace keys already on the destination frame; scale must be > 0.\ncopy {to, bones?, mirror?}: copies keys of [start,end] to [to, to+end-start], replacing keys there. mirror=true writes each bone's keys onto its mirror bone (MirrorPose: t.x and rotation y/z negated; center bones mirror in place).\nmirror {bones?}: mirrors the range in place (left/right tracks exchange their keys in [start,end]).\nsmooth {bones, window? (default 5), step?}: baked centred moving average (translation mean, normalized quaternion average with hemisphere alignment), envelope-blended with the original at the ends. Reports max_change_deg.\nmorph {morph (PMX name, e.g. まばたき, あ, 笑い), frames? [f...] or every + [start,end], peak? (0..1, default 1), attack? (2), hold? (2), release? (4)}: writes base at f-attack, peak at f, peak at f+hold, base at f+hold+release (base = the morph's original value). Overlaps merge by max.\nkey_pose {frame, bones: {name: {rotate_deg?, translate?}}, ease? (default 8)}: a held accent pose. The bones are set absolutely (local values) at frame and blended to / from the original motion over ease frames on both sides (baked at step).\nIK: leg and foot IK bones (足ＩＫ etc.) drive the legs; edit feet through the IK bones, not the leg bones (IK overwrites leg bone rotations).",
+ "description": "Layered motion editing: ONE undo step ('AI: studio_motion_edit') over every bone / morph track touched. model = character model index. ops apply in order (later ops see earlier output). Everything is validated first; the call is rejected (nothing written) on an unknown bone / morph, a bad field or >100000 written keys. dry_run reports per-op tracks and added / modified key counts (track_changes) and writes nothing.\nCommon op fields: start / end (inclusive frames), bones (PMX names), attack / release (smoothstep envelope fade in / out, default 6 / 6), step (frames between baked keys, default 2), curve (easing of the written keys, default linear). Baked layers also write start-1 / end+1 anchor keys holding the original value, so the motion outside the range is unchanged.\nrotate {bones, rotate_deg [x,y,z], space}: ADDITIVE rotation layer, Euler XYZ degrees like XMQuaternionRotationRollPitchYaw. space 'local' (default) is the bone's parent frame like VMD; 'world' converts the world-space offset into the bone's local frame using the parent's sampled world rotation.\ntranslate {bones? (default センター), offset [x,y,z]}: additive translation with the same envelope; the offset is WORLD for センター (center) and 全ての親 (all-parent), LOCAL (parent frame) for other bones.\nlook_at {target: 'camera' | [x,y,z] | {model, bone}, bones? (default ['首','頭']), weights? (default even), max_deg? (default 60)}: turns the head's forward axis (local -Z of 頭, MMD faces -Z) toward the target each sampled frame, clamps the turn to max_deg, splits the world-space offset across the bones by weights and applies it additively with the envelope. The op result reports mean_error_deg (mean remaining angle between the head and the target, sampled after the edit).\nretime {offset (frames, may be negative), scale? (default 1, about start), bones?}: moves keys in [start,end] (default every bone and morph track) to round(start + (frame-start)*scale) + offset; moved keys replace keys already on the destination frame; scale must be > 0.\ncopy {to, bones?, mirror?}: copies keys of [start,end] to [to, to+end-start], replacing keys there. mirror=true writes each bone's keys onto its mirror bone (MirrorPose: t.x and rotation y/z negated; center bones mirror in place).\nmirror {bones?}: mirrors the range in place (left/right tracks exchange their keys in [start,end]).\nsmooth {bones, window? (default 5), step?}: baked centred moving average (translation mean, normalized quaternion average with hemisphere alignment), envelope-blended with the original at the ends. Reports max_change_deg.\nmorph {morph (PMX name, e.g. まばたき, あ, 笑い), frames? [f...] or every + [start,end], peak? (0..1, default 1), attack? (2), hold? (2), release? (4)}: writes base at f-attack, peak at f, peak at f+hold, base at f+hold+release (base = the morph's original value). Overlaps merge by max.\nkey_pose {frame, bones: {name: {rotate_deg?, translate?}}, ease? (default 8)}: a held accent pose. The bones are set absolutely (local values) at frame and blended to / from the original motion over ease frames on both sides (baked at step).\nease {bones? (default every bone track with keys in range), curve (default smooth), only_linear (default true), channels? (default all four: x, y, z, rotation)}: rewrites the interpolation curves of the EXISTING keys in [start,end] (no new keys, no value change). only_linear skips keys whose curves are not on the diagonal. Reports curves_changed.\noverlap {chains? (default 上半身2/首/頭, 左腕/左ひじ/左手首, 右腕/右ひじ/右手首), lag (frames per link, default 2), step (default 1)}: follow-through; each chain bone at depth k is re-baked as child(f) = original(f - k*lag), blended in / out by the envelope. The chain root is unchanged.\nspring {bones, frequency (Hz, default 3), damping (ratio, default 0.45; < 1 overshoots), mix (0..1, default 1), step (default 1)}: second-order damped secondary motion (semi-implicit, 30 fps x 4 substeps) following the original rotation in rotation-vector space (translation for センター / グルーブ), starting at rest on the original at start - attack, blended by mix and the envelope. Reports max_deviation_deg.\nbreathe {bones? (default 上半身2, fallback 上半身), period (frames, default 105), amount_deg (default 1.2), only_holds (default true), head_drift_deg (default 0.8)}: additive idle pitch on the torso plus a deterministic smooth drift on 頭. With only_holds the layer is applied only inside detected dead holds (8-frame fades), else over the whole range. period must be >= 20.\nUse studio_motion_quality before and after to diagnose linear curves, dead holds and hard / synchronized stops.\nIK: leg and foot IK bones (足ＩＫ etc.) drive the legs; edit feet through the IK bones, not the leg bones (IK overwrites leg bone rotations).",
  "inputSchema": {
   "properties": {
    "dry_run": {
@@ -1909,6 +1909,55 @@ R"json({
         "type": "string"
        },
        "type": "array"
+      },
+      "chains": {
+       "description": "Bone-name arrays; each array is one parent-to-child chain",
+       "items": {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       "type": "array"
+      },
+      "channels": {
+       "description": "Curve channels rewritten by ease (x / y / z / rotation or 0..3)",
+       "items": {},
+       "type": "array"
+      },
+      "amount_deg": {
+       "type": "number"
+      },
+      "damping": {
+       "minimum": 0,
+       "type": "number"
+      },
+      "frequency": {
+       "minimum": 0,
+       "type": "number"
+      },
+      "head_drift_deg": {
+       "type": "number"
+      },
+      "lag": {
+       "maximum": 12,
+       "minimum": 0,
+       "type": "integer"
+      },
+      "mix": {
+       "maximum": 1,
+       "minimum": 0,
+       "type": "number"
+      },
+      "only_holds": {
+       "type": "boolean"
+      },
+      "only_linear": {
+       "type": "boolean"
+      },
+      "period": {
+       "minimum": 20,
+       "type": "integer"
       },
       "curve": {
        "description": "Curve of the written keys (preset name, [4] or per channel); default linear"
@@ -1967,7 +2016,11 @@ R"json({
         "mirror",
         "smooth",
         "morph",
-        "key_pose"
+        "key_pose",
+        "ease",
+        "overlap",
+        "spring",
+        "breathe"
        ],
        "type": "string"
       },
@@ -2038,6 +2091,129 @@ R"json({
  },
  "name": "studio_motion_edit"
 })json",
+R"json({
+ "description": "Render a list of timeline frames through the studio's real renderer into ONE contact-sheet PNG (storyboard), each tile labelled with its frame number and mm:ss.ff in the top-left. Tiles are arranged in `columns` (default 4) with a 2 px gutter. Args: `frames` [int] OR `start`+`end` with `step` or `count` (default 12); `columns` (default 4); `tile_width` (96..640, default 320); `settle_frames` (default 4); `path` (save PNG); `return_image` (default true when no path); `physics` (default true; false disables physics for the sheet and restores it). Pauses playback and restores playing, the playhead and the motion-camera choice afterwards; forces the motion camera on when the project has camera keys. Max 48 tiles. A second sheet while one runs is rejected.",
+ "inputSchema": {
+  "properties": {
+   "columns": {
+    "description": "Tiles per row (default 4)",
+    "minimum": 1,
+    "type": "integer"
+   },
+   "count": {
+    "description": "Number of tiles when start/end are used without step (default 12)",
+    "minimum": 1,
+    "type": "integer"
+   },
+   "end": {
+    "description": "Last timeline frame (default: the studio end frame)",
+    "type": "integer"
+   },
+   "frames": {
+    "description": "Explicit timeline frames to render",
+    "items": {
+     "type": "integer"
+    },
+    "type": "array"
+   },
+   "path": {
+    "description": "Save the sheet PNG here",
+    "type": "string"
+   },
+   "physics": {
+    "description": "false disables physics for the sheet and restores it afterwards (default true)",
+    "type": "boolean"
+   },
+   "return_image": {
+    "description": "Return image_base64 (default true when path is empty)",
+    "type": "boolean"
+   },
+   "settle_frames": {
+    "description": "Rendered frames to wait after each seek before capturing (default 4)",
+    "minimum": 0,
+    "type": "integer"
+   },
+   "start": {
+    "description": "First timeline frame (default 0)",
+    "type": "integer"
+   },
+   "step": {
+    "description": "Frame step between start and end",
+    "minimum": 1,
+    "type": "integer"
+   },
+   "tile_width": {
+    "description": "Tile width in pixels (96..640, default 320)",
+    "maximum": 640,
+    "minimum": 96,
+    "type": "integer"
+   }
+  },
+  "type": "object"
+ },
+ "name": "studio_contact_sheet"
+})json",
+R"json({
+ "description": "Report singing from the characters' lip-sync morph tracks (motion only, 30 fps). Per character: phrases [{start,end,mean_open,syllables}] (mouth > threshold, gaps < 6 frames merged, runs < 12 frames dropped), breaths (the gaps between phrases), held_notes [{start,end,vowel}] (one vowel >= 0.5 with < 0.15 change for >= 18 frames inside a phrase), has_lipsync (false when no mouth morph has keys) and share (sung frames / total). Across characters: timeline [{start,end,singers:[model indices]}] covering [start,end] (empty singers = instrumental) merged over equal singer sets. Mouth morphs: vowels あ い う え お (+ ワ ∧ ω ▲ □ when present); ん counts as closed.",
+ "inputSchema": {
+  "properties": {
+   "end": {
+    "description": "Last timeline frame (default: the studio end frame)",
+    "type": "integer"
+   },
+   "models": {
+    "description": "Character model indices (default every character)",
+    "items": {
+     "minimum": 0,
+     "type": "integer"
+    },
+    "type": "array"
+   },
+   "start": {
+    "description": "First timeline frame (default 0)",
+    "type": "integer"
+   },
+   "threshold": {
+    "description": "Mouth-open threshold (default 0.12)",
+    "minimum": 0,
+    "type": "number"
+   }
+  },
+  "type": "object"
+ },
+ "name": "studio_singing"
+})json",
+R"json({
+ "description": "Diagnose stiff motion from a character's motion TRACKS (no posing). model = character index, start / end default to the motion's key range, window = frames per ranked window (default 60). Per bone group (head, torso, center, arm_l, arm_r, hand_l, hand_r, legs): linear_ratio (share of keys in range whose rotation, plus translation for center / IK, curve is on the diagonal within 2 units), hold_ratio + holds [{start,end}] (runs >= 15 frames with every bone under 0.15 deg/frame and 0.01 units/frame), hard_stops [frame] (angular speed from > 2 to < 0.2 deg/frame within 2 frames), jerk and stiffness 0..100. Across groups: sync_stops [{frame, groups}] (>= 3 groups hard-stop within +-1 frame), chain_lag (mean cross-correlation lag of angular-speed peaks over +-6 frames for 上半身2->首->頭 and both arm chains) and the 5 worst `window`-frame ranges [{start, end, score, reasons}]. Read-only.",
+ "inputSchema": {
+  "properties": {
+   "end": {
+    "description": "Last frame (default the motion's key range end)",
+    "minimum": 0,
+    "type": "integer"
+   },
+   "model": {
+    "minimum": 0,
+    "type": "integer"
+   },
+   "start": {
+    "description": "First frame (default the motion's key range start)",
+    "minimum": 0,
+    "type": "integer"
+   },
+   "window": {
+    "description": "Frames per ranked window (default 60)",
+    "minimum": 1,
+    "type": "integer"
+   }
+  },
+  "required": [
+   "model"
+  ],
+  "type": "object"
+ },
+ "name": "studio_motion_quality"
+})json",
 };
 
 inline nlohmann::json GetMcpToolDefinitions() {
@@ -2056,6 +2232,8 @@ inline unsigned McpToolTimeoutMs(const std::string& tool) {
         tool == "studio_command")
         return 180000;
     if (tool == "wait_frames" || tool == "ui_input" || tool == "ui_click") return 120000;
+    if (tool == "studio_contact_sheet") return 180000;
+    if (tool == "studio_singing") return 60000;
     if (tool == "studio_audio_analysis") return 60000;
     return 30000;
 }

@@ -62,6 +62,9 @@ void App::ShutdownMcp() {
     for (auto& w : pendingMcpWaits_) w.promise->Reject("MCP server stopped");
     for (auto& l : pendingMcpLoads_) l.promise->Reject("MCP server stopped");
     for (auto& i : pendingMcpInputs_) i.promise->Reject("MCP server stopped");
+    if (pendingMcpContactSheet_ && pendingMcpContactSheet_->active)
+        pendingMcpContactSheet_->promise->Reject("MCP server stopped");
+    pendingMcpContactSheet_.reset();
     pendingMcpWaits_.clear();
     pendingMcpLoads_.clear();
     pendingMcpInputs_.clear();
@@ -193,6 +196,9 @@ void App::PumpMcp(bool minimized) {
         }
     }
 
+    // 3b. A running contact sheet advances one rendered frame per PumpMcp call.
+    AdvanceMcpContactSheet();
+
     // 4. ui_input steps due this frame (the same commands as --ui-script; follow-up steps such as a click's
     // press / release are scheduled through McpScheduleInput)
     if (mcpInputActive_) {
@@ -225,9 +231,11 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
     if (!promise) return;
     if (ExecuteMcpKeys(tool, args, promise)) return;
     if (ExecuteMcpMotion(tool, args, promise)) return;
+    if (ExecuteMcpMotionQuality(tool, args, promise)) return;
     if (ExecuteMcpAnalysis(tool, args, promise)) return;
     if (ExecuteMcpCamera(tool, args, promise)) return;
     if (ExecuteMcpLight(tool, args, promise)) return;
+    if (ExecuteMcpPerception(tool, args, promise)) return;
 
     if (tool == "get_state") {
         nlohmann::json s;

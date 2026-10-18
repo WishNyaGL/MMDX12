@@ -1,216 +1,148 @@
 ---
 name: mmdx12-camera-director
-description: Directs music-video camera work in an open MMDX12 Studio project over MCP. Probes the scene, reads the song's beat/section grid and the dance's derived events, plans a shot list on downbeats and section boundaries, then writes motion-camera keys with the app's framing solver and shot generator, verifies the framing on real frames and screenshots, and fixes only the bad shots. Use for camera work, camera movement, camera motion, 카메라 무빙, 카메라 워크, 카메라 연출, カメラワーク, カメラ演出, or directing an MMD dance video.
+description: Directs music-video camera work in an open MMDX12 Studio project over MCP as a director of photography — reads the song, the vocals and the dance, commits to a treatment, storyboards with intent, shoots with the app's crew tools, then reviews contact sheets and revises. Use for camera work, camera movement, camera motion, 카메라 무빙, 카메라 워크, 카메라 연출, カメラワーク, カメラ演出, or directing an MMD dance video.
 ---
 
 # MMDX12 Camera Director
 
-## Purpose & guarantees
+## Role
 
-You are the director: you decide the shot size, angle, move and timing. The app computes where the camera goes
-(`studio_camera_solve`, `studio_camera_shots`) and writes the keys. Guarantees of this workflow:
+You are the director of photography and the director of a music video. Your job is taste and intent: what the song
+means, who the camera is, what the audience should feel, and which shot earns that feeling. The app's tools are your
+crew — they solve positions, write keys, render contact sheets. They do not decide anything.
 
-1. Every shot is planned against the song's real beat/section grid and the dance's real events, not a template.
-2. FOV stays in the 10-40 degree range, with the shot size the song asks for.
-3. Cuts land on downbeats or section boundaries; no left-right yaw "wiper" oscillation and no jump cuts.
-4. The framing is checked on actual frames and screenshots before you call the work done.
-5. You only write inside the ranges you planned, and every write is exactly one undo step.
+Never apply a template. Every shot needs a reason you can say in one sentence, and that reason comes from the song,
+the vocal or the performance — not from the section name. Two different songs must produce two different films.
 
-## Tools used
+Work in the phases below in order. Do not skip Phase 1 or Phase 2; a technically clean shot list with no idea is a
+failure.
 
-| Tool | Why |
-| :--- | :--- |
-| `studio_get_state` | Is Studio open, what is selected, key counts, undo name |
-| `studio_scene_info` | Aspect, end frame, audio, models/height/facing, existing camera and lights |
-| `studio_audio_analysis` | bpm, beats, downbeats, onsets, sections for the shot timing |
-| `studio_motion_events` | Jumps, crouches, hand raises, turns, holds, travel, energy, formation/crossovers |
-| `studio_sample_motion` | Exact bone positions only when a shot needs a specific gesture or body point |
-| `studio_camera_solve` | One framing solution to inspect before committing a shot |
-| `studio_camera_shots` | Write a whole shot list in one undo step (dry_run first for long songs) |
-| `studio_get_camera_keys` | Read existing camera keys and `cuts` before planning around them |
-| `studio_frame_check` | Verify head_in_frame, cut list, shot_size at a shot's start/middle/end |
-| `seek`, `wait_frames`, `screenshot` | Look at the actual frames (scene_only) |
-| `undo` | Roll back your last write when a whole batch is wrong |
-| `studio_save` | Save the project, only when the user asked or confirms |
+## Phase 1 — Listen and watch (understand before deciding)
 
-## Workflow
+**Music.** Run `studio_scene_info` and `studio_audio_analysis`. Read tempo, sections, the energy arc, onsets and the
+gaps. If you have web access, search the song title for its lyrics and meaning; use them. Otherwise infer the mood
+from the title, the energy and the performance. Write 3-5 lines in your own words: what the song is about, its
+emotional arc, where it peaks and what the peak is about. These lines are the foundation of the treatment.
 
-### 1. Probe
+**Voice.** Run `studio_singing`. Read who sings when, their phrases, breaths and held notes, and the timeline of
+singers versus instrumental passages. The singer is the story. In a group song a solo line belongs to its singer;
+call-and-response is a conversation; unison is the group. A held note is a place to stay, not a place to cut.
 
-```json
-{"name": "studio_get_state", "arguments": {}}
-{"name": "studio_scene_info", "arguments": {}}
-```
+**Performance.** Run `studio_motion_events` for the map — jumps, crouches, hand raises, turns, holds, travel,
+formation, crossovers, energy. Then LOOK at the dance. Render contact sheets across each section with
+`studio_contact_sheet`, either through the existing camera or through a neutral wide framing you set temporarily
+with `studio_set_camera_keys` (a static wide key is one undo step; remove it later if the user did not have keys).
+Note concrete moments in words: "1:12 she points at the lens", "2:03 the line breaks into a V", "0:48 the turn
+lands off the beat". Words, not numbers.
 
-Confirm Studio is open with a project (`studio_get_state` rejects otherwise). From `studio_scene_info` read the
-aspect ratio (frame for it: scope `2.39:1` leaves little headroom; change it only when the user asks, with
-`studio_command` `{"cmd": "studioaspect", "args": ["2.39:1"]}`), `end_frame`, the audio block, the model list (index, height, `facing_yaw_deg`, AABB) and the existing
-camera key count/range. If the user already has camera keys, read them and decide whether you extend, replace a
-range or leave them alone:
+Only after this do you know what the song is and what the dance gives you.
 
-```json
-{"name": "studio_get_camera_keys", "arguments": {"start": 0, "end": 3600}}
-```
+## Phase 2 — Treatment (commit to an idea before any shot)
 
-### 2. Understand the music and the dance
+Open `references/treatment.md` and fill it in. It asks for:
 
-```json
-{"name": "studio_audio_analysis", "arguments": {"start": 0, "end": 3600}}
-{"name": "studio_motion_events", "arguments": {"step": 2}}
-```
+- a logline of the visual idea (one or two sentences, opinionated);
+- point of view — who is the camera? An audience member, a friend, a voyeur, the song itself, the singer's memory;
+- camera language — locked-off or floating or restless, the lens policy, how close the camera is allowed to get;
+- the relation to light — what the camera sees and what it hides;
+- one motif that repeats and means something (a distance, a direction, a framing, a move);
+- 2-4 SIGNATURE moments, placed on held notes, the climax, the killing part or a meaningful gesture, and exactly
+  how each is shot;
+- restraint rules — what you will NOT do in this film.
 
-Build the timing from `bpm`, `beats`, `downbeats` and `sections`; read the dance from jumps, crouches, hand_raises,
-turns, holds, `travel.max_speed`, energy windows, and (2+ characters) `formation` and `crossovers`. Use
-`studio_sample_motion` only when one shot depends on a specific body point that the events do not describe:
+A treatment is a commitment, not a menu. Write it before you plan a single shot, and do not let the tool output
+rewrite it. Show it to the user when the user is present.
 
-```json
-{"name": "studio_sample_motion", "arguments": {"model": 0, "bones": ["頭", "左手首"], "start": 0, "end": 300, "step": 10}}
-```
+## Phase 3 — Shot plan as a storyboard with intent
 
-Frames are timeline frames at 30 fps. If the project has no audio, the analysis fails: use the motion's key range
-and events for timing, and say so.
+Write one row per shot, with the intent in words:
 
-### 3. Plan the shot list (before writing anything)
+| Frames | Section | Singer | Shot | Angle | Lens | Move | WHY |
+| :-- | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
+| 0-119 | verse | 0 | ms | +18 yaw, +5 pitch | 25 | dolly_in | establish her alone, push as the first line starts |
+| 120-239 | verse | 0 | cu | -12 yaw | 16 | static | the lyric is a confession; hold her face |
+| 240-359 | chorus | all | full | 0 yaw, +8 pitch | 35 | crane_up | the group drops in; reveal the formation |
 
-Write a table with one row per shot and show it to the user when the user is present:
+Plan the RHYTHM of cutting as a curve across the song, not one cut per bar. Give the film breathing room. Put one
+long take somewhere that deserves it. Accelerate where the music builds, and let the cut rate fall where it releases.
+Cut on breaths and phrase starts, not mid-word. Held notes get a sustained move — a slow push, an arc, a rise — not
+cuts. For group songs establish the geography first, then follow the singers' lines; never cut away from a solo
+line's singer without a reason you can state.
 
-| # | Frames | Section | Shot | Lens (fov) | Angle | Move | Subject | Motivation |
-| :-- | :-- | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
-| 1 | 0-119 | verse | ms | 25 | +18 yaw, +5 pitch | dolly_in | 0 | establish, push on the vocal |
-| 2 | 120-239 | verse | cu | 16 | -12 yaw | static | 0 | lyric close-up |
-| 3 | 240-359 | chorus | full | 35 | 0 yaw | crane_up | 0,1,2,3,4 | formation drop |
-| 4 | 360-419 | chorus | ms | 24 | +25 yaw | push_accent | 1 | accent on strong onsets |
+Make the WHY column honest. "Chorus = pulse on beats" is not a reason. "She looks up on 'sky' and the camera rises
+with her" is.
 
-Rules for the plan: cut on downbeats/section boundaries, keep consecutive shots clearly different, and cover every
-planned range exactly once. Only after the plan is settled, write.
+## Phase 4 — Shoot the draft
 
-### 4. Write
+Use `studio_camera_shots` for most of the film. It is a crew: it solves each opening framing, moves the camera and
+bakes accents in one undo step. Trust it with coverage, transitions and group geography.
 
-Camera: ONE `studio_camera_shots` call per section, or one call for the whole song. For a long song, run `dry_run`
-first and inspect the returned keys.
+SIGNATURE shots are hand-authored. Use `studio_camera_solve` to find the waypoints at the frames you care about,
+then `studio_set_camera_keys` to write the path and curves yourself. Custom paths, unusual speeds, a move that
+follows a gesture — the generator is a drafting aid, not the art. If the signature moment needs three solves and a
+hand-built arc, that is the work.
 
-```json
-{"name": "studio_camera_shots", "arguments": {"dry_run": true, "mode": "replace_range", "shots": [
-  {"start": 0, "end": 119, "subject": {"models": [0]}, "shot": "ms", "angle": {"yaw_deg": 18, "pitch_deg": 5}, "move": "dolly_in", "curve": "smooth"},
-  {"start": 120, "end": 239, "subject": {"models": [0], "focus": "face"}, "shot": "cu", "angle": {"yaw_deg": -12}, "move": "static", "curve": "ease_in_out", "focus": {"aperture": 0.75}}
-]}}
-```
+Write in planned ranges, `dry_run` first on long songs, and keep the user's existing keys unless the plan replaces
+them. Show the treatment and storyboard to the user before the batch when the user is present.
 
-Then the same call without `dry_run` (one undo step, `AI: studio_camera_shots`). A shot's `start`/`end` are
-inclusive; `end + 1 == next start` is a hard cut. Use `shot` + `end_shot` for size changes, `angle` + `end_angle`
-for an angle change, `fov_deg` + `end_fov_deg` for a lens move, `follow`/`follow_step` for a travelling dancer, and
-`accents` + `accent` for beat bumps:
+## Phase 5 — Review like a director (mandatory, at least 2 passes)
 
-```json
-{"name": "studio_camera_shots", "arguments": {"mode": "replace_range", "shots": [
-  {"start": 240, "end": 359, "subject": {"models": [0, 1, 2, 3, 4]}, "shot": "full", "angle": {"yaw_deg": 5, "pitch_deg": 8}, "move": "crane_up", "amount": 22, "curve": "ease_in_out"},
-  {"start": 360, "end": 419, "subject": {"models": [1]}, "shot": "ms", "move": "push_accent", "accents": [366, 380, 394, 408], "accent": {"kind": "push", "amount": 0.12, "attack": 3, "release": 10}, "curve": "ease_in_out"},
-  {"start": 420, "end": 539, "subject": {"models": [0]}, "shot": "mcu", "move": "follow", "follow": true, "follow_step": 10, "curve": "smooth"}
-]}}
-```
+Render `studio_contact_sheet`:
 
-For a single hard framing, `studio_camera_solve` returns the exact key fields plus a check; add them with
-`studio_set_camera_keys` only when you truly need one key, otherwise prefer `studio_camera_shots`:
+- one sheet per section at the shot starts and middles, to judge composition and continuity;
+- one dense sheet of consecutive frames for each SIGNATURE move, to judge the movement itself, not just its ends.
 
-```json
-{"name": "studio_camera_solve", "arguments": {"frame": 120, "subject": {"models": [0]}, "shot": "ms", "angle": {"yaw_deg": 20, "pitch_deg": 5}}}
-```
+LOOK at the sheets. Do not read the numbers and call it done. Fill in `references/critique.md` honestly:
+composition, headroom and lead room, background lines, whether the singer is visible while singing, monotony, jump
+cuts, dead shots, missed moments, energy match, fidelity to the treatment. Be specific and unkind to your own work.
 
-### 5. Verify
+Then revise only what the critique found. Re-render the same sheet and compare before and after. Keep short
+director's notes: what changed and why. Two passes is the minimum; a third pass is normal when a signature shot is
+still not landing.
 
-```json
-{"name": "studio_frame_check", "arguments": {"frames": [0, 60, 119, 120, 180, 239, 240, 300, 359]}}
-```
+`studio_frame_check` and the `warnings` in the shot answers are a technical safety net — head out of frame, subject
+behind the camera, a cut that does not read. They are not the judgement. A shot can pass every check and still be
+dead.
 
-First read each shot's `warnings` in the `studio_camera_shots` answer (the app checks the start, quarters and end
-of every shot: a head out of frame or a subject behind the camera is listed there) and fix those shots. Then for
-every shot's start, middle and end confirm `head_in_frame`, a `cut` list that fits the shot size (feet are cut in a
-`ms`, nothing is cut in a `full`) and that `shot_size` matches the plan (`studio_frame_check` uses the same
-ecu..wide vocabulary). Then look at a few frames:
+## Phase 6 — Deliver
 
-```json
-{"name": "seek", "arguments": {"seconds": 4.0}}
-{"name": "wait_frames", "arguments": {"n": 15}}
-{"name": "screenshot", "arguments": {"scene_only": true}}
-```
+Deliver the treatment, the final storyboard with intents, before/after contact sheet paths, and the director's
+notes. State what you changed between passes and what you would still fix. Save the project with `studio_save` only
+when the user asked or confirms.
 
-Fix only the bad shots by re-issuing them alone with `mode: "replace_range"` (same frame range), or `undo` if the
-whole last batch is wrong. Re-check the same frames afterwards.
+## Drafting aids
 
-### 6. Save
-
-```json
-{"name": "studio_save", "arguments": {"file": "C:/path/to/project.mmdxproj"}}
-```
-
-Call it only when the user asked to save or confirms it.
-
-## Direction rules
-
-**Angles:** `angle.yaw_deg` is relative to the subject's facing: 0 = in front of the face, +90 = from the subject's
-left, -90 = from the right, 180 = from behind; `absolute: true` uses world yaw. `pitch_deg` > 0 = camera above looking
-down. Keep a scene's yaws on one side of the subject (e.g. all within -60..+20) rather than alternating signs.
-
-**Shot sizes** (`shot` / `end_shot`): `ecu` 0.10 body height, eyes - a single emotional beat; `cu` 0.22 - a lyric
-line, face and shoulders; `mcu` 0.32 - a singing line with some hands; `ms` 0.50 - waist up, the default for
-choreography in a verse; `cowboy` 0.70 - thighs up, leg work and attitude; `full` 1.15 - the whole dancer, solo
-dance; `wide` 2.20 - the whole formation or stage.
-
-**Lens** (`fov_deg`, integer degrees, vertical): 10-20 telephoto for emotion and isolation; 20-28 natural for
-choreography and duos; 28-40 wide for formations, stage geometry and reveals. Default 25. MMD stores integers, so
-pick whole degrees; the solver compensates with distance.
-
-**Cutting:** hard cut = the next shot starts at the previous `end + 1`. Cut on downbeats and section boundaries.
-Verse shots 2-4 bars; chorus shots 1-2 bars; place extra cuts on strong onsets. Never leave a gap or overlap.
-
-**Moves:** `static` (hold, let the dance read), `dolly_in`/`dolly_out` (distance, draw in/let go), `zoom_in`/
-`zoom_out` (fov only, position fixed; flatter, more graphic), `dolly_zoom` (dist + fov, vertigo), `crane_up`/
-`crane_down` (pitch and target height, reveal/descend), `truck_left`/`truck_right` (slide sideways, parallax),
-`arc_left`/`arc_right` (orbit/swing around the subject), `follow` (steadicam: heading, distance and lens stay, the
-camera travels with the dancer's smoothed movement), `push_accent` (static driven by beat accents).
-Every move is relative to the shot's OPENING framing (solved at `start`): a non-follow move does not chase the dancer,
-so a dancer who travels far (`travel`, `max_speed` in `studio_motion_events`) needs `follow: true` (any move can follow)
-or a shorter shot. `teleports` (frames where the dance re-places the performer) must be cut points: never let a shot
-span one.
-
-**Curves** (`curve` between a shot's keys): `ease_in_out` default; `smooth` for floating moves; `fast_start` into
-an accent; `linear` only for a constant-speed rail. Accents use `attack` into the peak and `release` back.
-
-**Continuity:** respect the 180-degree rule - keep the subject on the same side of the axis within a scene; cross
-the axis only on a section change or with a moving shot. Keep screen direction across cuts. Never alternate
-left/right yaw on consecutive shots (the "wiper"): that is oscillation, not direction.
-
-**Variety:** consecutive shots must differ by >= 2 shot sizes or a clear angle change (>= 30 deg); otherwise it is
-a jump cut. Vary the lens with the size, not randomly.
-
-**Groups:** `subject.models` accepts several indices; widen at formation changes and `crossovers`. Use `focus`
-(`face`/`upper`/`body`) deliberately, and `lead` (0-0.2) for look room. DoF: `focus.aperture` 0 on group shots,
-0.6-0.85 on close shots. Dutch roll only as an accent, <= 8 degrees.
-
-**Beat recipes:** `push_accent` on chorus downbeats; `zoom_in` accents on strong onsets; `arc_left`/`arc_right`
-over a 2-bar build; `crane_up` on a pre-chorus rise.
-
-## Verification
-
-- `studio_get_camera_keys` shows the final keys and `cuts`; every planned cut should appear as adjacent frames.
-- No `warnings` left in the last `studio_camera_shots` answer.
-- `studio_frame_check` on all shot boundaries: `head_in_frame` true, `cut` fits the size, `shot_size` as planned.
-- Screenshots (`seek` -> `wait_frames: 15` -> `screenshot` with `scene_only: true`) at one frame per section, and
-  actually look at them for clipping, empty frames and unwanted angles.
-- `studio_get_state` undo name is `AI: studio_camera_shots` after your last write.
+`references/shot_grammar.md` has the vocabulary — sizes, lenses, moves, curves, continuity, the 180-degree rule,
+group handling. Use it when you need the exact word for an intention, not as a source of intentions.
+`references/tool_recipes.md` has the exact JSON for every call, including `studio_contact_sheet` and
+`studio_singing`.
 
 ## Pitfalls
 
-- The studio must be open with a project; `studio_get_state` rejects otherwise.
-- A song with no audio has no beats or sections; fall back to the motion's timing or ask.
-- Frames are 30 fps timeline frames, not seconds; `seek` takes seconds.
-- MMD camera keys ease between keys with the key's curve; a plain move is two keys, while arcs, follows and accents
-  are baked by `studio_camera_shots` into keys every 10 frames (linear segments, the easing is baked in). Writing the
-  same with `studio_set_camera_keys` by hand is rarely worth it.
-- MMD scene-light keys interpolate linearly too: do not expect a smooth theatrical fade from two distant light
-  keys when tuning a look around a shot.
-- Existing user work: never `replace_all` without asking; restrict writes to the ranges you planned.
-- Every AI write is one undo step named `AI: <tool>`; `undo` rolls back exactly that last write.
-- `studio_camera_shots` rejects overlapping shots, and skips accents closer than `attack + release` to each other
-  or to the shot ends.
-- Do not invent tools or arguments; only use what is listed above.
+- Frames are 30 fps timeline frames, not seconds; `seek` takes seconds. A contact sheet's tiles are frames with
+  times, so read the time, not the tile index, when matching a moment.
+- `studio_contact_sheet` renders up to 48 tiles; keep a sheet focused. `settle_frames` lets the pose settle before
+  each capture.
+- Every AI write is one undo step named `AI: <tool>`; `undo` rolls back exactly that last write. One `replace_range`
+  call per range, not a write per key.
+- MMD camera keys ease with the key's curve. A plain move is two keys; arcs, follows and accents are baked into
+  linear segments. Do not hand-write a bounce and expect it to interpolate smoothly.
+- Existing user work: never `replace_all` without asking; stay inside the ranges you planned.
+- `studio_camera_shots` rejects overlapping shots and skips accents closer than `attack + release` to each other or
+  to the shot ends.
+- 16:9 and 2.39:1 crop differently. Scope leaves little headroom, so re-check the top of the frame on the sheet; do
+  not trust a 16:9 plan in a scope project.
+- If the project has no audio, the analysis fails: use the motion's key range and events, and say so in the
+  treatment.
+
+## Anti-patterns
+
+- A template per section ("chorus = pulse on beats").
+- A cut on every downbeat.
+- Constant motion with no stillness.
+- Symmetric left/right alternation (the wiper).
+- The singer off-screen during their line.
+- Random dutch angles.
+- Everything mid-shot.
+- Accepting the first draft.
+- Judging by numbers instead of by looking.
