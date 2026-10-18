@@ -80,6 +80,10 @@ struct RenderSettings {
     RenderPath renderPath = RenderPath::Raster;
     uint32_t ptSamples = 1;          // path tracer samples per pixel per frame (1..4)
     uint32_t ptBounces = 3;          // path tracer bounces after the primary hit (1..6)
+    float ptHistoryMax = 24.0f;      // temporal history length cap (video quality presets may raise it)
+    float ptHistoryMinAlpha = 0.08f; // temporal blend floor (1 / history length)
+    float ptHistoryCarry = 24.0f;    // history length kept across a video frame boundary (no clamp when >= max)
+    bool ptAccumAlbedo = false;      // offline video: accumulate the primary albedo too (alpha-tested hair, silhouette AA)
     PbrDebug pbrDebug = PbrDebug::None;                       // P2: debug channel (CLI --pbr-debug)
 
     // --- lighting / effects (every one can be switched off for an honest benchmark)
@@ -280,6 +284,9 @@ struct FrameView {
     std::vector<MmeEffectObject> mmeEffectObjects;
     bool studioFloor = false;       // draw the procedural studio floor at y = 0
     bool cameraCut = false;         // discard temporal history (seek, VMD camera cut)
+    bool ptFirstPass = false;       // first pass of a new video frame (clamp the carried history length)
+    bool ptStaticPass = false;      // a later pass of the same video frame: same pose and camera, accumulate in place
+    int ptPassIndex = 0;            // passes of this video frame already done (0 on the first)
     float focusDistance = 0.0f;     // DoF focus plane as view-space z (MMD units); <= 0: autofocus on the screen centre
     float apertureScale = 1.0f;     // DoF strength of this frame (studio focus keys) x the settings' aperture; 0 = all sharp
     // Studio self-shadow track: turns the sun shadows off for this frame / overrides the cascade range (MMD units, > 0).

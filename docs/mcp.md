@@ -47,6 +47,10 @@ graph TD
 
 ## 2. Configuration & Setup
 
+### Binary Path Guidelines
+- **Portable Release (`dist/MMDX12-*.zip`)**: `mmdx12_mcp.exe` is located directly in the root folder alongside `MMDX12.exe` (e.g., `C:\MMDX12\mmdx12_mcp.exe`).
+- **Development Build**: `mmdx12_mcp.exe` is located in the output bin directory (e.g., `C:\path\to\MMDX12\build\bin\mmdx12_mcp.exe`).
+
 ### Claude Code
 ```powershell
 claude mcp add mmdx12 -- C:\path\to\MMDX12\mmdx12_mcp.exe --launch
@@ -59,7 +63,7 @@ Add to your `%APPDATA%\Claude\claude_desktop_config.json`:
 {
   "mcpServers": {
     "mmdx12": {
-      "command": "C:\\path\\to\\MMDX12\\bin\\mmdx12_mcp.exe",
+      "command": "C:\\path\\to\\MMDX12\\mmdx12_mcp.exe",
       "args": ["--launch"]
     }
   }
@@ -72,7 +76,7 @@ Add to your project or user MCP settings:
 {
   "mcpServers": {
     "mmdx12": {
-      "command": "C:/path/to/MMDX12/bin/mmdx12_mcp.exe",
+      "command": "C:/path/to/MMDX12/mmdx12_mcp.exe",
       "args": ["--launch"]
     }
   }
@@ -178,3 +182,35 @@ python tools/mcp_x.py "click 플레이" "wait 30" "shot out.png" "items 셰이�
 # Run full end-to-end scenario (launches app, inspects state, loads scene, captures PNG, tests studio, exits cleanly):
 python tools/mcp_smoke.py --scenario
 ```
+
+---
+
+## 7. Agent Context & Best Practices (For AI Agents)
+
+When an AI agent interacts with MMDX12 over MCP, following these domain rules ensures reliable operation:
+
+### 1. Zero Shipped Assets & Cold Library Scan
+- MMDX12 ships **no copyrighted assets** by default. Assets reside under `library/characters`, `library/stages`, and `library/songs`.
+- On the first run with new assets, MMDX12 performs a cold library scan that can take 20–25 seconds.
+- **Agent Action**: Always run `list_library` first to check available assets, and inspect `get_state` (ensure it is not in `scanning` or `load_error` state) before attempting `load_scene` or `open_studio`.
+
+### 2. Screen State Machine
+- Application states: `select` (lobby), `play` (music video playback), `studio` (timeline & keyframe editor), and `bench` (benchmark).
+- `studio_*` tools (`studio_set_bone`, `studio_add_model`, `studio_key`, etc.) only function when in `studio` screen. Use `open_studio` or `set_screen` with `screen: "studio"` first.
+- Navigation tools (`set_screen`, `load_scene`, `open_studio`) guard against losing unsaved studio work (`discard_unsaved: true` is required if dirty).
+
+### 3. Multi-Part Songs (Formations)
+- Songs with >= 2 dance parts will open the formation selection modal in the lobby.
+- **Agent Action**: Prefer 1-part solo dance songs for automated play tests, or inspect UI items (`ui_items`) and confirm the formation using `ui_click` if multi-part songs are loaded.
+
+### 4. Asynchronous Loading & Frame Synchronization
+- Scene loading, screen switching, and project loads happen asynchronously across frames.
+- **Agent Action**: After triggering a state change (`load_scene`, `open_studio`, `seek`), call `wait_frames` (e.g. `n: 30` to `60`) to allow Direct3D 12 assets to load and temporal anti-aliasing (TAA) to settle before taking a `screenshot`.
+
+### 5. Deterministic Visual Verification
+- To compare visual rendering (A/B comparisons or regression checks):
+  1. Call `pause` to halt playback.
+  2. Call `seek` to jump to a specific timestamp.
+  3. Call `wait_frames` (e.g. `n: 60`) so physics and TAA converge.
+  4. Call `screenshot` with `scene_only: true` to get the clean 3D viewport without UI overlays.
+

@@ -74,13 +74,16 @@ struct VideoRealtimeQuality {
     uint32_t ptBounces;       // path tracer bounces (1..6)
     uint32_t ptPasses;        // passes for the first video frame and after a cut (warm-up)
     uint32_t ptSteadyPasses;  // passes for every other video frame (the denoiser history carries over)
+    float historyMax;         // temporal history length cap
+    float historyMinAlpha;    // temporal blend floor
+    float historyCarry;       // history length kept across a video frame boundary
     float relativeCost;       // relative to "고품질"
 };
 inline constexpr VideoRealtimeQuality kVideoRealtimeQualities[] = {
-    {"초안", 2, 1024, 1, 2, 4, 1, 0.5f},
-    {"표준", 4, 2048, 2, 3, 8, 2, 0.75f},
-    {"고품질", 8, 4096, 4, 4, 16, 4, 1.0f},
-    {"최고", 8, 4096, 4, 6, 32, 8, 2.0f}};
+    {"초안", 2, 1024, 1, 2, 4, 1, 24.0f, 0.08f, 12.0f, 0.5f},
+    {"표준", 4, 2048, 4, 3, 4, 1, 32.0f, 0.05f, 12.0f, 0.75f},
+    {"고품질", 8, 4096, 4, 4, 16, 4, 48.0f, 0.03f, 12.0f, 1.0f},
+    {"최고", 8, 4096, 4, 6, 24, 8, 64.0f, 0.02f, 12.0f, 2.0f}};
 
 inline bool IsGiRenderer(VideoRenderer r) { return r == VideoRenderer::OfflineGI; }
 

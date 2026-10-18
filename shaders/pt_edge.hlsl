@@ -17,6 +17,11 @@ Texture2D<float2> gEdgeVelocity : register(t1);
 #endif
 RWTexture2D<float4> gColor : register(u0);
 RWTexture2D<float2> gVelocityOut : register(u1);
+// Offline video (RenderSettings::ptAccumAlbedo): the layer is averaged over the passes of one video frame so the
+// 1 px outlines get the sub-pixel jitter's anti-aliasing instead of the last pass's stair-steps. gP0.x = on,
+// gP0.y = this pass's weight (1 on the first pass of the frame, then 1 / (pass index + 1)).
+cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
+RWTexture2D<float4> gEdgeAcc : register(u2);
 
 [numthreads(8, 8, 1)]
 void CSPtEdgeComposite(uint3 id : SV_DispatchThreadID) {
@@ -39,6 +44,10 @@ void CSPtEdgeComposite(uint3 id : SV_DispatchThreadID) {
     e = gEdgeColor[p];
     if (e.a > 0.5) { v = gEdgeVelocity[p]; vn = 1.0; }
 #endif
+    if (gP0.x > 0.5) {
+        e = (gP0.y >= 1.0) ? e : lerp(gEdgeAcc[p], e, gP0.y);
+        gEdgeAcc[p] = e;
+    }
     if (e.a <= 0.0) return;
 
     float4 c = gColor[p];

@@ -485,6 +485,9 @@ void App::RecordRealtimeVideoFrame(ID3D12GraphicsCommandList* cmd) {
         view.effectStateReset = true;
     }
     view.effectStateAdvance = (offline_.iter + 1 >= offline_.iterCount);
+    view.ptFirstPass = (offline_.iter == 0) && cfg.Renderer() == VideoRenderer::PathTraced;
+    view.ptStaticPass = (offline_.iter > 0) && cfg.Renderer() == VideoRenderer::PathTraced;
+    view.ptPassIndex = offline_.iter;
     renderer_.Render(cmd, view);
 }
 
@@ -902,6 +905,10 @@ RenderSettings App::VideoRealtimeSettings(const VideoRenderConfig& cfg) const {
     rs.ssr = true;
     rs.ptSamples = q.ptSamples;
     rs.ptBounces = q.ptBounces;
+    rs.ptHistoryMax = q.historyMax;
+    rs.ptHistoryMinAlpha = q.historyMinAlpha;
+    rs.ptHistoryCarry = q.historyCarry;
+    rs.ptAccumAlbedo = cfg.Renderer() == VideoRenderer::PathTraced;
     // PBR (work unit P2/P5): per-model records drive the look; the debug view is a raster lit-only aid.
     rs.pbrDebug = (PbrDebug)std::clamp(options_.pbrDebug, 0, 7);
     rs.bloom = cfg.bloom;

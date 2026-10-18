@@ -173,6 +173,15 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     pack's) into the cleared MSAA scene targets with the tracer's jittered camera (`RenderTargets::ptEdges`), and
     `PathTracePass` composites that layer over the denoised colour (`pt_edge.hlsl`, outline velocity where it covers), as the
     offline GI renderer composites its outline layer.
+    Offline video with the real-time PT renderer (`RenderSettings::ptAccumAlbedo`, `FrameView::ptFirstPass/ptStaticPass/ptPassIndex`,
+    `RecordRealtimeVideoFrame`): the temporal pass only averages demodulated light (`light = radiance / albedo of sample 0`), so a
+    primary hit that flips between passes (stochastic transparency: hair over skin, glass) or sits on a silhouette showed one pass's
+    albedo (binary dither, stair steps) however many passes ran. Now `CSTemporalAlbedo` also accumulates the radiance R = light x albedo
+    with the light's weights and hands the remodulation `R_acc / L_acc` (averaging the albedo itself is biased: light is correlated with
+    it), later passes of one video frame accumulate in place (no depth / normal rejection), and the outline layer is averaged per frame
+    (`edgeAcc_`). Per-quality history limits / carry live in `kVideoRealtimeQualities`. Real-time PT does not use any of it (TAA does).
+    Measure pass effects with a seed pair (same settings, different `pc.frame` seed) on a static region; a "converged" reference
+    carries bias. Scratch runs must not copy the user's `mmdx12.ini` (its effect stack changes brightness per pass).
     Pass implementations live in `Passes.cpp` and `Pass*.cpp` (shared helpers in `PassCommon.h`). Volumetric and the FFT bloom are `ComputePipeline` (cs_6_5) and silently disable themselves without DXR-class hardware.
     AutoLuminous (そぼろ convention, native): `GpuModel::Create` flags a non-PBR material with black specular and
     specular power >= 100 as `MatFlag_AutoLuminous` (cleared for pack-shaded materials); `AutoLumEmission`

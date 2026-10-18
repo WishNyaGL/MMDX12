@@ -1989,3 +1989,33 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - Release cover: `docs/media/physics-2.1.3.jpg` (ZZZ Lycaon performers on stage, flowing coat physics).
 - Version 2.1.3 bumped (patch bump: mode 2 physics fix, HDD scan prefetch, video render time range).
 
+
+## 2026-10-18 - Offline video PT: passes now converge (radiance / outline accumulation), README Sour Miku
+- Question: do extra passes of the real-time-PT offline video actually improve a frame? Static read first (seeds and jitter do
+  change per pass), then 4K measurements (Sour Miku White, terrace, seed-pair PSNR on static regions). Finding: in
+  alpha-flipping regions (hair over skin, glass) and on silhouettes the result did NOT improve with passes. Cause: only the
+  demodulated light was accumulated; the albedo (and the outline layer) of the LAST pass was used, so stochastic-transparency pixels
+  stayed a binary dither and edges stair-stepped (video renders TAA off).
+- Fix (`RenderSettings::ptAccumAlbedo`, offline PT video only): `CSTemporalAlbedo` (pt_denoise.hlsl) accumulates R = light x albedo
+  with the light's weights; the remodulation uses `R_acc / L_acc` (averaging the albedo itself shifted the glass to purple: biased).
+  Later passes of a video frame accumulate in place (`FrameView::ptStaticPass`, no depth / normal rejection; sky and silhouettes
+  included); the outline layer is averaged per frame (`pt_edge.hlsl`, `edgeAcc_`, `ptPassIndex`). Targets are created on first use.
+- Also: configurable history limits per video quality (`VideoRealtimeQuality::historyMax/MinAlpha/Carry`, `ptHistoryCarry` clamps the
+  history length across a video frame boundary), 최고 warm-up 32 -> 24 passes, 표준 = 4 samples x 4 passes (same sample count).
+  First delegated to an opencode worker (deepseek-v4.1-flash, low) from a contract spec; Claude reviewed (no fixes needed), then did
+  the accumulation redesign itself.
+- Measured (seed pair, 4K): skin under the bangs 24.9 -> 35.9 dB (1 -> 64 passes, was flat ~24), hair 22.0 -> 33.0, glass 18.2 -> 27.5,
+  floor 46.3 at 24 passes (was 45.9). Old accumulation capped at ~24 effective passes; the new limits only help beyond 32.
+  1080p outlines are continuous lines instead of dashes (and look lighter: they are anti-aliased now).
+- Mistakes caught on the way (kept in CLAUDE.md / memory): scratch builds copied the user's ini (eye_adaptation, volumetric, DoF:
+  1024-pass reference 3.5 levels darker, grey media shots); `--offline-quality 3` pins the render quality too (all sweeps ran at the
+  최고 preset's 4 spp / 6 bounces); the terrace stage animates run to run (vines, petals), so only the wood floor / glass / skin
+  regions were usable; a reference-based PSNR hid the plateau.
+- README: `tools/media_kit.py` default scene still pinned `01_9001` (Sekai); now `sour_miku`. Re-shot `docs/media/compare-classic.jpg`
+  (Sour Miku Black, terrace) and `ui-library.jpg` (search `sour_miku`). The other README images were checked: all Sour family.
+  `tools/pack_previews.py` keeps `01_9001` for the Sekai-only `project_sekai_toon` gallery pack (not in the README).
+- Not done / open: real-time PT (play mode) has the same stochastic-transparency noise (not changed); the moving clip (27 frames,
+  1080p) was only checked by eye; a 1024-pass frame was ~1.7 % darker than <=128 passes in the no-stage scene (cause not found);
+  render time per preset not measured; `build\` (the user's dev build) was not rebuilt with these changes.
+- Originals: `captures/pt_passes` (before) and `captures/pt_passes/after_fix` (after), 4K PNG. Report: Artifact "PT 패스 누적 검증".
+- Committed together with the other pending work in the tree (README / mcp / tools changes from other sessions), not re-tested here.

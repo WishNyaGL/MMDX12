@@ -2150,6 +2150,8 @@ bool PathTracePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::pat
         modulate_ = ComputePipeline{};
         LOG_WARN("PathTrace: pipelines unavailable");
     }
+    temporalAlbedo_ = ComputePipeline{};   // optional: offline video only, falls back to the per-pass albedo
+    if (ok && !temporalAlbedo_.Create(ctx, d, "CSTemporalAlbedo")) LOG_WARN("PathTrace: albedo accumulation unavailable");
     // outlines (ScenePass::DrawPtEdges): optional, the image is drawn without them on failure
     edgeComposite_ = ComputePipeline{};
     if (ok && !edgeComposite_.Create(ctx, shaderDir / L"pt_edge.hlsl", "CSPtEdgeComposite",
@@ -2171,6 +2173,10 @@ void PathTracePass::OnResize(Dx12Context& ctx, RenderTargets& targets) {
         tex.Create(ctx, w, h, RenderTargets::kColorFormat, uav, kSrv, L"pt.histNormal");
     filterA_.Create(ctx, w, h, RenderTargets::kColorFormat, uav, kSrv, L"pt.filterA");
     filterB_.Create(ctx, w, h, RenderTargets::kColorFormat, uav, kSrv, L"pt.filterB");
+    for (Texture& tex : histAlbedo_) tex.Release(ctx);   // recreated by the next accumulating render
+    rCur_.Release(ctx);
+    albEff_.Release(ctx);
+    edgeAcc_.Release(ctx);
     historyValid_ = false;
     current_ = 0;
 }
@@ -2181,6 +2187,10 @@ void PathTracePass::ReleaseTargets(Dx12Context& ctx) {
     for (Texture& tex : history_) tex.Release(ctx);
     for (Texture& tex : histDepth_) tex.Release(ctx);
     for (Texture& tex : histNormal_) tex.Release(ctx);
+    for (Texture& tex : histAlbedo_) tex.Release(ctx);
+    rCur_.Release(ctx);
+    albEff_.Release(ctx);
+    edgeAcc_.Release(ctx);
     filterA_.Release(ctx);
     filterB_.Release(ctx);
     historyValid_ = false;
@@ -2220,13 +2230,43 @@ void PathTracePass::Execute(PassContext& pc) {
     t.normal.Transition(cmd, kSrvAll);
     for (Texture* tex : {&history_[prev], &histDepth_[prev], &histNormal_[prev]}) tex->Transition(cmd, kSrvAll);
     for (Texture* tex : {&history_[cur], &histDepth_[cur], &histNormal_[cur]}) tex->Transition(cmd, kUav);
+    const bool accum = pc.settings.ptAccumAlbedo && temporalAlbedo_;
+    if (accum && !rCur_) {   // offline video: radiance accumulation targets, created on first use
+        const D3D12_RESOURCE_FLAGS uav = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        for (Texture& tex : histAlbedo_) tex.Create(pc.ctx, W, H, RenderTargets::kColorFormat, uav, kSrv, L"pt.histRadiance");
+        rCur_.Create(pc.ctx, W, H, RenderTargets::kColorFormat, uav, kSrv, L"pt.radiance");
+        albEff_.Create(pc.ctx, W, H, RenderTargets::kColorFormat, uav, kSrv, L"pt.albedoEff");
+        edgeAcc_.Create(pc.ctx, W, H, RenderTargets::kColorFormat, uav, kSrv, L"pt.edgeAcc");
+    }
+    Texture* radTarget = accum ? &rCur_ : &filterB_;   // filterB_ is a dummy binding when nothing accumulates
+    albedo_.Transition(cmd, kSrvAll);
+    radTarget->Transition(cmd, kUav);
     const bool valid = historyValid_ && !pc.view.cameraCut && !pc.offscreen;
-    const float c1[4] = {valid ? 1.0f : 0.0f, 24.0f, 0.08f, 0};
+    const float c1[8] = {valid ? 1.0f : 0.0f, pc.settings.ptHistoryMax, pc.settings.ptHistoryMinAlpha,
+                         pc.settings.ptHistoryCarry, pc.view.ptFirstPass ? 1.0f : 0.0f,
+                         pc.view.ptStaticPass ? 1.0f : 0.0f, 0, 0};
     temporal_.Dispatch(pc, pc.transient.SrvTable(pc.ctx,
                                                 {&light_, &history_[prev], &t.velocity, &t.depth, &t.normal,
-                                                 &histDepth_[prev], &histNormal_[prev]}),
-                       pc.transient.UavTable(pc.ctx, {&history_[cur], &histDepth_[cur], &histNormal_[cur]}),
-                       c1, 4, gx, gy);
+                                                 &histDepth_[prev], &histNormal_[prev], &albedo_}),
+                       pc.transient.UavTable(pc.ctx, {&history_[cur], &histDepth_[cur], &histNormal_[cur], radTarget}),
+                       c1, 8, gx, gy);
+
+    // 2b. offline video: accumulate the radiance with the light's weights, effective albedo R_acc / L_acc
+    Texture* albedoSrc = &albedo_;
+    if (accum) {
+        history_[cur].Transition(cmd, kSrvAll);
+        rCur_.Transition(cmd, kSrvAll);
+        histAlbedo_[prev].Transition(cmd, kSrvAll);
+        histAlbedo_[cur].Transition(cmd, kUav);
+        albEff_.Transition(cmd, kUav);
+        temporalAlbedo_.Dispatch(pc, pc.transient.SrvTable(pc.ctx,
+                                                          {&history_[cur], &rCur_, &histAlbedo_[prev], &t.velocity,
+                                                           &t.depth, &t.normal, &histDepth_[prev], &histNormal_[prev]}),
+                                 pc.transient.UavTable(pc.ctx, {&histAlbedo_[cur], &albEff_}), c1, 8, gx, gy);
+        histAlbedo_[cur].Transition(cmd, kSrvAll);
+        albEff_.Transition(cmd, kSrvAll);
+        albedoSrc = &albEff_;
+    }
 
     // 3. a-trous: history_[cur] -> filterA_ (step 1) -> filterB_ (step 2) -> filterA_ (step 4).
     Texture* src = &history_[cur];
@@ -2242,10 +2282,10 @@ void PathTracePass::Execute(PassContext& pc) {
 
     // 4. modulate the filtered light by the albedo into the G-buffer colour.
     filterA_.Transition(cmd, kSrvAll);
-    albedo_.Transition(cmd, kSrvAll);
+    albedoSrc->Transition(cmd, kSrvAll);
     t.color.Transition(cmd, kUav);
     const float c3[4] = {pc.settings.transparentBackground ? 1.0f : 0.0f, 0, 0, 0};
-    modulate_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&filterA_, &albedo_, &t.depth}),
+    modulate_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&filterA_, albedoSrc, &t.depth}),
                        pc.transient.UavTable(pc.ctx, {&t.color}), c3, 4, gx, gy);
 
     // 4b. outlines: ScenePass's edge layer (DrawPtEdges) over the denoised colour, its velocity where it covers
@@ -2255,8 +2295,11 @@ void PathTracePass::Execute(PassContext& pc) {
         t.colorMsaa.Transition(cmd, kSrvAll);
         t.velocityMsaa.Transition(cmd, kSrvAll);
         t.velocity.Transition(cmd, kUav);
+        Texture* edgeAcc = accum ? &edgeAcc_ : &filterB_;   // filterB_ is a dummy binding when nothing accumulates
+        edgeAcc->Transition(cmd, kUav);
+        const float ce[4] = {accum ? 1.0f : 0.0f, 1.0f / (float)(std::max(pc.view.ptPassIndex, 0) + 1), 0, 0};
         edgeComposite_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&t.colorMsaa, &t.velocityMsaa}),
-                                pc.transient.UavTable(pc.ctx, {&t.color, &t.velocity}), nullptr, 0, gx, gy);
+                                pc.transient.UavTable(pc.ctx, {&t.color, &t.velocity, edgeAcc}), ce, 4, gx, gy);
     }
 
     // 5. hand the G-buffer to the pixel-shader passes.

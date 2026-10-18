@@ -30,6 +30,8 @@ TOOLS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TOOLS_DIR.parent
 WEB_REPO_ROOT = REPO_ROOT.parent / "MMDX12_Web"   # the website repo next to this one (--web-root)
 APP_BIN_DIR = REPO_ROOT / "build_dev" / "bin"
+if not (APP_BIN_DIR / "MMDX12.exe").is_file():
+    APP_BIN_DIR = REPO_ROOT / "build" / "bin"
 APP_EXE = APP_BIN_DIR / "MMDX12.exe"
 
 sys.path.insert(0, str(TOOLS_DIR))
@@ -62,6 +64,7 @@ SHOT_CONFIGS = {
     "lens_flare": _shot("effect", "sour_miku", "theater", 8.0, 2),
     "lens_reflection": _shot("effect", "sour_miku", "theater", 8.0),
     "screen_ao": _shot("effect", "sour_miku", "theater", 22.0),
+    "eye_adaptation": _shot("effect", "sour_miku", "theater", 8.0, 2),
 }
 
 

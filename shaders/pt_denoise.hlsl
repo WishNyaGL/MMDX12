@@ -18,6 +18,8 @@ Texture2D<float4> gPrevNormal : register(t6);
 RWTexture2D<float4> gHistOut : register(u0);
 RWTexture2D<float> gDepthCopy : register(u1);
 RWTexture2D<float4> gNormalCopy : register(u2);
+Texture2D<float4> gAlbedoPass : register(t7);   // this pass's primary albedo
+RWTexture2D<float4> gRadPass : register(u3);     // this pass's radiance = light * albedo (offline video accumulates it)
 
 [numthreads(8, 8, 1)]
 void CSTemporal(uint3 id : SV_DispatchThreadID) {
@@ -27,10 +29,20 @@ void CSTemporal(uint3 id : SV_DispatchThreadID) {
     int2 p = (int2)id.xy;
 
     float3 c = min(gLight[p].rgb, 64.0);
+    float4 pa = gAlbedoPass[p];
+    gRadPass[p] = float4(c * pa.rgb, pa.a);
     float d = gDepth[p];
     float4 nt = gNormal[p];
     gDepthCopy[p] = d;
     gNormalCopy[p] = nt;
+    if (gP1.y > 0.5 && gP0.x > 0.5) {
+        // another pass of the same video frame: same pose and camera, only the jitter and the random numbers differ,
+        // so the history of this very pixel always belongs to it (sky and silhouettes included)
+        float4 h = gHistory[p];
+        float sl = min(h.a + 1.0, gP0.y);
+        gHistOut[p] = float4(lerp(h.rgb, c, max(1.0 / sl, gP0.z)), sl);
+        return;
+    }
     if (d >= 1.0 || gP0.x < 0.5) { gHistOut[p] = float4(c, 1.0); return; }   // sky or no history
 
     float2 size = gViewportSize;
@@ -57,9 +69,70 @@ void CSTemporal(uint3 id : SV_DispatchThreadID) {
     if (wsum < 0.01) { gHistOut[p] = float4(c, 1.0); return; }
 
     float4 hist = sum / wsum;
+    if (gP1.x > 0.5) hist.a = min(hist.a, gP0.w);   // first pass of a video frame: limit cross-frame ghosting
     float len = min(hist.a + 1.0, gP0.y);
     float alpha = max(1.0 / len, gP0.z);
     gHistOut[p] = float4(lerp(hist.rgb, c, alpha), len);
+}
+
+// ---- temporal accumulation of the radiance, effective albedo ---------------------------
+// The light is demodulated by the albedo of THIS pass, so a primary hit that changes between passes (stochastic
+// transparency such as hair over skin, and every silhouette under the sub-pixel jitter) would show one pass's albedo
+// as a binary dither and a stair-stepped edge. For offline video (RenderSettings::ptAccumAlbedo) the radiance
+// R = light * albedo is accumulated with the light's weights and the albedo handed to the remodulation is
+// R_acc / L_acc: exactly the mean radiance before the a-trous filter, and the plain albedo where it never changes.
+// (Averaging the albedo itself is biased: light = R / albedo of the first sample is correlated with that albedo.)
+
+Texture2D<float4> gLightHistCur : register(t0);   // history_[cur]: rgb = L_acc, a = the length the light pass just used
+Texture2D<float4> gRadCur : register(t1);
+Texture2D<float4> gRadPrev : register(t2);
+Texture2D<float2> gVelA : register(t3);
+Texture2D<float> gDepthA : register(t4);
+Texture2D<float4> gNormalA : register(t5);
+Texture2D<float> gPrevDepthA : register(t6);
+Texture2D<float4> gPrevNormalA : register(t7);
+RWTexture2D<float4> gRadOut : register(u0);
+RWTexture2D<float4> gAlbEff : register(u1);
+
+float4 RadianceHistory(int2 p, float4 c, float len, float alpha) {
+    if (gP0.x < 0.5 || len <= 1.0) return c;   // no history, or the light pass restarted it
+    if (gP1.y > 0.5) return lerp(gRadPrev[p], c, alpha);   // same frame: this pixel's own history
+    float d = gDepthA[p];
+    if (d >= 1.0) return c;
+    float2 size = gViewportSize;
+    float2 puv = (p + 0.5) / size - gVelA[p];
+    float2 pos = puv * size - 0.5;
+    int2 base = (int2)floor(pos);
+    float2 f = pos - base;
+    float z = LinearZ(d);
+    float3 n = OctDecode(gNormalA[p].xy);
+    float4 sum = 0;
+    float wsum = 0;
+    [unroll] for (int j = 0; j < 2; ++j)
+    [unroll] for (int i = 0; i < 2; ++i) {
+        int2 q = base + int2(i, j);
+        if (any(q < 0) || any(q >= (int2)size)) continue;
+        float pd = gPrevDepthA[q];
+        bool valid = pd < 1.0 && abs(LinearZ(pd) - z) < 0.05 * z && dot(OctDecode(gPrevNormalA[q].xy), n) > 0.8;
+        float wq = (i ? f.x : 1.0 - f.x) * (j ? f.y : 1.0 - f.y);
+        if (valid) { sum += gRadPrev[q] * wq; wsum += wq; }
+    }
+    if (wsum < 0.01) return c;
+    return lerp(sum / wsum, c, alpha);
+}
+
+[numthreads(8, 8, 1)]
+void CSTemporalAlbedo(uint3 id : SV_DispatchThreadID) {
+    uint w, h;
+    gRadOut.GetDimensions(w, h);
+    if (id.x >= w || id.y >= h) return;
+    int2 p = (int2)id.xy;
+
+    float4 lacc = gLightHistCur[p];
+    float len = max(lacc.a, 1.0);
+    float4 r = RadianceHistory(p, gRadCur[p], len, max(1.0 / len, gP0.z));
+    gRadOut[p] = r;
+    gAlbEff[p] = float4(r.rgb / max(lacc.rgb, 1e-3), r.a);
 }
 
 // ---- a-trous filter --------------------------------------------------------------

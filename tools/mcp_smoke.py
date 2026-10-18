@@ -162,7 +162,13 @@ def run_handshake_only(bridge_path):
 
         # every inputSchema must be a JSON Schema object (clients reject the whole list otherwise)
         def check_schema(schema, path):
-            if not isinstance(schema, dict) or "type" not in schema:
+            if not isinstance(schema, dict):
+                raise RuntimeError(f"Invalid schema at {path}: {schema!r}")
+            if "oneOf" in schema:
+                for idx, sub in enumerate(schema["oneOf"]):
+                    check_schema(sub, f"{path}.oneOf[{idx}]")
+                return
+            if "type" not in schema:
                 raise RuntimeError(f"Invalid schema at {path}: {schema!r}")
             if schema["type"] == "object":
                 props = schema.get("properties", {})

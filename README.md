@@ -221,7 +221,7 @@ MMDX12 can be controlled interactively by AI assistants (Claude Desktop, Cursor,
 - Full Studio inspection, pose and light adjustments, and keyframe editing.
 - Automated offline still and video rendering.
 
-See [docs/mcp.md](docs/mcp.md) for configuration instructions and the complete 33-tool reference.
+See [docs/mcp.md](docs/mcp.md) for configuration instructions and the complete 35-tool reference.
 
 ## Building from source
 

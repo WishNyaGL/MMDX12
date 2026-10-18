@@ -36,7 +36,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # optional fixed free camera "--camera tx,ty,tz,yawDeg,pitchDeg,dist" (None = the motion camera at `seek`).
 SCENE_PRESETS = {
     "default": {
-        "character": "01_9001",
+        "character": "sour_miku",
         "stage": "terrace",
         "song": "Evergreen",
         "seek": 47.0,   # face visible, turned toward the camera (20 s: a hand over the face)

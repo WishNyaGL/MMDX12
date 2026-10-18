@@ -262,7 +262,41 @@ int Run(int argc, char* argv[]) {
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--pipe" && i + 1 < argc) {
+        if (a == "--help" || a == "-h" || a == "/?") {
+            _setmode(_fileno(stdout), _O_TEXT);
+            std::cout << "MMDX12 Model Context Protocol (MCP) Bridge v1.0.0\n"
+                      << "Translates stdio JSON-RPC 2.0 to MMDX12 Win32 named pipe.\n\n"
+                      << "Usage:\n"
+                      << "  mmdx12_mcp.exe [options]\n\n"
+                      << "Options:\n"
+                      << "  --launch         Spawn MMDX12.exe --mcp from the bridge's folder if no instance is running\n"
+                      << "  --pipe <name>    Connect to an explicit named pipe (e.g. mmdx12_mcp or \\\\.\\pipe\\mmdx12_mcp_1234)\n"
+                      << "  --pid <pid>      Connect to a specific process ID (\\\\.\\pipe\\mmdx12_mcp_<pid>)\n"
+                      << "  --timeout <ms>   Request timeout in milliseconds (default: 30000)\n"
+                      << "  -h, --help       Show this help message and exit\n\n"
+                      << "Configuration Examples:\n"
+                      << "  Claude Desktop (%APPDATA%\\Claude\\claude_desktop_config.json):\n"
+                      << "    {\n"
+                      << "      \"mcpServers\": {\n"
+                      << "        \"mmdx12\": {\n"
+                      << "          \"command\": \"C:\\\\path\\\\to\\\\MMDX12\\\\mmdx12_mcp.exe\",\n"
+                      << "          \"args\": [\"--launch\"]\n"
+                      << "        }\n"
+                      << "      }\n"
+                      << "    }\n\n"
+                      << "  Claude Code:\n"
+                      << "    claude mcp add mmdx12 -- C:\\path\\to\\MMDX12\\mmdx12_mcp.exe --launch\n\n"
+                      << "  Cursor / Antigravity:\n"
+                      << "    {\n"
+                      << "      \"mcpServers\": {\n"
+                      << "        \"mmdx12\": {\n"
+                      << "          \"command\": \"C:/path/to/MMDX12/mmdx12_mcp.exe\",\n"
+                      << "          \"args\": [\"--launch\"]\n"
+                      << "        }\n"
+                      << "      }\n"
+                      << "    }\n";
+            return 0;
+        } else if (a == "--pipe" && i + 1 < argc) {
             argPipe = argv[++i];
         } else if (a == "--pid" && i + 1 < argc) {
             argPid = (uint32_t)std::stoul(argv[++i]);

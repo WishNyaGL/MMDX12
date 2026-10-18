@@ -47,6 +47,7 @@ foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
     Copy-Item (Join-Path $crt.FullName $dll) $stage
 }
 Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage 'LICENSE.txt')
+Copy-Item (Join-Path $root 'docs\mcp.md') (Join-Path $stage 'MCP_GUIDE.md')
 
 $lic = Join-Path $stage 'licenses'
 New-Item -ItemType Directory -Force $lic | Out-Null

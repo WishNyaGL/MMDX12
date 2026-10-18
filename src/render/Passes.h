@@ -190,6 +190,7 @@ public:
 
 private:
     ComputePipeline trace_, temporal_, atrous_, modulate_;
+    ComputePipeline temporalAlbedo_;  // optional (RenderSettings::ptAccumAlbedo): accumulates the radiance, derives the effective albedo
     ComputePipeline edgeComposite_;   // pt_edge.hlsl: ScenePass's outline layer over the denoised colour
     PtPackVariants ptVariants_;
     std::filesystem::path shaderDir_;
@@ -197,6 +198,10 @@ private:
     Texture history_[2];            // accumulated light, a = history length (RGBA16F)
     Texture histDepth_[2];          // R32_FLOAT raw depth of the frame each history belongs to
     Texture histNormal_[2];         // RGBA16F oct normal of that frame
+    // offline video only (RenderSettings::ptAccumAlbedo), created on first use:
+    Texture histAlbedo_[2];         // RGBA16F accumulated radiance (light * albedo) with the light's weights
+    Texture rCur_, albEff_;         // RGBA16F this pass's radiance, the effective albedo R_acc / L_acc
+    Texture edgeAcc_;               // RGBA16F outline layer averaged over the passes of one video frame
     Texture filterA_, filterB_;     // a-trous ping-pong (RGBA16F)
     uint32_t current_ = 0;
     bool historyValid_ = false;
