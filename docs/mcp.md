@@ -160,6 +160,71 @@ Navigation tools (`set_screen`, `load_scene`, `open_studio`, `studio_open`) refu
 changes unless `discard_unsaved: true`, and refuse while the app is loading, rendering or benchmarking. A failed load stays on its error screen (`get_state` shows `load_error`); any navigation tool leaves it.
 While the window is minimized, read-only queries answer as they are; every other tool restores the window first (it needs rendered frames).
 
+### Studio analysis tools (read-only)
+These five tools answer questions about the active studio project without changing the document, the undo history, the
+playhead or the view. Frames are timeline frames at 30 fps; angles are degrees; bones are PMX names (Japanese).
+- `studio_scene_info`: Snapshot of the project: fps/end frame/aspect, audio, per-model placement, key counts and world
+  AABB, character height/center/facing (0 = facing -Z, toward the default MMD camera), camera pose and eye, every
+  scene light with all fields. Example: `{"name": "studio_scene_info", "arguments": {}}`
+- `studio_sample_motion`: World-space bone positions at sampled frames, posed like the viewport without physics.
+  Example: `{"name": "studio_sample_motion", "arguments": {"model": 0, "bones": ["頭", "左手首"], "start": 0, "end": 300, "step": 10}}`
+- `studio_motion_events`: Derived choreography facts per character (jumps, crouches, hand raises, turns, holds,
+  travel, energy) plus formation order and crossovers with two or more characters.
+  Example: `{"name": "studio_motion_events", "arguments": {"model": 0, "step": 2}}`
+- `studio_frame_check`: Screen framing per frame from the motion camera or a camera override (bbox, on-screen fraction,
+  head in frame, cut points, screen height, distance, facing, shot size).
+  Example: `{"name": "studio_frame_check", "arguments": {"frames": [120, 240], "camera": {"target": [0, 10, 0], "yaw_deg": 0, "pitch_deg": 5, "dist": 40, "fov_deg": 30}}}`
+- `studio_audio_analysis`: Tempo, beats, downbeats, beat energy, onsets and sections of the project's audio, all in
+  timeline frames. Example: `{"name": "studio_audio_analysis", "arguments": {"start": 0, "end": 900}}`
+
+### Bulk key tools (camera, lights, bones, morphs)
+
+These six tools read and write whole key lists as JSON. Every write is exactly **one undo step** named `AI: <tool>`.
+All conventions below matter: values are MMD angles/units, not radians.
+
+**Curve JSON** (`"curve"` on a key = the easing *into* this key from the previous key, VMD semantics):
+- preset name: `linear` (20,20,107,107), `ease_in_out` (64,0,64,127), `ease_in` (64,0,127,127),
+  `ease_out` (0,0,64,127), `smooth` (42,0,86,127), `fast_start` (0,64,64,127), `slow_start` (64,0,107,64);
+- `[x1,y1,x2,y2]` integers 0..127, applied to every parameter / channel;
+- camera object per parameter `{x, y, z, rotation, distance, fov}`, bone object per channel `{x, y, z, rotation}`,
+  each a preset name or `[4]`; missing ones are linear.
+On read, curves come back in the object form (preset name when the bytes match exactly, else `[4]`). Absent `curve`
+means `linear`. Camera mapping: `rotation.x = -pitch`, `rotation.y = yaw`, `rotation.z = roll` (radians internally),
+`distance = -dist` (so `dist > 0` puts the eye in front of the target, like `studio_set_camera`).
+
+- `studio_get_camera_keys` `{start?, end?}` → `keys` (`frame`, `target`, `yaw_deg`, `pitch_deg`, `roll_deg`, `dist`,
+  `fov_deg`, `perspective`, `curve`, `eye`) plus `cuts` (frames f with keys at f and f+1, MMD's cut convention).
+  Example: `{"name": "studio_get_camera_keys", "arguments": {"start": 0, "end": 600}}`
+- `studio_set_camera_keys` `{keys, mode}`. `mode`: `merge` (default, upsert by frame), `replace_range` (delete keys in
+  `[min frame, max frame]` of the supplied keys first), `replace_all`. A missing field takes what the existing track
+  evaluates to at that frame (the default `CameraKf` when empty). `fov_deg` clamps to 1..125. Sets
+  `useMotionCamera = true`. Max 20000 keys. A cut = two keys on adjacent frames (there is no cut flag).
+  Example: `{"name": "studio_set_camera_keys", "arguments": {"mode": "replace_all", "keys": [{"frame": 0, "target": [0, 10, 0], "yaw_deg": 0, "pitch_deg": 5, "dist": 40, "fov_deg": 30, "curve": "smooth"}, {"frame": 300, "target": [0, 10, 0], "yaw_deg": 30, "pitch_deg": 3, "dist": 35, "fov_deg": 35}]}}`
+- `studio_set_light` `{index? | create, props?, base?, keys?, mode?, delete?}`. `create` is `sun|point|spot|area|ambient`
+  (optional `name`); at most one sun and one ambient. `props` are the non-keyed fields (`name`, `enabled`, `vmd_link`,
+  `rim_strength`, `rim_color`, `aim_mode`, `target_model`, `target_part`, `sway_phase`, `sky_zenith`, `sky_horizon`,
+  `ground_color`, `shadow`, `shadow_softness`, `shadow_density`, `shadow_color`, `falloff`, `affect_diffuse`,
+  `affect_specular`, `viewport_visible`); `base` holds the keyable values (`position`, `aim`, `direction`, `color`,
+  `intensity`, `range`, `cone_outer_deg`, `cone_inner_deg`, `size`); `keys` are `{frame, ...keyable}` with a missing
+  value taken from `SampleLightValues` at that frame. `mode` applies to the keys only. `delete: true` removes it.
+  Answers `index` and `uid`. Creation, property changes and key writes are one `LightsCommand` (one undo step).
+  Example: `{"name": "studio_set_light", "arguments": {"create": "spot", "name": "Key spot", "props": {"aim_mode": "target", "target_model": -1}, "base": {"position": [0, 60, -20], "intensity": 2.5, "cone_outer_deg": 20, "cone_inner_deg": 12}, "keys": [{"frame": 0, "intensity": 0}, {"frame": 60, "intensity": 2.5, "curve": "ease_in"}]}}`
+- `studio_get_bone_keys` `{model, bones?, start?, end?, morphs?}` → `bones` (`{name: [{frame, translate,
+  rotate_deg, quat, curve}]}`) and, with `morphs: true`, `morphs` (`{name: [{frame, weight}]}`). `rotate_deg` is Euler
+  XYZ degrees in `studio_set_bone`'s convention (`XMQuaternionRotationRollPitchYaw(x,y,z)`); `quat` is `[x,y,z,w]`.
+  Default: every bone with keys. Output caps at 20000 keys with `truncated: true`.
+  Example: `{"name": "studio_get_bone_keys", "arguments": {"model": 0, "bones": ["センター", "頭"], "start": 0, "end": 300, "morphs": true}}`
+- `studio_set_bone_keys` `{model, bones, morphs?, mode}`. `bones`: `{name: [{frame, translate?, rotate_deg? | quat?,
+  curve?}]}`; missing `translate` / rotation takes the bone's evaluated value at that frame (zero / identity with no
+  keys). Values are VMD-local like `studio_set_bone`. `morphs`: `{name: [{frame, weight}]}`. Bones and morphs must
+  exist in the PMX (unknown names rejected, listing them). `mode` applies per listed track. Bumps the model's motion
+  version. One undo step over all tracks.
+  Example: `{"name": "studio_set_bone_keys", "arguments": {"model": 0, "bones": {"センター": [{"frame": 0, "translate": [0, 0, 0]}, {"frame": 120, "translate": [0, 0, 8], "curve": "ease_in_out"}]}, "morphs": {"まばたき": [{"frame": 0, "weight": 0}, {"frame": 10, "weight": 1}]}}}`
+- `studio_delete_keys` `{target, start, end, index?, model?, bones?, morphs?}`. `target`: `camera` | `light` (needs
+  `index`) | `bone` / `morph` (needs `model`, optional name lists; default every track with keys). Deletes keys in
+  `[start, end]`, one undo step.
+  Example: `{"name": "studio_delete_keys", "arguments": {"target": "camera", "start": 0, "end": 30}}`
+
 ### Input Simulation & Lifetime
 32. `ui_input`: Injects virtual UI mouse and keyboard events (`move`, `click`, `dblclick`, `down`, `up`, `wheel`, `key`, `text`, `mod`) the same commands as `--ui-script`. Events run one per frame unless they give `frame` (offset from now); clicks add their own press / release. Real mouse / keyboard input is ignored only while injected steps are pending.
 34. `ui_items`: The widgets of the last frame: `label` (visible text), `id` (the language-independent ImGui id string, e.g. `##play`), `window`, `rect` `[x, y, w, h]`. `query` matches label or id (case-insensitive substring); Korean source text also matches its translation in the current UI language, so one script drives every language. Clipped widgets and widgets covered by another window (a modal, a popup) are left out unless `include_hidden`. Besides ImGui items it lists drawn-only elements: timeline row headers (`##tlrow`) and visible keys (`##tlkey:<row>:<frame>`); shader pack cards carry `p:<id>:...` / `r:<id>:<version>`.

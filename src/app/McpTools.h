@@ -702,6 +702,310 @@ inline nlohmann::json GetMcpToolDefinitions() {
         }}
     });
 
+    // 34. studio_scene_info
+    tools.push_back({
+        {"name", "studio_scene_info"},
+        {"description", "Read-only snapshot of the active studio project at the current frame: fps (30), end_frame, "
+                        "aspect ratio, audio (file / offset_seconds / end_frame or null), every model (index, uid, "
+                        "kind, name, file, visible, placement, key counts, key frame range, world-space AABB "
+                        "[minx,miny,minz,maxx,maxy,maxz]; characters also height, center bone world position and "
+                        "facing_yaw_deg where 0 = facing -Z toward the default MMD camera, +90 = +X), the camera "
+                        "(key count, first/last frame, use_motion_camera, current target / yaw / pitch / roll in "
+                        "degrees, dist, fov_deg, eye world position) and every scene light with all base and sampled "
+                        "values (cone angles in degrees). Units are MMD world units; frames are timeline frames at "
+                        "30 fps. Never changes the document."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", json::object()}
+        }}
+    });
+
+    // 35. studio_sample_motion
+    tools.push_back({
+        {"name", "studio_sample_motion"},
+        {"description", "Read-only world-space bone positions of one character or stage at sampled timeline frames "
+                        "(30 fps): {\"frames\": [...], \"bones\": {\"<bone name>\": [[x,y,z], ...]}, "
+                        "\"missing_bones\": [...]}. Pose = the bound motion at that frame plus the model's placement "
+                        "and scale, without pose-layer edits and with physics disabled, so the result is deterministic. "
+                        "Bones are PMX names (Japanese, e.g. 頭); missing ones are skipped and listed. Defaults: "
+                        "bones [センター, 上半身, 頭, 左手首, 右手首, 左足首, 右足首], the model's whole key range, "
+                        "step 5. At most 4000 samples (frames x bones). The viewport is restored afterwards. Props "
+                        "are rejected."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"model", {{"type", "integer"}, {"description", "Model index as in studio_get_state (character or stage)"}}},
+                {"bones", {{"type", "array"}, {"items", {{"type", "string"}}},
+                           {"description", "PMX bone names (Japanese), default the 7 tracked bones"}}},
+                {"start", {{"type", "integer"}, {"description", "First frame (default: the motion's first key)"}}},
+                {"end", {{"type", "integer"}, {"description", "Last frame (default: the motion's last key)"}}},
+                {"step", {{"type", "integer"}, {"description", "Frame step (default 5, minimum 1)"}}},
+                {"physics", {{"type", "boolean"}, {"description", "Ignored: bones are never physics-simulated"}}}
+            }},
+            {"required", {"model"}}
+        }}
+    });
+
+    // 36. studio_motion_events
+    tools.push_back({
+        {"name", "studio_motion_events"},
+        {"description", "Read-only derived choreography facts (timeline frames at 30 fps) to motivate camera shots. "
+                        "Per character: jumps [{frame, height}], crouches [{frame, depth}], hand_raises "
+                        "[{start, end, hand: left|right|both}], turns [{start, end, delta_yaw_deg}], holds "
+                        "[{start, end}], travel {start_xz, end_xz, bounds_min_xz, bounds_max_xz, max_speed} and "
+                        "energy windows of 15 frames normalised 0..1 over the character. With two or more characters "
+                        "it also returns formation (per 30 frames the left-to-right order of characters as seen from "
+                        "the default front camera, -Z looking +Z) and crossovers [{frame, a, b}]. Heights are in MMD "
+                        "world units. Never changes the document."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"model", {{"type", "integer"}, {"description", "Character index; default: every character"}}},
+                {"start", {{"type", "integer"}, {"description", "First frame (default: the motion's first key)"}}},
+                {"end", {{"type", "integer"}, {"description", "Last frame (default: the motion's last key)"}}},
+                {"step", {{"type", "integer"}, {"description", "Sampling step in frames (default 2, minimum 1)"}}}
+            }}
+        }}
+    });
+
+    // 37. studio_frame_check
+    tools.push_back({
+        {"name", "studio_frame_check"},
+        {"description", "Read-only framing evaluation at timeline frames (30 fps) using the project's motion camera "
+                        "(or one camera override for every frame). Per visible character: screen bbox [x0,y0,x1,y1] "
+                        "normalised 0..1 with y down, on_screen (fraction of sampled points inside), head_in_frame, "
+                        "cut (list of the sampled points outside: head, head_top, center, upper_body, left_hand, "
+                        "right_hand, left_foot, right_foot), screen_height (fraction of the frame height), center "
+                        "screen point, distance eye->center, facing_camera_deg (0 = looking into the lens). Also per "
+                        "frame: eye, fov_deg, aspect and shot_size from the largest character (extreme_close > 1.6, "
+                        "close > 1.0, medium > 0.55, full > 0.3, else wide). FOV is vertical, D3D left-handed "
+                        "perspective, and the project's aspect ratio is used. Poses are sampled without physics and "
+                        "the viewport is restored. Never changes the document."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"frames", {{"type", "array"}, {"items", {{"type", "integer"}}},
+                            {"description", "Timeline frames to evaluate"}}},
+                {"camera", {
+                    {"type", "object"},
+                    {"description", "Optional camera override for every frame (instead of the motion camera): orbit "
+                                    "style like studio_set_camera (yaw 0 / pitch 0 looks along -Z at the target)"},
+                    {"properties", {
+                        {"target", {{"type", "array"}, {"items", {{"type", "number"}}},
+                                    {"description", "World target [x,y,z]"}}},
+                        {"yaw_deg", {{"type", "number"}, {"description", "Yaw in degrees"}}},
+                        {"pitch_deg", {{"type", "number"}, {"description", "Pitch in degrees"}}},
+                        {"roll_deg", {{"type", "number"}, {"description", "Roll in degrees"}}},
+                        {"dist", {{"type", "number"}, {"description", "Distance from the target (positive)"}}},
+                        {"fov_deg", {{"type", "number"}, {"description", "Vertical FOV in degrees (default 30)"}}}
+                    }}
+                }}
+            }},
+            {"required", {"frames"}}
+        }}
+    });
+
+    // 38. studio_audio_analysis
+    tools.push_back({
+        {"name", "studio_audio_analysis"},
+        {"description", "Read-only music structure analysis of the project's audio: bpm, confidence, frames_per_beat, "
+                        "beats, downbeats, beat_energy, onsets plus onset_strength, sections [{start, end, level, "
+                        "energy}] and audio_offset_seconds. All times are timeline frames at 30 fps (frame = (seconds "
+                        "+ audio_offset) * 30, rounded to 0.01). start/end filter the returned frames. The first call "
+                        "may take about a second; the result is cached by audio path and file write time. Fails when "
+                        "the project has no audio."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"start", {{"type", "integer"}, {"description", "First timeline frame to return (default: all)"}}},
+                {"end", {{"type", "integer"}, {"description", "Last timeline frame to return (default: all)"}}}
+            }}
+        }}
+    });
+
+    // 34..39. Bulk key tools (AppMcpKeys.cpp). The descriptions carry the conventions: the AI only reads these.
+    {
+        const json curveDesc =
+            "Easing INTO this key from the previous key (VMD semantics). Preset name: linear (20,20,107,107), "
+            "ease_in_out (64,0,64,127), ease_in (64,0,127,127), ease_out (0,0,64,127), smooth (42,0,86,127), "
+            "fast_start (0,64,64,127), slow_start (64,0,107,64); [x1,y1,x2,y2] integers 0..127 for every "
+            "parameter/channel; or an object per parameter/channel, each a preset name or [4] (missing = linear).";
+        const json curveSchema = {
+            {"description", curveDesc},
+            {"oneOf", json::array({
+                {{"type", "string"}, {"enum", {"linear", "ease_in_out", "ease_in", "ease_out", "smooth", "fast_start", "slow_start"}}},
+                {{"type", "array"}, {"items", {{"type", "integer"}, {"minimum", 0}, {"maximum", 127}}}, {"minItems", 4}, {"maxItems", 4}},
+                {{"type", "object"}}
+            })}
+        };
+        const json vec3 = {{"type", "array"}, {"items", {{"type", "number"}}}, {"minItems", 3}, {"maxItems", 3}};
+        const json modeSchema = {
+            {"type", "string"},
+            {"enum", {"merge", "replace_range", "replace_all"}},
+            {"description", "merge (default): upsert by frame. replace_range: delete the existing keys in [min frame, "
+                            "max frame] of the supplied keys first. replace_all: delete every key of the track(s) first."}
+        };
+
+        tools.push_back({
+            {"name", "studio_get_camera_keys"},
+            {"description",
+             "Read the motion camera key list as JSON. Frame range {start,end} optional (inclusive). Each key: frame, "
+             "target [x,y,z], yaw_deg, pitch_deg, roll_deg, dist, fov_deg (1..125), perspective, curve (object form: "
+             "x/y/z/rotation/distance/fov, each a preset name or [x1,y1,x2,y2]), eye [x,y,z] (CameraMotion::ToView). "
+             "Convention: CameraKf rotation.x = -pitch, rotation.y = yaw, rotation.z = roll (radians internally), "
+             "distance = -dist (dist > 0 = the eye in front of the target, as studio_set_camera's dist). 'cuts' lists "
+             "frames f where keys exist at f and f+1 (MMD camera cut convention)."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"start", {{"type", "integer"}, {"description", "First frame (default 0)"}}},
+                    {"end", {{"type", "integer"}, {"description", "Last frame (default: no limit)"}}}
+                }}
+            }}
+        });
+
+        tools.push_back({
+            {"name", "studio_set_camera_keys"},
+            {"description",
+             "Write motion camera keys (max 20000). Each key needs frame; every other field is optional and a missing "
+             "field takes the value the existing track evaluates to at that frame (the default CameraKf when empty). "
+             "Fields: target [x,y,z], yaw_deg, pitch_deg, roll_deg, dist (dist > 0 = the eye in front of the target, "
+             "stored as distance = -dist), fov_deg (clamped 1..125), perspective, curve. Curve = the easing INTO the key "
+             "from the previous key: preset name, [x1,y1,x2,y2] (0..127), or an object {x,y,z,rotation,distance,fov}. "
+             "mode merge (default) / replace_range / replace_all. A camera cut is two keys on adjacent frames (frame f, "
+             "then frame f+1 with the new pose); there is no separate cut flag. Switches the viewport to the motion "
+             "camera. One undo step."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"keys", {
+                        {"type", "array"},
+                        {"minItems", 1},
+                        {"items", {
+                            {"type", "object"},
+                            {"properties", {
+                                {"frame", {{"type", "integer"}, {"minimum", 0}}},
+                                {"target", vec3},
+                                {"yaw_deg", {{"type", "number"}}},
+                                {"pitch_deg", {{"type", "number"}}},
+                                {"roll_deg", {{"type", "number"}}},
+                                {"dist", {{"type", "number"}}},
+                                {"fov_deg", {{"type", "number"}, {"minimum", 1}, {"maximum", 125}}},
+                                {"perspective", {{"type", "boolean"}}},
+                                {"curve", curveSchema}
+                            }},
+                            {"required", {"frame"}}
+                        }}
+                    }},
+                    {"mode", modeSchema}
+                }},
+                {"required", {"keys"}}
+            }}
+        });
+
+        tools.push_back({
+            {"name", "studio_set_light"},
+            {"description",
+             "Create, edit or delete a Studio scene light, optionally writing its whole key list, as ONE undo step. "
+             "Identify an existing light with index; create one with create (sun|point|spot|area|ambient) plus optional "
+             "name; delete one with delete: true (and index). At most one sun and one ambient are allowed. props (base, "
+             "non-keyed fields): name, enabled, vmd_link, rim_strength, rim_color [r,g,b], aim_mode manual|target|sway, "
+             "target_model (model index, -1 = performer), target_part centre|head, sway_phase, sky_zenith, sky_horizon, "
+             "ground_color, shadow nocast|hard|soft, shadow_softness, shadow_density, shadow_color, falloff "
+             "none|linear|inverse_square, affect_diffuse, affect_specular, viewport_visible. base holds the keyable "
+             "values: position [x,y,z], aim [x,y,z], direction [x,y,z], color [r,g,b], intensity, range, "
+             "cone_outer_deg, cone_inner_deg, size [w,h]. keys: [{frame, ...any keyable value}]; a missing value takes "
+             "SampleLightValues of the light at that frame. Cone inner is clamped to <= outer. mode merge / "
+             "replace_range / replace_all applies to the keys only. Answers index and uid."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"index", {{"type", "integer"}, {"minimum", 0}, {"description", "Existing light index"}}},
+                    {"create", {{"type", "string"}, {"enum", {"sun", "point", "spot", "area", "ambient"}}}},
+                    {"name", {{"type", "string"}, {"description", "Name for a newly created light"}}},
+                    {"delete", {{"type", "boolean"}, {"description", "Remove the light at index"}}},
+                    {"props", {{"type", "object"}, {"description", "Non-keyed light fields"}}},
+                    {"base", {{"type", "object"}, {"description", "Keyable base values"}}},
+                    {"keys", {
+                        {"type", "array"},
+                        {"items", {
+                            {"type", "object"},
+                            {"properties", {{"frame", {{"type", "integer"}, {"minimum", 0}}}}},
+                            {"required", {"frame"}}
+                        }}
+                    }},
+                    {"mode", modeSchema}
+                }}
+            }}
+        });
+
+        tools.push_back({
+            {"name", "studio_get_bone_keys"},
+            {"description",
+             "Read a model's bone (and optionally morph) keys as JSON. model = model index. bones: optional list of "
+             "bone names (default: every bone with keys; unknown names are rejected). start/end optional inclusive "
+             "frame range. Each bone key: frame, translate [x,y,z], rotate_deg [x,y,z] Euler XYZ degrees in "
+             "studio_set_bone's convention (XMQuaternionRotationRollPitchYaw), quat [x,y,z,w] (lossless), curve "
+             "(object form x/y/z/rotation, each a preset name or [x1,y1,x2,y2]). morphs: true adds morphs {name: "
+             "[{frame, weight}]}. Output capped at 20000 keys with truncated: true."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"model", {{"type", "integer"}, {"minimum", 0}}},
+                    {"bones", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                    {"start", {{"type", "integer"}}},
+                    {"end", {{"type", "integer"}}},
+                    {"morphs", {{"type", "boolean"}, {"description", "Also return morph keys"}}}
+                }},
+                {"required", {"model"}}
+            }}
+        });
+
+        tools.push_back({
+            {"name", "studio_set_bone_keys"},
+            {"description",
+             "Write bone and/or morph keys of a model (max 20000), ONE undo step over every track touched. model = "
+             "model index. bones: {name: [{frame, translate?, rotate_deg? | quat?, curve?}]}; values are VMD-local "
+             "like studio_set_bone. A missing translate / rotation takes the bone's evaluated value at that frame "
+             "(interpolated from the current track; zero / identity when it has no keys). rotate_deg is [x,y,z] Euler "
+             "degrees (XMQuaternionRotationRollPitchYaw(x,y,z)); quat is [x,y,z,w]; give one of them. Curve = easing "
+             "into the key: preset, [x1,y1,x2,y2] (0..127), or {x,y,z,rotation}. morphs: {name: [{frame, weight}]}. "
+             "Bones and morphs must exist in the model's PMX (unknown names are rejected with the list). mode merge / "
+             "replace_range / replace_all applies per listed track. Bumps the model's motion version."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"model", {{"type", "integer"}, {"minimum", 0}}},
+                    {"bones", {{"type", "object"}, {"description", "{bone name: [key...]}"}}},
+                    {"morphs", {{"type", "object"}, {"description", "{morph name: [{frame, weight}]}"}}},
+                    {"mode", modeSchema}
+                }},
+                {"required", {"model"}}
+            }}
+        });
+
+        tools.push_back({
+            {"name", "studio_delete_keys"},
+            {"description",
+             "Delete keys in the inclusive frame range [start, end], one undo step. target: camera (no model), light "
+             "(needs index), bone (needs model, optional bones list; default every bone with keys), morph (needs "
+             "model, optional morphs list; default every morph with keys). Answers changed_keys and undo."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"target", {{"type", "string"}, {"enum", {"camera", "light", "bone", "morph"}}}},
+                    {"index", {{"type", "integer"}, {"minimum", 0}, {"description", "target=light: light index"}}},
+                    {"model", {{"type", "integer"}, {"minimum", 0}, {"description", "target=bone/morph: model index"}}},
+                    {"bones", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                    {"morphs", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                    {"start", {{"type", "integer"}, {"minimum", 0}}},
+                    {"end", {{"type", "integer"}, {"minimum", 0}}}
+                }},
+                {"required", {"target", "start", "end"}}
+            }}
+        });
+    }
+
     // Tools that leave the current screen: an open studio project with unsaved changes is kept unless the agent says so.
     for (auto& t : tools) {
         const std::string n = t["name"];
@@ -726,6 +1030,7 @@ inline unsigned McpToolTimeoutMs(const std::string& tool) {
         tool == "studio_command")
         return 180000;
     if (tool == "wait_frames" || tool == "ui_input" || tool == "ui_click") return 120000;
+    if (tool == "studio_audio_analysis") return 60000;
     return 30000;
 }
 

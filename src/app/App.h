@@ -18,6 +18,7 @@
 #include "asset/MaterialChoice.h"
 #include "asset/RayMaterial.h"
 #include "audio/AudioPlayer.h"
+#include "audio/BeatAnalysis.h"
 #include "render/ColorLut.h"
 #include "render/Dx12Context.h"
 #include "render/MmeDiagnostics.h"
@@ -695,6 +696,15 @@ private:
     void ShutdownMcp();          // also fails the commands still waiting for a later frame
     void PumpMcp(bool minimized);  // main thread, before ImGui::NewFrame (and while minimized)
     void ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
+    // Bulk key tools (AppMcpKeys.cpp); true when it handled the tool.
+    bool ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
+    // Read-only analysis tools (AppMcpAnalysis.cpp); true when it handled the tool.
+    bool ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
+    // Poses `m` at each frame (bound motion, placement, no pose layer, no physics) and reads the bones, then restores
+    // the current frame. Rows are per frame; columns follow `bones`.
+    std::vector<std::vector<DirectX::XMFLOAT3>> StudioSampleBones(studio::StudioModel& m, const std::vector<int>& frames,
+                                                                 const std::vector<int>& bones,
+                                                                 std::vector<float>* facingYawDeg = nullptr);
     // Leaves the current screen for a navigation tool like the UI's back buttons do. False (promise rejected) while
     // loading / rendering / benchmarking, or with unsaved studio changes unless args.discard_unsaved.
     bool McpLeaveScreen(const nlohmann::json& args, McpPromise& promise);
@@ -1179,6 +1189,11 @@ private:
     std::unique_ptr<studio::StudioPackage> studioPackage_;
     double studioLastBind_ = 0;       // timeSeconds_ of the last motion re-bind (throttled while dragging)
     bool studioLeaveConfirm_ = false; // unsaved-changes prompt is open (guards studioPending_)
+    // MCP analysis caches (AppMcpAnalysis.cpp): static stage/prop AABBs by model uid, and the audio analysis by
+    // path + write time.
+    std::map<uint32_t, std::pair<DirectX::XMFLOAT3, DirectX::XMFLOAT3>> studioAabbCache_;
+    std::shared_ptr<BeatAnalysis> studioBeats_;
+    std::string studioBeatsKey_;
     StudioAction studioPending_ = StudioAction::None;
     std::filesystem::path studioPendingFile_;
     // async model / song loads started inside the studio

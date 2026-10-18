@@ -223,6 +223,8 @@ void App::PumpMcp(bool minimized) {
 
 void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise) {
     if (!promise) return;
+    if (ExecuteMcpKeys(tool, args, promise)) return;
+    if (ExecuteMcpAnalysis(tool, args, promise)) return;
 
     if (tool == "get_state") {
         nlohmann::json s;
