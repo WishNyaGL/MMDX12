@@ -281,11 +281,26 @@ void App::StartOfflineVideo(double startSeconds, double endSeconds, bool fromLob
         // the alpha sequence writes PNGs itself; the probe still uses an encoder to measure the frame time
         std::error_code ec;
         std::filesystem::create_directories(offline_.alphaDir, ec);
-    } else {
-        offline_.encoder = std::make_unique<VideoEncoder>();
+        if (!probe) {
+            // a transparent render has no encoder; the worker writes the PNG sequence (same frame order)
+            offline_.sink = std::make_unique<AsyncVideoSink>();
+            const std::filesystem::path dir = offline_.alphaDir;
+            const std::string base = offline_.alphaBase;
+            offline_.sink->Open([dir, base](const ImageRGBA8& img, int index) {
+                return WriteAlphaFrame(dir, base, index, img);
+            });
+        }
+    }
+    if (!alpha || probe) {
+        auto encoder = std::make_unique<VideoEncoder>();
         std::string err;
-        if (!offline_.encoder->Open(offline_.output, d, &err)) {
+        if (!encoder->Open(offline_.output, d, &err)) {
             abort(probe ? Tr("시간을 측정할 수 없습니다") : Tr("영상 렌더를 시작할 수 없습니다"), err);
+            return;
+        }
+        offline_.sink = std::make_unique<AsyncVideoSink>();
+        if (!offline_.sink->Open(std::move(encoder))) {
+            abort(Tr("영상 렌더를 시작할 수 없습니다"), Tr("영상 인코더를 시작할 수 없습니다"));
             return;
         }
     }
@@ -443,11 +458,13 @@ void App::RecordRealtimeVideoFrame(ID3D12GraphicsCommandList* cmd) {
     const bool newFrame = offline_.beginPending;
     if (newFrame) {
         // a new video frame: pose it once; its further passes (path tracer history) re-upload the same pose
-        playTime_ = offline_.startSeconds + (double)offline_.frame / offline_.video.fps;
+        playTime_ = offline_.startSeconds + (double)offline_.renderedFrame / offline_.video.fps;
         offline_.frameMmd = (float)(playTime_ * (offline_.studio ? kMmdFps : scene_->motionFps));
         OfflinePose(offline_.frameMmd);
         offline_.iter = 0;
         offline_.beginPending = false;
+        offline_.readbackQueued = false;
+        offline_.readbackFallback = false;
         offline_.imageStartWall = timeSeconds_;
         offline_.imageStartClock = std::chrono::steady_clock::now();
     } else {
@@ -460,7 +477,7 @@ void App::RecordRealtimeVideoFrame(ID3D12GraphicsCommandList* cmd) {
         if (cfg.Renderer() == VideoRenderer::PathTraced) {
             const int q = std::clamp(cfg.quality, 0, kVideoQualityCount - 1);
             bool jumpCut = false;
-            if (offline_.frame > 0) {
+            if (offline_.renderedFrame > 0) {
                 if (CameraJumped(offline_.prevCamera, view.camera, cfg.fps)) jumpCut = true;
                 const DirectX::XMFLOAT3 c = CharacterCenter();
                 const DirectX::XMVECTOR d = DirectX::XMVectorSubtract(DirectX::XMLoadFloat3(&c),
@@ -470,7 +487,7 @@ void App::RecordRealtimeVideoFrame(ID3D12GraphicsCommandList* cmd) {
                 }
             }
             if (jumpCut) view.cameraCut = true;
-            const bool warmUp = offline_.frame == 0 || view.cameraCut;
+            const bool warmUp = offline_.renderedFrame == 0 || view.cameraCut;
             offline_.iterCount = (int)(warmUp ? kVideoRealtimeQualities[q].ptPasses
                                               : kVideoRealtimeQualities[q].ptSteadyPasses);
         } else {
@@ -481,7 +498,7 @@ void App::RecordRealtimeVideoFrame(ID3D12GraphicsCommandList* cmd) {
     }
     const VideoRenderConfig& cfg = offline_.video;
     view.effectDt = (cfg.fps > 0) ? (1.0f / (float)cfg.fps) : (1.0f / 60.0f);
-    if (offline_.frame == 0 || view.cameraCut) {
+    if (offline_.renderedFrame == 0 || view.cameraCut) {
         view.effectStateReset = true;
     }
     view.effectStateAdvance = (offline_.iter + 1 >= offline_.iterCount);
@@ -489,10 +506,25 @@ void App::RecordRealtimeVideoFrame(ID3D12GraphicsCommandList* cmd) {
     view.ptStaticPass = (offline_.iter > 0) && cfg.Renderer() == VideoRenderer::PathTraced;
     view.ptPassIndex = offline_.iter;
     renderer_.Render(cmd, view);
+    // The last pass of this video frame is recorded: queue its copy into the readback ring inside this command
+    // list, so the frame can be encoded later without a GPU wait. A full ring falls back to a synchronous read
+    // in AfterOfflineFrame (targets_.ldr still holds this frame there).
+    if (offline_.iter + 1 >= offline_.iterCount) {
+        offline_.readbackFallback = !renderer_.QueueFinalReadback(cmd, offline_.alpha);
+        offline_.readbackQueued = true;
+        offline_.pendingRenderSeconds.push_back(
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - offline_.imageStartClock).count());
+        ++offline_.renderedFrame;    }
 }
 
 void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
     if (offline_.realtime) {
+        // every frame was recorded; the readback ring / encoder is draining (AfterOfflineFrame finishes the job).
+        // Keep the current back buffer (UI only) until it does.
+        if (offline_.renderedFrame >= offline_.frameCount && offline_.frameCount > 0) {
+            renderer_.ClearBackBuffer(cmd);   // UI-only surface for the progress overlay while the ring drains
+            return;
+        }
         RecordRealtimeVideoFrame(cmd);
         return;
     }
@@ -552,7 +584,7 @@ void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
     // a project's stack is what offline renders from the studio use.
     if (offline_.studio && studio_ && !options_.mmeSet) jd.mmeEffects = StudioMmeEntries();
     if (video) {
-        jd.effectReset = (offline_.frame == 0) || jumpCut || view.cameraCut;
+        jd.effectReset = (offline_.renderedFrame == 0) || jumpCut || view.cameraCut;
     }
     // the irradiance cache prepass is the render's GI: every image, video frames included
     if (!renderer_.BeginOffline(cmd, view, jd)) {
@@ -582,26 +614,57 @@ void App::AfterOfflineFrame() {
     ImageRGBA8 img;
     const bool alpha = offline_.alpha;
     if (offline_.realtime) {
-        if (++offline_.iter < offline_.iterCount) return;   // more passes accumulate into this frame
-        if (!renderer_.ReadFinalImage(img, alpha)) {
-            LOG_ERROR("offline render: could not read the frame");
-            toast_ = {Tr("렌더 결과를 읽을 수 없습니다"), "", {}, true, timeSeconds_ + 8.0};
-            FinishOffline(true);
-            return;
+        renderer_.EndFrameReadback();   // the frame just submitted is queued for its readback
+        if (offline_.iter < offline_.iterCount) ++offline_.iter;
+        // The ring was full when the frame completed: read the final image synchronously (targets_.ldr still
+        // holds it), after draining the older readbacks so the frame order stays exact.
+        if (offline_.readbackFallback) {
+            offline_.readbackFallback = false;
+            ImageRGBA8 older;
+            while (renderer_.PollFinalReadback(older, true)) {
+                const double r = offline_.pendingRenderSeconds.empty() ? 0.0 : offline_.pendingRenderSeconds.front();
+                if (!offline_.pendingRenderSeconds.empty()) offline_.pendingRenderSeconds.pop_front();
+                if (!older.Empty()) EncodeOfflineImage(std::move(older), r);
+                if (offline_.mode == OfflineMode::None) return;
+            }
+            if (!renderer_.ReadFinalImage(img, alpha)) {
+                LOG_ERROR("offline render: could not read the frame");
+                toast_ = {Tr("렌더 결과를 읽을 수 없습니다"), "", {}, true, timeSeconds_ + 8.0};
+                FinishOffline(true);
+                return;
+            }
+            const double r = offline_.pendingRenderSeconds.empty() ? 0.0 : offline_.pendingRenderSeconds.front();
+            if (!offline_.pendingRenderSeconds.empty()) offline_.pendingRenderSeconds.pop_front();
+            EncodeOfflineImage(std::move(img), r);
+            if (offline_.mode == OfflineMode::None) return;
         }
-    } else {
-        if (renderer_.OfflineStatus().phase != OfflinePhase::Done) return;
-        if (!renderer_.ReadOfflineImage(img, alpha)) {
-            LOG_ERROR("offline render: could not read the result image");
-            toast_ = {Tr("렌더 결과를 읽을 수 없습니다"), "", {}, true, timeSeconds_ + 8.0};
-            FinishOffline(true);
-            return;
+        // release every readback whose GPU work has finished, in the order the frames were recorded
+        ImageRGBA8 ready;
+        while (renderer_.PollFinalReadback(ready, false)) {
+            const double r = offline_.pendingRenderSeconds.empty() ? 0.0 : offline_.pendingRenderSeconds.front();
+            if (!offline_.pendingRenderSeconds.empty()) offline_.pendingRenderSeconds.pop_front();
+            if (!ready.Empty()) EncodeOfflineImage(std::move(ready), r);
+            if (offline_.mode == OfflineMode::None) return;   // failed while encoding
         }
+        if (offline_.iter < offline_.iterCount) {
+            // more passes accumulate into this video frame (PT): keep it
+        } else if (offline_.renderedFrame < offline_.frameCount) {
+            offline_.beginPending = true;
+        } else if (renderer_.PendingReadbacks() == 0) {
+            FinishOffline(false);   // every rendered frame is encoded
+        }
+        return;
+    }
+    if (renderer_.OfflineStatus().phase != OfflinePhase::Done) return;
+    if (!renderer_.ReadOfflineImage(img, alpha)) {
+        LOG_ERROR("offline render: could not read the result image");
+        toast_ = {Tr("렌더 결과를 읽을 수 없습니다"), "", {}, true, timeSeconds_ + 8.0};
+        FinishOffline(true);
+        return;
     }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - offline_.imageStartClock).count();
-    offline_.avgImageSeconds =
-        offline_.frame == 0 ? secs : (offline_.avgImageSeconds * offline_.frame + secs) / (offline_.frame + 1);
     if (offline_.mode == OfflineMode::Still) {
+        offline_.avgImageSeconds = secs;
         std::error_code ec;
         std::filesystem::create_directories(offline_.output.parent_path(), ec);
         const bool ok = SavePngRGBA8(offline_.output, img.Width(), img.Height(), img.mips[0].pixels.data(), img.Width() * 4);
@@ -613,30 +676,45 @@ void App::AfterOfflineFrame() {
         FinishOffline(!ok);
         return;
     }
-    const auto encodeStart = std::chrono::steady_clock::now();
-    const bool added = alpha ? WriteAlphaFrame(offline_.alphaDir, offline_.alphaBase, offline_.frame, img)
-                             : (offline_.encoder && offline_.encoder->AddFrame(img));
-    const double encodeSecs = std::chrono::duration<double>(std::chrono::steady_clock::now() - encodeStart).count();
-    offline_.avgEncodeSeconds = offline_.frame == 0 ? encodeSecs
-                                                    : (offline_.avgEncodeSeconds * offline_.frame + encodeSecs) /
-                                                          (offline_.frame + 1);
-    if (!added) {
-        toast_ = {Tr("영상 인코딩에 실패했습니다"), "", {}, true, timeSeconds_ + 8.0};
-        FinishOffline(true);
-        return;
-    }
-    // a sample render measures the frames after the first of the real-time renderers (the first one warms
-    // the GPU up); the GI renderer's single image is long enough that warming up does not matter
-    if (offline_.mode == OfflineMode::Probe && (!offline_.realtime || offline_.frame >= 1)) {
-        offline_.probeSum += secs + encodeSecs;
-        ++offline_.probeN;
-    }
-    LOG_INFO("offline video: frame %d/%d (%.3f s, encode %.3f s)", offline_.frame + 1, offline_.frameCount, secs,
-             encodeSecs);
-    if (++offline_.frame >= offline_.frameCount)
+    EncodeOfflineImage(std::move(img), secs);
+    if (offline_.mode == OfflineMode::None) return;   // failed while encoding
+    if (offline_.frame >= offline_.frameCount)
         FinishOffline(false);
     else
         offline_.beginPending = true;
+}
+
+// Hands one finished video image to the async sink. Keeps the preview (every 5th frame), the per-frame log line
+// and the timings; advances offline_.frame in rendered order.
+void App::EncodeOfflineImage(ImageRGBA8&& img, double renderSeconds) {
+    const int index = offline_.frame;
+    // The window preview is the exact image the encoder receives, at its final resolution.
+    if (!offline_.background && (index == 0 || index % 5 == 0) && !img.Empty()) {
+        offline_.previewFrame = index;
+        offline_.previewW = img.Width();
+        offline_.previewH = img.Height();
+        renderer_.SetOfflinePreviewImage(img);
+    }
+    const bool added = offline_.sink && offline_.sink->Push(std::move(img), index);
+    const double encodeSecs = offline_.sink ? offline_.sink->AverageEncodeSeconds() : 0.0;
+    offline_.avgEncodeSeconds = encodeSecs;
+    if (!added) {
+        if (!offline_.finishing) {
+            toast_ = {Tr("영상 인코딩에 실패했습니다"), "", {}, true, timeSeconds_ + 8.0};
+            FinishOffline(true);
+        }
+        return;
+    }
+    offline_.avgImageSeconds = index == 0 ? renderSeconds : (offline_.avgImageSeconds * index + renderSeconds) / (index + 1);
+    // a sample render measures the frames after the first of the real-time renderers (the first one warms
+    // the GPU up); the GI renderer's single image is long enough that warming up does not matter
+    if (offline_.mode == OfflineMode::Probe && (!offline_.realtime || index >= 1)) {
+        offline_.probeSum += renderSeconds + encodeSecs;
+        ++offline_.probeN;
+    }
+    LOG_INFO("offline video: frame %d/%d (%.3f s, encode %.3f s)", index + 1, offline_.frameCount, renderSeconds,
+             encodeSecs);
+    ++offline_.frame;
 }
 
 void App::FinishOffline(bool cancelled) {
@@ -658,9 +736,16 @@ void App::FinishOffline(bool cancelled) {
     const bool video = offline_.mode == OfflineMode::Video;
     const bool cli = offline_.fromCli;
     const bool lobby = (video || probe) && offline_.fromLobby;
+    offline_.finishing = true;
     if (offline_.realtime) ApplyRenderSettings();   // back from the video's fixed-resolution settings
+    renderer_.EndFrameReadback();                   // the last recorded frame may not have been signalled yet
     if (offline_.alpha && !probe) {
-        // transparent export: the PNG sequence is already written by AfterOfflineFrame
+        // transparent export: the PNG sequence is written by the sink's worker thread
+        if (offline_.sink) {
+            if (cancelled) offline_.sink->Abort();
+            else offline_.sink->Finish();
+            offline_.sink.reset();
+        }
         const int written = offline_.frame;
         if (written == 0) {
             if (!toast_.error || toast_.until < timeSeconds_)
@@ -674,9 +759,23 @@ void App::FinishOffline(bool cancelled) {
             toast_ = {Tr("고품질 영상 프레임을 저장했습니다"), PathToUtf8(offline_.alphaDir.filename()), offline_.alphaDir,
                       false, timeSeconds_ + 10.0};
         }
-    } else if ((video || probe) && offline_.encoder) {
-        const uint32_t written = offline_.encoder->FramesWritten();
-        offline_.encoder->Finish();
+    } else if ((video || probe) && offline_.sink) {
+        // drain the remaining readbacks (the last 1-2 frames) before the sink finalizes; a cancelled render
+        // discards them so the next job starts with an empty ring
+        {
+            ImageRGBA8 img;
+            while (renderer_.PollFinalReadback(img, true)) {
+                const double r = offline_.pendingRenderSeconds.empty() ? 0.0 : offline_.pendingRenderSeconds.front();
+                if (!offline_.pendingRenderSeconds.empty()) offline_.pendingRenderSeconds.pop_front();
+                if (!cancelled && !img.Empty()) EncodeOfflineImage(std::move(img), r);
+            }
+        }
+        const uint32_t written = offline_.sink->FramesWritten();
+        const bool sinkOk = cancelled ? (offline_.sink->Abort(), true) : offline_.sink->Finish();
+        if (!sinkOk && !cancelled) {
+            if (!toast_.error) toast_ = {Tr("영상 인코딩에 실패했습니다"), "", {}, true, timeSeconds_ + 8.0};
+        }
+        offline_.sink.reset();
         std::error_code ec;
         if (probe) {
             std::filesystem::remove(offline_.output, ec);   // the sample frame is only measured, never kept
@@ -689,7 +788,7 @@ void App::FinishOffline(bool cancelled) {
                 toast_ = {Tr("영상 렌더를 중단했습니다"),
                           std::to_string(written) + Tr("프레임까지 저장했습니다 · ") + PathToUtf8(offline_.output.filename()),
                           offline_.output, false, timeSeconds_ + 10.0};
-        } else {
+        } else if (!toast_.error || toast_.until < timeSeconds_) {
             toast_ = {Tr("고품질 영상을 저장했습니다"), PathToUtf8(offline_.output.filename()), offline_.output, false,
                       timeSeconds_ + 10.0};
         }
@@ -763,10 +862,33 @@ void App::DrawOfflineOverlay() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 ds = io.DisplaySize;
 
+    // ---- preview: the exact image handed to the encoder, letterboxed (the live viewport is hidden)
+    const bool hasPreview = video && offline_.previewFrame >= 0 && offline_.previewW > 0 && offline_.previewH > 0;
+    const uint64_t previewTex = hasPreview ? renderer_.OfflinePreviewTexture() : 0;
+    const float panelH = Dp(video ? 168.0f : 128.0f);
+    const ImVec2 panelTop((ds.x - std::min(ds.x - Dp(40.0f), Dp(720.0f))) * 0.5f, ds.y - Dp(24.0f) - panelH);
+    if (previewTex) {
+        dl->AddRectFilled(ImVec2(0, 0), ds, IM_COL32(0, 0, 0, 255));
+        const float availW = ds.x - Dp(40.0f), availH = ds.y - Dp(40.0f);
+        const float scale = std::min(availW / (float)offline_.previewW, availH / (float)offline_.previewH);
+        const float iw = (float)offline_.previewW * scale, ih = (float)offline_.previewH * scale;
+        const ImVec2 p0((ds.x - iw) * 0.5f, (ds.y - ih) * 0.5f), p1(p0.x + iw, p0.y + ih);
+        dl->AddImage((ImTextureID)previewTex, p0, p1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE);
+        const std::string caption = Tr("미리보기 · 프레임 ") + std::to_string(offline_.previewFrame + 1) + " / " +
+                                    std::to_string(offline_.frameCount);
+        const ImVec2 ts = TextSize(Font::Semibold, size::Caption, caption.c_str());
+        // top right: the top-left corner holds the render status pill
+        const ImVec2 c1(p1.x - Dp(12.0f), p0.y + Dp(12.0f) + ts.y + Dp(10.0f)),
+            c0(c1.x - ts.x - Dp(20.0f), p0.y + Dp(12.0f));
+        dl->AddRectFilled(c0, c1, IM_COL32(0, 0, 0, 170), Dp(8.0f));
+        Text(dl, Font::Semibold, size::Caption, ImVec2(c0.x + Dp(10.0f), c0.y + Dp(5.0f)), IM_COL32(255, 255, 255, 235),
+             caption.c_str());
+    }
+
     // ---- bottom-centred progress panel
     const float w = std::min(ds.x - Dp(40.0f), Dp(720.0f));
-    const float h = Dp(video ? 168.0f : 128.0f);
-    const ImVec2 a((ds.x - w) * 0.5f, ds.y - Dp(24.0f) - h), b(a.x + w, a.y + h);
+    const float h = panelH;
+    const ImVec2 a(panelTop.x, panelTop.y), b(a.x + w, a.y + h);
     const float rect0[4] = {0, 0, 0, 0};
     FrostedPanel(dl, a, b, Dp(20.0f), (ImTextureID)0, rect0);
     const float x0 = a.x + Dp(20.0f), x1 = b.x - Dp(20.0f);
@@ -788,12 +910,15 @@ void App::DrawOfflineOverlay() {
 
     // row 2: status + elapsed
     std::string status;
-    if (offline_.beginPending || pr.phase == OfflinePhase::Idle) {
+    if (offline_.realtime) {
+        // real-time renderers have no offline phase: the frame loop never waits for a scene preparation
+        status = offline_.renderedFrame >= offline_.frameCount && offline_.frameCount > 0 ? Tr("마무리 중…")
+                 : offline_.iterCount > 1 ? Tr("프레임 렌더링 · 패스 ") +
+                                                std::to_string(std::min(offline_.iter + 1, offline_.iterCount)) + "/" +
+                                                std::to_string(offline_.iterCount)
+                                          : Tr("프레임 렌더링 중");
+    } else if (offline_.beginPending || pr.phase == OfflinePhase::Idle) {
         status = Tr("장면 준비 중…");
-    } else if (offline_.realtime) {
-        status = offline_.iterCount > 1 ? Tr("프레임 렌더링 · ") + std::to_string(std::min(offline_.iter + 1, offline_.iterCount)) +
-                                              "/" + std::to_string(offline_.iterCount)
-                                        : Tr("프레임 렌더링 중");
     } else if (pr.phase == OfflinePhase::Prepass) {
         status = Tr("이래디언스 캐시 프리패스 · 메인 패스 (") + std::to_string(pr.prepassStep + 1) + "/" +
                  std::to_string(pr.prepassSteps) + ")";
@@ -805,8 +930,11 @@ void App::DrawOfflineOverlay() {
     }
     Text(dl, Font::Regular, size::Body, ImVec2(x0, y + Dp(56.0f)), p.ink2, status.c_str());
     {
-        const std::string right = video
-                                      ? Tr("이번 프레임 ") + MinSec(timeSeconds_ - offline_.imageStartWall)
+        const double elapsed = timeSeconds_ - offline_.startWall;
+        char fpsText[48];
+        std::snprintf(fpsText, sizeof(fpsText), "%.1f", elapsed > 0.5 ? offline_.frame / elapsed : 0.0);
+        const std::string right = video && offline_.realtime ? std::string(fpsText) + " fps"
+                                  : video ? Tr("이번 프레임 ") + MinSec(timeSeconds_ - offline_.imageStartWall)
                                       : Tr("경과 ") + MinSec(timeSeconds_ - offline_.startWall);
         const ImVec2 ts = TextSize(Font::Regular, size::Caption, right.c_str());
         Text(dl, Font::Regular, size::Caption, ImVec2(x1 - ts.x, y + Dp(57.0f)), p.ink3, right.c_str());
@@ -958,11 +1086,15 @@ void App::CancelBackgroundProbe() {
     if (!offline_.background) return;
     const bool realtime = offline_.realtime;
     if (!realtime) renderer_.CancelOffline();
-    if (offline_.encoder) {
-        offline_.encoder->Finish();
+    if (offline_.sink) {
+        offline_.sink->Abort();
+        offline_.sink.reset();
         std::error_code ec;
         std::filesystem::remove(offline_.output, ec);   // the sample frame is only measured, never kept
     }
+    // release the readbacks of the sample frames still in flight
+    ImageRGBA8 img;
+    while (renderer_.PollFinalReadback(img, true)) {}
     offline_ = OfflineJob{};
     renderer_.SetOfflinePresent(true);
     if (realtime) {

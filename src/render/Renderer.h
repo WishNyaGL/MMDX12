@@ -87,6 +87,25 @@ public:
     // colour, giving straight RGBA8 for a transparent export; false forces opaque (today's behaviour).
     bool ReadFinalImage(ImageRGBA8& out, bool preserveAlpha = false);
 
+    // ---- asynchronous final-image readback (offline video) ----------------------------------
+    // Records a copy of the last Render() result into a small ring of readback buffers. Call after Render()
+    // and before ctx.EndFrame() (the command list is still open). The colour/alpha decode happens later, so a
+    // video frame no longer waits for the GPU between rendering and encoding. False when no ring slot is free
+    // (the caller should fall back to ReadFinalImage) or there is no frame.
+    bool QueueFinalReadback(ID3D12GraphicsCommandList* cmd, bool preserveAlpha);
+    // After ctx.EndFrame(): signals the readback fence (the queue is ordered after the frame's work).
+    void EndFrameReadback();
+    // Maps the oldest recorded readback once its GPU work has finished. `wait`: block until it is (drain at the
+    // end of a render). Frames are returned in the order they were recorded; false when none is ready.
+    // Call outside frame recording.
+    bool PollFinalReadback(ImageRGBA8& out, bool wait);
+    // Pending readbacks not collected yet.
+    uint32_t PendingReadbacks() const { return (uint32_t)readbackQueue_.size(); }
+    // Offline video preview: uploads the exact image handed to the encoder. Call outside frame recording;
+    // returns an ImTextureID (0 when the image is empty).
+    uint64_t SetOfflinePreviewImage(const ImageRGBA8& image);
+    uint64_t OfflinePreviewTexture() const;
+
     // Blurred copy of the last presented frame for frosted UI panels (ImTextureID, 0 if none)
     // and the back-buffer rectangle the scene image occupies (letterbox), to map UVs.
     uint64_t UiBackdropTexture() const;
@@ -227,6 +246,29 @@ private:
     float presentRect_[4] = {};
     bool sceneVisible_ = false;
     bool hasFinal_ = false;   // targets_.ldr holds a finished Render() image (ReadFinalImage)
+    // asynchronous final-image readback ring (RecordFinalReadback / TryCollectFinalImage)
+    struct ReadbackSlot {
+        ComPtr<ID3D12Resource> res;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+        UINT64 total = 0;
+        uint32_t width = 0, height = 0;
+        bool preserveAlpha = false;
+        bool pending = false;
+        uint64_t fence = 0;
+    };
+    static constexpr uint32_t kReadbackRing = 3;
+    ReadbackSlot readback_[kReadbackRing];
+    std::vector<uint32_t> readbackQueue_;   // ring indices, oldest first
+    ComPtr<ID3D12Fence> readbackFence_;
+    HANDLE readbackEvent_ = nullptr;
+    uint64_t readbackFenceValue_ = 0;
+    uint64_t readbackRecorded_ = 0;         // slots recorded since the last EndFrameReadback
+    bool DecodeReadback(ReadbackSlot& slot, bool preserveAlpha, ImageRGBA8& out);
+    // offline video preview texture (SetOfflinePreviewImage); two SRV slots so overwriting a descriptor never
+    // races the GPU still drawing the previous preview
+    ComPtr<ID3D12Resource> previewRes_[2];
+    uint32_t previewSrv_[2] = {DescriptorHeap::kInvalid, DescriptorHeap::kInvalid};
+    uint32_t previewSlot_ = 0;
     // offscreen rendering
     ComPtr<ID3D12CommandAllocator> offAlloc_;
     ComPtr<ID3D12GraphicsCommandList> offList_;

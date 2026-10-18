@@ -30,6 +30,7 @@
 #include "studio/StudioFocus.h"
 #include <Windows.h>
 #include <chrono>
+#include <deque>
 #include <filesystem>
 #include <future>
 #include <set>
@@ -814,6 +815,8 @@ private:
     // begins it, or continues the current one.
     void RecordOfflineFrame(ID3D12GraphicsCommandList* cmd);
     void AfterOfflineFrame();   // after ctx_.EndFrame: collects a finished image (save / encode), advances
+    // Hands one finished video image to the async sink (rendered order), updates the timings and the preview.
+    void EncodeOfflineImage(ImageRGBA8&& img, double renderSeconds);
     void FinishOffline(bool cancelled);  // Offline -> Play (paused); closes the encoder; toast
     void DrawOfflineOverlay();  // progress panel over the preview (screen_ == Offline)
     void DrawVideoRenderDialog();  // video render settings + start (Select, UiVideoDialog.cpp)
@@ -1143,8 +1146,16 @@ private:
         double imageStartWall = 0;     // timeSeconds_ when the current image began
         double startSeconds = 0;       // song time of image 0
         int frame = 0, frameCount = 1; // images done / total (still: 1)
+        int renderedFrame = 0;         // real-time renderers: the next image to render (readbacks/encoding lag behind)
+        bool awaitingReadback = false; // real-time renderers: this image is recorded, its readback is pending
+        int previewFrame = -1;         // last frame uploaded as the window preview (every 5th)
+        uint32_t previewW = 0, previewH = 0;  // its size (letterbox in the progress overlay)
+        bool readbackQueued = false;   // real-time renderers: the finished frame's readback copy is in the queue
+        bool readbackFallback = false; // ring was full: read the final image synchronously before the next render
+        bool finishing = false;        // FinishOffline is draining: a sink failure must not re-enter it
+        std::deque<double> pendingRenderSeconds;  // render time of each recorded, not yet collected image
         double avgImageSeconds = 0;    // wall time per finished image (ETA)
-        std::unique_ptr<VideoEncoder> encoder;
+        std::unique_ptr<AsyncVideoSink> sink;  // video / alpha sequence encoding on a worker thread
         bool alpha = false;                // transparent export: write a PNG sequence instead of an encoder
         std::filesystem::path alphaDir;    // sequence folder (AlphaSequenceDir of the output path)
         std::string alphaBase;             // frame file stem: "<alphaBase>_00000.png"
@@ -1153,7 +1164,7 @@ private:
         double probeSum = 0;           // probe: seconds per image (render + encode) of the measured images
         int probeN = 0;
         uint64_t probeKey = 0;         // probe: VideoProbeKey of the measured combination
-        double avgEncodeSeconds = 0;   // wall time of VideoEncoder::AddFrame per image (ETA)
+        double avgEncodeSeconds = 0;   // wall time of one encoded frame on the sink's worker thread (ETA)
         int iter = 0, iterCount = 1;   // real-time renderers: passes done / passes accumulated for this frame
         float frameMmd = 0;            // real-time renderers: MMD frame of the image in progress
         bool realtime = false;         // frames come from the real-time renderer (Renderer::Render)

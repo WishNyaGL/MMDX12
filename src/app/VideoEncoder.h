@@ -5,6 +5,7 @@
 // file with miniaudio and written in step with the video, covering exactly the frames written.
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -36,6 +37,44 @@ public:
     uint32_t FramesWritten() const;
     // Finalizes the file (playable even when the render was cancelled midway). Idempotent.
     bool Finish();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// Encodes frames on a worker thread with a small bounded queue (back-pressure: Push blocks while the queue is
+// full), so the render thread never waits for Media Foundation. Owns the VideoEncoder, or a callback that writes
+// the alpha PNG sequence. Errors are latched and reported through Push / Finish.
+class AsyncVideoSink {
+public:
+    // Writes one frame; `index` is the 0-based frame number the image belongs to. Runs on the worker thread.
+    using WriteFn = std::function<bool(const ImageRGBA8&, int index)>;
+
+    AsyncVideoSink();
+    ~AsyncVideoSink();  // Finish() when still open
+    AsyncVideoSink(const AsyncVideoSink&) = delete;
+    AsyncVideoSink& operator=(const AsyncVideoSink&) = delete;
+
+    // Video file: `encoder` must already be Open(). `writer` is optional (null: encoder->AddFrame).
+    bool Open(std::unique_ptr<VideoEncoder> encoder, WriteFn writer = {}, size_t maxQueued = 4);
+    // Alpha PNG sequence: only the callback.
+    bool Open(WriteFn writer, size_t maxQueued = 4);
+    bool IsOpen() const;
+    // Queues `frame` (moved) for frame number `index`. Blocks while the queue is full (back-pressure).
+    // False once the sink failed.
+    bool Push(ImageRGBA8&& frame, int index);
+    // Frames in the queue (not yet encoded).
+    uint32_t Queued() const;
+    // Frames the writer has completed.
+    uint32_t FramesWritten() const;
+    // Mean wall time of one write on the worker thread (seconds).
+    double AverageEncodeSeconds() const;
+    bool Failed(std::string* error = nullptr) const;
+    // Drains the queue, joins the worker and finalizes the encoder. Idempotent; false on a latched error.
+    bool Finish();
+    // Drops the queued frames, joins the worker and finalizes the encoder (a cancelled render stays playable).
+    void Abort();
 
 private:
     struct Impl;

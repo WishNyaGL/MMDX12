@@ -44,7 +44,12 @@ progress.md is the session log. Read its latest entry first.
     Lobby path (select screen -> load -> render -> back to select): `--character c --song s --screen video --offline-video out.mp4 --offline-range a b`.
     `--screen video` alone opens the lobby's render dialog for a capture.
     Video renderer: `--offline-renderer raster|rt|pt|gi` (the real-time ones render frame by frame at the video size via `Renderer::Render` +
-    `ReadFinalImage`; PT accumulates several passes per frame). The render dialog measures its time estimate by itself: a headless sample render behind the UI (`--screen video` shows it; log `VIDEO PROBE`,
+    `ReadFinalImage`; PT accumulates several passes per frame). Video frames are pipelined: the real-time renderers
+    queue each frame's final image into a 3-slot readback ring inside the frame's command list
+    (`Renderer::QueueFinalReadback` / `PollFinalReadback`, one fence value per slot; a full ring falls back to the
+    blocking `ReadFinalImage`), and `AsyncVideoSink` (app/VideoEncoder.h) encodes on a worker thread (queue of 4 =
+    back-pressure; the alpha PNG sequence too). The window shows the exact encoded image every 5th frame
+    (`Renderer::SetOfflinePreviewImage`, "미리보기 · 프레임 N / M"), not the live viewport. The render dialog measures its time estimate by itself: a headless sample render behind the UI (`--screen video` shows it; log `VIDEO PROBE`,
     results in `videoProbe=` ini lines). `--offline-probe` runs the same measurement from a play scene.
     The dialog's effects are `VideoRenderConfig` (bloom, convolution bloom, volumetric, DoF for every renderer: GI's thin lens
     follows `OfflineJobDesc::dof` / `dofAperture`, the render benchmark keeps the defaults); stills use the effects chosen at

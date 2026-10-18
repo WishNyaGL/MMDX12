@@ -18,9 +18,14 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <mutex>
+#include <thread>
 
 namespace mmdx {
 
@@ -36,7 +41,9 @@ struct VideoEncoder::Impl {
     DWORD videoStream = 0, audioStream = 0;
     bool hasAudio = false;
     bool open = false;
-    bool mfStarted = false, comInit = false;
+    bool mfStarted = false;
+    bool comInit = false;
+    DWORD comThread = 0;              // the thread that CoInitializeEx'd (CoUninitialize only balances there)
     uint32_t frames = 0;              // video frames written
     uint64_t audioFrames = 0;         // PCM frames (48 kHz stereo) written
     uint64_t leadSilence = 0;         // PCM frames of silence before the song (negative audioStartSeconds)
@@ -145,6 +152,7 @@ bool VideoEncoder::Open(const std::filesystem::path& mp4Path, const Desc& desc, 
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     impl.comInit = SUCCEEDED(hr);  // RPC_E_CHANGED_MODE is fine; we just don't uninitialize later
+    impl.comThread = impl.comInit ? GetCurrentThreadId() : 0;
     hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
     impl.mfStarted = SUCCEEDED(hr);
     if (FAILED(hr)) {
@@ -331,6 +339,176 @@ bool VideoEncoder::Finish() {
     if (impl.comInit) { CoUninitialize(); impl.comInit = false; }
     LOG_INFO("video: finished %s (%u frames)", PathToUtf8(impl.path).c_str(), impl.frames);
     return SUCCEEDED(hr);
+}
+
+// ---------------------------------------------------------------------------
+// AsyncVideoSink: encoding on a worker thread, bounded queue, back-pressure
+// ---------------------------------------------------------------------------
+
+struct AsyncVideoSink::Impl {
+    std::unique_ptr<VideoEncoder> encoder;
+    WriteFn writer;
+    std::thread worker;
+    mutable std::mutex mutex;
+    std::condition_variable cvPush, cvPop;
+    std::deque<std::pair<ImageRGBA8, int>> queue;
+    size_t maxQueued = 4;
+    bool open = false;
+    bool stopping = false;      // Finish: drain the queue, then stop
+    bool aborting = false;      // Abort: drop the queue
+    bool finished = false;
+    bool failed = false;
+    std::string error;
+    uint32_t written = 0;
+    double encodeTotal = 0.0;
+    void Run() {
+        // Media Foundation is process-wide but the sink writer is used from this thread: keep COM / MF initialised
+        // here while frames are written (Open / Finish run on the app thread and balance their own calls).
+        const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const HRESULT mfHr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+        for (;;) {
+            std::pair<ImageRGBA8, int> item;
+            {
+                std::unique_lock<std::mutex> l(mutex);
+                cvPop.wait(l, [&] { return aborting || stopping || !queue.empty(); });
+                if (aborting || queue.empty()) break;
+                item = std::move(queue.front());
+                queue.pop_front();
+            }
+            cvPush.notify_one();
+            const auto begin = std::chrono::steady_clock::now();
+            bool ok = false;
+            if (writer) {
+                ok = writer(item.first, item.second);
+            } else if (encoder) {
+                ok = encoder->AddFrame(item.first);
+            }
+            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+            {
+                std::lock_guard<std::mutex> l(mutex);
+                encodeTotal += secs;
+                if (!ok) {
+                    if (!failed) {
+                        failed = true;
+                        error = "frame write failed";
+                    }
+                    // drop the rest: a failed encode cannot continue
+                    queue.clear();
+                    cvPush.notify_all();
+                } else {
+                    ++written;
+                }
+            }
+        }
+        if (SUCCEEDED(mfHr)) MFShutdown();
+        if (SUCCEEDED(comHr)) CoUninitialize();
+    }
+};
+
+AsyncVideoSink::AsyncVideoSink() : impl_(std::make_unique<Impl>()) {}
+AsyncVideoSink::~AsyncVideoSink() { Finish(); }
+
+bool AsyncVideoSink::Open(std::unique_ptr<VideoEncoder> encoder, WriteFn writer, size_t maxQueued) {
+    Impl& m = *impl_;
+    if (m.open) Finish();
+    if (!encoder || !encoder->IsOpen()) return false;
+    m.encoder = std::move(encoder);
+    m.writer = std::move(writer);
+    m.maxQueued = std::max<size_t>(1, maxQueued);
+    m.queue.clear();
+    m.stopping = m.aborting = m.finished = m.failed = false;
+    m.error.clear();
+    m.written = 0;
+    m.encodeTotal = 0.0;
+    m.open = true;
+    m.worker = std::thread(&Impl::Run, &m);
+    return true;
+}
+
+bool AsyncVideoSink::Open(WriteFn writer, size_t maxQueued) {
+    Impl& m = *impl_;
+    if (m.open) Finish();
+    if (!writer) return false;
+    m.encoder.reset();
+    m.writer = std::move(writer);
+    m.maxQueued = std::max<size_t>(1, maxQueued);
+    m.queue.clear();
+    m.stopping = m.aborting = m.finished = m.failed = false;
+    m.error.clear();
+    m.written = 0;
+    m.encodeTotal = 0.0;
+    m.open = true;
+    m.worker = std::thread(&Impl::Run, &m);
+    return true;
+}
+
+bool AsyncVideoSink::IsOpen() const { return impl_ && impl_->open; }
+
+bool AsyncVideoSink::Push(ImageRGBA8&& frame, int index) {
+    Impl& m = *impl_;
+    std::unique_lock<std::mutex> l(m.mutex);
+    if (!m.open || m.stopping || m.aborting) return false;
+    m.cvPush.wait(l, [&] { return m.failed || m.aborting || m.queue.size() < m.maxQueued; });
+    if (m.failed || m.aborting) return false;
+    m.queue.emplace_back(std::move(frame), index);
+    m.cvPop.notify_one();
+    return true;
+}
+
+uint32_t AsyncVideoSink::Queued() const {
+    std::lock_guard<std::mutex> l(impl_->mutex);
+    return (uint32_t)impl_->queue.size();
+}
+
+uint32_t AsyncVideoSink::FramesWritten() const {
+    std::lock_guard<std::mutex> l(impl_->mutex);
+    return impl_->written;
+}
+
+double AsyncVideoSink::AverageEncodeSeconds() const {
+    std::lock_guard<std::mutex> l(impl_->mutex);
+    return impl_->written ? impl_->encodeTotal / impl_->written : 0.0;
+}
+
+bool AsyncVideoSink::Failed(std::string* error) const {
+    std::lock_guard<std::mutex> l(impl_->mutex);
+    if (error) *error = impl_->error;
+    return impl_->failed;
+}
+
+bool AsyncVideoSink::Finish() {
+    Impl& m = *impl_;
+    if (!m.open) return !m.failed;
+    {
+        std::lock_guard<std::mutex> l(m.mutex);
+        m.stopping = true;
+    }
+    m.cvPop.notify_all();
+    if (m.worker.joinable()) m.worker.join();
+    bool ok = !m.failed;
+    if (m.encoder) ok = m.encoder->Finish() && ok;
+    m.encoder.reset();
+    m.writer = nullptr;
+    m.open = false;
+    m.finished = true;
+    return ok;
+}
+
+void AsyncVideoSink::Abort() {
+    Impl& m = *impl_;
+    if (!m.open) return;
+    {
+        std::lock_guard<std::mutex> l(m.mutex);
+        m.aborting = true;
+        m.queue.clear();
+    }
+    m.cvPop.notify_all();
+    m.cvPush.notify_all();
+    if (m.worker.joinable()) m.worker.join();
+    if (m.encoder) m.encoder->Finish();   // the file stays playable up to the last written frame
+    m.encoder.reset();
+    m.writer = nullptr;
+    m.open = false;
 }
 
 } // namespace mmdx

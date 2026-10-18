@@ -1197,6 +1197,9 @@ const Entry kEnglish[] = {
     {"NGX 기능 조회에 실패했습니다", "NGX capability query failed"},
     {"이 GPU 또는 드라이버는 프레임 생성을 지원하지 않습니다", "This GPU or driver does not support frame generation (RTX 40 series or newer)"},
     {"사용할 수 없음", "Unavailable"},
+    {"미리보기 · 프레임 ", "Preview · frame "},
+    {"영상 인코더를 시작할 수 없습니다", "Could not start the video encoder"},
+    {"프레임 렌더링 · 패스 ", "Rendering frame · pass "},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

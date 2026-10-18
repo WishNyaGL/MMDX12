@@ -1981,7 +1981,13 @@ void App::UnloadScene() {
     bgProbe_.sceneKey = 0;
     if (offline_.mode != OfflineMode::None) {
         renderer_.CancelOffline();
-        offline_.encoder.reset();
+        if (offline_.sink) {
+            offline_.sink->Abort();
+            offline_.sink.reset();
+        }
+        ImageRGBA8 pending;
+        renderer_.EndFrameReadback();
+        while (renderer_.PollFinalReadback(pending, true)) {}
         offline_ = OfflineJob{};
     }
     ctx_.WaitForGpu();

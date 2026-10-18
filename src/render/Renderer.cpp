@@ -1013,6 +1013,45 @@ bool Renderer::RenderToImage(const FrameView& view, uint32_t w, uint32_t h, Imag
     return ok;
 }
 
+bool Renderer::DecodeReadback(ReadbackSlot& slot, bool preserveAlpha, ImageRGBA8& out) {
+    uint8_t* data = nullptr;
+    D3D12_RANGE range{0, (SIZE_T)slot.total};   // the buffer's size (the last row has no pitch padding)
+    if (FAILED(slot.res->Map(0, &range, (void**)&data))) return false;
+    const uint32_t w = slot.width, h = slot.height;
+    out = ImageRGBA8{};
+    out.mips.push_back({w, h, std::vector<uint8_t>((size_t)w * h * 4)});
+    for (uint32_t y = 0; y < h; ++y) {
+        const uint8_t* srcRow = data + (size_t)slot.fp.Footprint.RowPitch * y;
+        uint8_t* dstRow = out.mips[0].pixels.data() + (size_t)w * 4 * y;
+        memcpy(dstRow, srcRow, (size_t)w * 4);
+        for (uint32_t x = 0; x < w; ++x) {
+            if (!preserveAlpha) {
+                dstRow[x * 4 + 3] = 255;
+                continue;
+            }
+            // straight (non-premultiplied) sRGB colour: post.hlsl (transparentBg) kept the coverage alpha and the
+            // unjittered scene targets premultiply the colour. Un-premultiply here, then un-jitter with the exact
+            // inverse of post.hlsl's +1/255 dither (same per-pixel seed), so a flat background decodes to alpha 0.
+            const uint8_t a = dstRow[x * 4 + 3];
+            if (a == 0) {
+                dstRow[x * 4 + 0] = dstRow[x * 4 + 1] = dstRow[x * 4 + 2] = 0;
+                continue;
+            }
+            const float fx = (float)x + 0.5f, fy = (float)y + 0.5f;
+            const float j = Ign(fx, fy) - 0.5f;
+            for (int ch = 0; ch < 3; ++ch) {
+                // the dither is j / 255 in normalized units = j in 8-bit units
+                const int encoded = std::clamp((int)std::lround((float)dstRow[x * 4 + ch] - j), 0, 255);
+                dstRow[x * 4 + ch] = (uint8_t)std::min(255, (int)std::lround(encoded * 255.0f / a));
+            }
+        }
+    }
+    out.hasAlpha = preserveAlpha;
+    D3D12_RANGE none{0, 0};
+    slot.res->Unmap(0, &none);
+    return true;
+}
+
 bool Renderer::ReadFinalImage(ImageRGBA8& out, bool preserveAlpha) {
     if (!ctx_ || !targets_.ldr || !hasFinal_) return false;
     ID3D12Device* device = ctx_->Device();
@@ -1050,41 +1089,125 @@ bool Renderer::ReadFinalImage(ImageRGBA8& out, bool preserveAlpha) {
     ctx_->Queue()->ExecuteCommandLists(1, lists);
     ctx_->WaitForGpu();
 
-    uint8_t* data = nullptr;
-    D3D12_RANGE range{0, (SIZE_T)total};   // the buffer's size (the last row has no pitch padding)
-    if (FAILED(readback->Map(0, &range, (void**)&data))) return false;
-    out = ImageRGBA8{};
-    out.mips.push_back({w, h, std::vector<uint8_t>((size_t)w * h * 4)});
-    for (uint32_t y = 0; y < h; ++y) {
-        const uint8_t* srcRow = data + (size_t)fp.Footprint.RowPitch * y;
-        uint8_t* dstRow = out.mips[0].pixels.data() + (size_t)w * 4 * y;
-        memcpy(dstRow, srcRow, (size_t)w * 4);
-        for (uint32_t x = 0; x < w; ++x) {
-            if (!preserveAlpha) {
-                dstRow[x * 4 + 3] = 255;
-                continue;
-            }
-            // straight (non-premultiplied) sRGB colour: post.hlsl (transparentBg) kept the coverage alpha and the
-            // unjittered scene targets premultiply the colour. Un-premultiply here, then un-jitter with the exact
-            // inverse of post.hlsl's +1/255 dither (same per-pixel seed), so a flat background decodes to alpha 0.
-            const uint8_t a = dstRow[x * 4 + 3];
-            if (a == 0) {
-                dstRow[x * 4 + 0] = dstRow[x * 4 + 1] = dstRow[x * 4 + 2] = 0;
-                continue;
-            }
-            const float fx = (float)x + 0.5f, fy = (float)y + 0.5f;
-            const float j = Ign(fx, fy) - 0.5f;
-            for (int ch = 0; ch < 3; ++ch) {
-                // the dither is j / 255 in normalized units = j in 8-bit units
-                const int encoded = std::clamp((int)std::lround((float)dstRow[x * 4 + ch] - j), 0, 255);
-                dstRow[x * 4 + ch] = (uint8_t)std::min(255, (int)std::lround(encoded * 255.0f / a));
-            }
-        }
+    ReadbackSlot slot;
+    slot.res = readback;
+    slot.fp = fp;
+    slot.total = total;
+    slot.width = w;
+    slot.height = h;
+    const bool ok = DecodeReadback(slot, preserveAlpha, out);
+    return ok;
+}
+
+bool Renderer::QueueFinalReadback(ID3D12GraphicsCommandList* cmd, bool preserveAlpha) {
+    if (!ctx_ || !cmd || !targets_.ldr || !hasFinal_) return false;
+    if (readbackQueue_.size() >= kReadbackRing) return false;  // caller falls back to the blocking read
+    ID3D12Device* device = ctx_->Device();
+    if (!readbackFence_) {
+        if (!CheckHr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&readbackFence_)),
+                     "QueueFinalReadback: fence"))
+            return false;
+        readbackEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!readbackEvent_) return false;
     }
-    out.hasAlpha = preserveAlpha;
-    D3D12_RANGE none{0, 0};
-    readback->Unmap(0, &none);
+    // first ring slot not in the queue
+    uint32_t index = DescriptorHeap::kInvalid;
+    for (uint32_t i = 0; i < kReadbackRing; ++i) {
+        bool used = false;
+        for (uint32_t q : readbackQueue_)
+            if (q == i) { used = true; break; }
+        if (!used) { index = i; break; }
+    }
+    if (index == DescriptorHeap::kInvalid) return false;
+    ReadbackSlot& slot = readback_[index];
+
+    const uint32_t w = targets_.ldr.width, h = targets_.ldr.height;
+    D3D12_RESOURCE_DESC desc = targets_.ldr.res->GetDesc();
+    UINT64 total = 0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+    if (!slot.res || slot.total != total) {
+        ctx_->DeferRelease(slot.res);
+        slot.res.Reset();
+        D3D12_HEAP_PROPERTIES rb{D3D12_HEAP_TYPE_READBACK};
+        CD3DX12_RESOURCE_DESC bd = CD3DX12_RESOURCE_DESC::Buffer(total);
+        if (!CheckHr(device->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &bd,
+                                                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                     IID_PPV_ARGS(&slot.res)),
+                     "QueueFinalReadback: readback"))
+            return false;
+    }
+    slot.fp = fp;
+    slot.total = total;
+    slot.width = w;
+    slot.height = h;
+    slot.preserveAlpha = preserveAlpha;
+    slot.fence = readbackFenceValue_ + 1;   // the value EndFrameReadback signals after this frame's submit
+    targets_.ldr.Transition(cmd, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    CD3DX12_TEXTURE_COPY_LOCATION dst(slot.res.Get(), fp), src(targets_.ldr.res.Get(), 0);
+    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    targets_.ldr.Transition(cmd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    readbackQueue_.push_back(index);
+    ++readbackRecorded_;
     return true;
+}
+
+void Renderer::EndFrameReadback() {
+    if (!ctx_ || !readbackFence_ || readbackRecorded_ == 0) return;
+    readbackRecorded_ = 0;
+    ++readbackFenceValue_;
+    ctx_->Queue()->Signal(readbackFence_.Get(), readbackFenceValue_);
+}
+
+bool Renderer::PollFinalReadback(ImageRGBA8& out, bool wait) {
+    if (!ctx_ || readbackQueue_.empty()) return false;
+    const uint32_t index = readbackQueue_.front();
+    ReadbackSlot& slot = readback_[index];
+    if (!slot.res) {
+        readbackQueue_.erase(readbackQueue_.begin());
+        return false;
+    }
+    if (wait) {
+        if (readbackFence_->GetCompletedValue() < slot.fence) {
+            readbackFence_->SetEventOnCompletion(slot.fence, readbackEvent_);
+            WaitForSingleObject(readbackEvent_, INFINITE);
+        }
+    } else if (readbackFence_->GetCompletedValue() < slot.fence) {
+        return false;   // this frame's GPU work is still running
+    }
+    const bool ok = DecodeReadback(slot, slot.preserveAlpha, out);
+    readbackQueue_.erase(readbackQueue_.begin());
+    return ok;
+}
+
+uint64_t Renderer::SetOfflinePreviewImage(const ImageRGBA8& image) {
+    if (!ctx_ || image.Empty()) return 0;
+    UploadBatch batch(*ctx_);
+    ComPtr<ID3D12Resource> tex = batch.CreateTexture(image, L"offline.preview");
+    batch.Submit();
+    if (!tex) return 0;
+    const uint32_t slot = previewSlot_;
+    previewSlot_ ^= 1;
+    if (previewSrv_[slot] == DescriptorHeap::kInvalid) previewSrv_[slot] = ctx_->SrvHeap().Allocate(1);
+    if (previewSrv_[slot] == DescriptorHeap::kInvalid) {
+        ctx_->DeferRelease(tex);
+        return 0;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC d{};
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    d.Texture2D.MipLevels = 1;
+    ctx_->Device()->CreateShaderResourceView(tex.Get(), &d, ctx_->SrvHeap().Cpu(previewSrv_[slot]));
+    if (previewRes_[slot]) ctx_->DeferRelease(previewRes_[slot]);   // 2 previews old: the GPU is long past it
+    previewRes_[slot] = tex;
+    return ctx_->SrvHeap().Gpu(previewSrv_[slot]).ptr;
+}
+
+uint64_t Renderer::OfflinePreviewTexture() const {
+    const uint32_t slot = previewSlot_ ^ 1;   // the last uploaded one
+    if (!ctx_ || !previewRes_[slot] || previewSrv_[slot] == DescriptorHeap::kInvalid) return 0;
+    return ctx_->SrvHeap().Gpu(previewSrv_[slot]).ptr;
 }
 
 uint64_t Renderer::UiBackdropTexture() const {
@@ -1277,6 +1400,25 @@ void Renderer::Shutdown() {
     lightBuf_.Reset();
     offList_.Reset();
     offAlloc_.Reset();
+    if (readbackFence_) {
+        for (ReadbackSlot& slot : readback_) slot.res.Reset();
+        readbackQueue_.clear();
+        readbackFence_.Reset();
+        readbackFenceValue_ = 0;
+        readbackRecorded_ = 0;
+    }
+    if (readbackEvent_) {
+        CloseHandle(readbackEvent_);
+        readbackEvent_ = nullptr;
+    }
+    if (previewRes_[0]) previewRes_[0].Reset();
+    if (previewRes_[1]) previewRes_[1].Reset();
+    for (uint32_t& srv : previewSrv_) {
+        if (srv != DescriptorHeap::kInvalid) {
+            ctx_->SrvHeap().Free(srv, 1);
+            srv = DescriptorHeap::kInvalid;
+        }
+    }
     timestampReadback_.Reset();
     timestampHeap_.Reset();
     timestampFrequency_ = 0;
