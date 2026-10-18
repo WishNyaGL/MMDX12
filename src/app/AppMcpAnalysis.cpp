@@ -207,6 +207,82 @@ std::vector<std::vector<DirectX::XMFLOAT3>> App::StudioSampleBones(studio::Studi
     return out;
 }
 
+std::vector<std::vector<DirectX::XMFLOAT4X4>> App::StudioSampleBoneWorlds(studio::StudioModel& m,
+                                                                         const std::vector<int>& frames,
+                                                                         const std::vector<int>& bones) {
+    std::vector<std::vector<DirectX::XMFLOAT4X4>> out;
+    if (!studio_ || !m.inst || !m.pmx) return out;
+    StudioDoc& d = *studio_;
+    ModelInstance& inst = *m.inst;
+
+    if (m.boundVersion != m.motionVersion) {
+        if (m.motion.bones.empty() && m.motion.morphs.empty() && m.motion.ik.empty() && m.motion.visibility.empty()) {
+            m.bound.reset();
+        } else {
+            const VmdMotion vmd = m.motion.ToVmd();
+            m.bound = BoundMotion::Bind(*m.pmx, {&vmd});
+        }
+        m.boundVersion = m.motionVersion;
+    }
+
+    const bool character = m.kind == ModelKind::Character;
+    float scale = 1.0f;
+    if (character) {
+        scale = (m.libraryId.empty() ? 1.0f : settings_.CharacterScale(m.libraryId)) * std::max(0.01f, m.place.scale);
+        inst.SetScale(scale);
+        inst.EnablePhysics(false);
+    } else if (m.IsStage()) {
+        scale = std::max(0.01f, m.place.scale);
+        inst.EnablePhysics(false);
+    } else {
+        return out;  // props are rejected by the callers
+    }
+
+    const auto applyRoot = [&]() {
+        using namespace DirectX;
+        constexpr float kRad = 0.01745329252f;
+        XMFLOAT4X4 root;
+        if (character) {
+            XMStoreFloat4x4(&root, XMMatrixMultiply(
+                                       XMMatrixRotationRollPitchYaw(m.place.rotationDeg.x * kRad, m.place.rotationDeg.y * kRad,
+                                                                    m.place.rotationDeg.z * kRad),
+                                       XMMatrixTranslation(m.place.translation.x / scale, m.place.translation.y / scale,
+                                                           m.place.translation.z / scale)));
+        } else {
+            XMStoreFloat4x4(&root, XMMatrixMultiply(
+                                       XMMatrixMultiply(XMMatrixScaling(scale, scale, scale),
+                                                        XMMatrixRotationRollPitchYaw(m.place.rotationDeg.x * kRad,
+                                                                                    m.place.rotationDeg.y * kRad,
+                                                                                    m.place.rotationDeg.z * kRad)),
+                                       XMMatrixTranslation(m.place.translation.x, m.place.translation.y,
+                                                           m.place.translation.z)));
+        }
+        inst.SetRootTransform(root);
+    };
+
+    for (int frame : frames) {
+        if (m.bound) m.bound->Evaluate((float)frame, inst);
+        else inst.ResetPose();
+        applyRoot();
+        inst.UpdatePose(0.0f);
+
+        std::vector<DirectX::XMFLOAT4X4> row;
+        row.reserve(bones.size());
+        for (int b : bones) {
+            if (b < 0 || b >= (int)m.pmx->bones.size()) row.push_back(DirectX::XMFLOAT4X4{});
+            else row.push_back(inst.BoneWorld(b));
+        }
+        out.push_back(std::move(row));
+    }
+
+    // Restore the viewport pose for the current frame (physics reset like a seek).
+    if (!frames.empty()) {
+        if (m.IsStage() && !m.bound) m.stageMotionApplied = ~0ull;  // force the keyless stage to be posed again
+        StudioUpdateModel(m, ctx_.FrameNumber(), (float)(d.time * kMmdFps), 0.0f, true);
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // Cached beat analysis (shared with the lighting tools)
 // ---------------------------------------------------------------------------
@@ -406,11 +482,16 @@ nlohmann::json App::McpFrameCheck(int frame, const CameraPose& pose) {
                              {"facing_camera_deg", Round3(facing)}});
     }
     frameJson["characters"] = charsJson;
+    // The same vocabulary as studio_camera_solve. screen_height spans head top to feet even when parts are off
+    // screen, so a shot that shows `frac` of the body over 90 % of the frame reads ~0.97 / frac (ms ~1.94, cu ~4.4);
+    // the thresholds are the geometric midpoints between neighbouring sizes.
     const char* shot = "wide";
-    if (mainHeight > 1.6f) shot = "extreme_close";
-    else if (mainHeight > 1.0f) shot = "close";
-    else if (mainHeight > 0.55f) shot = "medium";
-    else if (mainHeight > 0.3f) shot = "full";
+    if (mainHeight > 6.5f) shot = "ecu";
+    else if (mainHeight > 3.65f) shot = "cu";
+    else if (mainHeight > 2.4f) shot = "mcu";
+    else if (mainHeight > 1.64f) shot = "ms";
+    else if (mainHeight > 1.09f) shot = "cowboy";
+    else if (mainHeight > 0.61f) shot = "full";
     frameJson["shot_size"] = shot;
     return frameJson;
 }

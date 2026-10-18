@@ -2019,3 +2019,47 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   render time per preset not measured; `build\` (the user's dev build) was not rebuilt with these changes.
 - Originals: `captures/pt_passes` (before) and `captures/pt_passes/after_fix` (after), 4K PNG. Report: Artifact "PT 패스 누적 검증".
 - Committed together with the other pending work in the tree (README / mcp / tools changes from other sessions), not re-tested here.
+
+
+## 2026-10-18 (2) - MCP / AI accessibility for the studio: analysis tools, camera / lighting / motion toolsets, 3 agent skills
+- Goal: an agent can understand and direct a Studio project over MCP without Python scripts or VMD parsing (the old
+  Gemini `mmdx12-camera-director` skill parsed VMDs in Python and imported binary camera VMDs).
+- Analysis (read-only): `studio_scene_info` (models, AABBs, height / facing, camera, every scene light), `studio_sample_motion`
+  (bone world positions at any frames; `App::StudioSampleBones` poses without physics and restores the viewport),
+  `studio_motion_events` (jumps, crouches, hand raises, turns, holds, travel, energy, teleports = centre jumps > 0.5 x height
+  per frame, formation / crossovers), `studio_frame_check` (per-character screen bbox, cuts, head in frame, shot size in the
+  solver's ecu..wide vocabulary; points behind the eye are excluded), `studio_audio_analysis` (`audio/BeatAnalysis`: own FFT,
+  spectral flux, autocorrelation tempo 70..180 BPM, Ellis DP beat tracker, downbeats, per-beat energy, onsets, sections;
+  `tools/beat_probe --selftest`; 5-min song < 0.4 s).
+- Bulk keys (each write = one undo step "AI: <tool>"): `studio_get/set_camera_keys`, `studio_set_light` (create / props /
+  base / keys / delete), `studio_get/set_bone_keys` (+ morphs), `studio_delete_keys`; curve presets (linear, ease_in_out,
+  ease_in, ease_out, smooth, fast_start, slow_start) shared in `app/McpKeyUtil.h`.
+- Camera direction (`AppMcpCamera.cpp`): `studio_camera_solve` (shot size + angle relative to the subject's facing + fov +
+  screen placement -> camera; distance refined on the projected span) and `studio_camera_shots` (shot lists in one undo step:
+  static, dolly, zoom, dolly_zoom, crane, truck, arc = swing, follow, push_accent; beat accents; hard cuts = adjacent shots;
+  per-shot `warnings`). Claude redesigned the worker's shot generator: moves are relative to the OPENING framing (it solved
+  the end pose at the end frame: a travelling dancer turned a dolly into a 40-unit slide), follow is a steadicam (heading /
+  distance / lens kept, smoothed subject travel added; the worker re-solved the yaw from the dancer's facing every key = the
+  "wiper"), arcs rotate the rig about the anchor (no per-key solves), arcs / follows / accents are baked with the easing in a
+  global t, and full / wide shots anchor on the body centre (a wide shot's centre fell below the feet).
+- Lighting direction (`AppMcpLight.cpp`): `studio_light_rig` (key_fill_rim, front_wash, top_spots, side_bars, back_beams) and
+  `studio_light_cues` (pulse, chase, alternate, strobe, sweep, color_cycle, breathe, fade, section_levels, blackout on
+  beat / half / downbeat / bar / onset / section). Review fixes: cue keys stay inside their cue range (a colour cycle's
+  pre-event key overwrote the first colour), rejected rig calls restore the light list.
+- Motion editing (`AppMcpMotion.cpp`): `studio_motion_edit` ops rotate / translate / look_at / retime / copy (+mirror) /
+  mirror / smooth / morph envelopes / key_pose, baked additive layers with smoothstep envelopes, dry_run, one undo step.
+  Review fix: the worker composed the parent-frame offset in the wrong order (QMul = "a then b"): local' = local then
+  (P then D then P^-1). look_at verified by screenshot (head turns into the lens).
+- Skills (`skills/`, shipped in the release zip by `package_release.ps1`): `mmdx12-camera-director`,
+  `mmdx12-lighting-director`, `mmdx12-motion-editor` (+ references, README with install paths for Claude / Gemini / Codex).
+  MCP tools only, no scripts. Motion creation from nothing is declared out of scope in the motion skill (edits only).
+- Delegation: opencode workers (deepseek-v4.1-flash, low) built every module from contract specs (A beats, B1 analysis,
+  B2 keys, C camera, L lighting, M motion, S / S2 skills); Claude reviewed, fixed and ran three live MCP smoke tests on
+  build_b1 (Sour Miku White + rolling_girl, one window at a time).
+- Not done / open: no full agent run of the skills end to end (tools verified individually and as sequences); look_at
+  `mean_error_deg` averages the envelope ramps (10-25 deg typical); arm-axis signs in the motion skill are left to a
+  screenshot check; `studiosong` does not attach the dance to an unselected model (the smoke test imported it by hand).
+- Build blow-up (froze the session twice): the 51 tool schemas in `app/McpTools.h` were nested nlohmann::json initializer
+  lists; MSVC needed 27 GB for ONE translation unit including it (C1060 when several compiled in parallel). Now one JSON raw
+  string per tool (`kMcpToolSchemas`, parsed once): 231 MB per TU, the bridge's tools/list is byte-identical. Rule added to
+  CLAUDE.md.

@@ -279,16 +279,61 @@ An AI director decides WHAT (shot size, angle, move, timing); these tools comput
   optional `focus` `{aperture}` (a DoF key on the subject's head via `studiofocus`). Every shot writes keys only
   inside its range, in ONE undo step (`AI: studio_camera_shots`). Overlapping shots are rejected; consecutive shots
   with `end + 1 == next start` form a HARD CUT (MMD: keys on adjacent frames). `curve` is the easing between this
-  shot's keys (preset name, default `ease_in_out`). `follow` re-solves the framing on the moving subject every
-  `follow_step` frames (default 10). Accents are skipped when closer than `attack + release` to each other or to the
+  shot's keys (preset name, default `ease_in_out`). Every move is relative to the shot's opening framing (solved at `start`);
+  `follow: true` (any move) is a steadicam: heading, distance and lens stay and the camera travels with the subject's
+  smoothed movement (keys every `follow_step` frames, default 10). Arcs, follows and accent shots are baked into keys
+  with linear segments (the easing is baked in). Each shot answer carries `warnings` (head out of frame / subject
+  behind the camera at the start, quarters or end). Accents are skipped when closer than `attack + release` to each other or to the
   shot ends. Yaw is unwrapped: consecutive keys never jump more than 180 degrees.
   Moves: `static`, `dolly_in` / `dolly_out` (dist, `end_shot` or one size tighter/wider), `zoom_in` / `zoom_out`
   (fov, position fixed), `dolly_zoom` (dist and fov together, vertigo), `crane_up` / `crane_down` (pitch and target
   height, `amount` degrees, default 25), `truck_left` / `truck_right` (slide along the camera right axis, `amount`
   world units, default 0.6 x subject height, heading fixed), `arc_left` / `arc_right` (orbit by `amount` degrees,
-  default 35, keys every ~15 frames), `follow` (static framing with follow on), `push_accent` (static driven by
+  default 35, keys every ~15 frames), `follow` (the opening framing with follow on), `push_accent` (static driven by
   accents).
   Example: `{"name": "studio_camera_shots", "arguments": {"mode": "replace_range", "shots": [{"start": 0, "end": 120, "subject": {"models": [0]}, "shot": "ms", "move": "arc_left", "amount": 30}, {"start": 121, "end": 240, "shot": "cu", "move": "dolly_in"}]}}`
+
+### AI motion editing (layered edits on an existing dance)
+
+`studio_motion_edit` `{model, ops, dry_run?}` edits a character's bone / morph keys with TARGETED, LAYERED changes
+instead of authoring a whole dance. `ops` apply in order (later ops see earlier output); everything is validated first
+and every write is **one undo step** named `AI: studio_motion_edit`. Unknown bones / morphs, invalid fields and calls
+that would write more than 100000 keys are rejected without writing. `dry_run: true` reports per-op `tracks` and
+`track_changes` (`added` / `modified` per track) and writes nothing. The response is `{ops: [{op, tracks,
+keys_written, ...}], keys_written, undo}`.
+
+Common op fields: `start` / `end` (inclusive frames), `bones` (PMX names), `attack` / `release` (smoothstep envelope
+fade in / out, default 6 / 6), `step` (frames between baked keys, default 2), `curve` (easing of written keys, default
+`linear`). Baked layers also write `start - 1` / `end + 1` anchor keys holding the original value, so nothing outside
+the range moves.
+
+- `rotate` `{bones, rotate_deg, space?}`: additive rotation layer. `rotate_deg` is Euler XYZ degrees
+  (`XMQuaternionRotationRollPitchYaw`). `space: "local"` (default) is the bone's parent frame like VMD; `"world"`
+  converts the world-space offset into the local frame with the parent's sampled world rotation.
+- `translate` `{bones?, offset}`: additive translation (default センター). The offset is world space for センター /
+  全ての親 and local (parent frame) for other bones.
+- `look_at` `{target, bones?, weights?, max_deg?}`: turns the head toward `target` (`"camera"`, `[x,y,z]` or
+  `{model, bone}`); forward axis is the head's local **-Z** (MMD models face -Z). The turn is clamped to `max_deg`
+  (default 60), split across `bones` (default 首, 頭) by `weights`, applied as an additive WORLD offset with the
+  envelope. The result reports `mean_error_deg` (mean remaining angle to the target after the edit).
+- `retime` `{offset, scale?, bones?}`: moves keys in `[start, end]` to
+  `round(start + (frame - start) * scale) + offset` (default every bone and morph track). Moved keys replace keys on
+  their destination frame; `scale <= 0` is rejected.
+- `copy` `{to, bones?, mirror?}`: copies `[start, end]` to `[to, to + end - start]`, replacing keys there.
+  `mirror: true` writes each bone's keys onto its mirror bone (`MirrorPose`); centre bones mirror in place.
+- `mirror` `{bones?}`: mirrors the range in place (left/right tracks exchange their keys).
+- `smooth` `{bones, window?, step?}`: centred moving average (translation mean, normalized quaternion average with
+  hemisphere alignment), envelope-blended with the original at the ends. Reports `max_change_deg`.
+- `morph` `{morph, frames? | every + start/end, peak?, attack?, hold?, release?}`: writes base at `f - attack`, peak at
+  `f`, peak at `f + hold` and base at `f + hold + release` (base = the morph's original value). Overlaps merge by max.
+- `key_pose` `{frame, bones: {name: {rotate_deg?, translate?}}, ease?}`: a held accent pose set absolutely at `frame`,
+  blended to / from the original motion over `ease` frames on both sides (baked at `step`).
+
+IK note: leg / foot IK bones (足ＩＫ etc.) drive the legs, so edit feet through the IK bones; IK overwrites rotations
+written on the leg bones.
+
+Example (turn the head to the camera during the chorus, raise the right arm and blink):
+`{"name": "studio_motion_edit", "arguments": {"model": 0, "ops": [{"op": "look_at", "target": "camera", "bones": ["首", "頭"], "weights": [0.4, 0.6], "start": 300, "end": 420, "attack": 8, "release": 8}, {"op": "rotate", "bones": ["右腕"], "rotate_deg": [-25, 0, 0], "start": 300, "end": 330}, {"op": "morph", "morph": "まばたき", "frames": [330, 420], "peak": 1}]}}`
 
 ### Input Simulation & Lifetime
 32. `ui_input`: Injects virtual UI mouse and keyboard events (`move`, `click`, `dblclick`, `down`, `up`, `wheel`, `key`, `text`, `mod`) the same commands as `--ui-script`. Events run one per frame unless they give `frame` (offset from now); clicks add their own press / release. Real mouse / keyboard input is ignored only while injected steps are pending.

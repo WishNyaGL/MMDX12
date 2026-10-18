@@ -698,6 +698,8 @@ private:
     void ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
     // Bulk key tools (AppMcpKeys.cpp); true when it handled the tool.
     bool ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
+    // Layered motion-editing tool (AppMcpMotion.cpp); true when it handled the tool.
+    bool ExecuteMcpMotion(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
     // Read-only analysis tools (AppMcpAnalysis.cpp); true when it handled the tool.
     bool ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
     // Camera-direction tools (AppMcpCamera.cpp); true when it handled the tool.
@@ -716,6 +718,10 @@ private:
     std::vector<std::vector<DirectX::XMFLOAT3>> StudioSampleBones(studio::StudioModel& m, const std::vector<int>& frames,
                                                                  const std::vector<int>& bones,
                                                                  std::vector<float>* facingYawDeg = nullptr);
+    // Like StudioSampleBones, but the rows hold each bone's world matrix (BoneWorld) instead of its position.
+    std::vector<std::vector<DirectX::XMFLOAT4X4>> StudioSampleBoneWorlds(studio::StudioModel& m,
+                                                                       const std::vector<int>& frames,
+                                                                       const std::vector<int>& bones);
     // Leaves the current screen for a navigation tool like the UI's back buttons do. False (promise rejected) while
     // loading / rendering / benchmarking, or with unsaved studio changes unless args.discard_unsaved.
     bool McpLeaveScreen(const nlohmann::json& args, McpPromise& promise);

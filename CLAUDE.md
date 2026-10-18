@@ -393,7 +393,11 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
 - MCP (docs/mcp.md): `tools/mmdx12_mcp.cpp` is the stdio MCP bridge; it forwards tool calls over the named pipe
   `\\.\pipe\mmdx12_mcp[_<pid>]` to `McpServer` (app/McpServer.*, worker thread), which queues them for the main thread:
   `App::PumpMcp` / `ExecuteMcp` (app/AppMcp.cpp) before ImGui::NewFrame. Tool schemas + timeouts live in app/McpTools.h
-  (shared by both sides). Navigation goes through `McpLeaveScreen` (the UI's own leave paths); multi-frame calls
+  (shared by both sides) as one JSON raw string per tool (`kMcpToolSchemas`): never write schemas as nested
+  nlohmann::json initializer lists (at ~50 tools every including .cpp needed > 25 GB in MSVC and froze the machine;
+  JSON text compiles in ~0.2 GB). Studio AI tools: `AppMcpAnalysis.cpp` (scene / motion / framing / beats),
+  `AppMcpKeys.cpp` (bulk keys), `AppMcpCamera.cpp` (framing solver, shot lists), `AppMcpLight.cpp` (rigs, music cues),
+  `AppMcpMotion.cpp` (layered motion edits); agent skills in `skills/` ship in the release zip. Navigation goes through `McpLeaveScreen` (the UI's own leave paths); multi-frame calls
   (loads, wait_frames, ui_input) resolve later from PumpMcp; `ui_input` / `studio_command` reuse `ExecuteUiCommand`
   (UiScript.cpp) with their own queue counted in `mcpFrame_`.
   Widget registry (`src/ui_probe/UiProbe.*`, compiled into the imgui target with `IMGUI_ENABLE_TEST_ENGINE`, on while the

@@ -224,6 +224,7 @@ void App::PumpMcp(bool minimized) {
 void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise) {
     if (!promise) return;
     if (ExecuteMcpKeys(tool, args, promise)) return;
+    if (ExecuteMcpMotion(tool, args, promise)) return;
     if (ExecuteMcpAnalysis(tool, args, promise)) return;
     if (ExecuteMcpCamera(tool, args, promise)) return;
     if (ExecuteMcpLight(tool, args, promise)) return;

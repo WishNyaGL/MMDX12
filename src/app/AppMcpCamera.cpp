@@ -110,6 +110,34 @@ DirectX::XMFLOAT3 Normalize(const DirectX::XMFLOAT3& v) {
     return l > 1e-8f ? Scale(v, 1.0f / l) : DirectX::XMFLOAT3{0, 0, 1};
 }
 
+// The easing of a shot's "curve" (a preset name, [x1,y1,x2,y2], or a per-parameter object: its "x" entry), used to
+// bake moves into keys whose segments are linear. Unknown values ease linearly.
+Bezier EaseOf(const nlohmann::json& curve) {
+    static const struct { const char* name; uint8_t b[4]; } kPresets[] = {
+        {"linear", {20, 20, 107, 107}}, {"ease_in_out", {64, 0, 64, 127}}, {"ease_in", {64, 0, 127, 127}},
+        {"ease_out", {0, 0, 64, 127}},  {"smooth", {42, 0, 86, 127}},      {"fast_start", {0, 64, 64, 127}},
+        {"slow_start", {64, 0, 107, 64}}};
+    const nlohmann::json& c = curve.is_object() && curve.contains("x") ? curve["x"] : curve;
+    if (c.is_string())
+        for (const auto& p : kPresets)
+            if (c.get<std::string>() == p.name) return Bezier::FromBytes(p.b[0], p.b[1], p.b[2], p.b[3]);
+    if (c.is_array() && c.size() == 4 && c[0].is_number_integer())
+        return Bezier::FromBytes((uint8_t)c[0].get<int>(), (uint8_t)c[1].get<int>(), (uint8_t)c[2].get<int>(),
+                                 (uint8_t)c[3].get<int>());
+    return Bezier{};
+}
+
+CameraPose LerpPose(const CameraPose& a, const CameraPose& b, float t) {
+    CameraPose p = a;
+    p.target = {a.target.x + (b.target.x - a.target.x) * t, a.target.y + (b.target.y - a.target.y) * t,
+                a.target.z + (b.target.z - a.target.z) * t};
+    p.rotation = {a.rotation.x + (b.rotation.x - a.rotation.x) * t, a.rotation.y + (b.rotation.y - a.rotation.y) * t,
+                  a.rotation.z + (b.rotation.z - a.rotation.z) * t};
+    p.distance = a.distance + (b.distance - a.distance) * t;
+    p.fovDeg = a.fovDeg + (b.fovDeg - a.fovDeg) * t;
+    return p;
+}
+
 nlohmann::json CameraKeyJson(const CameraPose& pose, const nlohmann::json& curve) {
     DirectX::XMFLOAT3 eye;
     CameraMotion::ToView(pose, nullptr, &eye);
@@ -242,7 +270,10 @@ bool App::ExecuteMcpCamera(const std::string& tool, const nlohmann::json& args, 
                 const float frac = ShotFraction(shotName, ok);
                 if (!ok) { err = "shot must be ecu, cu, mcu, ms, cowboy, full or wide (or give fill)"; return false; }
                 spanWorld = frac * primaryHeight;
-                anchorY = subjects.front().headTop.y - spanWorld * 0.5f;
+                // a span from the head top down; a span taller than the body (full / wide) centres on the body
+                // instead (measured from the head top, a wide shot's centre fell below the feet: subject at the top edge)
+                anchorY = frac >= 1.0f ? (subjects.front().headTop.y + subjects.front().feet.y) * 0.5f
+                                       : subjects.front().headTop.y - spanWorld * 0.5f;
                 if (shotName == "ecu") anchorY = subjects.front().head.y;
             } else {
                 bool ok = false;
@@ -514,6 +545,7 @@ bool App::ExecuteMcpCamera(const std::string& tool, const nlohmann::json& args, 
         size_t keys = 0;
         CameraPose firstPose, lastPose;
         bool haveFirst = false, haveLast = false;
+        std::vector<std::string> warnings;
     };
     std::vector<Generated> generated(shots.size());
     std::vector<nlohmann::json> allKeys;
@@ -538,13 +570,10 @@ bool App::ExecuteMcpCamera(const std::string& tool, const nlohmann::json& args, 
         }
         g.firstPose = startPose;
         g.haveFirst = true;
-        CameraPose lastPose = startPose;
         g.lastPose = startPose;
         g.haveLast = true;
 
-        const float startYaw = DirectX::XMConvertToDegrees(startPose.rotation.y);
         std::map<int, nlohmann::json> keys;  // frame -> key JSON (a later write on the same frame wins)
-
         auto putPose = [&](int frame, const CameraPose& pose, const nlohmann::json& curve) {
             nlohmann::json k = CameraKeyJson(pose, curve);
             k["frame"] = frame;
@@ -552,11 +581,10 @@ bool App::ExecuteMcpCamera(const std::string& tool, const nlohmann::json& args, 
         };
 
         // end shot / fields (end_shot defaults to the start size for moves that do not change it)
-        std::string endShot = s.endShot;
-        if (endShot.empty()) endShot = s.shot;
-        float endFov = s.hasEndFov ? s.endFov : s.fov;
-        nlohmann::json endAngle = s.endAngle.empty() ? s.angle : s.endAngle;
-        nlohmann::json endScreen = s.endScreen.empty() ? s.screen : s.endScreen;
+        const std::string endShot = s.endShot.empty() ? s.shot : s.endShot;
+        const float endFov = s.hasEndFov ? s.endFov : s.fov;
+        const nlohmann::json endAngle = s.endAngle.empty() ? s.angle : s.endAngle;
+        const nlohmann::json endScreen = s.endScreen.empty() ? s.screen : s.endScreen;
 
         const bool isArc = s.move == "arc_left" || s.move == "arc_right";
         const bool isTruck = s.move == "truck_left" || s.move == "truck_right";
@@ -564,162 +592,152 @@ bool App::ExecuteMcpCamera(const std::string& tool, const nlohmann::json& args, 
         const bool isZoom = s.move == "zoom_in" || s.move == "zoom_out" || s.move == "dolly_zoom";
         const bool isDolly = s.move == "dolly_in" || s.move == "dolly_out";
 
-        // base keys along the shot
-        if (isArc) {
-            const float amount = s.hasAmount ? s.amount : 35.0f;
-            const float arcDeg = s.move == "arc_left" ? -std::abs(amount) : std::abs(amount);
-            const int step = s.follow ? std::max(1, s.followStep) : 15;
-            for (int f = s.start; f <= s.end; f += step) {
-                const float t = s.end > s.start ? (float)(f - s.start) / (float)(s.end - s.start) : 0.0f;
-                nlohmann::json fracAngle = nlohmann::json::object();
-                fracAngle["yaw_deg"] = startYaw + arcDeg * t;
-                fracAngle["pitch_deg"] = NumberOr(s.angle, "pitch_deg", 0.0f) +
-                                         (NumberOr(endAngle, "pitch_deg", NumberOr(s.angle, "pitch_deg", 0.0f)) -
-                                          NumberOr(s.angle, "pitch_deg", 0.0f)) * t;
-                fracAngle["roll_deg"] = NumberOr(s.angle, "roll_deg", 0.0f) +
-                                        (NumberOr(endAngle, "roll_deg", NumberOr(s.angle, "roll_deg", 0.0f)) -
-                                         NumberOr(s.angle, "roll_deg", 0.0f)) * t;
-                fracAngle["absolute"] = true;
-                CameraPose pose;
-                nlohmann::json cam;
-                std::string err;
-                if (!solve(f, s.subject, s.shot, 0.0f, s.fov, fracAngle, s.screen, std::string(), pose, cam, nullptr,
-                           err)) {
-                    promise->Reject(err);
+        // The move's end framing is built on the subject AT THE START FRAME: a move is a camera move relative to the
+        // opening framing, not a re-framing on wherever the subject is at the end (a travelling dancer made a dolly a
+        // long slide through empty space). `follow` adds the subject's own travel on top.
+        CameraPose endPose = startPose;
+        float arcDeg = 0.0f;
+        {
+            std::string err;
+            nlohmann::json cam;
+            const auto solveAtStart = [&](const std::string& shotName, float fov, const nlohmann::json& angle,
+                                          const nlohmann::json& screen) {
+                if (solve(s.start, s.subject, shotName, 0.0f, fov, angle, screen, std::string(), endPose, cam, nullptr,
+                          err))
                     return true;
+                promise->Reject(err);
+                return false;
+            };
+            const float startPitch = NumberOr(s.angle, "pitch_deg", 0.0f);
+            const float startRoll = NumberOr(s.angle, "roll_deg", 0.0f);
+            if (isArc) {
+                const float amount = s.hasAmount ? s.amount : 35.0f;
+                arcDeg = s.move == "arc_left" ? -std::abs(amount) : std::abs(amount);
+                endPose.rotation.x = DirectX::XMConvertToRadians(-NumberOr(endAngle, "pitch_deg", startPitch));
+                endPose.rotation.z = DirectX::XMConvertToRadians(NumberOr(endAngle, "roll_deg", startRoll));
+            } else if (isTruck) {
+                const float amount = s.hasAmount ? s.amount : 0.6f * startHeight;
+                const float sign = s.move == "truck_left" ? -1.0f : 1.0f;
+                // heading fixed: same orientation, target slides along the camera right axis
+                const DirectX::XMMATRIX rot = DirectX::XMMatrixRotationRollPitchYaw(
+                    -startPose.rotation.x, -startPose.rotation.y, -startPose.rotation.z);
+                const DirectX::XMFLOAT3 upv =
+                    ToVec3(DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(0, 1, 0, 0), rot));
+                const DirectX::XMFLOAT3 fwdv =
+                    ToVec3(DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(0, 0, 1, 0), rot));
+                const DirectX::XMFLOAT3 rightv = Normalize(
+                    ToVec3(DirectX::XMVector3Cross(DirectX::XMLoadFloat3(&upv), DirectX::XMLoadFloat3(&fwdv))));
+                endPose.target = Add(startPose.target, Scale(rightv, sign * amount));
+            } else if (isZoom) {
+                if (s.move == "dolly_zoom") {
+                    // the subject keeps its size: the distance scales with 1 / tan(fov / 2)
+                    const float newFov = std::clamp(std::round(s.hasEndFov ? endFov : s.fov * 1.4f), 1.0f, 125.0f);
+                    const float ratio = std::tan(DirectX::XMConvertToRadians(startPose.fovDeg * 0.5f)) /
+                                        std::tan(DirectX::XMConvertToRadians(newFov * 0.5f));
+                    endPose.fovDeg = newFov;
+                    endPose.distance = -std::max(1.0f, -startPose.distance * ratio);
+                } else {
+                    // the camera stays put, only the lens changes
+                    const float newFov = s.hasEndFov ? endFov : s.fov * (s.move == "zoom_in" ? 0.6f : 1.6f);
+                    endPose.fovDeg = std::clamp(std::round(newFov), 1.0f, 125.0f);
                 }
-                putPose(f, pose, s.curve);
-                lastPose = pose;
+            } else if (isCrane) {
+                const float amount = s.hasAmount ? s.amount : 25.0f;
+                nlohmann::json craneAngle = s.angle;
+                craneAngle["pitch_deg"] = startPitch + (s.move == "crane_up" ? amount : -amount);
+                if (!solveAtStart(endShot, endFov, craneAngle, endScreen)) return true;
+            } else if (isDolly) {
+                const std::string targetShot =
+                    !s.endShot.empty() ? s.endShot : NeighbourShot(s.shot, s.move == "dolly_in" ? -1 : 1);
+                if (!solveAtStart(targetShot, s.fov, endAngle, endScreen)) return true;
+            } else if (!s.endShot.empty() || s.hasEndFov || !s.endAngle.empty() || !s.endScreen.empty()) {
+                // static / follow / push_accent with end fields: a slow re-framing over the shot
+                if (!solveAtStart(endShot, endFov, endAngle, endScreen)) return true;
             }
-            if (!keys.count(s.end)) putPose(s.end, lastPose, s.curve);
-        } else if (isTruck) {
-            const float amount = s.hasAmount ? s.amount : 0.6f * startHeight;
-            const float sign = s.move == "truck_left" ? -1.0f : 1.0f;
-            CameraPose endPose = startPose;
-            nlohmann::json cam;
-            std::string err;
-            // heading fixed: same orientation, target slides along the camera right axis
-            const DirectX::XMMATRIX rot = DirectX::XMMatrixRotationRollPitchYaw(
-                -startPose.rotation.x, -startPose.rotation.y, -startPose.rotation.z);
-            const DirectX::XMFLOAT3 upv = ToVec3(DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(0, 1, 0, 0), rot));
-            const DirectX::XMFLOAT3 fwdv = ToVec3(DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(0, 0, 1, 0), rot));
-            DirectX::XMFLOAT3 rightv = Normalize(ToVec3(DirectX::XMVector3Cross(
-                DirectX::XMLoadFloat3(&upv), DirectX::XMLoadFloat3(&fwdv))));
-            endPose.target = Add(startPose.target, Scale(rightv, sign * amount));
-            endPose.rotation = startPose.rotation;
-            endPose.distance = startPose.distance;
-            endPose.fovDeg = s.fov;
-            (void)endShot;
-            putPose(s.start, startPose, s.curve);
-            putPose(s.end, endPose, s.curve);
-            lastPose = endPose;
-        } else if (isZoom) {
-            CameraPose endPose = startPose;
-            DirectX::XMFLOAT3 anchorEnd = startAnchor;
-            nlohmann::json cam;
-            std::string err;
-            // re-sample the subject at end to get its anchor there (same start framing)
-            CameraPose probe;
-            if (!solve(s.end, s.subject, s.shot, 0.0f, s.fov, s.angle, s.screen, std::string(), probe, cam, &anchorEnd,
-                       err)) {
-                promise->Reject(err);
-                return true;
-            }
-            DirectX::XMFLOAT3 eyeStart;
-            CameraMotion::ToView(startPose, nullptr, &eyeStart);
-            const DirectX::XMFLOAT3 eDir = Normalize(Sub(eyeStart, startPose.target));
-            if (s.move == "dolly_zoom") {
-                const float newFov = s.hasEndFov ? endFov : std::clamp(s.fov * 1.4f, 1.0f, 125.0f);
-                const float ratio = std::tan(DirectX::XMConvertToRadians(s.fov * 0.5f)) /
-                                    std::tan(DirectX::XMConvertToRadians(newFov * 0.5f));
-                const float distStart = -startPose.distance;
-                const float newDist = std::max(1.0f, distStart * ratio);
-                endPose.target = anchorEnd;
-                endPose.fovDeg = newFov;
-                endPose.distance = -newDist;
-                endPose.rotation = startPose.rotation;
-            } else {
-                const float newFov = s.hasEndFov ? endFov
-                                                : std::clamp(s.fov * (s.move == "zoom_in" ? 0.6f : 1.6f), 1.0f, 125.0f);
-                endPose.target = anchorEnd;
-                endPose.rotation = startPose.rotation;
-                endPose.fovDeg = newFov;
-                const float proj = (eyeStart.x - anchorEnd.x) * eDir.x + (eyeStart.y - anchorEnd.y) * eDir.y +
-                                   (eyeStart.z - anchorEnd.z) * eDir.z;
-                endPose.distance = -std::max(1.0f, proj);
-            }
-            putPose(s.start, startPose, s.curve);
-            putPose(s.end, endPose, s.curve);
-            lastPose = endPose;
-        } else if (isCrane) {
-            const float amount = s.hasAmount ? s.amount : 25.0f;
-            const float sign = s.move == "crane_up" ? 1.0f : -1.0f;
-            nlohmann::json craneAngle = s.angle;
-            craneAngle["pitch_deg"] = NumberOr(s.angle, "pitch_deg", 0.0f) + sign * amount;
-            CameraPose endPose;
-            nlohmann::json cam;
-            std::string err;
-            if (!solve(s.end, s.subject, endShot, 0.0f, endFov, craneAngle, endScreen, std::string(), endPose, cam,
-                       nullptr, err)) {
-                promise->Reject(err);
-                return true;
-            }
-            putPose(s.start, startPose, s.curve);
-            putPose(s.end, endPose, s.curve);
-            lastPose = endPose;
-        } else if (isDolly) {
-            const std::string targetShot = !s.endShot.empty()
-                                               ? s.endShot
-                                               : NeighbourShot(s.shot, s.move == "dolly_in" ? 1 : -1);
-            CameraPose endPose;
-            nlohmann::json cam;
-            std::string err;
-            if (!solve(s.end, s.subject, targetShot, 0.0f, s.fov, endAngle, endScreen, std::string(), endPose, cam,
-                       nullptr, err)) {
-                promise->Reject(err);
-                return true;
-            }
-            putPose(s.start, startPose, s.curve);
-            putPose(s.end, endPose, s.curve);
-            lastPose = endPose;
-        } else {
-            // static / follow / push_accent: hold the framing (follow re-solves on the moving subject)
-            if (s.follow && s.end > s.start) {
-                const int step = std::max(1, s.followStep);
-                for (int f = s.start + step; f < s.end; f += step) {
-                    const float t = (float)(f - s.start) / (float)(s.end - s.start);
-                    nlohmann::json fa = s.angle;
-                    fa["pitch_deg"] = NumberOr(s.angle, "pitch_deg", 0.0f) +
-                                      (NumberOr(endAngle, "pitch_deg", NumberOr(s.angle, "pitch_deg", 0.0f)) -
-                                       NumberOr(s.angle, "pitch_deg", 0.0f)) * t;
-                    fa["roll_deg"] = NumberOr(s.angle, "roll_deg", 0.0f) +
-                                     (NumberOr(endAngle, "roll_deg", NumberOr(s.angle, "roll_deg", 0.0f)) -
-                                      NumberOr(s.angle, "roll_deg", 0.0f)) * t;
-                    nlohmann::json fs = nlohmann::json::object();
-                    fs["x"] = NumberOr(s.screen, "x", 0.5f) +
-                              (NumberOr(endScreen, "x", NumberOr(s.screen, "x", 0.5f)) -
-                               NumberOr(s.screen, "x", 0.5f)) * t;
-                    fs["y"] = NumberOr(s.screen, "y", 0.5f) +
-                              (NumberOr(endScreen, "y", NumberOr(s.screen, "y", 0.5f)) -
-                               NumberOr(s.screen, "y", 0.5f)) * t;
-                    CameraPose pose;
-                    nlohmann::json cam;
-                    std::string err;
-                    if (!solve(f, s.subject, s.shot, 0.0f, s.fov + (endFov - s.fov) * t, fa, fs, std::string(), pose,
-                               cam, nullptr, err)) {
-                        promise->Reject(err);
-                        return true;
-                    }
-                    putPose(f, pose, s.curve);
-                    lastPose = pose;
-                }
-                if (!keys.count(s.end)) putPose(s.end, lastPose, s.curve);
-            }
-            if (!keys.count(s.start)) putPose(s.start, startPose, s.curve);
-            if (s.end > s.start && !keys.count(s.end)) putPose(s.end, startPose, s.curve);
+            // the shortest way round between the two headings
+            while (endPose.rotation.y - startPose.rotation.y > DirectX::XM_PI) endPose.rotation.y -= DirectX::XM_2PI;
+            while (endPose.rotation.y - startPose.rotation.y < -DirectX::XM_PI) endPose.rotation.y += DirectX::XM_2PI;
         }
 
-        // accents: push (dist), zoom (fov) or roll bumps around beat frames
+        // follow: the subject's travel since the start (upper body, sampled every 2 frames in one posing pass),
+        // smoothed over ~0.5 s and with the vertical half damped so jumps do not bob the camera
+        std::vector<DirectX::XMFLOAT3> travel;
+        if (s.follow && s.end > s.start) {
+            int mi = -1;
+            const nlohmann::json* mj = FindMember(s.subject, "models");
+            if (mj && mj->is_array() && !mj->empty() && (*mj)[0].is_number_integer()) {
+                mi = (*mj)[0].get<int>();
+            } else {
+                for (size_t i = 0; i < d.models.size(); ++i)
+                    if (d.models[i]->kind == ModelKind::Character && d.models[i]->visible && d.models[i]->inst) {
+                        mi = (int)i;
+                        break;
+                    }
+            }
+            if (mi >= 0 && mi < (int)d.models.size() && d.models[(size_t)mi]->pmx) {
+                StudioModel& m = *d.models[(size_t)mi];
+                int bone = m.pmx->FindBone(kUpperBone);
+                if (bone < 0) bone = m.pmx->FindBone(kCenterBone);
+                if (bone >= 0) {
+                    std::vector<int> frames;
+                    for (int f = s.start; f <= s.end; f += 2) frames.push_back(f);
+                    const auto pos = StudioSampleBones(m, frames, {bone});
+                    std::vector<DirectX::XMFLOAT3> raw;
+                    for (const auto& row : pos) {
+                        const DirectX::XMFLOAT3 o = Sub(row[0], pos[0][0]);
+                        raw.push_back({o.x, o.y * 0.5f, o.z});
+                    }
+                    constexpr int kHalf = 7;  // +-7 samples = +-14 frames
+                    for (int i = 0; i < (int)raw.size(); ++i) {
+                        DirectX::XMFLOAT3 sum{};
+                        int n = 0;
+                        for (int j = std::max(0, i - kHalf); j <= std::min((int)raw.size() - 1, i + kHalf); ++j) {
+                            sum = Add(sum, raw[(size_t)j]);
+                            ++n;
+                        }
+                        travel.push_back(Scale(sum, 1.0f / (float)n));
+                    }
+                    // the shot opens exactly on the solved framing
+                    const DirectX::XMFLOAT3 first = travel.empty() ? DirectX::XMFLOAT3{} : travel[0];
+                    for (auto& t : travel) t = Sub(t, first);
+                }
+            }
+        }
+
+        // The rig at frame f: the eased move from the start to the end framing, the arc as a rotation of the whole
+        // rig about the subject anchor (the framing is kept exactly), plus the follow travel.
+        const Bezier ease = EaseOf(s.curve);
+        const auto poseAt = [&](int f) {
+            const float lin =
+                s.end > s.start ? std::clamp((float)(f - s.start) / (float)(s.end - s.start), 0.0f, 1.0f) : 0.0f;
+            const float t = ease.Evaluate(lin);
+            CameraPose p = LerpPose(startPose, endPose, t);
+            if (isArc) {
+                const float delta = DirectX::XMConvertToRadians(arcDeg * t);
+                const DirectX::XMFLOAT3 off = Sub(p.target, startAnchor);
+                p.target = Add(startAnchor, ToVec3(DirectX::XMVector3TransformNormal(
+                                                DirectX::XMLoadFloat3(&off), DirectX::XMMatrixRotationY(-delta))));
+                p.rotation.y += delta;
+            }
+            if (!travel.empty())
+                p.target = Add(p.target, travel[(size_t)std::clamp((f - s.start) / 2, 0, (int)travel.size() - 1)]);
+            return p;
+        };
+
+        // Keys: a plain move is two keys eased by MMD with the shot's curve; arcs, follows and shots with accents are
+        // baked (the easing is in poseAt, the segments are linear) so the motion stays one continuous ease.
+        const bool baked = isArc || !travel.empty() || !s.accents.empty();
+        const nlohmann::json linear("linear");
+        if (baked) {
+            const int step = !travel.empty() ? s.followStep : 10;
+            for (int f = s.start; f < s.end; f += step) putPose(f, poseAt(f), linear);
+            putPose(s.end, poseAt(s.end), linear);
+        } else {
+            putPose(s.start, startPose, s.curve);
+            if (s.end > s.start) putPose(s.end, endPose, s.curve);
+        }
+
+        // accents: push (dist), zoom (fov) or roll bumps around beat frames, riding on the move
         if (!s.accents.empty()) {
             const std::string kind = s.accent.value("kind", std::string("push"));
             const float amount = NumberOr(s.accent, "amount", kind == "zoom" ? 4.0f : (kind == "roll" ? 6.0f : 0.12f));
@@ -729,42 +747,41 @@ bool App::ExecuteMcpCamera(const std::string& tool, const nlohmann::json& args, 
             std::vector<int> accents = s.accents;
             std::sort(accents.begin(), accents.end());
             for (int a : accents) {
-                if (a < s.start + attack || a > s.end - release) continue;
                 if (a - attack < s.start || a + release > s.end) continue;
                 bool tooClose = false;
                 for (int u : used)
                     if (std::abs(a - u) < attack + release) tooClose = true;
                 if (tooClose) continue;
                 used.push_back(a);
+                for (auto it = keys.upper_bound(a - attack); it != keys.end() && it->first < a + release;)
+                    it = keys.erase(it);  // the baked keys under the accent
+                const CameraPose base = poseAt(a);
+                CameraPose peak = base;
+                if (kind == "zoom") peak.fovDeg = std::clamp(std::round(base.fovDeg - amount), 1.0f, 125.0f);
+                else if (kind == "roll") peak.rotation.z = base.rotation.z + DirectX::XMConvertToRadians(amount);
+                else peak.distance = -std::max(1.0f, -base.distance * (1.0f - amount));
+                putPose(a - attack, poseAt(a - attack), linear);
+                putPose(a, peak, nlohmann::json::array({0, 64, 64, 127}));
+                putPose(a + release, poseAt(a + release), nlohmann::json("ease_out"));
+            }
+        }
 
-                // pre value: sample the base curve at a - attack (or the start pose)
-                CameraPose basePose = startPose;
-                auto itKey = keys.upper_bound(a - attack);
-                if (itKey != keys.begin()) --itKey;
-                if (itKey != keys.end()) {
-                    const nlohmann::json& k = itKey->second;
-                    basePose.target = {k["target"][0].get<float>(), k["target"][1].get<float>(),
-                                       k["target"][2].get<float>()};
-                    basePose.rotation = {DirectX::XMConvertToRadians(-k["pitch_deg"].get<float>()),
-                                         DirectX::XMConvertToRadians(k["yaw_deg"].get<float>()),
-                                         DirectX::XMConvertToRadians(k["roll_deg"].get<float>())};
-                    basePose.distance = -k["dist"].get<float>();
-                    basePose.fovDeg = k["fov_deg"].get<float>();
+        // framing warnings over the shot (start, quarters, end), so the caller can fix a shot without screenshots
+        {
+            const nlohmann::json* mj = FindMember(s.subject, "models");
+            for (int q = 0; q <= 4; ++q) {
+                const int f = s.start + (s.end - s.start) * q / 4;
+                const nlohmann::json check = McpFrameCheck(f, poseAt(f));
+                for (const nlohmann::json& c : check["characters"]) {
+                    if (mj && mj->is_array() && std::find(mj->begin(), mj->end(), c.value("model", -1)) == mj->end())
+                        continue;
+                    const std::string who = c.value("name", std::string());
+                    if (c.value("behind_camera", false))
+                        g.warnings.push_back("frame " + std::to_string(f) + ": " + who + " is behind the camera");
+                    else if (!c.value("head_in_frame", false))
+                        g.warnings.push_back("frame " + std::to_string(f) + ": " + who + "'s head is out of frame");
+                    if (!mj) break;  // the default subject is the first visible character only
                 }
-                CameraPose peak = basePose;
-                if (kind == "zoom") {
-                    peak.fovDeg = std::clamp(basePose.fovDeg - amount, 1.0f, 125.0f);
-                } else if (kind == "roll") {
-                    peak.rotation.z = DirectX::XMConvertToRadians(
-                        DirectX::XMConvertToDegrees(basePose.rotation.z) + amount);
-                } else {
-                    peak.distance = -std::max(1.0f, -basePose.distance * (1.0f - amount));
-                }
-                // the peak keeps the target: the camera dips in / lens pushes, then settles back
-                const nlohmann::json fastStart = nlohmann::json::array({0, 64, 64, 127});
-                putPose(a - attack, basePose, s.curve);
-                putPose(a, peak, fastStart);
-                putPose(a + release, basePose, nlohmann::json("ease_out"));
             }
         }
 
@@ -830,6 +847,7 @@ bool App::ExecuteMcpCamera(const std::string& tool, const nlohmann::json& args, 
         r["keys_written"] = g.keys;
         r["first_check"] = McpFrameCheck(g.start, g.firstPose);
         r["last_check"] = McpFrameCheck(g.end, g.lastPose);
+        r["warnings"] = g.warnings;
         shotResults.push_back(std::move(r));
     }
 
