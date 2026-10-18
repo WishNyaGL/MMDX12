@@ -19,6 +19,25 @@ RWTexture2D<float4> gAlbedoOut : register(u1);
 RWTexture2D<float4> gNormalOut : register(u2);
 RWTexture2D<float2> gVelocityOut : register(u3);
 RWTexture2D<float> gDepthOut : register(u4);
+// DLSS Ray Reconstruction guides (only written when gP2.x > 0.5; bound to dummies otherwise).
+RWTexture2D<float4> gDiffuseAlbedoOut : register(u5);
+RWTexture2D<float4> gSpecularAlbedoOut : register(u6);
+RWTexture2D<float4> gGuideNormalOut : register(u7);   // rgb = world normal, a = roughness (packed roughness mode)
+
+// Average specular reflectance for the RR guide (DLSS-RR guide appendix, EnvBRDFApprox2).
+float3 RrSpecularAlbedo(float3 specColor, float alpha, float NoV) {
+    NoV = abs(NoV);
+    float4 X = float4(1.0, NoV, NoV * NoV, NoV * NoV * NoV);
+    float4 Y = float4(1.0, alpha, alpha * alpha, alpha * alpha * alpha);
+    float2x2 M1 = float2x2(0.99044, -1.28514, 1.29678, -0.755907);
+    float3x3 M2 = float3x3(1.0, 2.92338, 59.4188, 20.3225, -27.0302, 222.592, 121.563, 626.13, 316.627);
+    float2x2 M3 = float2x2(0.0365463, 3.32707, 9.0632, -9.04756);
+    float3x3 M4 = float3x3(1.0, 3.59685, -1.36772, 9.04401, -16.3174, 9.22949, 5.56589, 19.7886, -20.2123);
+    float bias = dot(mul(M1, X.xy), Y.xy) * rcp(dot(mul(M2, X.xyw), Y.xyw));
+    float scale = dot(mul(M3, X.xy), Y.xy) * rcp(dot(mul(M4, X.xzw), Y.xyw));
+    bias *= saturate(specColor.g * 50.0);
+    return mad(specColor, max(0.0, scale), max(0.0, bias));
+}
 
 struct PtLight {
     float3 pos; float invRange;
@@ -144,7 +163,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
     uint bounces = (uint)gP0.y;
     float3 radiance = 0;
     float3 primAlbedo = 0, primNormal = 0, primPos = 0, primPrev = 0, primRd = 0;
-    float primRefl = 0;
+    float primRefl = 0, primRough = 0.5, primCosV = 1.0;
     bool primHit = false;
     [loop] for (uint s = 0; s < sampleCount; ++s) {
         uint rng = RngSeed(pix, (uint)gP1.x, s);
@@ -368,6 +387,8 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 primAlbedo = albedo;
                 primNormal = n;
                 primRefl = refl;
+                primRough = rough;
+                primCosV = saturate(dot(n, -dir));
                 primPos = pos;
                 primPrev = prevPos;
                 primHit = true;
@@ -508,6 +529,11 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
 
     if (!primHit) {
         // sky primary (sample 0 missed)
+        if (gP2.x > 0.5) {   // RR guides: a neutral grey albedo for the sky (guide requirement)
+            gDiffuseAlbedoOut[pix] = float4(0.5, 0.5, 0.5, 0.0);
+            gSpecularAlbedoOut[pix] = float4(0, 0, 0, 0);
+            gGuideNormalOut[pix] = 0;
+        }
         gAlbedoOut[pix] = float4(1, 1, 1, gP0.w > 0.5 ? 0.0 : 1.0);
         gLightOut[pix] = float4(radiance, 0.0);
         gNormalOut[pix] = 0;
@@ -522,6 +548,13 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
     float3 a = max(primAlbedo, 0.02);
     gAlbedoOut[pix] = float4(a, 1.0);
     gLightOut[pix] = float4(radiance / a, 1.0);
+    if (gP2.x > 0.5) {
+        // RR guides: world-space shading normal, roughness, diffuse and specular albedo. The primary
+        // reflectance is split into its diffuse (albedo scaled by 1 - reflectance) and specular parts.
+        gDiffuseAlbedoOut[pix] = float4(saturate(a * (1.0 - primRefl)), 0.0);
+        gSpecularAlbedoOut[pix] = float4(RrSpecularAlbedo(primRefl.xxx, primRough * primRough, primCosV), 0.0);
+        gGuideNormalOut[pix] = float4(normalize(primNormal), primRough);
+    }
     float3 vn = normalize(mul(primNormal, (float3x3)gView));
     float2 enc = OctEncode(vn);
     gNormalOut[pix] = float4(enc.x, enc.y, primRefl, 1.0);

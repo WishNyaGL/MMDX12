@@ -514,6 +514,55 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     }
     if (!psoDepthBack_) LOG_WARN("ScenePass: depth pre-pass unavailable, the path tracer draws no outlines");
 
+    // DLSS-RR guides (RayTraced): the lit MRT layout with PSGuides, compiled like PSMain (DXC when available).
+    // Built only here; ScenePass::DrawGuides runs only while RR is active, so RR-off frames have no extra cost.
+    psoGuideBack_.Reset();
+    psoGuideNoCull_.Reset();
+    {
+        ComPtr<ID3DBlob> psGuide;
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC guide = rasterPso;
+        if (ctx.Caps().shaderModel >= D3D_SHADER_MODEL_6_0 && litDesc_.VS.pShaderBytecode) {
+            psGuide = CompileShaderDxc(file, "PSGuides", "ps_6_0");
+            guide.VS = litDesc_.VS;
+        } else {
+            psGuide = CompileShader(file, "PSGuides", "ps_5_1");
+            guide.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+        }
+        if (psGuide) {
+            guide.PS = {psGuide->GetBufferPointer(), psGuide->GetBufferSize()};
+            guide.NumRenderTargets = 3;
+            guide.RTVFormats[0] = RenderTargets::kColorFormat;
+            guide.RTVFormats[1] = RenderTargets::kColorFormat;
+            guide.RTVFormats[2] = RenderTargets::kColorFormat;
+            // RR requires the DLSS upscaler, which forces single-sample targets: the guides are 1x.
+            guide.SampleDesc.Count = 1;
+            guide.RasterizerState.MultisampleEnable = FALSE;
+            // Translucent layers (eye shadow, blush, highlights over the face) blend into the guides by their
+            // coverage like the colour does: written opaque, a faint dark overlay became the face's albedo and RR
+            // demodulated it into dark patches ("panda eyes"). Destination alpha is kept. Only the two albedo
+            // targets blend: the normal target packs roughness in w (RR's packed roughness mode), written opaque.
+            guide.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+            for (int rt = 0; rt < 2; ++rt) {
+                D3D12_RENDER_TARGET_BLEND_DESC& b = guide.BlendState.RenderTarget[rt];
+                b.BlendEnable = TRUE;
+                b.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+                b.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                b.BlendOp = D3D12_BLEND_OP_ADD;
+                b.SrcBlendAlpha = D3D12_BLEND_ZERO;
+                b.DestBlendAlpha = D3D12_BLEND_ONE;
+                b.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            }
+            guide.BlendState.IndependentBlendEnable = TRUE;
+            guide.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+            guide.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            guide.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+            if (FAILED(device->CreateGraphicsPipelineState(&guide, IID_PPV_ARGS(&psoGuideBack_)))) psoGuideBack_.Reset();
+            guide.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            if (FAILED(device->CreateGraphicsPipelineState(&guide, IID_PPV_ARGS(&psoGuideNoCull_)))) psoGuideNoCull_.Reset();
+        }
+    }
+    if (!psoGuideBack_) LOG_WARN("ScenePass: DLSS-RR guides unavailable");
+
     // Wireframe model variants (D3D12_FILL_MODE_WIREFRAME, flat PSWire): same MRT layout and
     // blend as the lit PSO so the resolve / composite passes run unchanged. Line width is fixed
     // at 1 px (the rasterizer cannot draw wider lines); the vertex stage is VSMain (same skinning).
@@ -1761,12 +1810,123 @@ bool ScenePass::DrawMmeEdges(PassContext& pc, GpuModel& model) {
     return drew;
 }
 
+void ScenePass::OnResize(Dx12Context& ctx, RenderTargets& targets) {
+    // The RR guides are created on the first RR frame (ScenePass::DrawGuides): a resize drops them.
+    guideDiffuse_.Release(ctx);
+    guideSpecular_.Release(ctx);
+    guideNormal_.Release(ctx);
+}
+
+void ScenePass::ReleaseTargets(Dx12Context& ctx) {
+    guideDiffuse_.Release(ctx);
+    guideSpecular_.Release(ctx);
+    guideNormal_.Release(ctx);
+}
+
+void ScenePass::DrawGuides(PassContext& pc) {
+    if (!psoGuideBack_ || !psoGuideNoCull_) return;
+    RenderTargets& t = pc.targets;
+    if (t.msaa != 1) return;   // RR runs with the DLSS upscaler (single-sample targets) only
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    Dx12Context& ctx = pc.ctx;
+    const D3D12_RESOURCE_FLAGS guideFlags =
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (!guideDiffuse_ || guideDiffuse_.width != t.width || guideDiffuse_.height != t.height) {
+        guideDiffuse_.Create(ctx, t.width, t.height, RenderTargets::kColorFormat, guideFlags, kSrv,
+                             L"scene.guideDiffuse");
+        guideSpecular_.Create(ctx, t.width, t.height, RenderTargets::kColorFormat, guideFlags, kSrv,
+                              L"scene.guideSpecular");
+        guideNormal_.Create(ctx, t.width, t.height, RenderTargets::kColorFormat, guideFlags, kSrv,
+                            L"scene.guideNormal");
+    }
+    guideDiffuse_.Transition(cmd, kRt);
+    guideSpecular_.Transition(cmd, kRt);
+    guideNormal_.Transition(cmd, kRt);
+    // The scene's own depth target (cleared again at the start of the scene draw right after).
+    t.depthMsaa.Transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] = {ctx.RtvHeap().Cpu(guideDiffuse_.rtv),
+                                           ctx.RtvHeap().Cpu(guideSpecular_.rtv),
+                                           ctx.RtvHeap().Cpu(guideNormal_.rtv)};
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.DsvHeap().Cpu(t.depthMsaa.dsv);
+    // Sky: RR's documented grey (the same default the PT guides use); no coverage beyond the drawn surfaces.
+    const float clearDiffuse[4] = {0.5f, 0.5f, 0.5f, 0.0f};
+    const float clearZero[4] = {0, 0, 0, 0};
+    cmd->ClearRenderTargetView(rtvs[0], clearDiffuse, 0, nullptr);
+    cmd->ClearRenderTargetView(rtvs[1], clearZero, 0, nullptr);
+    cmd->ClearRenderTargetView(rtvs[2], clearZero, 0, nullptr);
+    cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    cmd->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
+
+    const D3D12_GPU_DESCRIPTOR_HANDLE shadowTable = pc.transient.SrvTable(ctx, {&t.shadowMap});
+    const D3D12_GPU_DESCRIPTOR_HANDLE spotTable = pc.transient.SrvTable(ctx, {&t.spotShadowMap});
+    const D3D12_GPU_DESCRIPTOR_HANDLE pointTable = pc.transient.SrvTable(ctx, {&t.pointShadowMap});
+    cmd->SetGraphicsRootSignature(rootSig_.Get());
+    cmd->SetGraphicsRootDescriptorTable(5, shadowTable);
+    cmd->SetGraphicsRootDescriptorTable(11, spotTable);
+    cmd->SetGraphicsRootDescriptorTable(13, pointTable);
+    cmd->SetGraphicsRootShaderResourceView(6, pc.lights);
+    if (pc.rt) {
+        cmd->SetGraphicsRootShaderResourceView(7, pc.rt->Tlas());
+        cmd->SetGraphicsRootShaderResourceView(8, pc.rt->Geometries());
+    }
+    const D3D12_GPU_DESCRIPTOR_HANDLE heapBase = ctx.SrvHeap().Gpu(0);
+    cmd->SetGraphicsRootDescriptorTable(9, heapBase);
+    cmd->SetGraphicsRootDescriptorTable(10, heapBase);
+    cmd->SetGraphicsRootConstantBufferView(0, pc.sceneConstants);
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    const float px = std::floor(pc.view.mainRect[0] * (float)t.width);
+    const float py = std::floor(pc.view.mainRect[1] * (float)t.height);
+    const float pw = std::floor((pc.view.mainRect[0] + pc.view.mainRect[2]) * (float)t.width) - px;
+    const float ph = std::floor((pc.view.mainRect[1] + pc.view.mainRect[3]) * (float)t.height) - py;
+    D3D12_VIEWPORT viewport{px, py, pw, ph, 0.0f, 1.0f};
+    D3D12_RECT scissor{(LONG)px, (LONG)py, (LONG)(px + pw), (LONG)(py + ph)};
+    cmd->RSSetViewports(1, &viewport);
+    cmd->RSSetScissorRects(1, &scissor);
+    const uint32_t pbrDebugChannel = (uint32_t)pc.settings.pbrDebug;
+    for (GpuModel* model : pc.view.models) {
+        if (!model) continue;
+        BindModelBuffers(cmd, *model, pc.frame);
+        cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
+        cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
+        ID3D12PipelineState* curPso = nullptr;
+        for (const GpuModel::Material& m : model->Materials()) {
+            if (m.indexCount == 0 || !m.visible) continue;
+            ID3D12PipelineState* want = m.doubleSided ? psoGuideNoCull_.Get() : psoGuideBack_.Get();
+            if (want != curPso) {
+                cmd->SetPipelineState(want);
+                curPso = want;
+            }
+            cmd->SetGraphicsRootConstantBufferView(1, m.constants);
+            cmd->SetGraphicsRootDescriptorTable(3, ctx.SrvHeap().Gpu(m.srvTable));
+            const size_t matIndex = (size_t)(&m - model->Materials().data());
+            const bool pbrRecord = model->HasPbrRecords() && model->HasPbr() &&
+                                   model->PbrIndex(matIndex) != DescriptorHeap::kInvalid;
+            const uint32_t c[4] = {pbrRecord ? model->PbrSrv() : 0xFFFFFFFFu,
+                                   pbrRecord ? model->PbrIndex(matIndex) : 0xFFFFFFFFu, pbrDebugChannel,
+                                   pbrRecord ? 1u : 0u};
+            cmd->SetGraphicsRoot32BitConstants(14, 4, c, 0);
+            cmd->DrawIndexedInstanced(m.indexCount, 1, m.indexStart, 0, 0);
+            pc.stats.drawCalls++;
+            pc.stats.triangles += m.indexCount / 3;
+        }
+    }
+    guideDiffuse_.Transition(cmd, kSrv);
+    guideSpecular_.Transition(cmd, kSrv);
+    guideNormal_.Transition(cmd, kSrv);
+    t.ptDiffuseAlbedo = &guideDiffuse_;
+    t.ptSpecularAlbedo = &guideSpecular_;
+    t.ptNormalRoughness = &guideNormal_;
+}
+
 void ScenePass::Execute(PassContext& pc) {
     pc.targets.ptEdges = false;
+    pc.targets.ptDiffuseAlbedo = pc.targets.ptSpecularAlbedo = pc.targets.ptNormalRoughness = nullptr;
     if (pc.path == RenderPath::PathTraced) {
         DrawPtEdges(pc);
         return;
     }
+    // RayTraced + RR: the guides first (their own depth), then the scene as usual.
+    if (pc.dlssRr && pc.path == RenderPath::RayTraced) DrawGuides(pc);
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     Dx12Context& ctx = pc.ctx;
     RenderTargets& t = pc.targets;
@@ -2057,6 +2217,13 @@ void SsaoPass::Execute(PassContext& pc) {
         t.depth.Transition(cmd, kSrv);
         t.normal.Transition(cmd, kSrv);
 
+        if (pc.dlssRr) {
+            // DLSS-RR denoises the raw per-frame AO: no temporal accumulation, no depth-aware blur.
+            histValid_ = false;
+            t.ao = &raw_;
+            return;
+        }
+
         // Reprojection needs last frame on screen: no offscreen renders (their history would depend on
         // whatever rendered before) and no camera cut or jump (the history is another view).
         const float dx = pc.view.camera.eye.x - histEye_.x, dy = pc.view.camera.eye.y - histEye_.y;
@@ -2177,6 +2344,9 @@ void PathTracePass::OnResize(Dx12Context& ctx, RenderTargets& targets) {
     rCur_.Release(ctx);
     albEff_.Release(ctx);
     edgeAcc_.Release(ctx);
+    rrDiffuse_.Release(ctx);
+    rrSpecular_.Release(ctx);
+    rrNormal_.Release(ctx);
     historyValid_ = false;
     current_ = 0;
 }
@@ -2193,6 +2363,9 @@ void PathTracePass::ReleaseTargets(Dx12Context& ctx) {
     edgeAcc_.Release(ctx);
     filterA_.Release(ctx);
     filterB_.Release(ctx);
+    rrDiffuse_.Release(ctx);
+    rrSpecular_.Release(ctx);
+    rrNormal_.Release(ctx);
     historyValid_ = false;
 }
 
@@ -2209,18 +2382,72 @@ void PathTracePass::Execute(PassContext& pc) {
     const uint32_t gx = Groups(W), gy = Groups(H);
 
     // 1. trace: noisy light + primary albedo; rewrites the G-buffer targets as UAVs.
+    const bool rr = pc.dlssRr;
+    if (rr && !rrDiffuse_) {   // DLSS-RR guides, created on the first RR frame
+        const D3D12_RESOURCE_FLAGS uav = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        rrDiffuse_.Create(pc.ctx, W, H, RenderTargets::kColorFormat, uav, kSrv, L"pt.rrDiffuse");
+        rrSpecular_.Create(pc.ctx, W, H, RenderTargets::kColorFormat, uav, kSrv, L"pt.rrSpecular");
+        rrNormal_.Create(pc.ctx, W, H, RenderTargets::kColorFormat, uav, kSrv, L"pt.rrNormal");
+    }
     light_.Transition(cmd, kUav);
     albedo_.Transition(cmd, kUav);
     t.normal.Transition(cmd, kUav);
     t.velocity.Transition(cmd, kUav);
     t.depth.Transition(cmd, kUav);
-    const float c0[8] = {(float)std::clamp(pc.settings.ptSamples, 1u, 4u),
-                         (float)std::clamp(pc.settings.ptBounces, 1u, 6u),
-                         (pc.view.studioFloor && !pc.settings.exportAlpha) ? 1.0f : 0.0f,   // transparent export: no default floor
-                         pc.settings.transparentBackground ? 1.0f : 0.0f,
-                         (float)(pc.frame % 65536), 0, 0, 0};
-    pipe->Dispatch(pc, {}, pc.transient.UavTable(pc.ctx, {&light_, &albedo_, &t.normal, &t.velocity, &t.depth}),
-                   c0, 8, gx, gy);
+    if (rr) {
+        rrDiffuse_.Transition(cmd, kUav);
+        rrSpecular_.Transition(cmd, kUav);
+        rrNormal_.Transition(cmd, kUav);
+    }
+    const float c0[12] = {(float)std::clamp(pc.settings.ptSamples, 1u, 4u),
+                          (float)std::clamp(pc.settings.ptBounces, 1u, 6u),
+                          (pc.view.studioFloor && !pc.settings.exportAlpha) ? 1.0f : 0.0f,   // transparent export: no default floor
+                          pc.settings.transparentBackground ? 1.0f : 0.0f,
+                          (float)(pc.frame % 65536), 0, 0, 0,
+                          rr ? 1.0f : 0.0f, 0, 0, 0};
+    // The guide UAVs are unbound (null) when RR is off; the shader never writes them then.
+    pipe->Dispatch(pc, {},
+                   pc.transient.UavTable(pc.ctx, {&light_, &albedo_, &t.normal, &t.velocity, &t.depth,
+                                                  rr ? &rrDiffuse_ : nullptr, rr ? &rrSpecular_ : nullptr,
+                                                  rr ? &rrNormal_ : nullptr}),
+                   c0, 12, gx, gy);
+
+    if (rr) {
+        // DLSS-RR replaces the temporal / a-trous denoiser: hand it the noisy radiance (light * albedo)
+        // and the guide buffers, then let the upscale pass run RR.
+        light_.Transition(cmd, kSrvAll);
+        albedo_.Transition(cmd, kSrvAll);
+        t.depth.Transition(cmd, kSrvAll);
+        t.color.Transition(cmd, kUav);
+        const float cr[4] = {pc.settings.transparentBackground ? 1.0f : 0.0f, 0, 0, 0};
+        modulate_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&light_, &albedo_, &t.depth}),
+                           pc.transient.UavTable(pc.ctx, {&t.color}), cr, 4, gx, gy);
+        // outline layer over the noisy colour (its velocity where it covers), as the SR path does
+        if (t.ptEdges && edgeComposite_) {
+            D3D12_RESOURCE_BARRIER uavB = CD3DX12_RESOURCE_BARRIER::UAV(t.color.res.Get());
+            cmd->ResourceBarrier(1, &uavB);
+            t.colorMsaa.Transition(cmd, kSrvAll);
+            t.velocityMsaa.Transition(cmd, kSrvAll);
+            t.velocity.Transition(cmd, kUav);
+            filterB_.Transition(cmd, kUav);   // dummy accumulation target
+            const float ce[4] = {0.0f, 1.0f, 0, 0};
+            edgeComposite_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&t.colorMsaa, &t.velocityMsaa}),
+                                    pc.transient.UavTable(pc.ctx, {&t.color, &t.velocity, &filterB_}), ce, 4, gx, gy);
+        }
+        rrDiffuse_.Transition(cmd, kSrv);
+        rrSpecular_.Transition(cmd, kSrv);
+        rrNormal_.Transition(cmd, kSrv);
+        t.color.Transition(cmd, kSrv);
+        t.normal.Transition(cmd, kSrv);
+        t.velocity.Transition(cmd, kSrv);
+        t.depth.Transition(cmd, kSrv);
+        t.ptDiffuseAlbedo = &rrDiffuse_;
+        t.ptSpecularAlbedo = &rrSpecular_;
+        t.ptNormalRoughness = &rrNormal_;
+        historyValid_ = false;   // RR owns its own history; the PT accumulator restarts when it is switched off
+        return;                  // RR replaces the temporal / a-trous denoiser
+    }
+    t.ptDiffuseAlbedo = t.ptSpecularAlbedo = t.ptNormalRoughness = nullptr;
 
     // 2. temporal accumulation into this frame's history slots.
     const uint32_t cur = current_, prev = current_ ^ 1;
@@ -2333,7 +2560,7 @@ void UpscalePass::Execute(PassContext& pc) {
     output_.Transition(cmd, kUav);
     UpscaleInputs in;
     in.cmd = cmd;
-    in.color = t.lit.res.Get();
+    in.color = t.lit.res.Get();   // the noisy PT radiance (composite only adds the distance haze)
     in.depth = t.depth.res.Get();
     in.velocity = t.velocity.res.Get();
     in.output = output_.res.Get();
@@ -2349,6 +2576,14 @@ void UpscalePass::Execute(PassContext& pc) {
     in.nearZ = pc.view.camera.nearZ;
     in.farZ = pc.view.camera.farZ;
     in.fovY = pc.view.camera.fovYRadians;
+    in.dlssModel = pc.settings.dlssModel;
+    in.rayReconstruction = pc.dlssRr;
+    if (pc.dlssRr) {
+        in.diffuseAlbedo = t.ptDiffuseAlbedo ? t.ptDiffuseAlbedo->res.Get() : nullptr;
+        in.specularAlbedo = t.ptSpecularAlbedo ? t.ptSpecularAlbedo->res.Get() : nullptr;
+        in.roughness = t.ptNormalRoughness ? t.ptNormalRoughness->res.Get() : nullptr;
+        in.normals = t.ptNormalRoughness ? t.ptNormalRoughness->res.Get() : nullptr;
+    }
     const bool ok = pc.upscaler->Evaluate(pc.ctx, in);
     ID3D12DescriptorHeap* heaps[] = {pc.ctx.SrvHeap().Heap()};
     cmd->SetDescriptorHeaps(1, heaps);  // SDKs change the heap
@@ -2371,12 +2606,14 @@ void CompositePass::Execute(PassContext& pc) {
     // Quad view: AO / SSR / distance haze unproject through the frame camera, so they only apply
     // inside the camera quadrant (gP1 = the rect in uv; gP1.z <= 0: the whole target).
     const bool quad = !pc.view.extraViews.empty();
-    const float c0[8] = {t.ao ? pc.settings.ssaoIntensity : 0.0f, t.ssr ? 1.0f : 0.0f,
-                         1.0f / Half(t.width), 1.0f / Half(t.height),
-                         quad ? pc.view.mainRect[0] : 0.0f, quad ? pc.view.mainRect[1] : 0.0f,
-                         quad ? pc.view.mainRect[2] : 0.0f, quad ? pc.view.mainRect[3] : 0.0f};
+    const float c0[12] = {t.ao ? pc.settings.ssaoIntensity : 0.0f, t.ssr ? 1.0f : 0.0f,
+                          1.0f / Half(t.width), 1.0f / Half(t.height),
+                          quad ? pc.view.mainRect[0] : 0.0f, quad ? pc.view.mainRect[1] : 0.0f,
+                          quad ? pc.view.mainRect[2] : 0.0f, quad ? pc.view.mainRect[3] : 0.0f,
+                          // gP2.x: DLSS-RR runs on the RayTraced path (raw AO + raw reflections, no spatial gathers).
+                          pc.dlssRr && pc.path == RenderPath::RayTraced ? 1.0f : 0.0f, 0, 0, 0};
     t.lit.Transition(pc.cmd, kRt);
-    pipe_.Draw(pc, {&t.lit}, pc.transient.SrvTable(pc.ctx, {&t.color, &t.depth, &t.normal, t.ao, t.ssr}), c0, 8);
+    pipe_.Draw(pc, {&t.lit}, pc.transient.SrvTable(pc.ctx, {&t.color, &t.depth, &t.normal, t.ao, t.ssr}), c0, 12);
     t.lit.Transition(pc.cmd, kSrv);
     t.hdrFinal = &t.lit;
 }
@@ -2399,7 +2636,7 @@ void TaaPass::ReleaseTargets(Dx12Context& ctx) {
 
 void TaaPass::Execute(PassContext& pc) {
     RenderTargets& t = pc.targets;
-    if (!pc.settings.taa || pc.upscaler || !history_[0]) return;
+    if (!pc.settings.taa || pc.upscaler || pc.dlssRr || !history_[0]) return;
     Texture& out = history_[current_];
     Texture& prev = history_[current_ ^ 1];
     const float c0[4] = {pc.historyValid ? 1.0f : 0.0f, 0, 0, 0};

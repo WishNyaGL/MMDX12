@@ -78,9 +78,16 @@ public:
     ~ScenePass() override;
     const char* Name() const override { return "Scene"; }
     bool CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) override;
+    void OnResize(Dx12Context& ctx, RenderTargets& targets) override;
+    void ReleaseTargets(Dx12Context& ctx) override;
     void Execute(PassContext& pc) override;
 
 private:
+    // DLSS-RR guides on the RayTraced path: a second geometry pass with the default material data (packs / MME
+    // keep their own colour shading). Created on the first RR frame only; absent with RR off.
+    void DrawGuides(PassContext& pc);
+    ComPtr<ID3D12PipelineState> psoGuideBack_, psoGuideNoCull_;
+    Texture guideDiffuse_, guideSpecular_, guideNormal_;
     ComPtr<ID3D12PipelineState> psoCullBack_, psoNoCull_, psoEdge_, psoSky_, psoFloor_;
     ComPtr<ID3D12PipelineState> psoWireBack_, psoWireNoCull_, psoWireFloor_, psoFlatBg_;
     // model .emd blend hints (MatFlag_Additive / MatFlag_NoDepthWrite): additive (SrcAlpha/One, no depth write)
@@ -203,6 +210,8 @@ private:
     Texture rCur_, albEff_;         // RGBA16F this pass's radiance, the effective albedo R_acc / L_acc
     Texture edgeAcc_;               // RGBA16F outline layer averaged over the passes of one video frame
     Texture filterA_, filterB_;     // a-trous ping-pong (RGBA16F)
+    // DLSS-RR guides (created on first RR frame): diffuse albedo, specular albedo, normal + roughness.
+    Texture rrDiffuse_, rrSpecular_, rrNormal_;   // RGBA16F render res
     uint32_t current_ = 0;
     bool historyValid_ = false;
 };

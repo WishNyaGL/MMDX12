@@ -17,8 +17,15 @@ struct UpscaleInputs {
     ID3D12Resource* color = nullptr;     // RGBA16F linear HDR (pre-exposure 1)
     ID3D12Resource* depth = nullptr;     // R32_FLOAT raw device depth (0 near .. 1 far, not inverted)
     ID3D12Resource* velocity = nullptr;  // R16G16_FLOAT, uv(current) - uv(previous), unjittered
+    // DLSS Ray Reconstruction guides (render resolution, ALL_SHADER_RESOURCE); null when RR is not used:
+    ID3D12Resource* diffuseAlbedo = nullptr;   // RGBA16F (rgb = albedo)
+    ID3D12Resource* specularAlbedo = nullptr;  // RGBA16F (rgb = specular reflectance)
+    ID3D12Resource* roughness = nullptr;       // RGBA16F (r = linear roughness)
+    ID3D12Resource* normals = nullptr;         // RGBA16F (rgb = world-space shading normal)
     // Output resolution, RGBA16F, state D3D12_RESOURCE_STATE_UNORDERED_ACCESS:
     ID3D12Resource* output = nullptr;
+    DlssModel dlssModel = DlssModel::Auto;
+    bool rayReconstruction = false;   // RR replaces SR + the PT denoiser for this frame
     uint32_t renderWidth = 0, renderHeight = 0, outputWidth = 0, outputHeight = 0;
     UpscalerQuality quality = UpscalerQuality::Quality;
     // Sub-pixel jitter in render pixels. The projection was offset by
@@ -40,6 +47,8 @@ public:
     // Releases the feature/context and the DLL. The GPU must be idle (Renderer waits).
     virtual void Shutdown() = 0;
     virtual bool IsAvailable() const = 0;
+    // DLSS only: the RR feature (nvngx_dlssd.dll + GPU support) can run. False for every other upscaler.
+    virtual bool RayReconstructionAvailable() const { return false; }
     // Records the upscale into in.cmd. Creates or recreates the internal feature/context when
     // the render size, output size or quality changed (waiting for the GPU first if needed).
     // The SDKs change descriptor heaps and root signatures: the caller rebinds its heap after.

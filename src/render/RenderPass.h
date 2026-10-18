@@ -91,6 +91,10 @@ struct RenderTargets {
     Texture* uiBackdrop = nullptr;  // RGBA8, blurred final image for frosted UI panels
     Texture* lut = nullptr;         // colour LUT strip (kColorLutSize^2 x kColorLutSize RGBA8), Renderer::SetColorLut; null = none
     bool ptEdges = false;           // PT mode: ScenePass drew this frame's outline layer into colorMsaa / velocityMsaa
+    // DLSS-RR guides (PathTracePass, PathTraced + RR only): render-resolution render targets / shader resources.
+    Texture* ptDiffuseAlbedo = nullptr;
+    Texture* ptSpecularAlbedo = nullptr;
+    Texture* ptNormalRoughness = nullptr;   // rgb = world normal, a = roughness
 };
 
 class RtScene;
@@ -124,6 +128,9 @@ struct PassContext {
     MmeSkin* mmeSkin = nullptr;
     // CPU copy of sceneConstants (ScenePass's MME object matrices, M4b); set by the renderer, null elsewhere.
     const SceneConstants* sceneConstantsCpu = nullptr;
+    // DLSS-RR runs this frame (PathTraced, DLSS active, RR available, switch on): PathTracePass writes
+    // the guide targets instead of running its temporal / a-trous denoiser.
+    bool dlssRr = false;
 };
 
 class IRenderPass {

@@ -505,7 +505,7 @@ bool IconButton(const char* id, const char* icon, const char* tooltip, bool acti
 }
 
 bool Segmented(const char* id, const char* const* labels, int count, int* current, float widthPx, float heightPx,
-               const char* const* icons) {
+               const char* const* icons, const bool* disabled, const char* const* tooltips) {
     ImGuiWindow* w = ImGui::GetCurrentWindow();
     if (w->SkipItems || count <= 0) return false;
     ImGui::PushID(id);
@@ -562,13 +562,17 @@ bool Segmented(const char* id, const char* const* labels, int count, int* curren
         ImGui::ItemAdd(sb, sid);
         uiprobe::Info(sid, id, labels[i]);
         bool hovered = false, held = false;
-        if (ImGui::ButtonBehavior(sb, sid, &hovered, &held) && *current != i) {
+        const bool off = disabled && disabled[i];
+        if (!off && ImGui::ButtonBehavior(sb, sid, &hovered, &held) && *current != i) {
             *current = i;
             changed = true;
+        } else if (off) {
+            hovered = ImGui::IsMouseHoveringRect(sb.Min, sb.Max);
         }
-        if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (hovered && tooltips && tooltips[i]) ImGui::SetTooltip("%s", tooltips[i]);
+        if (hovered && !off) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         const bool sel = i == *current;
-        const ImU32 fg = sel ? p.ink : (hovered ? p.ink : p.ink2);
+        const ImU32 fg = off ? p.ink3 : (sel ? p.ink : (hovered ? p.ink : p.ink2));
         const ImVec2 ts = TextSize(Font::Semibold, size::Small, labels[i]);
         const float iw = icons && icons[i] ? Dp(22.0f) : 0.0f;
         const float cx = x + (segW[i] - ts.x - iw) * 0.5f;

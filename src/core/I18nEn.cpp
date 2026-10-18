@@ -1183,6 +1183,20 @@ const Entry kEnglish[] = {
     {"실시간 효과", "Real-time effects"},
     {"고품질 CJK 글꼴", "High-quality CJK font"},
     {"GPU 드라이버가 재설정되어(디바이스 제거) 렌더링을 계속할 수 없습니다. 프로그램을 종료합니다.\n자세한 내용은 mmdx12.log 를 확인하세요.", "The GPU driver has been reset (device removed), so rendering cannot continue. The program will exit.\nSee mmdx12.log for details."},
+    {"DLSS 모델", "DLSS model"},
+    {"트랜스포머", "Transformer"},
+    {"트랜스포머 2세대", "Transformer 2nd gen"},
+    {"레이 재구성", "Ray reconstruction"},
+    {"DLSS 레이 재구성은 레이 트레이싱 또는 패스 트레이싱에서만 사용할 수 있습니다", "DLSS Ray Reconstruction works with ray tracing or path tracing only"},
+    {"nvngx_dlssd.dll이 없거나 이 GPU가 DLSS 레이 재구성을 지원하지 않습니다", "nvngx_dlssd.dll is missing or this GPU does not support DLSS Ray Reconstruction"},
+    {"프레임 생성", "Frame generation"},
+    {"이 GPU는 프레임 생성을 2x까지만 지원합니다", "This GPU supports frame generation up to 2x"},
+    {"NVIDIA GPU가 아닙니다", "Not an NVIDIA GPU"},
+    {"nvngx_dlssg.dll이 없습니다", "nvngx_dlssg.dll is missing"},
+    {"NGX 초기화에 실패했습니다", "NGX initialisation failed"},
+    {"NGX 기능 조회에 실패했습니다", "NGX capability query failed"},
+    {"이 GPU 또는 드라이버는 프레임 생성을 지원하지 않습니다", "This GPU or driver does not support frame generation (RTX 40 series or newer)"},
+    {"사용할 수 없음", "Unavailable"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

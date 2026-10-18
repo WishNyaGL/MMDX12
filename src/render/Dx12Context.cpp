@@ -433,6 +433,89 @@ void Dx12Context::ProcessCapture() {
     captureInFlightMemoryCallback_ = nullptr;
 }
 
+void Dx12Context::EndFrameFrameGen(bool vsync, int generatedCount, ID3D12Resource* const* generated,
+                                   ID3D12Resource* real, float frameTimeMs) {
+    if (!cmdList_ || !queue_ || !swapChain_ || deviceLost_) return;
+    // Submit the rendered frame (the final image was already copied out for DLSS-G).
+    if (backBuffers_[backBufferIndex_]) {
+        D3D12_RESOURCE_BARRIER toPresent = CD3DX12_RESOURCE_BARRIER::Transition(
+            backBuffers_[backBufferIndex_].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_PRESENT);
+        cmdList_->ResourceBarrier(1, &toPresent);
+    }
+    cmdList_->Close();
+    ID3D12CommandList* lists[] = {cmdList_.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+    ++fenceValue_;
+    queue_->Signal(fence_.Get(), fenceValue_);
+    slotFence_[frameSlot_] = fenceValue_;
+    for (Deferred& d : deferred_)
+        if (d.fence == kPendingFrame) d.fence = fenceValue_;
+    recording_ = false;
+
+    if (!presentAlloc_) {
+        if (!CheckHr(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                     IID_PPV_ARGS(&presentAlloc_)),
+                     "FrameGen: present allocator") ||
+            !CheckHr(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, presentAlloc_.Get(), nullptr,
+                                                IID_PPV_ARGS(&presentList_)),
+                     "FrameGen: present list")) {
+            presentAlloc_.Reset();
+            presentList_.Reset();
+            return;
+        }
+        presentList_->Close();
+    }
+
+    const int total = std::max(0, generatedCount) + (real ? 1 : 0);
+    if (total == 0) return;
+    // Even spacing between the presented frames; vsync's Present already spaces them at the display rate.
+    const double intervalMs = (double)std::clamp(frameTimeMs, 1.0f, 100.0f) / (double)total;
+    LARGE_INTEGER freq, begin;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&begin);
+
+    for (int i = 0; i < total; ++i) {
+        ID3D12Resource* src = i < generatedCount ? generated[i] : real;
+        if (!src) continue;
+        if (!vsync && i > 0) {
+            const double target = intervalMs * (double)i;
+            for (;;) {
+                LARGE_INTEGER now;
+                QueryPerformanceCounter(&now);
+                const double elapsed = (double)(now.QuadPart - begin.QuadPart) * 1000.0 / (double)freq.QuadPart;
+                if (elapsed >= target) break;
+                Sleep((DWORD)std::max(0.0, std::min(target - elapsed, 2.0)));
+            }
+        }
+        // One copy + present. The fence wait keeps the next copy off a back buffer the display still reads.
+        if (fence_->GetCompletedValue() < fenceValue_) {
+            CheckHr(fence_->SetEventOnCompletion(fenceValue_, fenceEvent_), "FrameGen: SetEventOnCompletion");
+            WaitForSingleObject(fenceEvent_, INFINITE);
+        }
+        presentAlloc_->Reset();
+        presentList_->Reset(presentAlloc_.Get(), nullptr);
+        if (swapChain_) backBufferIndex_ = swapChain_->GetCurrentBackBufferIndex();
+        ID3D12Resource* bb = backBuffers_[backBufferIndex_].Get();
+        D3D12_RESOURCE_BARRIER toCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+            bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+        presentList_->ResourceBarrier(1, &toCopy);
+        presentList_->CopyResource(bb, src);
+        D3D12_RESOURCE_BARRIER toPresent = CD3DX12_RESOURCE_BARRIER::Transition(
+            bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+        presentList_->ResourceBarrier(1, &toPresent);
+        presentList_->Close();
+        ID3D12CommandList* pl[] = {presentList_.Get()};
+        queue_->ExecuteCommandLists(1, pl);
+        const HRESULT hr = swapChain_->Present(vsync ? 1 : 0,
+                                               (!vsync && caps_.tearingSupported) ? DXGI_PRESENT_ALLOW_TEARING : 0);
+        ++fenceValue_;
+        queue_->Signal(fence_.Get(), fenceValue_);
+        CheckDeviceLost(hr);
+        if (deviceLost_) return;
+    }
+}
+
 void Dx12Context::WaitForGpu() {
     if (!queue_ || !fence_ || !fenceEvent_) return;
     ++fenceValue_;
@@ -485,6 +568,8 @@ void Dx12Context::Shutdown() {
     deferred_.clear();
     for (auto& a : allocators_) a.Reset();
     cmdList_.Reset();
+    presentList_.Reset();
+    presentAlloc_.Reset();
     fence_.Reset();
     queue_.Reset();
     swapChain_.Reset();

@@ -48,6 +48,10 @@ struct AppSettings {
     int renderPath = 0;        // RenderPath: 0 raster, 1 ray traced, 2 path traced
     int upscaler = 0;          // UpscalerKind: 0 none, 1 DLSS, 2 FSR, 3 XeSS
     int upscalerQuality = 1;   // UpscalerQuality: 0 native AA, 1 quality, 2 balanced, 3 performance, 4 ultra performance
+    // DLSS Frame Generation: 0 off, 2 / 3 / 4 (multiplier). Only applies to the live play scene.
+    int dlssFrameGen = 0;
+    int dlssModel = 0;         // DlssModel: 0 auto (driver default), 1 cnn (preset E), 2 transformer (K), 3 transformer2 (M / L)
+    bool dlssRayReconstruction = false;  // DLSS-RR: replaces the ray-traced denoising/filtering and the upscaler (RT/PT + DLSS only)
     int ptSamples = 1;         // 1, 2, 4
     int ptBounces = 3;         // 1..6
     // Post effects (independent of graphicsPreset; the benchmark turns them all off).

@@ -96,6 +96,8 @@ Write-Host "packaged $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB)
 # copies in sync. Paths are relative to the stage root (forward slashes).
 $optional = @(
     'nvngx_dlss.dll',
+    'nvngx_dlssd.dll',
+    'nvngx_dlssg.dll',
     'amd_fidelityfx_loader_dx12.dll',
     'amd_fidelityfx_upscaler_dx12.dll',
     'libxess.dll',

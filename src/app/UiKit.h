@@ -66,9 +66,11 @@ enum class ButtonKind { Primary, Secondary, Ghost, Danger };
 bool Button(const char* id, const char* label, const char* icon = nullptr, ButtonKind kind = ButtonKind::Secondary,
             ImVec2 size = ImVec2(0, 0));
 bool IconButton(const char* id, const char* icon, const char* tooltip, bool active = false, float sizePx = 36.0f);
-// Pill segmented control; returns true when the selection changed.
+// Pill segmented control; returns true when the selection changed. `disabled` (optional, one per label) greys out
+// individual options: clicking them does nothing. `tooltips` (optional) shows on hover of the option.
 bool Segmented(const char* id, const char* const* labels, int count, int* current, float widthPx = 0.0f,
-               float heightPx = 36.0f, const char* const* icons = nullptr);
+               float heightPx = 36.0f, const char* const* icons = nullptr, const bool* disabled = nullptr,
+               const char* const* tooltips = nullptr);
 // Label on the left, switch on the right, full available width.
 bool Switch(const char* id, const char* label, bool* v, const char* hint = nullptr);
 bool SliderRow(const char* id, const char* label, float* v, float vmin, float vmax, const char* fmt);

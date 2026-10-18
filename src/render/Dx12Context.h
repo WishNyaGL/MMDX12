@@ -73,6 +73,12 @@ public:
     // presents (vsync ? 1 : 0, ALLOW_TEARING when !vsync and supported), signals the fence.
     // Detects device loss from the Present HRESULT.
     void EndFrame(bool vsync);
+    // DLSS Frame Generation: submits the recorded frame without presenting it, then presents each generated frame
+    // (0..count-1, window-sized back-buffer format) followed by the held real frame, evenly spaced over
+    // `frameTimeMs` (the rendered frame's wall time). Generated/real frames are copied into the swap chain's back
+    // buffers; the swap chain is presented once per frame. Detects device loss like EndFrame.
+    void EndFrameFrameGen(bool vsync, int generatedCount, ID3D12Resource* const* generated,
+                          ID3D12Resource* real, float frameTimeMs);
     void WaitForGpu();
 
     // True once the device is lost (Present / ResizeBuffers returned DEVICE_REMOVED / DEVICE_RESET, or
@@ -120,6 +126,10 @@ private:
     ComPtr<IDXGISwapChain3> swapChain_;
     ComPtr<ID3D12CommandAllocator> allocators_[kFramesInFlight];
     ComPtr<ID3D12GraphicsCommandList> cmdList_;
+    // DLSS Frame Generation presentation: copies one finished frame into the current back buffer and presents it.
+    // Own allocator/list so the paced presents do not disturb the render slot's recording.
+    ComPtr<ID3D12CommandAllocator> presentAlloc_;
+    ComPtr<ID3D12GraphicsCommandList> presentList_;
     ComPtr<ID3D12Fence> fence_;
     HANDLE fenceEvent_ = nullptr;
     uint64_t fenceValue_ = 0;

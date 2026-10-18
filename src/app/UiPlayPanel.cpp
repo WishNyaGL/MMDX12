@@ -35,6 +35,32 @@ void App::DrawScreenEffectControls(float width) {
     fx |= Switch("##vol", Tr("볼류메트릭 라이트"), &settings_.volumetric, Tr("빛줄기와 조명 산란"));
     if (settings_.volumetric) { Gap(6.0f); fx |= SliderRow("##vold", Tr("안개 밀도"), &settings_.volumetricDensity, 0.25f, 4.0f, "%.2f"); Gap(6.0f); }
     fx |= Switch("##bloomconv", Tr("컨볼루션 블룸"), &settings_.bloomConvolution, Tr("FFT 스타버스트 블룸"));
+    // DLSS Frame Generation (play scene only; the panel is only drawn in play mode).
+    {
+        const bool fgOk = renderer_.FrameGenAvailable();
+        const int fgMax = std::max(2, renderer_.FrameGenMaxMultiplier());
+        Gap(10.0f);
+        SectionLabel(Tr("프레임 생성"));
+        const char* fgLabels[] = {Tr("끔"), "2x", "3x", "4x"};
+        bool fgDisabled[4] = {false, !fgOk, !fgOk || fgMax < 3, !fgOk || fgMax < 4};
+        const char* fgTips[4] = {nullptr, nullptr, nullptr, nullptr};
+        const char* cap = fgOk ? Tr("이 GPU는 프레임 생성을 2x까지만 지원합니다") : Tr(renderer_.FrameGenReason());
+        if (fgOk && fgMax < 3) fgTips[2] = cap;
+        if (fgOk && fgMax < 4) fgTips[3] = cap;
+        if (!fgOk) fgTips[1] = cap;
+        int fg = settings_.dlssFrameGen >= 2 && fgOk ? std::clamp(settings_.dlssFrameGen - 1, 1, fgMax - 1) : 0;
+        if (Segmented("##playframegen", fgLabels, 4, &fg, width / Dpi(), 34.0f, nullptr, fgDisabled, fgTips)) {
+            settings_.dlssFrameGen = fg == 0 ? 0 : fg + 1;
+            fx = true;
+        }
+        if (!fgOk) {
+            PushFont(Font::Regular, size::Caption);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(P().ink3));
+            ImGui::TextUnformatted(cap);
+            ImGui::PopStyleColor();
+            PopFont();
+        }
+    }
     Gap(10.0f);
     SectionLabel(Tr("컬러 LUT"));
     const int lutCount = 1 + (int)luts_.size();

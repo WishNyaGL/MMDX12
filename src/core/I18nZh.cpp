@@ -1183,6 +1183,20 @@ const Entry kChinese[] = {
     {"실시간 효과", "实时效果"},
     {"고품질 CJK 글꼴", "高质量 CJK 字体"},
     {"GPU 드라이버가 재설정되어(디바이스 제거) 렌더링을 계속할 수 없습니다. 프로그램을 종료합니다.\n자세한 내용은 mmdx12.log 를 확인하세요.", "GPU 驱动已被重置(设备移除),无法继续渲染。程序将退出。\n详情请查看 mmdx12.log。"},
+    {"DLSS 모델", "DLSS 模型"},
+    {"트랜스포머", "Transformer"},
+    {"트랜스포머 2세대", "Transformer 第二代"},
+    {"레이 재구성", "光线重建"},
+    {"DLSS 레이 재구성은 레이 트레이싱 또는 패스 트레이싱에서만 사용할 수 있습니다", "DLSS 光线重建仅可用于光线追踪或路径追踪"},
+    {"nvngx_dlssd.dll이 없거나 이 GPU가 DLSS 레이 재구성을 지원하지 않습니다", "缺少 nvngx_dlssd.dll，或此 GPU 不支持 DLSS 光线重建"},
+    {"프레임 생성", "帧生成"},
+    {"이 GPU는 프레임 생성을 2x까지만 지원합니다", "此 GPU 的帧生成最高支持 2x"},
+    {"NVIDIA GPU가 아닙니다", "不是 NVIDIA GPU"},
+    {"nvngx_dlssg.dll이 없습니다", "缺少 nvngx_dlssg.dll"},
+    {"NGX 초기화에 실패했습니다", "NGX 初始化失败"},
+    {"NGX 기능 조회에 실패했습니다", "NGX 功能查询失败"},
+    {"이 GPU 또는 드라이버는 프레임 생성을 지원하지 않습니다", "此 GPU 或驱动不支持帧生成（需要 RTX 40 系列或更新）"},
+    {"사용할 수 없음", "不可用"},
 };
 const int kChineseCount = (int)(sizeof(kChinese) / sizeof(kChinese[0]));
 

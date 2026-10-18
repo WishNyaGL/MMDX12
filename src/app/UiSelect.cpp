@@ -1058,6 +1058,62 @@ void App::DrawSelect() {
                     ApplyRenderSettings();
                     settings_.Save(settingsPath_);
                 }
+                if (settings_.upscaler == (int)UpscalerKind::DLSS) {
+                    Gap(10.0f);
+                    SectionLabel(Tr("DLSS 모델"));
+                    const char* dm[] = {Tr("자동"), "CNN", Tr("트랜스포머"), Tr("트랜스포머 2세대")};
+                    int model = settings_.dlssModel;
+                    if (Segmented("##dlssmodel", dm, 4, &model, colW / Dpi(), 34.0f)) {
+                        settings_.dlssModel = std::clamp(model, 0, 3);
+                        ApplyRenderSettings();
+                        settings_.Save(settingsPath_);
+                    }
+                    Gap(6.0f);
+                    const bool rrOk = renderer_.RayReconstructionAvailable();
+                    const bool tracedPath = settings_.renderPath == 1 || settings_.renderPath == 2;
+                    const bool rrDisabled = !rrOk || !tracedPath;
+                    if (rrDisabled) ImGui::BeginDisabled();
+                    if (Switch("##dlssrr", Tr("레이 재구성"), &settings_.dlssRayReconstruction)) {
+                        ApplyRenderSettings();
+                        settings_.Save(settingsPath_);
+                    }
+                    if (rrDisabled) ImGui::EndDisabled();
+                    if (rrDisabled) {   // the reason, like the unavailable-upscaler caption above
+                        PushFont(Font::Regular, size::Caption);
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(P().ink3));
+                        ImGui::TextUnformatted(!rrOk ? Tr("nvngx_dlssd.dll이 없거나 이 GPU가 DLSS 레이 재구성을 지원하지 않습니다")
+                                                     : Tr("DLSS 레이 재구성은 레이 트레이싱 또는 패스 트레이싱에서만 사용할 수 있습니다"));
+                        ImGui::PopStyleColor();
+                        PopFont();
+                    }
+                }
+            }
+            Gap(14.0f);
+            SectionLabel(Tr("프레임 생성"));
+            {
+                const bool fgOk = renderer_.FrameGenAvailable();
+                const int fgMax = std::max(2, renderer_.FrameGenMaxMultiplier());
+                const char* fgLabels[] = {Tr("끔"), "2x", "3x", "4x"};
+                // 3x / 4x need the GPU's multi-frame support (RTX 50).
+                bool fgDisabled[4] = {false, !fgOk, !fgOk || fgMax < 3, !fgOk || fgMax < 4};
+                const char* fgTips[4] = {nullptr, nullptr, nullptr, nullptr};
+                const char* cap = fgOk ? Tr("이 GPU는 프레임 생성을 2x까지만 지원합니다") : Tr(renderer_.FrameGenReason());
+                if (fgOk && fgMax < 3) fgTips[2] = cap;
+                if (fgOk && fgMax < 4) fgTips[3] = cap;
+                if (!fgOk) fgTips[1] = cap;
+                int fg = settings_.dlssFrameGen >= 2 && fgOk ? std::clamp(settings_.dlssFrameGen - 1, 1, fgMax - 1) : 0;
+                if (Segmented("##framegen", fgLabels, 4, &fg, colW / Dpi(), 36.0f, nullptr, fgDisabled, fgTips)) {
+                    settings_.dlssFrameGen = fg == 0 ? 0 : fg + 1;
+                    ApplyRenderSettings();
+                    settings_.Save(settingsPath_);
+                }
+                if (!fgOk) {
+                    PushFont(Font::Regular, size::Caption);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(P().ink3));
+                    ImGui::TextUnformatted(cap);
+                    ImGui::PopStyleColor();
+                    PopFont();
+                }
             }
             Gap(18.0f);
             SectionLabel(Tr("조명"));

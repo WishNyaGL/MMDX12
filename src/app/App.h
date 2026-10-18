@@ -95,6 +95,9 @@ namespace mmdx {
 //   --render <raster|rt|pt>            render path for this run (override settings)
 //   --upscaler <none|dlss|fsr|xess>    upscaler for this run (override settings)
 //   --upscale-quality <native|quality|balanced|performance|ultra>  upscaler quality for this run
+//   --frame-gen <off|2|3|4>            DLSS Frame Generation multiplier for this run (2x / 3x / 4x)
+//   --dlss-model <auto|cnn|transformer|transformer2>  DLSS Super Resolution model (preset hint) for this run
+//   --dlss-rr <0|1>        DLSS Ray Reconstruction (PathTraced + DLSS only) for this run
 //   --no-physics           disable rigid-body physics for this run
 //   --dof <0|1>  --volumetric <0|1>  --bloom-conv <0|1>   post effects for this run
 //   --auto-luminous <0|1>  そぼろ AutoLuminous glow convention for this run
@@ -163,6 +166,10 @@ struct AppOptions {
     int shading = -1;          // --shading <lit|unlit|wire>: raster ViewShading override for this run (hidden)
     int upscaler = -1;         // --upscaler <none|dlss|fsr|xess>: override settings for this run
     int upscalerQuality = -1;  // --upscale-quality <native|quality|balanced|performance|ultra>: override settings for this run
+    int frameGen = -1;         // --frame-gen <off|2|3|4>: override settings for this run
+    int dlssModel = -1;        // --dlss-model <auto|cnn|transformer|transformer2>: override settings for this run
+    int dlssRayReconstruction = -1;  // --dlss-rr <0|1>: null default; override settings for this run
+
     bool noPhysics = false;    // --no-physics: override settings for this run
     std::string shaderPack;    // --shader-pack <id|none>: the character's shader pack for this run (play and studio)
     bool shaderPackSet = false;

@@ -1,6 +1,7 @@
 # Downloads the upscaler runtime DLLs into external/*/bin (git-ignored, ~165 MB).
 # Headers and import libraries are vendored; only the redistributable DLLs are fetched.
-#   DLSS 310.9.1  github.com/NVIDIA/DLSS                      -> external/dlss/bin/nvngx_dlss.dll
+#   DLSS 310.9.16 github.com/NVIDIA/DLSS                      -> external/dlss/bin/nvngx_dlss.dll (+ nvngx_dlssd.dll for RR,
+#                                                                 nvngx_dlssg.dll for frame generation)
 #   XeSS 3.0.2    github.com/intel/xess (release zip)          -> external/xess/bin/libxess.dll
 #   FSR  (FidelityFX SDK 2.3.0 prebuilt samples, release zip)  -> external/ffx/bin/amd_fidelityfx_{loader,upscaler}_dx12.dll
 # Usage: powershell -ExecutionPolicy Bypass -File tools\fetch_sdks.ps1   (then rebuild)
@@ -35,7 +36,9 @@ function Expand-Entries($zipPath, $entries, $destDir) {
 # DLSS (the DLL lives in the repository, served through git LFS media links)
 $dlssDir = Join-Path $ext 'dlss/bin'
 New-Item -ItemType Directory -Force $dlssDir | Out-Null
-Get-File 'https://github.com/NVIDIA/DLSS/raw/v310.9.1/lib/Windows_x86_64/rel/nvngx_dlss.dll' (Join-Path $dlssDir 'nvngx_dlss.dll')
+Get-File 'https://github.com/NVIDIA/DLSS/raw/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlss.dll' (Join-Path $dlssDir 'nvngx_dlss.dll')
+Get-File 'https://github.com/NVIDIA/DLSS/raw/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlssd.dll' (Join-Path $dlssDir 'nvngx_dlssd.dll')
+Get-File 'https://github.com/NVIDIA/DLSS/raw/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlssg.dll' (Join-Path $dlssDir 'nvngx_dlssg.dll')
 
 # XeSS
 $xessZip = Join-Path $tmp 'XeSS_SDK_3.0.2.zip'

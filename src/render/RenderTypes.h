@@ -51,6 +51,20 @@ enum class UpscalerKind : uint8_t { None = 0, DLSS, FSR, XeSS };
 // Performance 2.0, UltraPerformance 3.0.
 enum class UpscalerQuality : uint8_t { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance };
 
+// DLSS Super Resolution model, passed to NGX as a render-preset hint before feature creation.
+// Auto = the driver's default; Cnn = preset E (legacy convolutional); Transformer = preset K (DLSS 4);
+// Transformer2 = preset M (DLSS 4.5), with preset L for the Ultra Performance quality.
+enum class DlssModel : uint8_t { Auto = 0, Cnn, Transformer, Transformer2 };
+inline const char* DlssModelId(DlssModel m) {
+    switch (m) {
+    case DlssModel::Cnn: return "cnn";
+    case DlssModel::Transformer: return "transformer";
+    case DlssModel::Transformer2: return "transformer2";
+    case DlssModel::Auto:
+    default: return "auto";
+    }
+}
+
 // Raster: shadow maps, SSAO, SSR. RayTraced: the raster G-buffer with DXR (inline ray query)
 // shadows, ambient occlusion and reflections. PathTraced: compute path tracer + denoiser
 // (no MMD outlines). Both DXR paths need raytracing tier 1.1; otherwise Raster is used.
@@ -77,6 +91,8 @@ struct RenderSettings {
     ViewShading shading = ViewShading::Lit;  // Raster path only; RayTraced/PathTraced stay Lit
     UpscalerKind upscaler = UpscalerKind::None;
     UpscalerQuality upscalerQuality = UpscalerQuality::Quality;
+    DlssModel dlssModel = DlssModel::Auto;   // DLSS SR preset hint (recreates the feature when it changes)
+    bool dlssRayReconstruction = false;      // DLSS-RR (ray-traced paths only): replaces the denoising/filtering + upscaler
     RenderPath renderPath = RenderPath::Raster;
     uint32_t ptSamples = 1;          // path tracer samples per pixel per frame (1..4)
     uint32_t ptBounces = 3;          // path tracer bounces after the primary hit (1..6)
@@ -118,6 +134,9 @@ struct RenderSettings {
     // default studio floor is skipped, so the read-back image gives straight RGBA with a soft coverage alpha.
     bool exportAlpha = false;
     bool headless = false;               // render without touching the back buffer (background sample renders)
+    // DLSS Frame Generation multiplier: 0 off, 2 / 3 / 4 (1..3 generated frames). Ignored when unavailable or
+    // outside the play scene (the app clears it elsewhere).
+    int frameGen = 0;
     // Effect packs ("type": "effect"), the user's ordered stack: PackEffectPass runs the enabled entries
     // (PackEffectStage from each pack's manifest) before Bloom / after Post. Empty = no cost, no targets.
     std::vector<EffectStackEntry> packEffects;
@@ -284,6 +303,9 @@ struct FrameView {
     std::vector<MmeEffectObject> mmeEffectObjects;
     bool studioFloor = false;       // draw the procedural studio floor at y = 0
     bool cameraCut = false;         // discard temporal history (seek, VMD camera cut)
+    // This view may use DLSS Frame Generation (live play scene only; the lobby, studio, offline renders,
+    // benchmarks and captures leave it false).
+    bool frameGen = false;
     bool ptFirstPass = false;       // first pass of a new video frame (clamp the carried history length)
     bool ptStaticPass = false;      // a later pass of the same video frame: same pose and camera, accumulate in place
     int ptPassIndex = 0;            // passes of this video frame already done (0 on the first)
@@ -320,6 +342,9 @@ struct RenderStats {
     uint32_t outputWidth = 0, outputHeight = 0;       // after the upscaler (== internal without one)
     RenderPath renderPath = RenderPath::Raster;       // path actually used this frame (after fallback)
     UpscalerKind upscaler = UpscalerKind::None;       // upscaler actually used this frame (None if unavailable)
+    int frameGenMultiplier = 0;                       // DLSS Frame Generation multiplier used this frame (0 off)
+    DlssModel dlssModel = DlssModel::Auto;            // DLSS model actually used this frame
+    bool dlssRayReconstruction = false;               // DLSS-RR ran this frame
     uint32_t drawCalls = 0;
     uint64_t triangles = 0;
     float gpuFrameMs = 0;  // from timestamp queries, ~kFramesInFlight frames old

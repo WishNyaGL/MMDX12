@@ -137,6 +137,8 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
         progress->fraction.store(std::max(progress->fraction.load(), 0.08f));
         progress->SetStatus(Tr("렌더러 엔진 준비 중"));
     }
+    frameGen_ = std::make_unique<DlssFrameGen>();
+    if (!frameGen_->Initialize(ctx)) LOG_INFO("frame generation: unavailable (%s)", frameGen_->Reason());
     packTextures_ = std::make_unique<PackTextures>();
     // MME runtime + object skinning (M4b): owned here, used by ScenePass and MmePostPass through PassContext.
     // The runtime only allocates its root signature / sampler heap / rings; without any effect it stays idle.
@@ -628,6 +630,7 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
         frameSettings.ssr = false;
         frameSettings.volumetric = false;
         frameSettings.bloom = false;
+        frameSettings.dof = false;   // an editing view, not a lens image
     }
     // Wireframe / unlit (and quad views) skip the effect packs: flat frames have nothing for them to read
     // (RunStack checks the same conditions per frame; this also skips their target allocation).
@@ -641,6 +644,7 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     stats_.outputHeight = targets_.outHeight;
     stats_.renderPath = path;
     stats_.upscaler = up ? up->Kind() : UpscalerKind::None;
+    stats_.dlssModel = frameSettings.dlssModel;
     PassContext pc{*ctx_, cmd, view, frameSettings, targets_, stats_, transient_,
                    sceneCb_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kSceneCbSize,
                    lightBuf_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kLightBytes,
@@ -649,6 +653,12 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     pc.mme = mme_.get();
     pc.mmeSkin = mmeSkin_.get();
     pc.sceneConstantsCpu = &sc;
+    // DLSS Ray Reconstruction needs the noisy ray-traced signals and their guides; it replaces the PT
+    // temporal / a-trous denoiser, the RT AO / reflection filtering and the upscaler for the frame.
+    pc.dlssRr = frameSettings.dlssRayReconstruction &&
+                (path == RenderPath::PathTraced || path == RenderPath::RayTraced) && up &&
+                up->Kind() == UpscalerKind::DLSS && up->RayReconstructionAvailable() && !offscreen;
+    stats_.dlssRayReconstruction = pc.dlssRr;
     // A model destroyed or replaced since the last drawn frame leaves the model set: release its per-model MME
     // resources (object SRV tables + skinned buffer) after the frames that still reference them.
     if (!offscreen) {
@@ -718,6 +728,43 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
             pc.extraSceneConstants[e] = sceneCb_->GetGPUVirtualAddress() + (uint64_t)slot * kSceneCbSize;
         }
     }
+    // Frame Generation: remember this frame's camera data (the final evaluate runs after the UI draw).
+    if (!offscreen) {
+        if (quad || settings_.headless || !frameGen_ || !frameGen_->Available() || settings_.frameGen < 2 ||
+            !view.frameGen) {
+            frameGenPending_ = false;
+        } else {
+            frameGenPending_ = true;
+            const CameraParams& cam = view.camera;
+            const bool sizeChanged = frameGenData_.width != w || frameGenData_.height != h;
+            frameGenData_.viewProjNoJitter = sc.viewProjNoJitter;
+            frameGenData_.prevViewProjNoJitter = sc.prevViewProjNoJitter;
+            frameGenData_.invView = sc.invView;
+            XMStoreFloat4x4(&frameGenData_.proj,
+                            XMMatrixPerspectiveFovLH(cam.fovYRadians, (float)w / (float)h, cam.nearZ, cam.farZ));
+            frameGenData_.eye = cam.eye;
+            frameGenData_.nearZ = cam.nearZ;
+            frameGenData_.farZ = cam.farZ;
+            frameGenData_.fov = cam.fovYRadians;
+            frameGenData_.jitterX = jitterPx_[0];
+            frameGenData_.jitterY = jitterPx_[1];
+            frameGenData_.width = w;
+            frameGenData_.height = h;
+            const XMMATRIX invView = XMLoadFloat4x4(&frameGenData_.invView);
+            XMStoreFloat3(&frameGenData_.right, invView.r[0]);
+            XMStoreFloat3(&frameGenData_.up, invView.r[1]);
+            XMStoreFloat3(&frameGenData_.fwd, invView.r[2]);
+            frameGenReset_ = view.cameraCut || !havePrev_ || !frameGenWasPending_ || sizeChanged;
+            frameGenWasPending_ = true;
+        }
+    } else {
+        frameGenPending_ = false;
+    }
+    if (!frameGenPending_) {
+        frameGenWasPending_ = false;
+        if (frameGen_) frameGen_->SetActive(*ctx_, false);   // toggled off / left the play scene: free the feature
+    }
+
     for (auto& pass : passes_) pass->Execute(pc);
 
     if (!offscreen) {
@@ -753,6 +800,7 @@ void Renderer::ClearBackBuffer(ID3D12GraphicsCommandList* cmd) {
 
 void Renderer::Render(ID3D12GraphicsCommandList* cmd, const FrameView& view) {
     if (!cmd || !ctx_) return;
+    stats_.frameGenMultiplier = 0;
     ID3D12DescriptorHeap* heaps[] = {ctx_->SrvHeap().Heap()};
     cmd->SetDescriptorHeaps(1, heaps);
     transient_.Begin(ctx_->FrameSlot());
@@ -765,6 +813,10 @@ void Renderer::Render(ID3D12GraphicsCommandList* cmd, const FrameView& view) {
         // Menus: nothing to render, just a clean surface for the UI.
         sceneVisible_ = false;
         havePrev_ = false;
+        frameGenPending_ = false;
+        frameGenActive_ = false;
+        frameGenWasPending_ = false;
+        if (frameGen_) frameGen_->SetActive(*ctx_, false);
         lastFrameQpc_ = 0;
         // No model is drawable: release the MME resources of the model set that just left the frame. Schedule
         // before clearing, then drain here (today the drain only ran from RecordScene) so the frees complete during
@@ -830,6 +882,7 @@ void Renderer::Render(ID3D12GraphicsCommandList* cmd, const FrameView& view) {
     // Background AVI (背景AVI): update the screen.bmp texture before anything draws models.
     if (screenVideo_) screenVideo_->Update(*ctx_, cmd, view);
     RecordScene(cmd, view, w, h, slot, ctx_->FrameNumber(), false);
+    if (frameGenPending_) FrameGenCopyHudless(cmd);
 
     cmd->EndQuery(timestampHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
     cmd->ResolveQueryData(timestampHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2,
@@ -862,7 +915,17 @@ bool Renderer::RenderToImage(const FrameView& view, uint32_t w, uint32_t h, Imag
     offAlloc_->Reset();
     offList_->Reset(offAlloc_.Get(), nullptr);
 
+    // Thumbnails are a fixed portrait look, not a view of the user's current scene: pin everything that would
+    // otherwise come from the user's ini (exposure, effect stack, MME, bloom shape, ...). The effect stack in
+    // particular must never run offscreen: a metering / auto-exposure pack sees the transparent background and
+    // can blow the exposure up (the washed-out cards).
+    // Thumbnails are deterministic: the default look, not the user's (an effect stack with eye adaptation metered the
+    // mostly transparent frame and blew the portrait out; exposure / LUT / MME post changed every card).
     const RenderSettings saved = settings_;
+    settings_ = RenderSettings{};
+    settings_.msaaSamples = saved.msaaSamples;
+    settings_.shadowMapSize = saved.shadowMapSize;
+    settings_.lutIntensity = 0.0f;
     settings_.transparentBackground = true;
     settings_.taa = false;
     settings_.fog = 0.0f;
@@ -870,6 +933,23 @@ bool Renderer::RenderToImage(const FrameView& view, uint32_t w, uint32_t h, Imag
     settings_.ssr = false;
     settings_.renderPath = RenderPath::Raster;
     settings_.upscaler = UpscalerKind::None;
+    settings_.shading = ViewShading::Lit;
+    settings_.drawEdges = true;
+    settings_.shadows = true;
+    settings_.shadowMapSize = 2048;
+    settings_.ssao = true;
+    settings_.autoLuminous = true;
+    settings_.exposure = 1.0f;
+    settings_.contrast = 1.06f;
+    settings_.saturation = 1.06f;
+    settings_.bloom = true;
+    settings_.bloomIntensity = 0.35f;
+    settings_.bloomThreshold = 1.1f;
+    settings_.bloomConvolution = false;
+    settings_.dof = false;
+    settings_.volumetric = false;
+    settings_.packEffects.clear();   // shader packs are opt-in per character and never applied to thumbnails
+    settings_.mmeEffects.clear();
     sceneVisible_ = false;
 
     const uint32_t msaa = pipelineMsaa_ ? pipelineMsaa_ : 1;
@@ -1032,6 +1112,94 @@ bool Renderer::UpscalerAvailable(UpscalerKind kind) const {
     return k < 4 && upscalerAvailable_[k];
 }
 
+bool Renderer::FrameGenAvailable() const { return frameGen_ && frameGen_->Available(); }
+int Renderer::FrameGenMaxMultiplier() const { return frameGen_ ? frameGen_->MaxMultiplier() : 0; }
+const char* Renderer::FrameGenReason() const { return frameGen_ ? frameGen_->Reason() : "사용할 수 없음"; }
+
+void Renderer::FrameGenCopyHudless(ID3D12GraphicsCommandList* cmd) {
+    if (!frameGen_ || !frameGenPending_ || !ctx_) return;
+    // The back buffer is in RENDER_TARGET state right now (RenderPass contract).
+    frameGen_->CopyHudless(*ctx_, cmd, ctx_->BackBuffer());
+}
+
+bool Renderer::FrameGenEvaluate(ID3D12GraphicsCommandList* cmd) {
+    frameGenActive_ = false;
+    stats_.frameGenMultiplier = 0;
+    if (!frameGen_ || !frameGenPending_ || !ctx_ || !cmd || !targets_.depth || !targets_.velocity) return false;
+    if (ctx_->DeviceLost()) return false;
+    frameGenPending_ = false;
+    ID3D12Resource* bb = ctx_->BackBuffer();
+    if (!bb || !frameGen_->CopyFinal(*ctx_, cmd, bb)) return false;
+
+    FrameGenInputs in{};
+    in.cmd = cmd;
+    in.backbuffer = bb;
+    in.depth = targets_.depth.res.Get();
+    in.velocity = targets_.velocity.res.Get();
+    in.depthState = targets_.depth.state;
+    in.velocityState = targets_.velocity.state;
+    in.width = ctx_->Width();
+    in.height = ctx_->Height();
+    in.renderWidth = frameGenData_.width;
+    in.renderHeight = frameGenData_.height;
+    in.multiplier = std::clamp(settings_.frameGen, 0, std::max(1, frameGen_->MaxMultiplier()));
+    in.reset = frameGenReset_;
+    in.frameTimeMs = frameTimeMs_;
+    // Jitter in render pixels (the same value/sign convention the DLSS-SR path passes as InJitterOffsetX).
+    in.jitterX = frameGenData_.jitterX;
+    in.jitterY = frameGenData_.jitterY;
+    // Matrices are row-vector (DirectX) row-major: v_clip = v * matrix. The SDK takes the same layout.
+    std::memcpy(in.cameraViewToClip, &frameGenData_.proj, sizeof(in.cameraViewToClip));
+    DirectX::XMFLOAT4X4 invProj;
+    XMStoreFloat4x4(&invProj,
+                    XMMatrixInverse(nullptr, XMLoadFloat4x4(&frameGenData_.proj)));
+    std::memcpy(in.clipToCameraView, &invProj, sizeof(in.clipToCameraView));
+    {
+        // clip(current) -> clip(previous) = inv(viewProj_cur) * viewProj_prev (row-vector convention).
+        const XMMATRIX vpCur = XMLoadFloat4x4(&frameGenData_.viewProjNoJitter);
+        const XMMATRIX vpPrev = XMLoadFloat4x4(&frameGenData_.prevViewProjNoJitter);
+        const XMMATRIX invCur = XMMatrixInverse(nullptr, vpCur);
+        const XMMATRIX invPrev = XMMatrixInverse(nullptr, vpPrev);
+        DirectX::XMFLOAT4X4 clipToPrev, prevToClip;
+        XMStoreFloat4x4(&clipToPrev, invCur * vpPrev);
+        XMStoreFloat4x4(&prevToClip, invPrev * vpCur);
+        std::memcpy(in.clipToPrevClip, &clipToPrev, sizeof(in.clipToPrevClip));
+        std::memcpy(in.prevClipToClip, &prevToClip, sizeof(in.prevClipToClip));
+    }
+    in.cameraPos[0] = frameGenData_.eye.x;
+    in.cameraPos[1] = frameGenData_.eye.y;
+    in.cameraPos[2] = frameGenData_.eye.z;
+    in.cameraUp[0] = frameGenData_.up.x;
+    in.cameraUp[1] = frameGenData_.up.y;
+    in.cameraUp[2] = frameGenData_.up.z;
+    in.cameraRight[0] = frameGenData_.right.x;
+    in.cameraRight[1] = frameGenData_.right.y;
+    in.cameraRight[2] = frameGenData_.right.z;
+    in.cameraFwd[0] = frameGenData_.fwd.x;
+    in.cameraFwd[1] = frameGenData_.fwd.y;
+    in.cameraFwd[2] = frameGenData_.fwd.z;
+    in.nearZ = frameGenData_.nearZ;
+    in.farZ = frameGenData_.farZ;
+    in.fov = frameGenData_.fov;
+    in.aspect = (float)frameGenData_.width / (float)std::max(1u, frameGenData_.height);
+    frameGenReset_ = false;
+    if (!frameGen_->Evaluate(*ctx_, in)) return false;
+    frameGenActive_ = true;
+    stats_.frameGenMultiplier = frameGen_->GeneratedCount() + 1;
+    return true;
+}
+
+int Renderer::FrameGenGeneratedCount() const { return frameGen_ ? frameGen_->GeneratedCount() : 0; }
+ID3D12Resource* Renderer::FrameGenGeneratedFrame(int i) const {
+    return frameGen_ ? frameGen_->GeneratedFrame(i) : nullptr;
+}
+ID3D12Resource* Renderer::FrameGenRealFrame() const { return frameGen_ ? frameGen_->RealFrame() : nullptr; }
+
+bool Renderer::RayReconstructionAvailable() const {
+    const size_t k = (size_t)UpscalerKind::DLSS;
+    return upscalerAvailable_[k] && upscalers_[k] && upscalers_[k]->RayReconstructionAvailable();
+}
+
 void Renderer::SetColorLut(const ImageRGBA8* strip) {
     if (!ctx_) return;
     lut_.Release(*ctx_);  // deferred: frames in flight may still sample it
@@ -1069,6 +1237,12 @@ void Renderer::Shutdown() {
     }
     mmeSkin_.reset();
     rtSupported_ = false;
+    if (frameGen_) {
+        frameGen_->Shutdown();
+        frameGen_.reset();
+    }
+    frameGenPending_ = false;
+    frameGenActive_ = false;
     for (size_t k = 1; k < 4; ++k) {
         if (upscalers_[k]) {
             upscalers_[k]->Shutdown();

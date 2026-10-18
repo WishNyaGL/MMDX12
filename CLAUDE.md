@@ -15,8 +15,19 @@ progress.md is the session log. Read its latest entry first.
   Raster shaders use FXC (`*_5_1`), except the lit / floor scene PSOs (mmd.hlsl VSMain/PSMain, VSFloor/PSFloor): DXC
   `*_6_0` on SM 6.0 devices because FXC needs ~5.5 min for PSMain since the PBR branch (FXC stays their fallback; a PSO
   never mixes DXBC and DXIL). Slow cold compiles (> 1 s) log a `shader compile` line. Ray-query shaders use DXC (`*_6_5`, `-HV 2018` because common.hlsli uses vector ternaries that HLSL 2021 rejects). `dxcompiler.dll`/`dxil.dll` are copied from the Windows SDK.
-- Upscaler runtime DLLs are git-ignored: run `tools/fetch_sdks.ps1` once (DLSS 310.9.1, XeSS 3.0.2, FidelityFX 2.3.0), then rebuild. Missing DLLs only disable that upscaler.
-- Render path / upscaler from the CLI: `--render raster|rt|pt`, `--upscaler none|dlss|fsr|xess`, `--upscale-quality native|quality|balanced|performance|ultra`.
+- Upscaler runtime DLLs are git-ignored: run `tools/fetch_sdks.ps1` once (DLSS 310.9.16, XeSS 3.0.2, FidelityFX 2.3.0), then rebuild. Missing DLLs only disable that upscaler.
+- Render path / upscaler from the CLI: `--render raster|rt|pt`, `--upscaler none|dlss|fsr|xess`, `--upscale-quality native|quality|balanced|performance|ultra`,
+  `--dlss-model auto|cnn|transformer|transformer2`, `--dlss-rr 0|1` (DLSS Ray Reconstruction on the RayTraced / PathTraced
+  paths with DLSS; it replaces the RT AO / reflection filtering and the PT denoiser, and runs instead of TAA),
+  `--frame-gen off|2|3|4` (DLSS Frame Generation; 3x / 4x need RTX 50).
+  DLSS is raw NGX 310.9.16 (no Streamline): SR + RR in `render/UpscalerDlss.cpp` (model = render preset hint: CNN E,
+  transformer K, transformer 2nd gen M / L for Ultra Performance), FG in `render/DlssFrameGen.*`, one shared NGX init
+  (`render/NgxShared.*`). RR guides: PT writes them from the tracer; RT draws them in `ScenePass::DrawGuides`
+  (`PSGuides`) only while RR runs. The two albedo guides alpha-blend by coverage (translucent face overlays written opaque
+  became the face albedo: dark "panda eyes"); the normal guide stays opaque (w = RR's packed roughness).
+  FG: hudless = the scene before ImGui, back buffer after; `Dx12Context::EndFrameFrameGen` presents generated frame(s)
+  then the held real frame. Play scenes only: off in the lobby, studio, offline renders, benchmarks, headless and
+  `--capture` runs. DLSS 5 (neural rendering) has no public SDK yet (2026-10).
 - PBR material data (2.0.0): per-character material source (기본 / Ray-MMD, saved as `characterMaterial=` ini lines and
   `.mmdxproj` "material"), `--material-source default|ray` overrides it for a run, and
   `--pbr-debug none|albedo|normal|roughness|metalness|ao|emissive|model` shows one channel (`asset/PbrMaterial`,
@@ -200,7 +211,8 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   - `GpuModel` handles GPU skinning. `RtScene` (RayTracing.h) skins every model into world-space `RtVertex` buffers with a compute shader and builds BLAS (characters every frame, stages once) + TLAS; shaders read geometry bindlessly (`rt_common.hlsli`, `RtGeometry` table, unbounded tables over the whole SRV heap, root signature 1.0 so descriptors stay volatile).
   - Render resolution (`targets.width/height`) vs output resolution (`outWidth/outHeight`): the upscaler (DLSS/FSR/XeSS behind `IUpscaler`) runs after TAA/composite; bloom, post, backdrop and present work at output size. Jitter uses the FSR convention (`jitterPx`), motion vectors are uv(cur) − uv(prev) so SDK MV scale is −renderSize.
 - Theme: `ui::P()` is the live palette (light / dark, `ui::SetTheme`); never cache colours in statics. `App::ApplyTheme` (settings `theme`, `--theme auto|light|dark`) runs before the next ImGui frame and re-runs `ui::ApplyStyle`. Capture both: `--theme dark|light`.
-- `app`: the `App` state machine, ImGui screens (`Ui*.cpp`) built on `UiKit` (tokens, fonts, widgets; see DESIGN.md), `ThumbnailCache`, `Lighting` presets, `SceneLoader` (worker thread), benchmark, WinHTTP leaderboard.
+- `app`: the `App` state machine, ImGui screens (`Ui*.cpp`) built on `UiKit` (tokens, fonts, widgets; see DESIGN.md), `ThumbnailCache` (rendered by
+  `Renderer::RenderToImage` with default RenderSettings, never the user's effect stack / exposure / LUT), `Lighting` presets, `SceneLoader` (worker thread), benchmark, WinHTTP leaderboard.
 - `audio`: miniaudio. The audio cursor is the master clock.
 - `studio` (+ `app/UiStudio*.cpp`): the Studio editor (Screen::Studio). `StudioDoc` holds the models with name-keyed editable
   motions (`MotionData`, StudioMotion.h, converted to VmdMotion and re-bound with `BoundMotion::Bind` after edits), the camera

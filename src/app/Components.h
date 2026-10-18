@@ -24,7 +24,7 @@ struct Def {
     int fileCount;
 };
 
-inline constexpr const char* kDlssFiles[] = {"nvngx_dlss.dll"};
+inline constexpr const char* kDlssFiles[] = {"nvngx_dlss.dll", "nvngx_dlssd.dll", "nvngx_dlssg.dll"};
 inline constexpr const char* kFsrFiles[] = {"amd_fidelityfx_loader_dx12.dll",
                                             "amd_fidelityfx_upscaler_dx12.dll"};
 inline constexpr const char* kXessFiles[] = {"libxess.dll"};
@@ -32,7 +32,7 @@ inline constexpr const char* kCjkFontFiles[] = {
     "assets/fonts/NotoSansCJKjp-Regular.otf", "assets/fonts/NotoSansCJKjp-Bold.otf",
     "assets/fonts/NotoSansCJKsc-Regular.otf", "assets/fonts/NotoSansCJKsc-Bold.otf"};
 
-inline constexpr Def kDlss = {"upscaler:dlss", 1, "NVIDIA DLSS", kDlssFiles, 1};
+inline constexpr Def kDlss = {"upscaler:dlss", 1, "NVIDIA DLSS", kDlssFiles, 3};
 inline constexpr Def kFsr = {"upscaler:fsr", 2, "AMD FSR", kFsrFiles, 2};
 inline constexpr Def kXess = {"upscaler:xess", 3, "Intel XeSS", kXessFiles, 1};
 inline constexpr Def kCjk = {"fonts:cjk", 0, "고품질 CJK 글꼴", kCjkFontFiles, 4};

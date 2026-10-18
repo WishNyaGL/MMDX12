@@ -178,6 +178,15 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "renderPath" && ParseInt(value, i)) renderPath = i;
         else if (key == "upscaler" && ParseInt(value, i)) upscaler = i;
         else if (key == "upscalerQuality" && ParseInt(value, i)) upscalerQuality = i;
+        else if (key == "dlssFrameGen" && ParseInt(value, i)) dlssFrameGen = i;
+        else if (key == "dlssModel") {
+            const std::string v = ToLowerAscii(value);
+            if (v == "auto") dlssModel = 0;
+            else if (v == "cnn") dlssModel = 1;
+            else if (v == "transformer") dlssModel = 2;
+            else if (v == "transformer2") dlssModel = 3;
+        }
+        else if (key == "dlssRayReconstruction" && ParseBool(value, b)) dlssRayReconstruction = b;
         else if (key == "ptSamples" && ParseInt(value, i)) ptSamples = i;
         else if (key == "ptBounces" && ParseInt(value, i)) ptBounces = i;
         else if (key == "dof" && ParseBool(value, b)) dof = b;
@@ -450,6 +459,8 @@ bool AppSettings::Load(const std::filesystem::path& file) {
     renderPath = std::clamp(renderPath, 0, 2);
     upscaler = std::clamp(upscaler, 0, 3);
     upscalerQuality = std::clamp(upscalerQuality, 0, 4);
+    if (dlssFrameGen != 2 && dlssFrameGen != 3 && dlssFrameGen != 4) dlssFrameGen = 0;
+    dlssModel = std::clamp(dlssModel, 0, 3);
     ptSamples = std::clamp(ptSamples, 1, 4);
     ptBounces = std::clamp(ptBounces, 1, 6);
     dofAperture = std::clamp(dofAperture, 0.2f, 3.0f);
@@ -526,6 +537,10 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     std::fprintf(f, "renderPath=%d\n", renderPath);
     std::fprintf(f, "upscaler=%d\n", upscaler);
     std::fprintf(f, "upscalerQuality=%d\n", upscalerQuality);
+    std::fprintf(f, "dlssFrameGen=%d\n", dlssFrameGen);
+    static const char* const kDlssModels[] = {"auto", "cnn", "transformer", "transformer2"};
+    std::fprintf(f, "dlssModel=%s\n", kDlssModels[std::clamp(dlssModel, 0, 3)]);
+    std::fprintf(f, "dlssRayReconstruction=%d\n", dlssRayReconstruction ? 1 : 0);
     std::fprintf(f, "ptSamples=%d\n", ptSamples);
     std::fprintf(f, "ptBounces=%d\n", ptBounces);
     std::fprintf(f, "dof=%d\ndofAperture=%.3f\n", dof ? 1 : 0, dofAperture);

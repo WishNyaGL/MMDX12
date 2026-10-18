@@ -8,6 +8,7 @@
 #include "render/RenderTypes.h"
 #include "render/ShaderInterop.h"
 #include "render/Upscaler.h"
+#include "render/DlssFrameGen.h"
 #include "render/MmeRuntime.h"
 #include "render/MmeSkin.h"
 #include "render/ScreenVideo.h"
@@ -101,6 +102,22 @@ public:
     bool RayTracingSupported() const { return rtSupported_; }
     // Probed once in Initialize (DLL present, GPU supported). None is always available.
     bool UpscalerAvailable(UpscalerKind kind) const;
+    // DLSS Frame Generation (render/DlssFrameGen.h). Available on RTX 40+; MaxMultiplier() is 2 on RTX 40,
+    // 4 on RTX 50. Off = no cost.
+    bool FrameGenAvailable() const;
+    int FrameGenMaxMultiplier() const;
+    const char* FrameGenReason() const;
+    // True when this frame recorded DLSS-G output (the caller presents it with Dx12Context::EndFrameFrameGen).
+    bool FrameGenActive() const { return frameGenActive_; }
+    int FrameGenGeneratedCount() const;
+    ID3D12Resource* FrameGenGeneratedFrame(int i) const;
+    ID3D12Resource* FrameGenRealFrame() const;
+    // The hudless copy for this frame (Renderer::Render calls it before the UI); the caller signals the final
+    // copy after ImGui via FrameGenEvaluate.
+    void FrameGenCopyHudless(ID3D12GraphicsCommandList* cmd);
+    bool FrameGenEvaluate(ID3D12GraphicsCommandList* cmd);
+    // DLSS Ray Reconstruction (nvngx_dlssd.dll + GPU support): the UI enables its switch only then.
+    bool RayReconstructionAvailable() const;
 
     // ---- offline GI renderer (render/OfflineRenderer.h) ------------------------------------
     // Available with ray tracing when the offline pipelines compiled.
@@ -153,6 +170,25 @@ private:
     TransientDescriptors transient_;
     std::unique_ptr<IUpscaler> upscalers_[4];  // indexed by UpscalerKind; [0] unused
     bool upscalerAvailable_[4] = {true, false, false, false};
+    std::unique_ptr<DlssFrameGen> frameGen_;
+    bool frameGenActive_ = false;
+    // Camera / jitter / depth data of the frame Render() last recorded, for FrameGenEvaluate (which runs after
+    // the UI draw). Valid when frameGenPending_ is set.
+    struct FrameGenFrameData {
+        DirectX::XMFLOAT4X4 viewProjNoJitter{};
+        DirectX::XMFLOAT4X4 prevViewProjNoJitter{};
+        DirectX::XMFLOAT4X4 invView{};
+        DirectX::XMFLOAT4X4 proj{};
+        DirectX::XMFLOAT3 eye{};
+        DirectX::XMFLOAT3 fwd{}, up{}, right{};
+        float nearZ = 0.5f, farZ = 3000.0f, fov = 0.5f;
+        float jitterX = 0, jitterY = 0;
+        uint32_t width = 0, height = 0;
+    };
+    FrameGenFrameData frameGenData_{};
+    bool frameGenPending_ = false;
+    bool frameGenReset_ = false;
+    bool frameGenWasPending_ = false;
     std::unique_ptr<PackTextures> packTextures_;
     std::unique_ptr<RtScene> rt_;
     // Models whose MME resources were released with ForgetModel; freed kFramesInFlight frames later so the

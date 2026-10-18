@@ -87,7 +87,7 @@ if(NOT RENDER_SRC)
   set(RENDER_SRC ${CMAKE_SOURCE_DIR}/cmake/empty.cpp)
 endif()
 add_library(mmdx_render STATIC ${RENDER_SRC})
-target_link_libraries(mmdx_render PUBLIC mmdx_core Microsoft::DirectX-Headers Microsoft::DirectX-Guids d3d12 dxgi d3dcompiler)
+target_link_libraries(mmdx_render PUBLIC mmdx_core Microsoft::DirectX-Headers Microsoft::DirectX-Guids d3d12 dxgi d3dcompiler version)
 # Upscaler SDKs (headers + import libs vendored; runtime DLLs fetched by tools/fetch_sdks.ps1).
 # DLSS: static NGX loader (loads nvngx_dlss.dll itself). XeSS: delay-loaded so a missing
 # libxess.dll only disables XeSS. FSR: amd_fidelityfx_loader_dx12.dll via LoadLibrary.

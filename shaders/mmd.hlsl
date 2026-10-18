@@ -837,6 +837,61 @@ PSOut PSMain(VSOut i, bool front : SV_IsFrontFace) {
     return MmdShade(i, front, n, L, V, tex, alpha);
 }
 
+// DLSS Ray Reconstruction guides (RayTraced path, ScenePass::DrawGuides): default material data even for
+// pack-shaded / MME-owned materials. t0 = diffuse albedo (linear), t1 = specular albedo (EnvBRDFApprox2),
+// t2 = world normal, a = linear roughness. Sky / no coverage stays at the cleared defaults.
+struct GuideOut {
+    float4 diffuse : SV_Target0;
+    float4 specular : SV_Target1;
+    float4 normalRough : SV_Target2;
+};
+
+float3 GuideSpecularAlbedo(float3 specColor, float alpha, float NoV) {
+    NoV = abs(NoV);
+    float4 X = float4(1.0, NoV, NoV * NoV, NoV * NoV * NoV);
+    float4 Y = float4(1.0, alpha, alpha * alpha, alpha * alpha * alpha);
+    float2x2 M1 = float2x2(0.99044, -1.28514, 1.29678, -0.755907);
+    float3x3 M2 = float3x3(1.0, 2.92338, 59.4188, 20.3225, -27.0302, 222.592, 121.563, 626.13, 316.627);
+    float2x2 M3 = float2x2(0.0365463, 3.32707, 9.0632, -9.04756);
+    float3x3 M4 = float3x3(1.0, 3.59685, -1.36772, 9.04401, -16.3174, 9.22949, 5.56589, 19.7886, -20.2123);
+    float bias = dot(mul(M1, X.xy), Y.xy) * rcp(dot(mul(M2, X.xyw), Y.xyw));
+    float scale = dot(mul(M3, X.xy), Y.xy) * rcp(dot(mul(M4, X.xzw), Y.xyw));
+    bias *= saturate(specColor.g * 50.0);
+    return mad(specColor, max(0.0, scale), max(0.0, bias));
+}
+
+GuideOut PSGuides(VSOut i, bool front : SV_IsFrontFace) {
+    PbrSetUvGradients(ddx(i.uv), ddy(i.uv));
+    float3 n = normalize(i.nrm);
+    if (!front) n = -n;
+    float3 V = normalize(gEyePos - i.worldPos);
+    float4 tex = (gFlags & MAT_HAS_TEXTURE) ? ApplyTexFactor(gTexture.Sample(gWrap, i.uv), gTexMul, gTexAdd)
+                                            : float4(1, 1, 1, 1);
+    float alpha = gDiffuse.a * tex.a;
+    clip(alpha - 0.004);
+
+    float3 albedo = SrgbToLinear(saturate(gDiffuse.rgb * tex.rgb));
+    float3 spec = gReflectivity.xxx;
+    float rough = clamp(sqrt(2.0 / (max(gSpecularPower, 0.0) + 2.0)), 0.03, 0.6);
+    if (gPbrActive != 0u && gShading < 0.5) {
+        GpuPbrMaterial pbr = PbrLoadMaterial(gPbrSrv, gPbrIndex);
+        const bool cel = pbr.shadingModel == 8u || pbr.shadingModel == 9u;
+        const float3 albedoLin = PbrAlbedo(pbr, i.uv, gDiffuse.rgb);
+        const float metal = cel ? 0.0 : saturate(PbrSlotMetalness(pbr.slots[PBR_SLOT_METALNESS], i.uv));
+        const float3 f0mma = PbrSlotF0(pbr.slots[PBR_SLOT_SPECULAR], i.uv);
+        albedo = albedoLin * (1.0 - metal);
+        spec = cel ? f0mma : lerp(f0mma, max(0.02, albedoLin), metal);
+        rough = max(PbrSlotRoughness(pbr.slots[PBR_SLOT_SMOOTHNESS], i.uv), 0.03);
+        if (pbr.shadingModel == 1u) rough = max(rough, 0.6);   // SKIN: never glossy
+    }
+    GuideOut o;
+    // alpha = coverage: the PSO blends the albedo guides of translucent layers over what is below
+    o.diffuse = float4(saturate(albedo), alpha);
+    o.specular = float4(GuideSpecularAlbedo(spec, rough * rough, dot(n, V)), alpha);
+    o.normalRough = float4(n, saturate(rough));   // opaque: w is RR's packed roughness
+    return o;
+}
+
 // ---- shader packs ---------------------------------------------------------------------
 // Compiled only for a pack's PSO: MMDX_PACK is the pack's surface.hlsl (a quoted include path), which implements
 // PackShade (contract: pack_api.hlsli). PSMain above is never affected.

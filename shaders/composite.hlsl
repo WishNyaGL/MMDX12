@@ -45,6 +45,15 @@ float4 PSComposite(FsOut i) : SV_Target {
         c.rgb *= lerp(1.0, ao, gP0.x);
     }
     if (cam && gP0.y > 0.0 && nt.z > 0.01) {
+        if (gP2.x > 0.5) {
+            // DLSS-RR: hand RR the raw 1-frame ray-traced reflection (no 3x3 spatial gather).
+            float4 sr = gSsrTex.SampleLevel(gPoint, i.uv, 0);
+            float3 V = normalize(ViewPosFromDepth(i.uv, d));
+            float3 N = OctDecode(nt.xy);
+            float fres = nt.z + (1.0 - nt.z) * pow(1.0 - saturate(dot(-V, N)), 5.0);
+            float w = saturate(fres * sr.a * nt.w);
+            c.rgb = lerp(c.rgb, sr.rgb, w);
+        } else {
         // 3x3 alpha-weighted gather hides the per-pixel jitter of the half-res march
         float4 r = 0;
         [unroll] for (int y = -1; y <= 1; ++y)
@@ -61,6 +70,7 @@ float4 PSComposite(FsOut i) : SV_Target {
         float fres = nt.z + (1.0 - nt.z) * pow(1.0 - saturate(dot(-V, N)), 5.0);
         float w = saturate(fres * r.a * nt.w);
         c.rgb = lerp(c.rgb, r.rgb, w);
+        }
     }
     if (cam && gFog > 0.0) {
         float3 vp = ViewPosFromDepth(i.uv, d);

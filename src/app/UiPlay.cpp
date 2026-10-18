@@ -300,6 +300,17 @@ void App::DrawPlayOverlay() {
                                  : rs.upscaler == UpscalerKind::FSR ? "FSR"
                                  : "XeSS";
             n += std::snprintf(buf + n, sizeof(buf) - n, "   %s", upName);
+            if (rs.upscaler == UpscalerKind::DLSS) {
+                static const char* const kModelNames[] = {"Auto", "CNN", "Transformer", "Transformer 2"};
+                n += std::snprintf(buf + n, sizeof(buf) - n, " %s",
+                                   kModelNames[std::clamp((int)rs.dlssModel, 0, 3)]);
+                if (rs.dlssRayReconstruction) n += std::snprintf(buf + n, sizeof(buf) - n, " RR");
+            }
+        }
+        if (rs.frameGenMultiplier >= 2) {
+            // DLSS Frame Generation: rendered rate x multiplier = presented rate.
+            n += std::snprintf(buf + n, sizeof(buf) - n, "   FG %dx (%.0f)", rs.frameGenMultiplier,
+                               io.Framerate * (float)rs.frameGenMultiplier);
         }
         (void)n;
         const ImVec2 bs = TextSize(Font::Semibold, size::Caption, buf);

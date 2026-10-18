@@ -172,6 +172,22 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             else if (v == "performance") opt.upscalerQuality = 3;
             else if (v == "ultra") opt.upscalerQuality = 4;
             else LOG_WARN("unknown --upscale-quality value: %s (want native|quality|balanced|performance|ultra)", v.c_str());
+        } else if (arg == L"--dlss-model") {
+            const std::string v = ToLowerAscii(WideToUtf8(next()));
+            if (v == "auto") opt.dlssModel = 0;
+            else if (v == "cnn") opt.dlssModel = 1;
+            else if (v == "transformer") opt.dlssModel = 2;
+            else if (v == "transformer2") opt.dlssModel = 3;
+            else LOG_WARN("unknown --dlss-model value: %s (want auto|cnn|transformer|transformer2)", v.c_str());
+        } else if (arg == L"--dlss-rr") {
+            opt.dlssRayReconstruction = _wtoi(next().c_str()) != 0 ? 1 : 0;
+        } else if (arg == L"--frame-gen") {
+            const std::string v = ToLowerAscii(WideToUtf8(next()));
+            if (v == "off" || v == "0" || v == "none") opt.frameGen = 0;
+            else if (v == "2" || v == "2x") opt.frameGen = 2;
+            else if (v == "3" || v == "3x") opt.frameGen = 3;
+            else if (v == "4" || v == "4x") opt.frameGen = 4;
+            else LOG_WARN("unknown --frame-gen value: %s (want off|2|3|4)", v.c_str());
         } else if (arg == L"--dof") {
             opt.dof = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--volumetric") {
@@ -433,6 +449,9 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     shadingOverride_ = options_.shading;
     if (options_.upscaler >= 0) settings_.upscaler = std::clamp(options_.upscaler, 0, 3);
     if (options_.upscalerQuality >= 0) settings_.upscalerQuality = std::clamp(options_.upscalerQuality, 0, 4);
+    if (options_.dlssModel >= 0) settings_.dlssModel = std::clamp(options_.dlssModel, 0, 3);
+    if (options_.dlssRayReconstruction >= 0) settings_.dlssRayReconstruction = options_.dlssRayReconstruction != 0;
+    if (options_.frameGen >= 0) settings_.dlssFrameGen = options_.frameGen;
     if (options_.dof >= 0) settings_.dof = options_.dof != 0;
     if (options_.volumetric >= 0) settings_.volumetric = options_.volumetric != 0;
     if (options_.volumetricDensity > 0.0f) settings_.volumetricDensity = std::clamp(options_.volumetricDensity, 0.25f, 4.0f);
@@ -609,6 +628,9 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.renderPath >= 0) settings_.renderPath = persisted.renderPath;
     if (options_.upscaler >= 0) settings_.upscaler = persisted.upscaler;
     if (options_.upscalerQuality >= 0) settings_.upscalerQuality = persisted.upscalerQuality;
+    if (options_.dlssModel >= 0) settings_.dlssModel = persisted.dlssModel;
+    if (options_.dlssRayReconstruction >= 0) settings_.dlssRayReconstruction = persisted.dlssRayReconstruction;
+    if (options_.frameGen >= 0) settings_.dlssFrameGen = persisted.dlssFrameGen;
     if (options_.dof >= 0) settings_.dof = persisted.dof;
     if (options_.volumetric >= 0) settings_.volumetric = persisted.volumetric;
     if (options_.volumetricDensity > 0.0f) settings_.volumetricDensity = persisted.volumetricDensity;
@@ -1026,12 +1048,21 @@ void App::RenderFrame() {
             const float frame = (float)(playTime_ * scene_->motionFps);
             UpdateScene(frame);
             BuildFrameView(frame, view);
+            // Frame Generation only for the live play scene: never the benchmark run, captures (which must read the
+            // real frame) or when the option is off.
+            view.frameGen = screen_ == Screen::Play && options_.capturePath.empty() && !ctx_.CapturePending();
             lastLiveCamera_ = view.camera;
             haveLastLiveCamera_ = true;
         }
         renderer_.Render(cmd, view);
     }
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmd);
+
+    // DLSS Frame Generation: copy the final (with UI) frame and generate the intermediate frames; EndFrame then
+    // paces them (generated frames, then the held real frame). Captures always read the real frame.
+    const bool frameGenPresented =
+        inScene && screen_ == Screen::Play && options_.capturePath.empty() && !ctx_.CapturePending() &&
+        renderer_.FrameGenEvaluate(cmd);
 
     bool quit = false;
     bool sceneCapture = false;   // --capture-scene: read the final image once this frame is submitted
@@ -1063,7 +1094,16 @@ void App::RenderFrame() {
             quit = true;
         }
     }
-    ctx_.EndFrame(renderer_.Settings().vsync);
+    if (frameGenPresented && !ctx_.CapturePending()) {
+        const int n = renderer_.FrameGenGeneratedCount();
+        ID3D12Resource* generated[3];
+        for (int i = 0; i < n && i < 3; ++i) generated[i] = renderer_.FrameGenGeneratedFrame(i);
+        // Even spacing over one rendered frame's wall time (the previous frames' rate).
+        const float frameMs = ImGui::GetIO().Framerate > 1.0f ? 1000.0f / ImGui::GetIO().Framerate : 16.7f;
+        ctx_.EndFrameFrameGen(renderer_.Settings().vsync, n, generated, renderer_.FrameGenRealFrame(), frameMs);
+    } else {
+        ctx_.EndFrame(renderer_.Settings().vsync);
+    }
     if (sceneCapture) {
         ImageRGBA8 img;
         if (renderer_.ReadFinalImage(img) && !img.mips.empty() && !img.mips[0].pixels.empty() &&
@@ -1494,6 +1534,9 @@ void App::ApplyRenderSettings() {
     if (shadingOverride_ >= 0) rs.shading = (ViewShading)std::clamp(shadingOverride_, 0, 2);
     rs.upscaler = (UpscalerKind)settings_.upscaler;
     rs.upscalerQuality = (UpscalerQuality)settings_.upscalerQuality;
+    rs.frameGen = settings_.dlssFrameGen;
+    rs.dlssModel = (DlssModel)settings_.dlssModel;
+    rs.dlssRayReconstruction = settings_.dlssRayReconstruction;
     rs.ptSamples = (uint32_t)settings_.ptSamples;
     rs.ptBounces = (uint32_t)settings_.ptBounces;
     rs.dof = settings_.dof;
