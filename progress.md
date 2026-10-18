@@ -2115,3 +2115,26 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   shots.
 - Commits split by scope with a hunk/line stager (index blobs built from HEAD + selected hunks); each intermediate commit
   was build-checked in a scratch worktree.
+
+## 2026-10-19 (2) - GI video eye adaptation flicker fix, release 2.3.0
+- Report: the `eye_adaptation` effect pack flickered in offline renders ("시간 적응 로직이 제대로 작동 안하는 듯").
+  Measured (Sour Miku White, Evergreen 20-24 s, 640x360, 30 fps, GI): without the pack frame luma is flat (128-131);
+  with it the per-frame exposure ratio jumped (mean 1.08 %, max 6.0 % between frames).
+- Diagnosis: a scratch edit of the runtime pack copy made `PackEffect` output its frame counter (state[4]): 0 on all 60
+  frames = the state was reset every frame, so the pack metered each frame from scratch (64 samples, no smoothing).
+- Root cause: d1d394d (pipelined video readback) renamed `offline_.frame` to `offline_.renderedFrame` in the GI path's
+  `jd.effectReset` (UiOffline.cpp); `renderedFrame` only advances in `RecordRealtimeVideoFrame` (raster / RT / PT),
+  so every GI frame was "frame 0". Fix: the GI path tests `offline_.frame` again.
+- Verified on build_release (build/ was locked by the user's open app + the MCP bridge): counter ramps; GI mean 0.13 % /
+  max 0.78 % (8-bit steps); raster 0.09 / 0.72 %, RT 0.09 / 0.68 %, PT 0.06 / 0.43 % (those paths were never affected).
+- Found, not fixed: in PT video a detected jump cut (`jumpCut`, camera teleport / pose jump) sets `view.cameraCut` only on
+  the frame's first pass, while the effect state advances on the last pass, so such cuts do not reset effect state
+  (VMD camera cuts do). Effect: exposure eases across the cut instead of snapping; no flicker.
+- Release 2.3.0 (minor: DLSS RR / FG / model choice, pipelined video renders, adjustable + convolution bloom presets, this
+  fix). Cover `docs/media/bloom-2.3.0.jpg` = the user's own 4K play capture (MMDX12_20261019_025904, a furry model): the
+  user was asked about the public furry-model rule and explicitly chose it. Notes `dist/notes_2.3.0.md` (4 languages; lite
+  users with DLSS installed re-fetch the component: it now has 3 files and counts as missing until they do).
+  `package_release.ps1` (full 195 MB: +nvngx_dlssd / dlssg, lite 15.3 MB), packaged smoke (select screen, v2.3.0,
+  0 `[E]`/`[W]`, SR / RR / FG available; cache / shader_cache / ini / log removed, stage file list identical to before),
+  delta manifest 2.3.0 = 14 new objects (113 reused), uploaded (only the objects missing on the server), live manifest
+  sha 3b3a4867... and exe / dlssg object hashes match.
