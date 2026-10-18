@@ -700,6 +700,17 @@ private:
     bool ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
     // Read-only analysis tools (AppMcpAnalysis.cpp); true when it handled the tool.
     bool ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
+    // Camera-direction tools (AppMcpCamera.cpp); true when it handled the tool.
+    bool ExecuteMcpCamera(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
+    // Writes a camera key list (studio_set_camera_keys' behaviour). False + error when it rejects the input.
+    bool McpWriteCameraKeys(const nlohmann::json& keys, const std::string& mode, size_t& changed, std::string& error,
+                            bool pushUndo = true);
+    // Framing evaluation of one frame/pose (one element of studio_frame_check's frames array).
+    nlohmann::json McpFrameCheck(int frame, const CameraPose& pose);
+    // AI lighting tools (AppMcpLight.cpp); true when it handled the tool.
+    bool ExecuteMcpLight(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise);
+    // Cached beat analysis of the project's audio (AppMcpAnalysis.cpp); nullptr with `error` set when unavailable.
+    const BeatAnalysis* StudioBeats(std::string& error);
     // Poses `m` at each frame (bound motion, placement, no pose layer, no physics) and reads the bones, then restores
     // the current frame. Rows are per frame; columns follow `bones`.
     std::vector<std::vector<DirectX::XMFLOAT3>> StudioSampleBones(studio::StudioModel& m, const std::vector<int>& frames,

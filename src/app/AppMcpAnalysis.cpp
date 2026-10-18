@@ -35,6 +35,7 @@ constexpr int kEventMinGap = 15;               // frames between two peaks of th
 constexpr float kTurnMinDeg = 60.0f;           // facing change
 constexpr int kTurnWindow = 45;                // frames: 1.5 s
 constexpr float kHoldSpeedRatio = 0.10f;       // below this x the median speed
+constexpr float kTeleportRatio = 0.5f;         // centre travel per frame above this x height = a teleport
 constexpr int kHoldMinFrames = 30;             // 1 s
 constexpr int kEnergyWindow = 15;              // frames
 constexpr int kFormationWindow = 30;           // frames
@@ -204,6 +205,214 @@ std::vector<std::vector<DirectX::XMFLOAT3>> App::StudioSampleBones(studio::Studi
         StudioUpdateModel(m, ctx_.FrameNumber(), (float)(d.time * kMmdFps), 0.0f, true);
     }
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Cached beat analysis (shared with the lighting tools)
+// ---------------------------------------------------------------------------
+
+const BeatAnalysis* App::StudioBeats(std::string& error) {
+    if (!studio_) {
+        error = "Studio is not active";
+        return nullptr;
+    }
+    StudioDoc& d = *studio_;
+    if (!d.hasAudio || d.audioPath.empty()) {
+        error = "The project has no audio";
+        return nullptr;
+    }
+    std::string key = PathToUtf8(d.audioPath);
+    std::error_code ec;
+    const auto writeTime = std::filesystem::last_write_time(d.audioPath, ec);
+    key += "|";
+    key += ec ? std::string("0") : std::to_string((long long)writeTime.time_since_epoch().count());
+    if (!studioBeats_ || studioBeatsKey_ != key) {
+        studioBeats_ = std::make_shared<BeatAnalysis>(AnalyzeBeats(d.audioPath));
+        studioBeatsKey_ = key;
+    }
+    if (!studioBeats_->ok) {
+        error = studioBeats_->error.empty() ? "Audio analysis failed" : studioBeats_->error;
+        return nullptr;
+    }
+    return studioBeats_.get();
+}
+
+// ---------------------------------------------------------------------------
+// Framing check (studio_frame_check's per-frame body, also used by studio_camera_solve)
+// ---------------------------------------------------------------------------
+
+nlohmann::json App::McpFrameCheck(int frame, const CameraPose& pose) {
+    StudioDoc& d = *studio_;
+    DirectX::XMFLOAT4X4 view;
+    DirectX::XMFLOAT3 eye;
+    CameraMotion::ToView(pose, &view, &eye);
+    const float aspect = d.AspectRatio();
+    const DirectX::XMMATRIX vp = DirectX::XMMatrixMultiply(
+        DirectX::XMLoadFloat4x4(&view),
+        DirectX::XMMatrixPerspectiveFovLH(DirectX::XMConvertToRadians(pose.fovDeg), aspect, 0.1f, 10000.0f));
+
+    std::vector<int> chars;
+    for (size_t i = 0; i < d.models.size(); ++i)
+        if (d.models[i]->kind == ModelKind::Character && d.models[i]->visible &&
+            d.models[i]->inst && d.models[i]->pmx)
+            chars.push_back((int)i);
+
+    const std::vector<std::string> pointNames = {
+        "\xE9\xA0\xAD", "\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xBC", "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB",
+        "\xE5\xB7\xA6\xE6\x89\x8B\xE9\xA6\x96", "\xE5\x8F\xB3\xE6\x89\x8B\xE9\xA6\x96", "\xE5\xB7\xA6\xE8\xB6\xB3\xE9\xA6\x96",
+        "\xE5\x8F\xB3\xE8\xB6\xB3\xE9\xA6\x96"};
+    const std::vector<std::string> pointLabels = {"head", "center", "upper_body", "left_hand", "right_hand",
+                                                  "left_foot", "right_foot"};
+    nlohmann::json frameJson;
+    frameJson["frame"] = frame;
+    frameJson["eye"] = Vec3(eye);
+    frameJson["fov_deg"] = Round3(pose.fovDeg);
+    frameJson["aspect"] = Round3(aspect);
+
+    nlohmann::json charsJson = nlohmann::json::array();
+    float mainHeight = 0.0f;
+    for (int ci : chars) {
+        StudioModel& m = *d.models[(size_t)ci];
+
+        // height at the current frame (used for the head-top point)
+        const int headBone = m.pmx->FindBone("\xE9\xA0\xAD");
+        const int footL = m.pmx->FindBone("\xE5\xB7\xA6\xE8\xB6\xB3\xE9\xA6\x96");
+        const int footR = m.pmx->FindBone("\xE5\x8F\xB3\xE8\xB6\xB3\xE9\xA6\x96");
+        float height = 1.0f;
+        {
+            float lo = 0, hi = 0;
+            bool any = false;
+            for (size_t b = 0; b < m.pmx->bones.size(); ++b) {
+                const float y = m.inst->BoneWorldPosition((int)b).y;
+                if (!any) { lo = hi = y; any = true; }
+                else { lo = std::min(lo, y); hi = std::max(hi, y); }
+            }
+            height = hi - lo;
+            if (headBone >= 0 && (footL >= 0 || footR >= 0)) {
+                float feet = 1e30f;
+                if (footL >= 0) feet = std::min(feet, m.inst->BoneWorldPosition(footL).y);
+                if (footR >= 0) feet = std::min(feet, m.inst->BoneWorldPosition(footR).y);
+                height = m.inst->BoneWorldPosition(headBone).y - feet;
+            }
+            if (height <= 1e-3f) height = 1.0f;
+        }
+
+        std::vector<int> boneIdx;
+        std::vector<int> slots(pointNames.size(), -1);
+        for (size_t k = 0; k < pointNames.size(); ++k) {
+            const int b = m.pmx->FindBone(pointNames[k]);
+            if (b >= 0) {
+                slots[k] = (int)boneIdx.size();
+                boneIdx.push_back(b);
+            }
+        }
+        std::vector<float> yaw;
+        const auto pos = StudioSampleBones(m, {frame}, boneIdx, &yaw);
+
+        struct ScreenPoint {
+            std::string label;
+            DirectX::XMFLOAT3 world;
+            DirectX::XMFLOAT2 screen;
+            bool inside = false;
+        };
+        std::vector<ScreenPoint> points;
+        for (size_t k = 0; k < pointNames.size(); ++k) {
+            if (slots[k] < 0 || pos.empty()) continue;
+            ScreenPoint sp;
+            sp.label = pointLabels[k];
+            sp.world = pos[0][(size_t)slots[k]];
+            points.push_back(sp);
+        }
+        if (headBone >= 0 && !pos.empty()) {
+            ScreenPoint sp;
+            sp.label = "head_top";
+            sp.world = pos[0][(size_t)slots[0]];
+            sp.world.y += 0.08f * height;
+            points.push_back(sp);
+        }
+        if (points.empty()) continue;
+
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+        int inside = 0, behind = 0;
+        nlohmann::json cut = nlohmann::json::array();
+        for (ScreenPoint& sp : points) {
+            // a point at or behind the eye plane projects mirrored: it is cut and stays out of the bbox
+            const float viewZ = DirectX::XMVectorGetZ(
+                DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&sp.world), DirectX::XMLoadFloat4x4(&view)));
+            if (viewZ <= 0.1f) {
+                ++behind;
+                cut.push_back(sp.label);
+                continue;
+            }
+            DirectX::XMVECTOR ndc = DirectX::XMVector3TransformCoord(
+                DirectX::XMLoadFloat3(&sp.world), vp);
+            DirectX::XMFLOAT3 n;
+            DirectX::XMStoreFloat3(&n, ndc);
+            sp.screen = {n.x * 0.5f + 0.5f, 0.5f - n.y * 0.5f};
+            sp.inside = sp.screen.x >= 0.0f && sp.screen.x <= 1.0f && sp.screen.y >= 0.0f &&
+                        sp.screen.y <= 1.0f && n.z >= 0.0f && n.z <= 1.0f;
+            if (sp.inside) ++inside;
+            else cut.push_back(sp.label);
+            x0 = std::min(x0, sp.screen.x);
+            y0 = std::min(y0, sp.screen.y);
+            x1 = std::max(x1, sp.screen.x);
+            y1 = std::max(y1, sp.screen.y);
+        }
+        if (behind == (int)points.size()) {  // the whole character is behind the camera
+            charsJson.push_back({{"model", ci}, {"uid", m.uid}, {"name", m.name}, {"behind_camera", true},
+                                 {"on_screen", 0.0}, {"head_in_frame", false}, {"cut", cut}, {"screen_height", 0.0}});
+            continue;
+        }
+
+        DirectX::XMFLOAT2 center{0.5f, 0.5f};
+        DirectX::XMFLOAT3 centerWorld{0, 0, 0};
+        if (slots[1] >= 0 && !pos.empty()) {
+            centerWorld = pos[0][(size_t)slots[1]];
+            DirectX::XMVECTOR ndc = DirectX::XMVector3TransformCoord(
+                DirectX::XMLoadFloat3(&centerWorld), vp);
+            DirectX::XMFLOAT3 n;
+            DirectX::XMStoreFloat3(&n, ndc);
+            center = {n.x * 0.5f + 0.5f, 0.5f - n.y * 0.5f};
+        } else {
+            center = {(x0 + x1) * 0.5f, (y0 + y1) * 0.5f};
+        }
+
+        bool headIn = false;
+        for (const ScreenPoint& sp : points)
+            if (sp.label == "head" && sp.inside) headIn = true;
+
+        const float dx = eye.x - centerWorld.x, dy = eye.y - centerWorld.y, dz = eye.z - centerWorld.z;
+        const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        float facing = 0.0f;
+        if (distance > 1e-6f) {
+            const float yawRad = DirectX::XMConvertToRadians(yaw.empty() ? 0.0f : yaw[0]);
+            const DirectX::XMFLOAT3 fwd{std::sin(yawRad), 0.0f, -std::cos(yawRad)};
+            const float dot = std::clamp((fwd.x * dx + fwd.y * dy + fwd.z * dz) / distance, -1.0f, 1.0f);
+            facing = DirectX::XMConvertToDegrees(std::acos(dot));
+        }
+
+        const float screenHeight = y1 - y0;
+        mainHeight = std::max(mainHeight, screenHeight);
+        charsJson.push_back({{"model", ci},
+                             {"uid", m.uid},
+                             {"name", m.name},
+                             {"bbox", nlohmann::json::array({Round3(x0), Round3(y0), Round3(x1), Round3(y1)})},
+                             {"on_screen", Round3(points.empty() ? 0.0 : (double)inside / (double)points.size())},
+                             {"head_in_frame", headIn},
+                             {"cut", cut},
+                             {"screen_height", Round3(screenHeight)},
+                             {"center", nlohmann::json::array({Round3(center.x), Round3(center.y)})},
+                             {"distance", Round3(distance)},
+                             {"facing_camera_deg", Round3(facing)}});
+    }
+    frameJson["characters"] = charsJson;
+    const char* shot = "wide";
+    if (mainHeight > 1.6f) shot = "extreme_close";
+    else if (mainHeight > 1.0f) shot = "close";
+    else if (mainHeight > 0.55f) shot = "medium";
+    else if (mainHeight > 0.3f) shot = "full";
+    frameJson["shot_size"] = shot;
+    return frameJson;
 }
 
 // ---------------------------------------------------------------------------
@@ -654,9 +863,24 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
             }
 
             // speeds (world units per frame), summed over the tracked bones
+            // A centre jump of more than half the body height per frame is a teleport (the dance re-places the
+            // performer between scenes), not movement: it is reported and left out of speeds / energy / travel speed.
             std::vector<float> speed(n, 0.0f);
+            std::vector<char> teleport(n, 0);
+            nlohmann::json teleports = nlohmann::json::array();
             for (size_t i = 1; i < n; ++i) {
                 const float df = (float)std::max(1, frames[i] - frames[i - 1]);
+                if (centerSlot >= 0) {
+                    const DirectX::XMFLOAT3 a = pos[i - 1][(size_t)centerSlot], c = pos[i][(size_t)centerSlot];
+                    const float jump = std::sqrt((c.x - a.x) * (c.x - a.x) + (c.y - a.y) * (c.y - a.y) +
+                                                 (c.z - a.z) * (c.z - a.z));
+                    if (jump / df > kTeleportRatio * height) {
+                        teleport[i] = 1;
+                        teleports.push_back(frames[i]);
+                        speed[i] = speed[i - 1];
+                        continue;
+                    }
+                }
                 float s = 0.0f;
                 for (size_t b = 0; b < boneIdx.size(); ++b) {
                     const DirectX::XMFLOAT3 a = pos[i - 1][b], c = pos[i][b];
@@ -699,6 +923,7 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
                     const DirectX::XMFLOAT3 p = bonePos(i, centerSlot);
                     lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.z);
                     hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.z);
+                    if (teleport[i]) continue;
                     const DirectX::XMFLOAT3 q = bonePos(i - 1, centerSlot);
                     const float df = (float)std::max(1, frames[i] - frames[i - 1]);
                     maxSpeed = std::max(maxSpeed, std::sqrt((p.x - q.x) * (p.x - q.x) + (p.z - q.z) * (p.z - q.z)) /
@@ -716,7 +941,7 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
             nlohmann::json energy = nlohmann::json::array();
             {
                 std::vector<std::pair<int, float>> windows;
-                float maxEnergy = 0.0f;
+                std::vector<float> sorted;
                 for (int w = start; w <= end; w += kEnergyWindow) {
                     float sum = 0.0f;
                     int count = 0;
@@ -724,10 +949,13 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
                         if (frames[i] >= w && frames[i] < w + kEnergyWindow) { sum += speed[i]; ++count; }
                     const float e = count > 0 ? sum / (float)count : 0.0f;
                     windows.push_back({w, e});
-                    maxEnergy = std::max(maxEnergy, e);
+                    sorted.push_back(e);
                 }
+                // normalised by the 95th percentile (one wild window must not flatten the rest), clamped to 1
+                std::sort(sorted.begin(), sorted.end());
+                const float maxEnergy = sorted.empty() ? 0.0f : sorted[(size_t)((sorted.size() - 1) * 0.95f)];
                 for (const auto& [w, e] : windows) {
-                    const float norm = maxEnergy > 1e-6f ? e / maxEnergy : 0.0f;
+                    const float norm = maxEnergy > 1e-6f ? std::min(1.0f, e / maxEnergy) : 0.0f;
                     energy.push_back({{"start", w}, {"end", w + kEnergyWindow - 1}, {"energy", Round3(norm)}});
                 }
             }
@@ -737,6 +965,7 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
                                   {"name", m.name},
                                   {"height", Round3(height)},
                                   {"jumps", jumps},
+                                  {"teleports", teleports},
                                   {"crouches", crouches},
                                   {"hand_raises", handRaises},
                                   {"turns", turns},
@@ -838,159 +1067,10 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
                 d.models[i]->inst && d.models[i]->pmx)
                 chars.push_back((int)i);
 
-        const std::vector<std::string> pointNames = {
-            "\xE9\xA0\xAD", "\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xBC", "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB",
-            "\xE5\xB7\xA6\xE6\x89\x8B\xE9\xA6\x96", "\xE5\x8F\xB3\xE6\x89\x8B\xE9\xA6\x96", "\xE5\xB7\xA6\xE8\xB6\xB3\xE9\xA6\x96",
-            "\xE5\x8F\xB3\xE8\xB6\xB3\xE9\xA6\x96"};
-        const std::vector<std::string> pointLabels = {"head", "center", "upper_body", "left_hand", "right_hand",
-                                                      "left_foot", "right_foot"};
-        const float aspect = d.AspectRatio();
         nlohmann::json result = nlohmann::json::array();
         for (int frame : frames) {
             CameraPose pose = hasOverride ? overridePose : d.cameraEval->Evaluate((float)frame);
-            DirectX::XMFLOAT4X4 view;
-            DirectX::XMFLOAT3 eye;
-            CameraMotion::ToView(pose, &view, &eye);
-            const DirectX::XMMATRIX vp = DirectX::XMMatrixMultiply(
-                DirectX::XMLoadFloat4x4(&view),
-                DirectX::XMMatrixPerspectiveFovLH(DirectX::XMConvertToRadians(pose.fovDeg), aspect, 0.1f, 10000.0f));
-            nlohmann::json frameJson;
-            frameJson["frame"] = frame;
-            frameJson["eye"] = Vec3(eye);
-            frameJson["fov_deg"] = Round3(pose.fovDeg);
-            frameJson["aspect"] = Round3(aspect);
-
-            nlohmann::json charsJson = nlohmann::json::array();
-            float mainHeight = 0.0f;
-            for (int ci : chars) {
-                StudioModel& m = *d.models[(size_t)ci];
-
-                // height at the current frame (used for the head-top point)
-                const int headBone = m.pmx->FindBone("\xE9\xA0\xAD");
-                const int footL = m.pmx->FindBone("\xE5\xB7\xA6\xE8\xB6\xB3\xE9\xA6\x96");
-                const int footR = m.pmx->FindBone("\xE5\x8F\xB3\xE8\xB6\xB3\xE9\xA6\x96");
-                float height = 1.0f;
-                {
-                    float lo = 0, hi = 0;
-                    bool any = false;
-                    for (size_t b = 0; b < m.pmx->bones.size(); ++b) {
-                        const float y = m.inst->BoneWorldPosition((int)b).y;
-                        if (!any) { lo = hi = y; any = true; }
-                        else { lo = std::min(lo, y); hi = std::max(hi, y); }
-                    }
-                    height = hi - lo;
-                    if (headBone >= 0 && (footL >= 0 || footR >= 0)) {
-                        float feet = 1e30f;
-                        if (footL >= 0) feet = std::min(feet, m.inst->BoneWorldPosition(footL).y);
-                        if (footR >= 0) feet = std::min(feet, m.inst->BoneWorldPosition(footR).y);
-                        height = m.inst->BoneWorldPosition(headBone).y - feet;
-                    }
-                    if (height <= 1e-3f) height = 1.0f;
-                }
-
-                std::vector<int> boneIdx;
-                std::vector<int> slots(pointNames.size(), -1);
-                for (size_t k = 0; k < pointNames.size(); ++k) {
-                    const int b = m.pmx->FindBone(pointNames[k]);
-                    if (b >= 0) {
-                        slots[k] = (int)boneIdx.size();
-                        boneIdx.push_back(b);
-                    }
-                }
-                std::vector<float> yaw;
-                const auto pos = StudioSampleBones(m, {frame}, boneIdx, &yaw);
-
-                struct ScreenPoint {
-                    std::string label;
-                    DirectX::XMFLOAT3 world;
-                    DirectX::XMFLOAT2 screen;
-                    bool inside = false;
-                };
-                std::vector<ScreenPoint> points;
-                for (size_t k = 0; k < pointNames.size(); ++k) {
-                    if (slots[k] < 0 || pos.empty()) continue;
-                    ScreenPoint sp;
-                    sp.label = pointLabels[k];
-                    sp.world = pos[0][(size_t)slots[k]];
-                    points.push_back(sp);
-                }
-                if (headBone >= 0 && !pos.empty()) {
-                    ScreenPoint sp;
-                    sp.label = "head_top";
-                    sp.world = pos[0][(size_t)slots[0]];
-                    sp.world.y += 0.08f * height;
-                    points.push_back(sp);
-                }
-                if (points.empty()) continue;
-
-                float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
-                int inside = 0;
-                nlohmann::json cut = nlohmann::json::array();
-                for (ScreenPoint& sp : points) {
-                    DirectX::XMVECTOR ndc = DirectX::XMVector3TransformCoord(
-                        DirectX::XMLoadFloat3(&sp.world), vp);
-                    DirectX::XMFLOAT3 n;
-                    DirectX::XMStoreFloat3(&n, ndc);
-                    sp.screen = {n.x * 0.5f + 0.5f, 0.5f - n.y * 0.5f};
-                    sp.inside = sp.screen.x >= 0.0f && sp.screen.x <= 1.0f && sp.screen.y >= 0.0f &&
-                                sp.screen.y <= 1.0f && n.z >= 0.0f && n.z <= 1.0f;
-                    if (sp.inside) ++inside;
-                    else cut.push_back(sp.label);
-                    x0 = std::min(x0, sp.screen.x);
-                    y0 = std::min(y0, sp.screen.y);
-                    x1 = std::max(x1, sp.screen.x);
-                    y1 = std::max(y1, sp.screen.y);
-                }
-
-                DirectX::XMFLOAT2 center{0.5f, 0.5f};
-                DirectX::XMFLOAT3 centerWorld{0, 0, 0};
-                if (slots[1] >= 0 && !pos.empty()) {
-                    centerWorld = pos[0][(size_t)slots[1]];
-                    DirectX::XMVECTOR ndc = DirectX::XMVector3TransformCoord(
-                        DirectX::XMLoadFloat3(&centerWorld), vp);
-                    DirectX::XMFLOAT3 n;
-                    DirectX::XMStoreFloat3(&n, ndc);
-                    center = {n.x * 0.5f + 0.5f, 0.5f - n.y * 0.5f};
-                } else {
-                    center = {(x0 + x1) * 0.5f, (y0 + y1) * 0.5f};
-                }
-
-                bool headIn = false;
-                for (const ScreenPoint& sp : points)
-                    if (sp.label == "head" && sp.inside) headIn = true;
-
-                const float dx = eye.x - centerWorld.x, dy = eye.y - centerWorld.y, dz = eye.z - centerWorld.z;
-                const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-                float facing = 0.0f;
-                if (distance > 1e-6f) {
-                    const float yawRad = DirectX::XMConvertToRadians(yaw.empty() ? 0.0f : yaw[0]);
-                    const DirectX::XMFLOAT3 fwd{std::sin(yawRad), 0.0f, -std::cos(yawRad)};
-                    const float dot = std::clamp((fwd.x * dx + fwd.y * dy + fwd.z * dz) / distance, -1.0f, 1.0f);
-                    facing = DirectX::XMConvertToDegrees(std::acos(dot));
-                }
-
-                const float screenHeight = y1 - y0;
-                mainHeight = std::max(mainHeight, screenHeight);
-                charsJson.push_back({{"model", ci},
-                                     {"uid", m.uid},
-                                     {"name", m.name},
-                                     {"bbox", nlohmann::json::array({Round3(x0), Round3(y0), Round3(x1), Round3(y1)})},
-                                     {"on_screen", Round3(points.empty() ? 0.0 : (double)inside / (double)points.size())},
-                                     {"head_in_frame", headIn},
-                                     {"cut", cut},
-                                     {"screen_height", Round3(screenHeight)},
-                                     {"center", nlohmann::json::array({Round3(center.x), Round3(center.y)})},
-                                     {"distance", Round3(distance)},
-                                     {"facing_camera_deg", Round3(facing)}});
-            }
-            frameJson["characters"] = charsJson;
-            const char* shot = "wide";
-            if (mainHeight > 1.6f) shot = "extreme_close";
-            else if (mainHeight > 1.0f) shot = "close";
-            else if (mainHeight > 0.55f) shot = "medium";
-            else if (mainHeight > 0.3f) shot = "full";
-            frameJson["shot_size"] = shot;
-            result.push_back(std::move(frameJson));
+            result.push_back(McpFrameCheck(frame, pose));
         }
         promise->Resolve({{"frames", result}});
         return true;
@@ -998,24 +1078,13 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
 
     // ---- studio_audio_analysis --------------------------------------------
     if (tool == "studio_audio_analysis") {
-        if (!d.hasAudio || d.audioPath.empty()) {
-            promise->Reject("The project has no audio");
+        std::string beatsError;
+        const BeatAnalysis* analysis = StudioBeats(beatsError);
+        if (!analysis) {
+            promise->Reject(beatsError);
             return true;
         }
-        std::string key = PathToUtf8(d.audioPath);
-        std::error_code ec;
-        const auto writeTime = std::filesystem::last_write_time(d.audioPath, ec);
-        key += "|";
-        key += ec ? std::string("0") : std::to_string((long long)writeTime.time_since_epoch().count());
-        if (!studioBeats_ || studioBeatsKey_ != key) {
-            studioBeats_ = std::make_shared<BeatAnalysis>(AnalyzeBeats(d.audioPath));
-            studioBeatsKey_ = key;
-        }
-        const BeatAnalysis& a = *studioBeats_;
-        if (!a.ok) {
-            promise->Reject(a.error.empty() ? "Audio analysis failed" : a.error);
-            return true;
-        }
+        const BeatAnalysis& a = *analysis;
 
         int start = args.value("start", INT_MIN);
         int end = args.value("end", INT_MAX);

@@ -225,6 +225,71 @@ means `linear`. Camera mapping: `rotation.x = -pitch`, `rotation.y = yaw`, `rota
   `[start, end]`, one undo step.
   Example: `{"name": "studio_delete_keys", "arguments": {"target": "camera", "start": 0, "end": 30}}`
 
+### AI lighting tools (rig builder + music cues)
+
+Two tools let an AI lighting director place a rig and key it on the beat grid. Colours are linear RGB (`0..1+`),
+angles are degrees, times / frame values are timeline frames at 30 fps, and every write is one undo step named
+`AI: <tool>`.
+
+- `studio_light_rig` `{rig, count?, subject?, radius?, height?, color? | palette?, intensity?, cone_deg?, size?, shadow?, name_prefix?, replace?}`.
+  `rig`: `key_fill_rim` (key spot 35 degrees to one side, soft fill area on the other, rim spot behind-above) |
+  `front_wash` (default 3 area lights in an arc in front) | `top_spots` (default 6 spots above / in front, `aim`
+  `subject` or `down`) | `side_bars` (two columns of `count` point lights, default 4) | `back_beams` (default 4
+  sway spots behind, phases spread). `subject` is the character model index (default: the first character); its
+  centre / height are sampled at the current frame and positions scale with its height (`1.0` height unit = the
+  character's height). `radius` / `height` are in character heights. A `palette` is cycled per light. `shadow` is
+  `nocast|hard|soft` (default: key light hard, others nocast). `replace` deletes the lights a previous rig call
+  with the same `name_prefix` created. Never touches the sun / ambient. Answers
+  `lights: [{index, uid, name, kind, position, aim}]` and `undo`.
+  Example: `{"name": "studio_light_rig", "arguments": {"rig": "key_fill_rim", "subject": 0, "palette": [[1, 0.9, 0.8], [0.4, 0.6, 1], [1, 0.3, 0.5]], "cone_deg": 24, "replace": true}}`
+- `studio_light_cues` `{cues: [cue...]}`. Each cue: `lights` (indices, or `spots` / `points` / `areas` / `all` =
+  every non-sun non-ambient light), `start` / `end` frames, `pattern`, `timing` (`beat` default, `half`,
+  `downbeat`, `bar`, `onset`, `section`), `every` (Nth event, default 1), `offset` (event phase shift),
+  `min_strength` (onset, default 0.5), `base` / `peak` intensity (default: current intensity x0.3 / x1.0),
+  `decay` frames (default 0.6 beat), `colors`, `aim_points` / `aim_targets` (`head`, `center`, `left`, `right`,
+  `audience`), `from` / `to` (fade colours), `mode` `replace_range` (default) / `merge`. Patterns: `pulse`,
+  `chase`, `alternate`, `strobe`, `sweep`, `color_cycle`, `breathe`, `fade`, `section_levels`, `blackout`. Key
+  values the pattern does not drive keep the light's sampled value at that frame. Events are rounded to integer
+  frames and duplicates dropped; a timing that finds no events in range rejects the call. All cues are computed
+  and validated before writing (max 50000 keys). Answers `cues: [{pattern, lights, events, keys_written}]`,
+  `undo` and `bpm`.
+  Example: `{"name": "studio_light_cues", "arguments": {"cues": [{"lights": "spots", "start": 0, "end": 900, "pattern": "pulse", "timing": "beat", "peak": 4}, {"lights": [2, 3], "start": 900, "end": 1800, "pattern": "sweep", "timing": "bar", "aim_targets": ["left", "center", "right"]}]}}`
+
+### AI camera direction (framing solver + shot generator)
+
+An AI director decides WHAT (shot size, angle, move, timing); these tools compute WHERE.
+
+- `studio_camera_solve` `{frame, subject?, shot? | fill?, angle?, fov_deg?, screen?, lead?}` → `{camera, check}`.
+  `subject`: `{models: [index...] (default the first visible character), focus: "face"|"upper"|"body"}`. Shot sizes are
+  fractions of body height: `ecu` 0.10 (around the eyes), `cu` 0.22, `mcu` 0.32, `ms` 0.50, `cowboy` 0.70,
+  `full` 1.15, `wide` 2.20; `fill` requests any subject span as a fraction of the frame height instead. Several models
+  are fitted as one union in width and height (the project aspect); `shot` then only adds margin for full/wide.
+  `angle`: `yaw_deg` is relative to the subject's facing (0 = in front, looking at the face), `+90` puts the camera at
+  the subject's LEFT (+X while the subject faces -Z), negative is the right; `absolute: true` uses a world yaw like
+  `studio_set_camera`. `pitch_deg` + is above looking down; `roll_deg` is a dutch angle. `screen` is the normalised
+  anchor point (y down, default x 0.5 / y 0.38 for face-led shots else 0.5) and `lead` (0..0.2) adds look room.
+  `camera` has exactly `studio_set_camera_keys`' key fields (`target`, `yaw_deg`, `pitch_deg`, `roll_deg`, `dist`,
+  `fov_deg`, `eye`); `check` is one `studio_frame_check` frame. The distance is iterated so the projected span matches
+  (single-model ms/full/cu: `screen_height` within 15 % of the request, `head_in_frame` true). Read-only.
+  Example: `{"name": "studio_camera_solve", "arguments": {"frame": 120, "subject": {"models": [0]}, "shot": "ms", "angle": {"yaw_deg": 20, "pitch_deg": 5}}}`
+- `studio_camera_shots` `{shots, mode?, dry_run?}` → `{shots: [{start, end, keys_written, first_check, last_check}],
+  keys (dry_run only), undo}`. Each shot: `start`, `end` (inclusive), `subject`, `shot` + optional `end_shot`,
+  `angle` + optional `end_angle`, `fov_deg` + optional `end_fov_deg`, `screen` / `end_screen`, `move`, `curve`,
+  `follow` / `follow_step`, `accents` (beat frames), `accent` `{kind: push|zoom|roll, amount, attack, release}` and
+  optional `focus` `{aperture}` (a DoF key on the subject's head via `studiofocus`). Every shot writes keys only
+  inside its range, in ONE undo step (`AI: studio_camera_shots`). Overlapping shots are rejected; consecutive shots
+  with `end + 1 == next start` form a HARD CUT (MMD: keys on adjacent frames). `curve` is the easing between this
+  shot's keys (preset name, default `ease_in_out`). `follow` re-solves the framing on the moving subject every
+  `follow_step` frames (default 10). Accents are skipped when closer than `attack + release` to each other or to the
+  shot ends. Yaw is unwrapped: consecutive keys never jump more than 180 degrees.
+  Moves: `static`, `dolly_in` / `dolly_out` (dist, `end_shot` or one size tighter/wider), `zoom_in` / `zoom_out`
+  (fov, position fixed), `dolly_zoom` (dist and fov together, vertigo), `crane_up` / `crane_down` (pitch and target
+  height, `amount` degrees, default 25), `truck_left` / `truck_right` (slide along the camera right axis, `amount`
+  world units, default 0.6 x subject height, heading fixed), `arc_left` / `arc_right` (orbit by `amount` degrees,
+  default 35, keys every ~15 frames), `follow` (static framing with follow on), `push_accent` (static driven by
+  accents).
+  Example: `{"name": "studio_camera_shots", "arguments": {"mode": "replace_range", "shots": [{"start": 0, "end": 120, "subject": {"models": [0]}, "shot": "ms", "move": "arc_left", "amount": 30}, {"start": 121, "end": 240, "shot": "cu", "move": "dolly_in"}]}}`
+
 ### Input Simulation & Lifetime
 32. `ui_input`: Injects virtual UI mouse and keyboard events (`move`, `click`, `dblclick`, `down`, `up`, `wheel`, `key`, `text`, `mod`) the same commands as `--ui-script`. Events run one per frame unless they give `frame` (offset from now); clicks add their own press / release. Real mouse / keyboard input is ignored only while injected steps are pending.
 34. `ui_items`: The widgets of the last frame: `label` (visible text), `id` (the language-independent ImGui id string, e.g. `##play`), `window`, `rect` `[x, y, w, h]`. `query` matches label or id (case-insensitive substring); Korean source text also matches its translation in the current UI language, so one script drives every language. Clipped widgets and widgets covered by another window (a modal, a popup) are left out unless `include_hidden`. Besides ImGui items it lists drawn-only elements: timeline row headers (`##tlrow`) and visible keys (`##tlkey:<row>:<frame>`); shader pack cards carry `p:<id>:...` / `r:<id>:<version>`.

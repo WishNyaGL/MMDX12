@@ -225,6 +225,8 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
     if (!promise) return;
     if (ExecuteMcpKeys(tool, args, promise)) return;
     if (ExecuteMcpAnalysis(tool, args, promise)) return;
+    if (ExecuteMcpCamera(tool, args, promise)) return;
+    if (ExecuteMcpLight(tool, args, promise)) return;
 
     if (tool == "get_state") {
         nlohmann::json s;

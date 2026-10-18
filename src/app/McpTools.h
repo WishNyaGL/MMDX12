@@ -940,6 +940,47 @@ inline nlohmann::json GetMcpToolDefinitions() {
         });
 
         tools.push_back({
+            {"name", "studio_light_rig"},
+            {"description",
+             "Create a whole Studio lighting rig in ONE undo step (\"AI: studio_light_rig\"). rig: key_fill_rim "
+             "(key spot front 35 deg to one side, soft fill area other side, rim spot behind-above) | front_wash "
+             "(count area lights in an arc in front, default 3) | top_spots (count spots above/in front, default "
+             "6; aim subject (default) or down) | side_bars (two columns of count point lights left/right, default "
+             "4) | back_beams (count spots behind aimed up/forward, sway with spread phases, default 4). subject = "
+             "model index of the character (default: the first character); its centre / height come from the "
+             "current frame, and positions scale with height (1.0 height unit = the character's height). Common: "
+             "radius, height (both in character-height units), color [r,g,b] (linear RGB 0..1+) or palette "
+             "[[r,g,b]...] cycled per light, intensity, cone_deg (spot outer degrees; inner = 0.7 x outer), size "
+             "[w,h] (area), shadow nocast|hard|soft (default: key light hard, others nocast), name_prefix "
+             "(default \"AI \"), replace (delete the lights a previous rig call with the same name_prefix "
+             "created). Never touches the sun or ambient. Answers lights [{index, uid, name, kind, position, "
+             "aim}] and undo."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"rig", {{"type", "string"},
+                             {"enum", {"key_fill_rim", "front_wash", "top_spots", "side_bars", "back_beams"}}}},
+                    {"count", {{"type", "integer"}, {"minimum", 1}, {"maximum", 64}}},
+                    {"subject", {{"type", "integer"}, {"minimum", 0},
+                                 {"description", "Character model index (default: the first character)"}}},
+                    {"radius", {{"type", "number"}, {"description", "In character heights (default 1.6)"}}},
+                    {"height", {{"type", "number"}, {"description", "In character heights (default 1.6)"}}},
+                    {"color", vec3},
+                    {"palette", {{"type", "array"}, {"items", vec3}}},
+                    {"intensity", {{"type", "number"}}},
+                    {"cone_deg", {{"type", "number"}, {"minimum", 0}, {"maximum", 180}}},
+                    {"size", {{"type", "array"}, {"items", {{"type", "number"}}}, {"minItems", 2},
+                              {"maxItems", 2}}},
+                    {"shadow", {{"type", "string"}, {"enum", {"nocast", "hard", "soft"}}}},
+                    {"name_prefix", {{"type", "string"}}},
+                    {"replace", {{"type", "boolean"}}},
+                    {"aim", {{"type", "string"}, {"enum", {"subject", "down"}}}}
+                }},
+                {"required", {"rig"}}
+            }}
+        });
+
+        tools.push_back({
             {"name", "studio_get_bone_keys"},
             {"description",
              "Read a model's bone (and optionally morph) keys as JSON. model = model index. bones: optional list of "
@@ -958,6 +999,69 @@ inline nlohmann::json GetMcpToolDefinitions() {
                     {"morphs", {{"type", "boolean"}, {"description", "Also return morph keys"}}}
                 }},
                 {"required", {"model"}}
+            }}
+        });
+
+        tools.push_back({
+            {"name", "studio_light_cues"},
+            {"description",
+             "Generate keyed light animation from the song's beats / sections in ONE undo step (\"AI: "
+             "studio_light_cues\"). Every cue: lights (light indices or spots / points / areas / all = every "
+             "non-sun non-ambient light), start / end (timeline frames at 30 fps), pattern pulse | chase | "
+             "alternate | strobe | sweep | color_cycle | breathe | fade | section_levels | blackout, timing beat "
+             "(default) | half | downbeat | bar | onset | section, every (use every Nth event, default 1), offset "
+             "(event phase shift), min_strength (onset, default 0.5), base / peak intensity (default: the light's "
+             "current intensity x0.3 / x1.0), decay (frames, default 0.6 x beat), colors [[r,g,b] linear 0..1+], "
+             "aim_points [[x,y,z] world] or aim_targets [head, center, left, right, audience], from / to colour "
+             "(fade), mode replace_range (default: delete each light's keys inside [start,end] first) | merge. "
+             "Key values not driven by the pattern keep the light's sampled value at that frame. Events are "
+             "rounded to integer frames and duplicates dropped; a timing that finds no events rejects the call. "
+             "Answers cues [{pattern, lights, events, keys_written}], undo and bpm."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"cues", {
+                        {"type", "array"},
+                        {"minItems", 1},
+                        {"items", {
+                            {"type", "object"},
+                            {"properties", {
+                                {"lights", {
+                                    {"description", "Light indices, or spots / points / areas / all"},
+                                    {"oneOf", json::array({
+                                        {{"type", "array"}, {"items", {{"type", "integer"}, {"minimum", 0}}}},
+                                        {{"type", "string"}, {"enum", {"spots", "points", "areas", "all"}}}
+                                    })}
+                                }},
+                                {"start", {{"type", "integer"}, {"minimum", 0}}},
+                                {"end", {{"type", "integer"}, {"minimum", 0}}},
+                                {"pattern", {{"type", "string"},
+                                             {"enum", {"pulse", "chase", "alternate", "strobe", "sweep",
+                                                       "color_cycle", "breathe", "fade", "section_levels",
+                                                       "blackout"}}}},
+                                {"timing", {{"type", "string"},
+                                            {"enum", {"beat", "half", "downbeat", "bar", "onset", "section"}}}},
+                                {"every", {{"type", "integer"}, {"minimum", 1}}},
+                                {"offset", {{"type", "integer"}}},
+                                {"min_strength", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}},
+                                {"base", {{"type", "number"}}},
+                                {"peak", {{"type", "number"}}},
+                                {"decay", {{"type", "integer"}, {"minimum", 0}}},
+                                {"colors", {{"type", "array"}, {"items", vec3}}},
+                                {"aim_points", {{"type", "array"}, {"items", vec3}}},
+                                {"aim_targets", {{"type", "array"},
+                                                 {"items", {{"type", "string"},
+                                                            {"enum", {"head", "center", "left", "right",
+                                                                      "audience"}}}}}},
+                                {"from", vec3},
+                                {"to", vec3},
+                                {"mode", {{"type", "string"}, {"enum", {"replace_range", "merge"}}}}
+                            }},
+                            {"required", {"lights", "start", "end", "pattern"}}
+                        }}
+                    }}
+                }},
+                {"required", {"cues"}}
             }}
         });
 
@@ -1002,6 +1106,139 @@ inline nlohmann::json GetMcpToolDefinitions() {
                     {"end", {{"type", "integer"}, {"minimum", 0}}}
                 }},
                 {"required", {"target", "start", "end"}}
+            }}
+        });
+    }
+
+    // 39. studio_camera_solve / studio_camera_shots (AppMcpCamera.cpp): AI camera direction.
+    {
+        const json vec3 = {{"type", "array"}, {"items", {{"type", "number"}}}, {"minItems", 3}, {"maxItems", 3}};
+        const json vec2 = {{"type", "array"}, {"items", {{"type", "number"}}}, {"minItems", 2}, {"maxItems", 2}};
+        const json subjectSchema = {
+            {"type", "object"},
+            {"description", "What the shot is about"},
+            {"properties", {
+                {"models", {{"type", "array"}, {"items", {{"type", "integer"}}},
+                            {"description", "Model indices (studio_get_state). Default: the first visible character. Several models are fitted as one group in width and height"}}},
+                {"focus", {{"type", "string"}, {"enum", {"face", "upper", "body"}},
+                           {"description", "What the shot is built around: face (head/eyes), upper (upper body) or body (centre). Default follows the shot size (face for ecu/cu/mcu)"}}}
+            }}
+        };
+        const json angleSchema = {
+            {"type", "object"},
+            {"description", "Camera angle. yaw_deg is relative to the subject's facing (0 = in front, looking at the face); +90 puts the camera at the subject's LEFT (-X while the subject faces -Z), negative is the right. absolute: true makes yaw_deg a world yaw like studio_set_camera. pitch_deg: + is above looking down. roll_deg: dutch angle"},
+            {"properties", {
+                {"yaw_deg", {{"type", "number"}, {"description", "Relative yaw (default 0 = front); ignored with absolute"}}},
+                {"absolute", {{"type", "boolean"}, {"description", "yaw_deg is a world yaw instead of relative to the subject"}}},
+                {"pitch_deg", {{"type", "number"}, {"description", "+ = camera above looking down (default 0)"}}},
+                {"roll_deg", {{"type", "number"}, {"description", "Dutch roll in degrees (default 0)"}}}
+            }}
+        };
+        const json screenSchema = {
+            {"type", "object"},
+            {"description", "Where the subject anchor lands, normalised 0..1 with y down (default x 0.5, y 0.38 for face-led shots else 0.5)"},
+            {"properties", {
+                {"x", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}},
+                {"y", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}}
+            }}
+        };
+        const json shotEnum = json::array({"ecu", "cu", "mcu", "ms", "cowboy", "full", "wide"});
+
+        tools.push_back({
+            {"name", "studio_camera_solve"},
+            {"description",
+             "Framing solver: computes WHERE the camera goes for a requested shot, so the AI only decides WHAT. Samples "
+             "the subject bones at 'frame' (no physics, viewport restored), fits the shot size from the projected body "
+             "span (head top = head + 0.08 x height), places the anchor at 'screen' and iterates the distance until the "
+             "projected span matches. Shot sizes (fraction of body height): ecu 0.10 around the eyes, cu 0.22, mcu 0.32, "
+             "ms 0.50 (waist), cowboy 0.70, full 1.15, wide 2.20. Alternatively 'fill' = the subject span as a fraction "
+             "of the frame height. Several models: the union is fitted in BOTH width and height (project aspect); 'shot' "
+             "then only adds margin for full/wide. fov_deg default 25 (MMD stores integers; the solve compensates with "
+             "distance). Optional 'lead' (0..0.2) adds look room: the subject shifts opposite its facing. Returns "
+             "{camera: {target, yaw_deg, pitch_deg, roll_deg, dist, fov_deg, eye} - exactly studio_set_camera_keys' key "
+             "fields - and check: one studio_frame_check frame. Never writes."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"frame", {{"type", "integer"}, {"minimum", 0}, {"description", "Timeline frame (30 fps)"}}},
+                    {"subject", subjectSchema},
+                    {"shot", {{"type", "string"}, {"enum", shotEnum}, {"description", "Shot size (default ms)"}}},
+                    {"fill", {{"type", "number"}, {"description", "Subject span as a fraction of frame height (overrides shot)"}}},
+                    {"angle", angleSchema},
+                    {"fov_deg", {{"type", "number"}, {"minimum", 1}, {"maximum", 125}, {"description", "Vertical FOV (default 25)"}}},
+                    {"screen", screenSchema},
+                    {"lead", {{"type", "number"}, {"minimum", 0}, {"maximum", 0.2}, {"description", "Look-room offset in the subject's facing direction (default 0)"}}}
+                }},
+                {"required", {"frame"}}
+            }}
+        });
+
+        const json accentSchema = {
+            {"type", "object"},
+            {"description", "Beat accent inside the shot"},
+            {"properties", {
+                {"kind", {{"type", "string"}, {"enum", {"push", "zoom", "roll"}}, {"description", "push = dist, zoom = fov, roll = roll (default push)"}}},
+                {"amount", {{"type", "number"}, {"description", "push: fraction of dist (default 0.12); zoom: fov degrees (default 4); roll: degrees (default 6)"}}},
+                {"attack", {{"type", "integer"}, {"minimum", 1}, {"description", "Frames from the pre value to the peak (default 3)"}}},
+                {"release", {{"type", "integer"}, {"minimum", 1}, {"description", "Frames from the peak back to the settle (default 10)"}}}
+            }}
+        };
+        const json shotSchema = {
+            {"type", "object"},
+            {"properties", {
+                {"start", {{"type", "integer"}, {"minimum", 0}, {"description", "First frame (inclusive)"}}},
+                {"end", {{"type", "integer"}, {"minimum", 0}, {"description", "Last frame (inclusive)"}}},
+                {"subject", subjectSchema},
+                {"shot", {{"type", "string"}, {"enum", shotEnum}, {"description", "Start shot size"}}},
+                {"end_shot", {{"type", "string"}, {"enum", shotEnum}, {"description", "End shot size (dolly; default one size tighter / wider)"}}},
+                {"angle", angleSchema},
+                {"end_angle", angleSchema},
+                {"fov_deg", {{"type", "number"}, {"minimum", 1}, {"maximum", 125}}},
+                {"end_fov_deg", {{"type", "number"}, {"minimum", 1}, {"maximum", 125}}},
+                {"screen", screenSchema},
+                {"end_screen", screenSchema},
+                {"move", {{"type", "string"},
+                          {"enum", {"static", "dolly_in", "dolly_out", "zoom_in", "zoom_out", "dolly_zoom", "crane_up",
+                                    "crane_down", "truck_left", "truck_right", "arc_left", "arc_right", "follow",
+                                    "push_accent"}},
+                          {"description", "static holds the framing; dolly in/out changes dist; zoom in/out changes fov with the position fixed; dolly_zoom changes both (vertigo); crane up/down changes pitch and target height; truck left/right slides along the camera right axis (parallax, heading fixed); arc left/right orbits around the subject (amount degrees, default 35, keys every ~15 frames); follow re-solves the framing on the moving subject; push_accent is a static shot driven by accents"}}},
+                {"amount", {{"type", "number"}, {"description", "Move amount: crane degrees (default 25), truck world units (default 0.6 x height), arc degrees (default 35)"}}},
+                {"curve", {{"type", "string"}, {"description", "Easing between this shot's keys (preset name, default ease_in_out)"}}},
+                {"follow", {{"type", "boolean"}, {"description", "Re-solve the framing on the moving subject (default false)"}}},
+                {"follow_step", {{"type", "integer"}, {"minimum", 1}, {"description", "Follow key step in frames (default 10)"}}},
+                {"accents", {{"type", "array"}, {"items", {{"type", "integer"}}},
+                             {"description", "Beat frames inside the shot for accent bumps"}}},
+                {"accent", accentSchema},
+                {"focus", {{"type", "object"}, {"description", "Optional DoF focus key at start on the subject's head"},
+                           {"properties", {{"aperture", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}, {"description", "Focus aperture scale (default 1)"}}}}}}}
+            }},
+            {"required", {"start", "end"}}
+        };
+
+        tools.push_back({
+            {"name", "studio_camera_shots"},
+            {"description",
+             "Shot / sequence generator: writes motion-camera keys for a list of shots in ONE undo step (unless "
+             "dry_run). Every shot covers [start, end] inclusive and writes keys only inside its range. Overlapping "
+             "shots are rejected. Consecutive shots with end+1 == next start form a HARD CUT (MMD: keys on adjacent "
+             "frames); there is no cut flag. mode replace_range (default) deletes existing keys inside each shot first; "
+             "merge upserts. Each shot solves its start framing (same rules as studio_camera_solve), then computes the "
+             "end pose from 'move'. 'curve' is the easing between the shot's keys (preset name, default ease_in_out). "
+             "follow: true re-solves the framing every follow_step frames so a travelling dancer stays framed. accents "
+             "adds push / zoom / roll bumps at beat frames (attack into the peak with [0,64,64,127], release with "
+             "ease_out); accents closer than attack+release to each other or to the shot ends are skipped. Yaw is "
+             "unwrapped so consecutive keys never jump more than 180 degrees. focus: {aperture} writes a DoF focus key "
+             "at start targeting the subject's head (studiofocus; a separate undo step). Returns shots [{start, end, "
+             "keys_written, first_check, last_check}], 'keys' with dry_run, and 'undo'."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"shots", {{"type", "array"}, {"items", shotSchema}, {"minItems", 1}}},
+                    {"mode", {{"type", "string"}, {"enum", {"replace_range", "merge"}},
+                              {"description", "replace_range (default): delete keys inside each shot; merge: upsert only"}}},
+                    {"dry_run", {{"type", "boolean"}, {"description", "Return the keys and write nothing (default false)"}}}
+                }},
+                {"required", {"shots"}}
             }}
         });
     }

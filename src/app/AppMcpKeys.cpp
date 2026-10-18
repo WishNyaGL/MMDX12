@@ -296,6 +296,126 @@ bool ApplyLightValues(const nlohmann::json& j, LightValues& out, std::string& er
 
 } // namespace
 
+bool App::McpWriteCameraKeys(const nlohmann::json& keysJson, const std::string& mode, size_t& changed,
+                             std::string& error, bool pushUndo) {
+    changed = 0;
+    if (!studio_) {
+        error = "Studio is not active";
+        return false;
+    }
+    StudioDoc& d = *studio_;
+    if (!keysJson.is_array() || keysJson.empty()) {
+        error = "keys must be a non-empty array";
+        return false;
+    }
+    if (keysJson.size() > kMaxKeys) {
+        error = "Too many keys (max 20000)";
+        return false;
+    }
+    if (mode != "merge" && mode != "replace_range" && mode != "replace_all") {
+        error = "mode must be merge, replace_range or replace_all";
+        return false;
+    }
+
+    struct NewKey {
+        int frame = 0;
+        bool hasTarget = false, hasYaw = false, hasPitch = false, hasRoll = false, hasDist = false;
+        bool hasFov = false, hasPerspective = false;
+        DirectX::XMFLOAT3 target{};
+        float yaw = 0, pitch = 0, roll = 0, dist = 0, fov = 0;
+        bool perspective = true;
+        nlohmann::json curve;
+    };
+    std::vector<NewKey> parsed;
+    parsed.reserve(keysJson.size());
+    for (const nlohmann::json& kj : keysJson) {
+        if (!kj.is_object()) { error = "every key must be an object"; return false; }
+        NewKey k;
+        if (!ReadFrame(kj.contains("frame") ? kj["frame"] : nlohmann::json(), k.frame, error)) return false;
+        if (kj.contains("target")) {
+            if (!ReadVec3(kj["target"], k.target)) { error = "target must be [x,y,z]"; return false; }
+            k.hasTarget = true;
+        }
+        auto number = [&](const char* name, float& out, bool& has) {
+            if (!kj.contains(name)) return true;
+            if (!kj[name].is_number()) {
+                error = std::string(name) + " must be a number";
+                return false;
+            }
+            out = kj[name].get<float>();
+            has = true;
+            return true;
+        };
+        if (!number("yaw_deg", k.yaw, k.hasYaw) || !number("pitch_deg", k.pitch, k.hasPitch) ||
+            !number("roll_deg", k.roll, k.hasRoll) || !number("dist", k.dist, k.hasDist) ||
+            !number("fov_deg", k.fov, k.hasFov)) {
+            return false;
+        }
+        if (kj.contains("perspective")) {
+            if (!ReadBool(kj["perspective"], k.perspective)) {
+                error = "perspective must be a boolean";
+                return false;
+            }
+            k.hasPerspective = true;
+        }
+        if (kj.contains("curve")) {
+            uint8_t tmp[24];
+            FillLinearCameraInterp(tmp);
+            if (!ApplyCameraCurve(kj["curve"], tmp, error)) return false;
+            k.curve = kj["curve"];
+        }
+        parsed.push_back(std::move(k));
+    }
+
+    // validate replace_range before editing
+    int minFrame = std::numeric_limits<int>::max(), maxFrame = std::numeric_limits<int>::min();
+    for (const NewKey& k : parsed) {
+        minFrame = std::min(minFrame, k.frame);
+        maxFrame = std::max(maxFrame, k.frame);
+    }
+
+    std::vector<TrackState> before{CaptureTrack(d, -1, RowKind::Camera, "")};
+    const std::vector<CameraKf> original = d.camera.camera;  // missing fields evaluate against the pre-edit track
+    if (mode == "replace_all") {
+        d.camera.camera.clear();
+    } else if (mode == "replace_range") {
+        d.camera.camera.erase(std::remove_if(d.camera.camera.begin(), d.camera.camera.end(),
+                                             [&](const CameraKf& k) {
+                                                 return k.frame >= minFrame && k.frame <= maxFrame;
+                                             }),
+                              d.camera.camera.end());
+    }
+
+    for (const NewKey& nk : parsed) {
+        CameraKf base;
+        if (!original.empty()) base = SampleCamera(original, nk.frame);
+        else FillLinearCameraInterp(base.interp);
+        CameraKf k = base;
+        k.frame = nk.frame;
+        if (nk.hasTarget) k.target = nk.target;
+        if (nk.hasYaw || nk.hasPitch || nk.hasRoll) {
+            const float pitch = nk.hasPitch ? nk.pitch : -DirectX::XMConvertToDegrees(base.rotation.x);
+            const float yaw = nk.hasYaw ? nk.yaw : DirectX::XMConvertToDegrees(base.rotation.y);
+            const float roll = nk.hasRoll ? nk.roll : DirectX::XMConvertToDegrees(base.rotation.z);
+            k.rotation.x = -DirectX::XMConvertToRadians(pitch);
+            k.rotation.y = DirectX::XMConvertToRadians(yaw);
+            k.rotation.z = DirectX::XMConvertToRadians(roll);
+        }
+        if (nk.hasDist) k.distance = -nk.dist;
+        if (nk.hasFov) k.fovDeg = (uint32_t)std::clamp((int)std::lround(nk.fov), 1, 125);
+        if (nk.hasPerspective) k.perspective = nk.perspective;
+        if (!ApplyCameraCurve(nk.curve, k.interp, error)) return false;
+        UpsertKey(d.camera.camera, k);
+        ++changed;
+    }
+
+    if (changed > 0) {
+        d.useMotionCamera = true;
+        if (pushUndo) StudioPushTrackEdit("AI: studio_set_camera_keys", before);
+    }
+    return true;
+}
+
 bool App::ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, std::shared_ptr<McpPromise> promise) {
     const bool cameraGet = tool == "studio_get_camera_keys";
     const bool cameraSet = tool == "studio_set_camera_keys";
@@ -364,107 +484,10 @@ bool App::ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, st
         }
         std::string mode, error;
         if (!ParseMode(args, mode, error)) { promise->Reject(error); return true; }
-
-        struct NewKey {
-            int frame = 0;
-            bool hasTarget = false, hasYaw = false, hasPitch = false, hasRoll = false, hasDist = false;
-            bool hasFov = false, hasPerspective = false;
-            DirectX::XMFLOAT3 target{};
-            float yaw = 0, pitch = 0, roll = 0, dist = 0, fov = 0;
-            bool perspective = true;
-            nlohmann::json curve;
-        };
-        std::vector<NewKey> parsed;
-        parsed.reserve(keysJson->size());
-        for (const nlohmann::json& kj : *keysJson) {
-            if (!kj.is_object()) { promise->Reject("every key must be an object"); return true; }
-            NewKey k;
-            if (!ReadFrame(kj.contains("frame") ? kj["frame"] : nlohmann::json(), k.frame, error)) {
-                promise->Reject(error);
-                return true;
-            }
-            if (kj.contains("target")) {
-                if (!ReadVec3(kj["target"], k.target)) { promise->Reject("target must be [x,y,z]"); return true; }
-                k.hasTarget = true;
-            }
-            auto number = [&](const char* name, float& out, bool& has) {
-                if (!kj.contains(name)) return true;
-                if (!kj[name].is_number()) {
-                    error = std::string(name) + " must be a number";
-                    return false;
-                }
-                out = kj[name].get<float>();
-                has = true;
-                return true;
-            };
-            if (!number("yaw_deg", k.yaw, k.hasYaw) || !number("pitch_deg", k.pitch, k.hasPitch) ||
-                !number("roll_deg", k.roll, k.hasRoll) || !number("dist", k.dist, k.hasDist) ||
-                !number("fov_deg", k.fov, k.hasFov)) {
-                promise->Reject(error);
-                return true;
-            }
-            if (kj.contains("perspective")) {
-                if (!ReadBool(kj["perspective"], k.perspective)) {
-                    promise->Reject("perspective must be a boolean");
-                    return true;
-                }
-                k.hasPerspective = true;
-            }
-            if (kj.contains("curve")) {
-                uint8_t tmp[24];
-                FillLinearCameraInterp(tmp);
-                if (!ApplyCameraCurve(kj["curve"], tmp, error)) { promise->Reject(error); return true; }
-                k.curve = kj["curve"];
-            }
-            parsed.push_back(std::move(k));
-        }
-
-        // validate replace_range before editing
-        int minFrame = std::numeric_limits<int>::max(), maxFrame = std::numeric_limits<int>::min();
-        for (const NewKey& k : parsed) {
-            minFrame = std::min(minFrame, k.frame);
-            maxFrame = std::max(maxFrame, k.frame);
-        }
-
-        std::vector<TrackState> before{CaptureTrack(d, -1, RowKind::Camera, "")};
-        const std::vector<CameraKf> original = d.camera.camera;  // missing fields evaluate against the pre-edit track
-        if (mode == "replace_all") {
-            d.camera.camera.clear();
-        } else if (mode == "replace_range") {
-            d.camera.camera.erase(std::remove_if(d.camera.camera.begin(), d.camera.camera.end(),
-                                                 [&](const CameraKf& k) {
-                                                     return k.frame >= minFrame && k.frame <= maxFrame;
-                                                 }),
-                                  d.camera.camera.end());
-        }
-
         size_t changed = 0;
-        for (const NewKey& nk : parsed) {
-            CameraKf base;
-            if (!original.empty()) base = SampleCamera(original, nk.frame);
-            else FillLinearCameraInterp(base.interp);
-            CameraKf k = base;
-            k.frame = nk.frame;
-            if (nk.hasTarget) k.target = nk.target;
-            if (nk.hasYaw || nk.hasPitch || nk.hasRoll) {
-                const float pitch = nk.hasPitch ? nk.pitch : -DirectX::XMConvertToDegrees(base.rotation.x);
-                const float yaw = nk.hasYaw ? nk.yaw : DirectX::XMConvertToDegrees(base.rotation.y);
-                const float roll = nk.hasRoll ? nk.roll : DirectX::XMConvertToDegrees(base.rotation.z);
-                k.rotation.x = -DirectX::XMConvertToRadians(pitch);
-                k.rotation.y = DirectX::XMConvertToRadians(yaw);
-                k.rotation.z = DirectX::XMConvertToRadians(roll);
-            }
-            if (nk.hasDist) k.distance = -nk.dist;
-            if (nk.hasFov) k.fovDeg = (uint32_t)std::clamp((int)std::lround(nk.fov), 1, 125);
-            if (nk.hasPerspective) k.perspective = nk.perspective;
-            if (!ApplyCameraCurve(nk.curve, k.interp, error)) { promise->Reject(error); return true; }
-            UpsertKey(d.camera.camera, k);
-            ++changed;
-        }
-
-        if (changed > 0) {
-            d.useMotionCamera = true;
-            StudioPushTrackEdit("AI: studio_set_camera_keys", before);
+        if (!McpWriteCameraKeys(*keysJson, mode, changed, error)) {
+            promise->Reject(error);
+            return true;
         }
         promise->Resolve({{"changed_keys", changed},
                           {"undo", d.history.CanUndo() ? d.history.UndoName() : std::string()}});
