@@ -139,7 +139,10 @@ const ShaderPack* InstalledVersionOf(const std::string& id) {
 
 // "화면 효과" / "표면 셰이더" / "룩" type badge text for a card.
 const char* TypeLabel(PackType t) {
-    return t == PackType::Effect ? Tr("화면 효과") : t == PackType::Look ? Tr("룩") : Tr("표면 셰이더");
+    if (t == PackType::Effect) return Tr("화면 효과");
+    if (t == PackType::Look) return Tr("룩");
+    if (t == PackType::World) return Tr("월드 이펙트");
+    return Tr("표면 셰이더");
 }
 
 } // namespace
@@ -285,10 +288,10 @@ void App::DrawShaders() {
 
         // type filter: Segmented (전체 / 표면 셰이더 / 화면 효과 / 룩) — the installed / online tabs only
         if (shaderTab_ < 2) {
-            const char* typeLabels[] = {Tr("전체"), Tr("표면 셰이더"), Tr("화면 효과"), Tr("룩")};
-            int curType = std::clamp(settings_.shaderType[shaderTab_], 0, 3);
+            const char* typeLabels[] = {Tr("전체"), Tr("표면 셰이더"), Tr("화면 효과"), Tr("룩"), Tr("월드 이펙트")};
+            int curType = std::clamp(settings_.shaderType[shaderTab_], 0, 4);
             ImGui::SetCursorScreenPos(ImVec2(curX, top + Dp(2.0f)));
-            if (Segmented("##packtype", typeLabels, 4, &curType, 0.0f, 36.0f)) {
+            if (Segmented("##packtype", typeLabels, 5, &curType, 0.0f, 36.0f)) {
                 settings_.shaderType[shaderTab_] = curType;
                 settings_.Save(settingsPath_);
             }
@@ -324,14 +327,15 @@ void App::DrawShaders() {
 
         // Compute match count for result count and search field layout
         const std::string needle = ToLowerAscii(shaderFilter_);
-        const int curType0 = std::clamp(settings_.shaderType[0], 0, 3);
-        const int curType1 = std::clamp(settings_.shaderType[1], 0, 3);
+        const int curType0 = std::clamp(settings_.shaderType[0], 0, 4);
+        const int curType1 = std::clamp(settings_.shaderType[1], 0, 4);
         int matchCount = 0;
         if (shaderTab_ == 0) {
             for (const ShaderPack& pk : reg.Packs()) {
                 if (curType0 == 1 && pk.type != PackType::Surface) continue;
                 if (curType0 == 2 && pk.type != PackType::Effect) continue;
                 if (curType0 == 3 && pk.type != PackType::Look) continue;
+                if (curType0 == 4 && pk.type != PackType::World) continue;
                 if (!PackMatches(needle, pk.id, pk.name, pk.authors, pk.tags)) continue;
                 ++matchCount;
             }
@@ -340,6 +344,7 @@ void App::DrawShaders() {
                 if (curType1 == 1 && rp.type != "surface") continue;
                 if (curType1 == 2 && rp.type != "effect") continue;
                 if (curType1 == 3 && rp.type != "look") continue;
+                if (curType1 == 4 && rp.type != "world") continue;
                 if (!PackMatches(needle, rp.id, rp.name, rp.authors, rp.tags)) continue;
                 ++matchCount;
             }
@@ -384,7 +389,7 @@ void App::DrawShaders() {
         const float cw = (availW - cgap * (cols - 1)) / cols;
         const float imgH = cw * 9.0f / 16.0f, chH = imgH + Dp(92.0f);
         const std::string needle = ToLowerAscii(shaderFilter_);
-        const int curType = shaderTab_ < 2 ? std::clamp(settings_.shaderType[shaderTab_], 0, 2) : 0;
+        const int curType = shaderTab_ < 2 ? std::clamp(settings_.shaderType[shaderTab_], 0, 4) : 0;
         float contentH = 0;
         int n = 0;
 
@@ -445,6 +450,7 @@ void App::DrawShaders() {
                 if (curType == 1 && pk.type != PackType::Surface) continue;
                 if (curType == 2 && pk.type != PackType::Effect) continue;
                 if (curType == 3 && pk.type != PackType::Look) continue;
+                if (curType == 4 && pk.type != PackType::World) continue;
                 if (!PackMatches(needle, pk.id, pk.name, pk.authors, pk.tags)) continue;
                 installedList.push_back(&pk);
             }
@@ -480,7 +486,7 @@ void App::DrawShaders() {
             for (const ShaderPack* pk : installedList) {
                 std::vector<std::pair<std::string, std::pair<ImU32, ImU32>>> badges;
                 const bool isEffect = pk->type == PackType::Effect;
-                const char* typeText = isEffect ? Tr("화면 효과") : Tr("표면 셰이더");
+                const char* typeText = TypeLabel(pk->type);
                 const std::pair<ImU32, ImU32> typeCol = isEffect ? std::make_pair(WithAlpha(p.ink, 0.12f), p.ink)
                                                                  : std::make_pair(WithAlpha(p.ink, 0.05f), p.ink2);
                 badges.push_back({typeText, typeCol});
@@ -531,6 +537,7 @@ void App::DrawShaders() {
                     if (curType == 1 && rp.type != "surface") continue;
                     if (curType == 2 && rp.type != "effect") continue;
                     if (curType == 3 && rp.type != "look") continue;
+                    if (curType == 4 && rp.type != "world") continue;
                     if (!PackMatches(needle, rp.id, rp.name, rp.authors, rp.tags)) continue;
                     onlineList.push_back(&rp);
                 }
@@ -902,6 +909,23 @@ void App::DrawShaderPackDetail(float x0, float y0, float x1, float y1) {
         if (pk->params.empty() && pk->textures.empty()) {
             Gap(12.0f);
             Para(Tr("조절할 수 있는 항목이 없습니다"), p.ink3, size::Caption);
+        }
+        if (pk->type == PackType::World) {
+            // installing a world does not place it: add / remove it from the user's world stack right here
+            Gap(12.0f);
+            auto& stack = settings_.worldStack;
+            const auto it = std::find_if(stack.begin(), stack.end(), [&](const EffectStackEntry& e) { return e.pack == pk->id; });
+            const bool inStack = it != stack.end();
+            if (!inStack ? Button("##worldstackadd", Tr("월드에 추가"), icon::Plus, ButtonKind::Primary)
+                         : Button("##worldstackremove", Tr("월드에서 빼기"), icon::X, ButtonKind::Secondary)) {
+                if (inStack) stack.erase(it);
+                else stack.push_back({pk->id, true, {}, {}});
+                settings_.Save(settingsPath_);
+                ApplyRenderSettings();
+            }
+            Gap(8.0f);
+            Para(Tr("켠 월드는 로비의 세부 탭(\"월드 이펙트\")과 재생 바의 화면 효과 버튼에서 끄거나 순서를 바꿀 수 있습니다."), p.ink3,
+                 size::Caption);
         }
         if (pk->type == PackType::Effect) {
             // installing an effect does not turn it on: add / remove it from the user's stack right here

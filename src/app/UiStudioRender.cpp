@@ -332,346 +332,7 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
                 if (IconButton("##remove", icon::X, Tr("스택에서 제거"), false, 28.0f)) removeAt = i;
 
                 if (usable && eff.entry.enabled && !pk->params.empty()) {
-                    auto drawDiamond = [&](const char* btnId, bool isKeyed, const ImVec2& curPos, auto&& onToggle) {
-                        const float diaW = Dp(24.0f);
-                        const ImVec2 dc(curPos.x + Dp(10.0f), curPos.y + Dp(12.0f));
-                        const float dr = Dp(5.0f);
-                        const ImU32 kc = isKeyed ? p.accent : p.ink3;
-                        const ImVec2 pts[4] = {{dc.x, dc.y - dr}, {dc.x + dr, dc.y}, {dc.x, dc.y + dr}, {dc.x - dr, dc.y}};
-                        if (isKeyed) dl->AddConvexPolyFilled(pts, 4, kc);
-                        else dl->AddPolyline(pts, 4, kc, ImDrawFlags_Closed, 1.5f);
-
-                        ImGui::SetCursorScreenPos(curPos);
-                        if (ImGui::InvisibleButton(btnId, ImVec2(diaW, Dp(24.0f)))) {
-                            onToggle();
-                        }
-                        Tooltip(isKeyed ? Tr("현재 프레임의 키 삭제") : Tr("현재 값을 재생 헤드에 키로 등록"));
-                    };
-
-                    auto drawStudioParam = [&](const ShaderPackParam& sp, size_t k) {
-                        ImGui::PushID((int)k);
-                        const float diaW = Dp(24.0f);
-                        const float availW = ImGui::GetContentRegionAvail().x;
-                        const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(lang);
-                        const std::string sid = "##fx_" + sp.key;
-
-                        switch (sp.type) {
-                        case ShaderPackParamType::Float: {
-                            float staticVal = eff.entry.params.count(sp.key) ? eff.entry.params[sp.key] : sp.def;
-                            EffectParamTrack* tr = nullptr;
-                            for (auto& t : eff.tracks) { if (t.param == sp.key) { tr = &t; break; } }
-                            const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
-                            float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
-
-                            const ImVec2 curPos = ImGui::GetCursorScreenPos();
-                            drawDiamond("##keybtn", keyed, curPos, [&] {
-                                std::vector<TrackState> before = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, sp.key))};
-                                if (keyed) {
-                                    EraseParamKeys(*tr, {(int32_t)d.Frame()});
-                                    StudioPushTrackEdit(Tr("효과 키 삭제"), before);
-                                } else {
-                                    if (!tr) { eff.tracks.push_back({sp.key, {}}); tr = &eff.tracks.back(); }
-                                    UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, false});
-                                    StudioPushTrackEdit(Tr("효과 키 등록"), before);
-                                }
-                                d.rowsKey = ~0ull;
-                                effChanged = true;
-                            });
-
-                            ImGui::SameLine(diaW + Dp(4.0f));
-                            ImGui::SetNextItemWidth(availW - diaW - Dp(4.0f));
-                            float v = curVal;
-                            const char* fmt = sp.step > 0.0f ? (sp.step >= 1.0f ? "%.0f" : "%.2f") : "%.2f";
-                            if (SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, fmt)) {
-                                if (sp.step > 0.0f) v = sp.min + std::round((v - sp.min) / sp.step) * sp.step;
-                                if (d.autoKey || keyed) {
-                                    if (!tr) { eff.tracks.push_back({sp.key, {}}); tr = &eff.tracks.back(); }
-                                    UpsertParamKey(*tr, EffectParamKey{d.Frame(), v, false});
-                                    studioKeyChanged_ = true;
-                                    d.rowsKey = ~0ull;
-                                } else {
-                                    eff.entry.params[sp.key] = v;
-                                    ++d.projectVersion;
-                                }
-                                effChanged = true;
-                            }
-                            if (ImGui::IsItemActivated()) {
-                                studioKeyBefore_ = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, sp.key))};
-                                studioKeyEdit_ = true;
-                                studioKeyChanged_ = false;
-                            }
-                            if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
-                            break;
-                        }
-                        case ShaderPackParamType::Int: {
-                            float staticVal = eff.entry.params.count(sp.key) ? eff.entry.params[sp.key] : sp.def;
-                            EffectParamTrack* tr = nullptr;
-                            for (auto& t : eff.tracks) { if (t.param == sp.key) { tr = &t; break; } }
-                            const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
-                            float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
-
-                            const ImVec2 curPos = ImGui::GetCursorScreenPos();
-                            drawDiamond("##keybtn", keyed, curPos, [&] {
-                                std::vector<TrackState> before = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, sp.key))};
-                                if (keyed) {
-                                    EraseParamKeys(*tr, {(int32_t)d.Frame()});
-                                    StudioPushTrackEdit(Tr("효과 키 삭제"), before);
-                                } else {
-                                    if (!tr) { eff.tracks.push_back({sp.key, {}}); tr = &eff.tracks.back(); }
-                                    UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, true});
-                                    StudioPushTrackEdit(Tr("효과 키 등록"), before);
-                                }
-                                d.rowsKey = ~0ull;
-                                effChanged = true;
-                            });
-
-                            ImGui::SameLine(diaW + Dp(4.0f));
-                            ImGui::SetNextItemWidth(availW - diaW - Dp(4.0f));
-                            float v = curVal;
-                            if (SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, "%.0f")) {
-                                v = std::round(v);
-                                if (d.autoKey || keyed) {
-                                    if (!tr) { eff.tracks.push_back({sp.key, {}}); tr = &eff.tracks.back(); }
-                                    UpsertParamKey(*tr, EffectParamKey{d.Frame(), v, true});
-                                    studioKeyChanged_ = true;
-                                    d.rowsKey = ~0ull;
-                                } else {
-                                    eff.entry.params[sp.key] = v;
-                                    ++d.projectVersion;
-                                }
-                                effChanged = true;
-                            }
-                            if (ImGui::IsItemActivated()) {
-                                studioKeyBefore_ = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, sp.key))};
-                                studioKeyEdit_ = true;
-                                studioKeyChanged_ = false;
-                            }
-                            if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
-                            break;
-                        }
-                        case ShaderPackParamType::Bool: {
-                            float staticVal = eff.entry.params.count(sp.key) ? eff.entry.params[sp.key] : (sp.defBool ? 1.0f : 0.0f);
-                            EffectParamTrack* tr = nullptr;
-                            for (auto& t : eff.tracks) { if (t.param == sp.key) { tr = &t; break; } }
-                            const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
-                            float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
-
-                            const ImVec2 curPos = ImGui::GetCursorScreenPos();
-                            drawDiamond("##keybtn", keyed, curPos, [&] {
-                                std::vector<TrackState> before = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, sp.key))};
-                                if (keyed) {
-                                    EraseParamKeys(*tr, {(int32_t)d.Frame()});
-                                    StudioPushTrackEdit(Tr("효과 키 삭제"), before);
-                                } else {
-                                    if (!tr) { eff.tracks.push_back({sp.key, {}}); tr = &eff.tracks.back(); }
-                                    UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, true});
-                                    StudioPushTrackEdit(Tr("효과 키 등록"), before);
-                                }
-                                d.rowsKey = ~0ull;
-                                effChanged = true;
-                            });
-
-                            ImGui::SameLine(diaW + Dp(4.0f));
-                            ImGui::SetNextItemWidth(availW - diaW - Dp(4.0f));
-                            bool b = (curVal > 0.5f);
-                            if (Switch(sid.c_str(), label.c_str(), &b)) {
-                                float v = b ? 1.0f : 0.0f;
-                                if (d.autoKey || keyed) {
-                                    if (!tr) { eff.tracks.push_back({sp.key, {}}); tr = &eff.tracks.back(); }
-                                    UpsertParamKey(*tr, EffectParamKey{d.Frame(), v, true});
-                                    studioKeyChanged_ = true;
-                                    d.rowsKey = ~0ull;
-                                } else {
-                                    eff.entry.params[sp.key] = v;
-                                    ++d.projectVersion;
-                                }
-                                effChanged = true;
-                            }
-                            break;
-                        }
-                        case ShaderPackParamType::Color: {
-                            int numComp = sp.alpha ? 4 : 3;
-                            EffectParamTrack* trComp[4] = {nullptr, nullptr, nullptr, nullptr};
-                            bool keyedComp[4] = {false, false, false, false};
-                            float curValComp[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-                            for (int c = 0; c < numComp; ++c) {
-                                std::string tc = sp.key + "#" + std::to_string(c);
-                                float defVal = sp.defVec[c];
-                                float staticVal = eff.entry.params.count(tc) ? eff.entry.params[tc] : defVal;
-                                for (auto& t : eff.tracks) { if (t.param == tc) { trComp[c] = &t; break; } }
-                                keyedComp[c] = trComp[c] && FindKey(trComp[c]->keys, d.Frame()) != nullptr;
-                                curValComp[c] = trComp[c] ? EvaluateParamTrack(*trComp[c], (float)d.Frame(), staticVal) : staticVal;
-                            }
-                            const bool allRgbKeyed = keyedComp[0] && keyedComp[1] && keyedComp[2];
-                            const ImVec2 curPos = ImGui::GetCursorScreenPos();
-                            drawDiamond("##keybtn", allRgbKeyed, curPos, [&] {
-                                std::vector<TrackState> before;
-                                for (int c = 0; c < 3; ++c) {
-                                    before.push_back(CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, sp.key + "#" + std::to_string(c))));
-                                }
-                                if (allRgbKeyed) {
-                                    for (int c = 0; c < 3; ++c) if (trComp[c]) EraseParamKeys(*trComp[c], {(int32_t)d.Frame()});
-                                    StudioPushTrackEdit(Tr("효과 키 삭제"), before);
-                                } else {
-                                    for (int c = 0; c < 3; ++c) {
-                                        std::string tc = sp.key + "#" + std::to_string(c);
-                                        if (!trComp[c]) { eff.tracks.push_back({tc, {}}); trComp[c] = &eff.tracks.back(); }
-                                        UpsertParamKey(*trComp[c], EffectParamKey{d.Frame(), curValComp[c], false});
-                                    }
-                                    StudioPushTrackEdit(Tr("효과 키 등록"), before);
-                                }
-                                d.rowsKey = ~0ull;
-                                effChanged = true;
-                            });
-
-                            const float itemW = availW - diaW - Dp(4.0f);
-                            const ImVec2 cpos(curPos.x + diaW + Dp(4.0f), curPos.y);
-                            TextEllipsis(dl, Font::Regular, size::Small, ImVec2(cpos.x, cpos.y + Dp(4.0f)), cpos.x + itemW * 0.4f, p.ink2, label.c_str());
-                            ImGui::SetCursorScreenPos(ImVec2(cpos.x + itemW * 0.4f, cpos.y));
-                            float rgb[3] = {curValComp[0], curValComp[1], curValComp[2]};
-                            if (ColorField(sid.c_str(), rgb)) {
-                                for (int c = 0; c < 3; ++c) {
-                                    std::string tc = sp.key + "#" + std::to_string(c);
-                                    if (d.autoKey || keyedComp[c]) {
-                                        if (!trComp[c]) { eff.tracks.push_back({tc, {}}); trComp[c] = &eff.tracks.back(); }
-                                        UpsertParamKey(*trComp[c], EffectParamKey{d.Frame(), rgb[c], false});
-                                    } else {
-                                        eff.entry.params[tc] = rgb[c];
-                                    }
-                                }
-                                if (d.autoKey) { studioKeyChanged_ = true; d.rowsKey = ~0ull; }
-                                else { ++d.projectVersion; }
-                                effChanged = true;
-                            }
-                            if (sp.alpha) {
-                                const ImVec2 aPos = ImGui::GetCursorScreenPos();
-                                drawDiamond("##keybtna", keyedComp[3], aPos, [&] {
-                                    std::string tc = sp.key + "#3";
-                                    std::vector<TrackState> before = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, tc))};
-                                    if (keyedComp[3]) {
-                                        EraseParamKeys(*trComp[3], {(int32_t)d.Frame()});
-                                        StudioPushTrackEdit(Tr("효과 키 삭제"), before);
-                                    } else {
-                                        if (!trComp[3]) { eff.tracks.push_back({tc, {}}); trComp[3] = &eff.tracks.back(); }
-                                        UpsertParamKey(*trComp[3], EffectParamKey{d.Frame(), curValComp[3], false});
-                                        StudioPushTrackEdit(Tr("효과 키 등록"), before);
-                                    }
-                                    d.rowsKey = ~0ull;
-                                    effChanged = true;
-                                });
-                                ImGui::SameLine(diaW + Dp(4.0f));
-                                ImGui::SetNextItemWidth(itemW);
-                                std::string alphaLabel = label + " " + Tr("불투명도");
-                                float a = curValComp[3];
-                                if (SliderRow((sid + "_a").c_str(), alphaLabel.c_str(), &a, 0.0f, 1.0f, "%.2f")) {
-                                    std::string tc = sp.key + "#3";
-                                    if (d.autoKey || keyedComp[3]) {
-                                        if (!trComp[3]) { eff.tracks.push_back({tc, {}}); trComp[3] = &eff.tracks.back(); }
-                                        UpsertParamKey(*trComp[3], EffectParamKey{d.Frame(), a, false});
-                                        studioKeyChanged_ = true;
-                                        d.rowsKey = ~0ull;
-                                    } else {
-                                        eff.entry.params[tc] = a;
-                                        ++d.projectVersion;
-                                    }
-                                    effChanged = true;
-                                }
-                                if (ImGui::IsItemActivated()) {
-                                    studioKeyBefore_ = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, sp.key + "#3"))};
-                                    studioKeyEdit_ = true;
-                                    studioKeyChanged_ = false;
-                                }
-                                if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
-                            }
-                            break;
-                        }
-                        case ShaderPackParamType::Vec3: {
-                            static const char* kAxes[3] = {" X", " Y", " Z"};
-                            for (int c = 0; c < 3; ++c) {
-                                std::string tc = sp.key + "#" + std::to_string(c);
-                                float defVal = sp.defVec[c];
-                                float staticVal = eff.entry.params.count(tc) ? eff.entry.params[tc] : defVal;
-                                EffectParamTrack* tr = nullptr;
-                                for (auto& t : eff.tracks) { if (t.param == tc) { tr = &t; break; } }
-                                const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
-                                float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
-
-                                const ImVec2 curPos = ImGui::GetCursorScreenPos();
-                                std::string btnId = "##keybtn_" + std::to_string(c);
-                                drawDiamond(btnId.c_str(), keyed, curPos, [&] {
-                                    std::vector<TrackState> before = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, tc))};
-                                    if (keyed) {
-                                        EraseParamKeys(*tr, {(int32_t)d.Frame()});
-                                        StudioPushTrackEdit(Tr("효과 키 삭제"), before);
-                                    } else {
-                                        if (!tr) { eff.tracks.push_back({tc, {}}); tr = &eff.tracks.back(); }
-                                        UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, false});
-                                        StudioPushTrackEdit(Tr("효과 키 등록"), before);
-                                    }
-                                    d.rowsKey = ~0ull;
-                                    effChanged = true;
-                                });
-
-                                ImGui::SameLine(diaW + Dp(4.0f));
-                                ImGui::SetNextItemWidth(availW - diaW - Dp(4.0f));
-                                std::string clabel = label + kAxes[c];
-                                std::string csid = sid + "_" + std::to_string(c);
-                                float v = curVal;
-                                const char* fmt = sp.step > 0.0f ? (sp.step >= 1.0f ? "%.0f" : "%.2f") : "%.2f";
-                                if (SliderRow(csid.c_str(), clabel.c_str(), &v, sp.min, sp.max, fmt)) {
-                                    if (sp.step > 0.0f) v = sp.min + std::round((v - sp.min) / sp.step) * sp.step;
-                                    if (d.autoKey || keyed) {
-                                        if (!tr) { eff.tracks.push_back({tc, {}}); tr = &eff.tracks.back(); }
-                                        UpsertParamKey(*tr, EffectParamKey{d.Frame(), v, false});
-                                        studioKeyChanged_ = true;
-                                        d.rowsKey = ~0ull;
-                                    } else {
-                                        eff.entry.params[tc] = v;
-                                        ++d.projectVersion;
-                                    }
-                                    effChanged = true;
-                                }
-                                if (ImGui::IsItemActivated()) {
-                                    studioKeyBefore_ = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, tc))};
-                                    studioKeyEdit_ = true;
-                                    studioKeyChanged_ = false;
-                                }
-                                if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
-                            }
-                            break;
-                        }
-                        }
-                        ImGui::PopID();
-                    };
-
-                    if (pk->groups.empty()) {
-                        for (size_t k = 0; k < pk->params.size(); ++k) {
-                            drawStudioParam(pk->params[k], k);
-                        }
-                    } else {
-                        std::vector<std::pair<const ShaderPackParam*, size_t>> ungrouped;
-                        std::map<std::string, std::vector<std::pair<const ShaderPackParam*, size_t>>> grouped;
-                        for (size_t k = 0; k < pk->params.size(); ++k) {
-                            const ShaderPackParam& sp = pk->params[k];
-                            if (sp.group.empty()) ungrouped.push_back({&sp, k});
-                            else grouped[sp.group].push_back({&sp, k});
-                        }
-                        for (const auto& [sp, k] : ungrouped) {
-                            drawStudioParam(*sp, k);
-                        }
-                        for (const auto& g : pk->groups) {
-                            const auto it = grouped.find(g.id);
-                            if (it == grouped.end() || it->second.empty()) continue;
-                            const bool open = DrawParamGroupHeader(*pk, g, "##studiofx");
-                            if (open) {
-                                ImGui::Indent(Dp(14.0f));
-                                for (const auto& [sp, k] : it->second) {
-                                    drawStudioParam(*sp, k);
-                                }
-                                ImGui::Unindent(Dp(14.0f));
-                            }
-                        }
-                    }
+                    effChanged |= DrawKeyableParams(*pk, eff, eff.uid, RowKind::EffectParam, "##fx");
                 }
                 ImGui::PopID();
                 Gap(8.0f);
@@ -919,4 +580,368 @@ void App::DrawStudioHelp() {
     if (closeBtn || outside || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) studioHelpOpen_ = false;
 }
 
+// ---- shared keyable param widgets for studio effects / worlds ----
+
+// The keyable typed params of a studio effect / world (docs/effect_ecosystem.md): one slider / switch per pack param
+// with a key diamond at the playhead, under the pack's collapsible groups. `uid` addresses the keyed tracks
+// (EffectParamTrackName / WorldParamTrackName for `kind`). True = a static value or a key changed this frame.
+bool App::DrawKeyableParams(const ShaderPack& pk, studio::StudioEffect& fx, uint32_t uid, studio::RowKind kind,
+                            const char* idPrefix) {
+    using namespace ui;
+    const Palette& p = P();
+    const std::string lang = PackLanguage();
+    StudioDoc& d = *studio_;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    bool changed = false;
+    const auto trackName = [&](const std::string& key) {
+        return kind == RowKind::WorldParam ? WorldParamTrackName(uid, key) : EffectParamTrackName(uid, key);
+    };
+    const char* keyAddName = kind == RowKind::WorldParam ? Tr("월드 키 등록") : Tr("효과 키 등록");
+    const char* keyDelName = kind == RowKind::WorldParam ? Tr("월드 키 삭제") : Tr("효과 키 삭제");
+
+auto drawDiamond = [&](const char* btnId, bool isKeyed, const ImVec2& curPos, auto&& onToggle) {
+    const float diaW = Dp(24.0f);
+    const ImVec2 dc(curPos.x + Dp(10.0f), curPos.y + Dp(12.0f));
+    const float dr = Dp(5.0f);
+    const ImU32 kc = isKeyed ? p.accent : p.ink3;
+    const ImVec2 pts[4] = {{dc.x, dc.y - dr}, {dc.x + dr, dc.y}, {dc.x, dc.y + dr}, {dc.x - dr, dc.y}};
+    if (isKeyed) dl->AddConvexPolyFilled(pts, 4, kc);
+    else dl->AddPolyline(pts, 4, kc, ImDrawFlags_Closed, 1.5f);
+
+    ImGui::SetCursorScreenPos(curPos);
+    if (ImGui::InvisibleButton(btnId, ImVec2(diaW, Dp(24.0f)))) {
+        onToggle();
+    }
+    Tooltip(isKeyed ? Tr("현재 프레임의 키 삭제") : Tr("현재 값을 재생 헤드에 키로 등록"));
+};
+
+auto drawStudioParam = [&](const ShaderPackParam& sp, size_t k) {
+    ImGui::PushID((int)k);
+    const float diaW = Dp(24.0f);
+    const float availW = ImGui::GetContentRegionAvail().x;
+    const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(lang);
+    const std::string sid = std::string(idPrefix) + "_" + sp.key;
+
+    switch (sp.type) {
+    case ShaderPackParamType::Float: {
+        float staticVal = fx.entry.params.count(sp.key) ? fx.entry.params[sp.key] : sp.def;
+        EffectParamTrack* tr = nullptr;
+        for (auto& t : fx.tracks) { if (t.param == sp.key) { tr = &t; break; } }
+        const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
+        float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
+
+        const ImVec2 curPos = ImGui::GetCursorScreenPos();
+        drawDiamond("##keybtn", keyed, curPos, [&] {
+            std::vector<TrackState> before = {CaptureTrack(d, -1, kind, trackName(sp.key))};
+            if (keyed) {
+                EraseParamKeys(*tr, {(int32_t)d.Frame()});
+                StudioPushTrackEdit(keyDelName, before);
+            } else {
+                if (!tr) { fx.tracks.push_back({sp.key, {}}); tr = &fx.tracks.back(); }
+                UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, false});
+                StudioPushTrackEdit(keyAddName, before);
+            }
+            d.rowsKey = ~0ull;
+            changed = true;
+        });
+
+        ImGui::SameLine(0.0f, Dp(4.0f));   // right after the key diamond (indent-safe)
+        ImGui::SetNextItemWidth(availW - diaW - Dp(4.0f));
+        float v = curVal;
+        const char* fmt = sp.step > 0.0f ? (sp.step >= 1.0f ? "%.0f" : "%.2f") : "%.2f";
+        if (SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, fmt)) {
+            if (sp.step > 0.0f) v = sp.min + std::round((v - sp.min) / sp.step) * sp.step;
+            if (d.autoKey || keyed) {
+                if (!tr) { fx.tracks.push_back({sp.key, {}}); tr = &fx.tracks.back(); }
+                UpsertParamKey(*tr, EffectParamKey{d.Frame(), v, false});
+                studioKeyChanged_ = true;
+                d.rowsKey = ~0ull;
+            } else {
+                fx.entry.params[sp.key] = v;
+                ++d.projectVersion;
+            }
+            changed = true;
+        }
+        if (ImGui::IsItemActivated()) {
+            studioKeyBefore_ = {CaptureTrack(d, -1, kind, trackName(sp.key))};
+            studioKeyEdit_ = true;
+            studioKeyChanged_ = false;
+        }
+        if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
+        break;
+    }
+    case ShaderPackParamType::Int: {
+        float staticVal = fx.entry.params.count(sp.key) ? fx.entry.params[sp.key] : sp.def;
+        EffectParamTrack* tr = nullptr;
+        for (auto& t : fx.tracks) { if (t.param == sp.key) { tr = &t; break; } }
+        const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
+        float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
+
+        const ImVec2 curPos = ImGui::GetCursorScreenPos();
+        drawDiamond("##keybtn", keyed, curPos, [&] {
+            std::vector<TrackState> before = {CaptureTrack(d, -1, kind, trackName(sp.key))};
+            if (keyed) {
+                EraseParamKeys(*tr, {(int32_t)d.Frame()});
+                StudioPushTrackEdit(keyDelName, before);
+            } else {
+                if (!tr) { fx.tracks.push_back({sp.key, {}}); tr = &fx.tracks.back(); }
+                UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, true});
+                StudioPushTrackEdit(keyAddName, before);
+            }
+            d.rowsKey = ~0ull;
+            changed = true;
+        });
+
+        ImGui::SameLine(0.0f, Dp(4.0f));   // right after the key diamond (indent-safe)
+        ImGui::SetNextItemWidth(availW - diaW - Dp(4.0f));
+        float v = curVal;
+        if (SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, "%.0f")) {
+            v = std::round(v);
+            if (d.autoKey || keyed) {
+                if (!tr) { fx.tracks.push_back({sp.key, {}}); tr = &fx.tracks.back(); }
+                UpsertParamKey(*tr, EffectParamKey{d.Frame(), v, true});
+                studioKeyChanged_ = true;
+                d.rowsKey = ~0ull;
+            } else {
+                fx.entry.params[sp.key] = v;
+                ++d.projectVersion;
+            }
+            changed = true;
+        }
+        if (ImGui::IsItemActivated()) {
+            studioKeyBefore_ = {CaptureTrack(d, -1, kind, trackName(sp.key))};
+            studioKeyEdit_ = true;
+            studioKeyChanged_ = false;
+        }
+        if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
+        break;
+    }
+    case ShaderPackParamType::Bool: {
+        float staticVal = fx.entry.params.count(sp.key) ? fx.entry.params[sp.key] : (sp.defBool ? 1.0f : 0.0f);
+        EffectParamTrack* tr = nullptr;
+        for (auto& t : fx.tracks) { if (t.param == sp.key) { tr = &t; break; } }
+        const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
+        float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
+
+        const ImVec2 curPos = ImGui::GetCursorScreenPos();
+        drawDiamond("##keybtn", keyed, curPos, [&] {
+            std::vector<TrackState> before = {CaptureTrack(d, -1, kind, trackName(sp.key))};
+            if (keyed) {
+                EraseParamKeys(*tr, {(int32_t)d.Frame()});
+                StudioPushTrackEdit(keyDelName, before);
+            } else {
+                if (!tr) { fx.tracks.push_back({sp.key, {}}); tr = &fx.tracks.back(); }
+                UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, true});
+                StudioPushTrackEdit(keyAddName, before);
+            }
+            d.rowsKey = ~0ull;
+            changed = true;
+        });
+
+        ImGui::SameLine(0.0f, Dp(4.0f));   // right after the key diamond (indent-safe)
+        ImGui::SetNextItemWidth(availW - diaW - Dp(4.0f));
+        bool b = (curVal > 0.5f);
+        if (Switch(sid.c_str(), label.c_str(), &b)) {
+            float v = b ? 1.0f : 0.0f;
+            if (d.autoKey || keyed) {
+                if (!tr) { fx.tracks.push_back({sp.key, {}}); tr = &fx.tracks.back(); }
+                UpsertParamKey(*tr, EffectParamKey{d.Frame(), v, true});
+                studioKeyChanged_ = true;
+                d.rowsKey = ~0ull;
+            } else {
+                fx.entry.params[sp.key] = v;
+                ++d.projectVersion;
+            }
+            changed = true;
+        }
+        break;
+    }
+    case ShaderPackParamType::Color: {
+        int numComp = sp.alpha ? 4 : 3;
+        EffectParamTrack* trComp[4] = {nullptr, nullptr, nullptr, nullptr};
+        bool keyedComp[4] = {false, false, false, false};
+        float curValComp[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        for (int c = 0; c < numComp; ++c) {
+            std::string tc = sp.key + "#" + std::to_string(c);
+            float defVal = sp.defVec[c];
+            float staticVal = fx.entry.params.count(tc) ? fx.entry.params[tc] : defVal;
+            for (auto& t : fx.tracks) { if (t.param == tc) { trComp[c] = &t; break; } }
+            keyedComp[c] = trComp[c] && FindKey(trComp[c]->keys, d.Frame()) != nullptr;
+            curValComp[c] = trComp[c] ? EvaluateParamTrack(*trComp[c], (float)d.Frame(), staticVal) : staticVal;
+        }
+        const bool allRgbKeyed = keyedComp[0] && keyedComp[1] && keyedComp[2];
+        const ImVec2 curPos = ImGui::GetCursorScreenPos();
+        drawDiamond("##keybtn", allRgbKeyed, curPos, [&] {
+            std::vector<TrackState> before;
+            for (int c = 0; c < 3; ++c) {
+                before.push_back(CaptureTrack(d, -1, kind, trackName(sp.key + "#" + std::to_string(c))));
+            }
+            if (allRgbKeyed) {
+                for (int c = 0; c < 3; ++c) if (trComp[c]) EraseParamKeys(*trComp[c], {(int32_t)d.Frame()});
+                StudioPushTrackEdit(keyDelName, before);
+            } else {
+                for (int c = 0; c < 3; ++c) {
+                    std::string tc = sp.key + "#" + std::to_string(c);
+                    if (!trComp[c]) { fx.tracks.push_back({tc, {}}); trComp[c] = &fx.tracks.back(); }
+                    UpsertParamKey(*trComp[c], EffectParamKey{d.Frame(), curValComp[c], false});
+                }
+                StudioPushTrackEdit(keyAddName, before);
+            }
+            d.rowsKey = ~0ull;
+            changed = true;
+        });
+
+        const float itemW = availW - diaW - Dp(4.0f);
+        const ImVec2 cpos(curPos.x + diaW + Dp(4.0f), curPos.y);
+        TextEllipsis(dl, Font::Regular, size::Small, ImVec2(cpos.x, cpos.y + Dp(4.0f)), cpos.x + itemW * 0.4f, p.ink2, label.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(cpos.x + itemW * 0.4f, cpos.y));
+        float rgb[3] = {curValComp[0], curValComp[1], curValComp[2]};
+        if (ColorField(sid.c_str(), rgb)) {
+            for (int c = 0; c < 3; ++c) {
+                std::string tc = sp.key + "#" + std::to_string(c);
+                if (d.autoKey || keyedComp[c]) {
+                    if (!trComp[c]) { fx.tracks.push_back({tc, {}}); trComp[c] = &fx.tracks.back(); }
+                    UpsertParamKey(*trComp[c], EffectParamKey{d.Frame(), rgb[c], false});
+                } else {
+                    fx.entry.params[tc] = rgb[c];
+                }
+            }
+            if (d.autoKey) { studioKeyChanged_ = true; d.rowsKey = ~0ull; }
+            else { ++d.projectVersion; }
+            changed = true;
+        }
+        if (sp.alpha) {
+            const ImVec2 aPos = ImGui::GetCursorScreenPos();
+            drawDiamond("##keybtna", keyedComp[3], aPos, [&] {
+                std::string tc = sp.key + "#3";
+                std::vector<TrackState> before = {CaptureTrack(d, -1, kind, trackName(tc))};
+                if (keyedComp[3]) {
+                    EraseParamKeys(*trComp[3], {(int32_t)d.Frame()});
+                    StudioPushTrackEdit(keyDelName, before);
+                } else {
+                    if (!trComp[3]) { fx.tracks.push_back({tc, {}}); trComp[3] = &fx.tracks.back(); }
+                    UpsertParamKey(*trComp[3], EffectParamKey{d.Frame(), curValComp[3], false});
+                    StudioPushTrackEdit(keyAddName, before);
+                }
+                d.rowsKey = ~0ull;
+                changed = true;
+            });
+            ImGui::SameLine(0.0f, Dp(4.0f));   // right after the key diamond (indent-safe)
+            ImGui::SetNextItemWidth(itemW);
+            std::string alphaLabel = label + " " + Tr("불투명도");
+            float a = curValComp[3];
+            if (SliderRow((sid + "_a").c_str(), alphaLabel.c_str(), &a, 0.0f, 1.0f, "%.2f")) {
+                std::string tc = sp.key + "#3";
+                if (d.autoKey || keyedComp[3]) {
+                    if (!trComp[3]) { fx.tracks.push_back({tc, {}}); trComp[3] = &fx.tracks.back(); }
+                    UpsertParamKey(*trComp[3], EffectParamKey{d.Frame(), a, false});
+                    studioKeyChanged_ = true;
+                    d.rowsKey = ~0ull;
+                } else {
+                    fx.entry.params[tc] = a;
+                    ++d.projectVersion;
+                }
+                changed = true;
+            }
+            if (ImGui::IsItemActivated()) {
+                studioKeyBefore_ = {CaptureTrack(d, -1, kind, trackName(sp.key + "#3"))};
+                studioKeyEdit_ = true;
+                studioKeyChanged_ = false;
+            }
+            if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
+        }
+        break;
+    }
+    case ShaderPackParamType::Vec3: {
+        static const char* kAxes[3] = {" X", " Y", " Z"};
+        for (int c = 0; c < 3; ++c) {
+            std::string tc = sp.key + "#" + std::to_string(c);
+            float defVal = sp.defVec[c];
+            float staticVal = fx.entry.params.count(tc) ? fx.entry.params[tc] : defVal;
+            EffectParamTrack* tr = nullptr;
+            for (auto& t : fx.tracks) { if (t.param == tc) { tr = &t; break; } }
+            const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
+            float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
+
+            const ImVec2 curPos = ImGui::GetCursorScreenPos();
+            std::string btnId = "##keybtn_" + std::to_string(c);
+            drawDiamond(btnId.c_str(), keyed, curPos, [&] {
+                std::vector<TrackState> before = {CaptureTrack(d, -1, kind, trackName(tc))};
+                if (keyed) {
+                    EraseParamKeys(*tr, {(int32_t)d.Frame()});
+                    StudioPushTrackEdit(keyDelName, before);
+                } else {
+                    if (!tr) { fx.tracks.push_back({tc, {}}); tr = &fx.tracks.back(); }
+                    UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, false});
+                    StudioPushTrackEdit(keyAddName, before);
+                }
+                d.rowsKey = ~0ull;
+                changed = true;
+            });
+
+            ImGui::SameLine(0.0f, Dp(4.0f));   // right after the key diamond (indent-safe)
+            ImGui::SetNextItemWidth(availW - diaW - Dp(4.0f));
+            std::string clabel = label + kAxes[c];
+            std::string csid = sid + "_" + std::to_string(c);
+            float v = curVal;
+            const char* fmt = sp.step > 0.0f ? (sp.step >= 1.0f ? "%.0f" : "%.2f") : "%.2f";
+            if (SliderRow(csid.c_str(), clabel.c_str(), &v, sp.min, sp.max, fmt)) {
+                if (sp.step > 0.0f) v = sp.min + std::round((v - sp.min) / sp.step) * sp.step;
+                if (d.autoKey || keyed) {
+                    if (!tr) { fx.tracks.push_back({tc, {}}); tr = &fx.tracks.back(); }
+                    UpsertParamKey(*tr, EffectParamKey{d.Frame(), v, false});
+                    studioKeyChanged_ = true;
+                    d.rowsKey = ~0ull;
+                } else {
+                    fx.entry.params[tc] = v;
+                    ++d.projectVersion;
+                }
+                changed = true;
+            }
+            if (ImGui::IsItemActivated()) {
+                studioKeyBefore_ = {CaptureTrack(d, -1, kind, trackName(tc))};
+                studioKeyEdit_ = true;
+                studioKeyChanged_ = false;
+            }
+            if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
+        }
+        break;
+    }
+    }
+    ImGui::PopID();
+};
+
+if (pk.groups.empty()) {
+    for (size_t k = 0; k < pk.params.size(); ++k) {
+        drawStudioParam(pk.params[k], k);
+    }
+} else {
+    std::vector<std::pair<const ShaderPackParam*, size_t>> ungrouped;
+    std::map<std::string, std::vector<std::pair<const ShaderPackParam*, size_t>>> grouped;
+    for (size_t k = 0; k < pk.params.size(); ++k) {
+        const ShaderPackParam& sp = pk.params[k];
+        if (sp.group.empty()) ungrouped.push_back({&sp, k});
+        else grouped[sp.group].push_back({&sp, k});
+    }
+    for (const auto& [sp, k] : ungrouped) {
+        drawStudioParam(*sp, k);
+    }
+    for (const auto& g : pk.groups) {
+        const auto it = grouped.find(g.id);
+        if (it == grouped.end() || it->second.empty()) continue;
+        const char* groupPrefix = kind == RowKind::EffectParam ? "##studiofx" : idPrefix;
+        const bool open = DrawParamGroupHeader(pk, g, groupPrefix);
+        if (open) {
+            ImGui::Indent(Dp(14.0f));
+            for (const auto& [sp, k] : it->second) {
+                drawStudioParam(*sp, k);
+            }
+            ImGui::Unindent(Dp(14.0f));
+        }
+    }
+}
+    return changed;
+}
+
 } // namespace mmdx
+

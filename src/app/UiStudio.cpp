@@ -2497,7 +2497,8 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
         const ImVec2 a = ImGui::GetCursorScreenPos();
         const float w = ImGui::GetContentRegionAvail().x;
         const ImVec2 b(a.x + w, a.y + rowH);
-        const bool selected = index == -1 ? (d.selectedModel == -1 && d.selectedLightUid == 0) : (d.selectedModel == index);
+        const bool selected = index == -1 ? (d.selectedModel == -1 && d.selectedLightUid == 0 && studioSelectedWorld_ == 0)
+                                             : (d.selectedModel == index);
         ImGui::InvisibleButton("##row", ImVec2(w - Dp(index >= 0 ? 72.0f : 40.0f), rowH));
         uiprobe::Info(ImGui::GetItemID(), "##row", label);   // MCP ui_click by name
         const bool hovered = ImGui::IsItemHovered();
@@ -2551,6 +2552,116 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
                   (int)(d.camera.camera.size() + d.camera.light.size() + d.camera.shadow.size()));
     row(-1, icon::VideoCamera, Tr("카메라 VMD"), sub, nullptr);
     DrawStudioLightOutliner();
+    // world entities (installed world packs, keyable like effects)
+    {
+        const float w = ImGui::GetContentRegionAvail().x;
+        {
+            const ImVec2 a = ImGui::GetCursorScreenPos();
+            const float headH = Dp(32.0f);
+            const ImVec2 b(a.x + w, a.y + headH);
+            Text(dl, Font::Semibold, size::Caption, ImVec2(a.x + Dp(16.0f), a.y + Dp(8.0f)), p.ink3, Tr("월드"));
+            ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(12.0f + 64.0f), a.y + Dp(1.0f)));
+            if (Button("##worldadd", Tr("추가"), icon::Plus, ButtonKind::Ghost, ImVec2(64.0f, 30.0f)))
+                ImGui::OpenPopup("##worldaddpopup");
+            Tooltip(Tr("월드 이펙트 추가"));
+            if (ImGui::BeginPopup("##worldaddpopup")) {
+                const std::string lang = PackLanguage();
+                bool any = false;
+                for (const ShaderPack& pk : ShaderPacks().Packs()) {
+                    if (pk.type != PackType::World || !PackUsable(&pk)) continue;
+                    any = true;
+                    const std::string rid = "##worldadd_" + pk.id;
+                    if (MenuItem(rid.c_str(), pk.name.Get(lang).c_str())) {
+                        std::vector<StudioWorld> before = d.worlds;
+                        StudioWorld nw;
+                        nw.uid = d.nextWorldUid++;
+                        nw.name = pk.name.Get(lang);
+                        nw.fx.entry.pack = pk.id;
+                        nw.fx.entry.enabled = true;
+                        d.worlds.push_back(std::move(nw));
+                        d.history.Push(std::make_unique<WorldsCommand>(d, Tr("월드 추가"), before, d.worlds));
+                        ++d.projectVersion;
+                        d.rowsKey = ~0ull;
+                        studioSelectedWorld_ = d.worlds.back().uid;
+                        StudioSelectWorld(studioSelectedWorld_);
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+                if (!any) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+                    ImGui::TextUnformatted(Tr("설치된 월드 이펙트가 없습니다"));
+                    ImGui::PopStyleColor();
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::SetCursorScreenPos(ImVec2(a.x, b.y));
+            ImGui::Dummy(ImVec2(w, 0.0f));
+        }
+        if (d.worlds.empty()) {
+            const ImVec2 c = ImGui::GetCursorScreenPos();
+            Text(dl, Font::Regular, size::Caption, ImVec2(c.x + Dp(16.0f), c.y + Dp(4.0f)), p.ink3,
+                 Tr("월드 이펙트가 없어요. 추가로 설치된 월드를 넣으세요."));
+            ImGui::Dummy(ImVec2(w, Dp(26.0f)));
+        }
+        uint32_t removeWorld = 0;
+        for (size_t i = 0; i < d.worlds.size(); ++i) {
+            StudioWorld& wd = d.worlds[i];
+            const ShaderPack* pk = ShaderPacks().Find(wd.fx.entry.pack);
+            const std::string name = pk ? pk->name.Get(PackLanguage()) : (wd.name.empty() ? wd.fx.entry.pack : wd.name);
+            ImGui::PushID("world");
+            ImGui::PushID((int)wd.uid);
+            ImDrawList* cdl = ImGui::GetWindowDrawList();
+            const ImVec2 a = ImGui::GetCursorScreenPos();
+            const ImVec2 b(a.x + w, a.y + rowH);
+            const bool selected = d.selectedModel == -1 && d.selectedLightUid == 0 && studioSelectedWorld_ == wd.uid;
+            ImGui::InvisibleButton("##row", ImVec2(w - Dp(76.0f), rowH));
+            uiprobe::Info(ImGui::GetItemID(), "##row", name.c_str());
+            const bool hovered = ImGui::IsItemHovered();
+            if (ImGui::IsItemClicked()) StudioSelectWorld(wd.uid);
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) ImGui::OpenPopup("##worldmenu");
+            const bool rowHot = hovered || ImGui::IsMouseHoveringRect(a, b);
+            const ImVec2 ra(a.x + Dp(8.0f), a.y + Dp(2.0f)), rb(b.x - Dp(8.0f), b.y - Dp(2.0f));
+            if (selected) cdl->AddRectFilled(ra, rb, p.accentSoft, Dp(8.0f));
+            else if (rowHot) cdl->AddRectFilled(ra, rb, WithAlpha(p.ink, 0.05f), Dp(8.0f));
+            const ImU32 fg = selected ? p.accentInk : p.ink;
+            Icon(cdl, icon::Sparkle, 16.0f, ImVec2(a.x + Dp(26.0f), a.y + rowH * 0.5f), selected ? p.accentInk : p.ink2);
+            const float tx = a.x + Dp(44.0f), maxX = b.x - Dp(78.0f);
+            TextEllipsis(cdl, Font::Semibold, size::Small, ImVec2(tx, a.y + Dp(4.0f)), maxX, fg, name.c_str());
+            TextEllipsis(cdl, Font::Regular, size::Caption, ImVec2(tx, a.y + Dp(21.0f)), maxX, p.ink3, Tr("월드 이펙트"));
+            if (rowHot || selected) {
+                ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(76.0f), a.y + Dp(6.0f)));
+                if (IconButton("##worldmenu", icon::DotsThree, Tr("월드 메뉴"), false, 28.0f))
+                    ImGui::OpenPopup("##worldmenu");
+                if (ImGui::BeginPopup("##worldmenu")) {
+                    if (MenuItem("##worldremove", Tr("삭제"), icon::Trash)) removeWorld = wd.uid;
+                    ImGui::EndPopup();
+                }
+            }
+            ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(44.0f), a.y + Dp(6.0f)));
+            bool on = wd.fx.entry.enabled;
+            if (IconButton("##vis", on ? icon::Eye : icon::EyeSlash, on ? Tr("끄기") : Tr("켜기"), false, 28.0f)) {
+                std::vector<StudioWorld> before = d.worlds;
+                wd.fx.entry.enabled = !on;
+                d.history.Push(std::make_unique<WorldsCommand>(d, !on ? Tr("월드 켜기") : Tr("월드 끄기"), before, d.worlds));
+                ++d.projectVersion;
+                d.rowsKey = ~0ull;
+            }
+            ImGui::SetCursorScreenPos(ImVec2(a.x, b.y));
+            ImGui::Dummy(ImVec2(w, 0.0f));
+            ImGui::PopID();
+            ImGui::PopID();
+        }
+        if (removeWorld != 0) {
+            std::vector<StudioWorld> before = d.worlds;
+            d.worlds.erase(std::remove_if(d.worlds.begin(), d.worlds.end(),
+                                          [&](const StudioWorld& x) { return x.uid == removeWorld; }),
+                           d.worlds.end());
+            d.history.Push(std::make_unique<WorldsCommand>(d, Tr("월드 삭제"), before, d.worlds));
+            if (studioSelectedWorld_ == removeWorld) studioSelectedWorld_ = 0;
+            ++d.projectVersion;
+            d.rowsKey = ~0ull;
+        }
+    }
     // characters first (they are what gets animated), then props, then stage parts
     for (int pass = 0; pass < 3; ++pass) {
         const ModelKind kind = pass == 0 ? ModelKind::Character : pass == 1 ? ModelKind::Prop : ModelKind::Stage;
@@ -2634,6 +2745,73 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
     DrawStudioAddMenu();
 }
 
+void App::StudioSelectWorld(uint32_t uid) {
+    StudioDoc& d = *studio_;
+    if (d.selectedModel == -1 && d.selectedLightUid == 0 && studioSelectedWorld_ == uid) return;
+    StudioPossess(false);
+    d.selectedModel = -1;
+    d.selectedLightUid = 0;
+    studioSelectedWorld_ = uid;
+    d.selection.clear();
+    d.selectedRows.clear();
+    d.selectedBones.clear();
+    d.activeBone = -1;
+    d.collapsed.clear();
+    d.rowsKey = ~0ull;
+}
+
+// World inspector: placement (translation / rotation / scale; one undo step per drag) and the pack's keyable params.
+void App::DrawStudioWorldPanel(float w) {
+    using namespace ui;
+    StudioDoc& d = *studio_;
+    StudioWorld* world = d.FindWorld(studioSelectedWorld_);
+    if (!world) return;
+    const Palette& p = P();
+    ImDrawList* cdl = ImGui::GetWindowDrawList();
+    const ShaderPack* pk = ShaderPacks().Find(world->fx.entry.pack);
+
+    ImGui::Dummy(ImVec2(w, Dp(6.0f)));
+    {
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("트랜스폼"));
+        ImGui::Dummy(ImVec2(w, Dp(20.0f)));
+    }
+    PropAttach place = world->place;
+    bool dragEnded = false;
+    const auto dragRow = [&](const char* label, auto&& widget) {
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        Text(cdl, Font::Regular, size::Small, ImVec2(c.x, c.y + Dp(5.0f)), p.ink3, label);
+        ImGui::SetCursorScreenPos(ImVec2(c.x + Dp(64.0f), c.y));
+        ImGui::SetNextItemWidth(w - Dp(64.0f));
+        PushFont(Font::Regular, size::Small);
+        widget();
+        PopFont();
+        if (ImGui::IsItemActivated()) { studioWorldBefore_ = d.worlds; studioWorldPlaceDragging_ = true; }
+        if (ImGui::IsItemDeactivatedAfterEdit() && studioWorldPlaceDragging_) dragEnded = true;
+        ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+    };
+    dragRow(Tr("위치"), [&] { ImGui::DragFloat3("##worldplacet", &place.translation.x, 0.05f, 0.0f, 0.0f, "%.2f"); });
+    dragRow(Tr("회전"), [&] { ImGui::DragFloat3("##worldplacer", &place.rotationDeg.x, 0.5f, 0.0f, 0.0f, "%.1f°"); });
+    dragRow(Tr("크기"), [&] { ImGui::DragFloat("##worldplaces", &place.scale, 0.005f, 0.01f, 100.0f, "%.3f"); });
+    place.scale = std::clamp(place.scale, 0.01f, 100.0f);
+    if (!(place == world->place)) world->place = place;
+    if (dragEnded) {
+        studioWorldPlaceDragging_ = false;
+        d.history.Push(std::make_unique<WorldsCommand>(d, Tr("월드 배치"), studioWorldBefore_, d.worlds));
+        ++d.projectVersion;
+    }
+
+    if (pk && PackUsable(pk) && !pk->params.empty()) {
+        ImGui::Dummy(ImVec2(w, Dp(8.0f)));
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("파라미터"));
+        ImGui::Dummy(ImVec2(w, Dp(20.0f)));
+        if (DrawKeyableParams(*pk, world->fx, world->uid, RowKind::WorldParam, "##studioworld")) {
+            ++d.projectVersion;
+        }
+    }
+}
+
 void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
     using namespace ui;
     StudioDoc& d = *studio_;
@@ -2663,6 +2841,21 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
             DrawStudioLightInspector(w);
             ImGui::EndChild();
             return;
+        }
+        if (studioSelectedWorld_ != 0 && d.selectedModel == -1 && d.selection.empty()) {
+            const StudioWorld* world = d.FindWorld(studioSelectedWorld_);
+            if (world) {
+                const ShaderPack* wpk = ShaderPacks().Find(world->fx.entry.pack);
+                const ImVec2 wc = ImGui::GetCursorScreenPos();
+                const std::string wname = wpk ? wpk->name.Get(PackLanguage())
+                                             : (world->name.empty() ? world->fx.entry.pack : world->name);
+                TextEllipsis(cdl, Font::Semibold, size::Body, wc, wc.x + w, p.ink, wname.c_str());
+                ImGui::Dummy(ImVec2(w, Dp(28.0f)));
+                DrawStudioWorldPanel(w);
+                ImGui::EndChild();
+                return;
+            }
+            studioSelectedWorld_ = 0;
         }
         const ImVec2 c = ImGui::GetCursorScreenPos();
         const StudioModel* m = d.Selected();

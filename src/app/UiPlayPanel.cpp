@@ -77,6 +77,67 @@ void App::DrawScreenEffectControls(float width) {
         ImGui::PopID();
     }
     if (!settings_.colorLut.empty()) fx |= SliderRow("##lutint", Tr("LUT 강도"), &settings_.lutIntensity, 0.0f, 1.0f, "%.2f");
+    Gap(14.0f);
+    SectionLabel(Tr("월드 이펙트"));
+    {
+        ShaderPackRegistry& reg = ShaderPacks();
+        const std::string lang = PackLanguage();
+        bool worldChanged = false;
+        size_t worldRemove = SIZE_MAX;
+        for (size_t i = 0; i < settings_.worldStack.size(); ++i) {
+            EffectStackEntry& e = settings_.worldStack[i];
+            const ShaderPack* pk = reg.Find(e.pack);
+            const bool usable = pk && PackUsable(pk) && pk->type == PackType::World;
+            const std::string name = pk ? pk->name.Get(lang) : e.pack;
+            ImGui::PushID((int)i);
+            bool on = e.enabled;
+            if (Switch("##worldon", name.c_str(), &on)) {
+                e.enabled = on;
+                worldChanged = true;
+            }
+            ImGui::SameLine();
+            if (IconButton("##worldremove", icon::X, Tr("월드에서 빼기"), false, 28.0f)) worldRemove = i;
+            if (usable && e.enabled && !pk->params.empty())
+                worldChanged |= DrawShaderPackParameters(*pk, e.params, "##world");
+            ImGui::PopID();
+            Gap(8.0f);
+        }
+        if (worldRemove != SIZE_MAX) {
+            settings_.worldStack.erase(settings_.worldStack.begin() + (long)worldRemove);
+            worldChanged = true;
+        }
+        std::vector<const ShaderPack*> addable;
+        for (const ShaderPack& pk : reg.Packs()) {
+            if (pk.type != PackType::World || !PackUsable(&pk)) continue;
+            bool in = false;
+            for (const EffectStackEntry& e : settings_.worldStack) in |= e.pack == pk.id;
+            if (!in) addable.push_back(&pk);
+        }
+        if (!addable.empty()) {
+            if (Button("##worldadd", Tr("월드 추가"), icon::Plus, ButtonKind::Secondary))
+                ImGui::OpenPopup("##worldaddpopup");
+            ImGui::SetNextWindowSize(ImVec2(Dp(300.0f), 0));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(12.0f), Dp(12.0f)));
+            if (ImGui::BeginPopup("##worldaddpopup")) {
+                for (const ShaderPack* pk : addable) {
+                    const std::string rid = "##worldadd_" + pk->id;
+                    if (MenuItem(rid.c_str(), pk->name.Get(lang).c_str())) {
+                        settings_.worldStack.push_back({pk->id, true, {}, {}});
+                        worldChanged = true;
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar();
+        }
+        if (settings_.worldStack.empty())
+            ImGui::TextUnformatted(Tr("월드 이펙트가 없습니다. 월드를 추가하면 장면에 배치됩니다."));
+        if (worldChanged) {
+            settings_.Save(settingsPath_);
+            ApplyRenderSettings();
+        }
+    }
     if (fx) {
         ApplyRenderSettings();
         settings_.Save(settingsPath_);

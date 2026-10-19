@@ -1257,6 +1257,23 @@ const Entry kEnglish[] = {
     {"사용자 텍스처 폴더 연결 필요", "Connect a user texture folder"},
     {"사용자", "User"},
     {"팩 포함", "Bundled"},
+    {"월드", "World"},
+    {"파라미터", "Parameters"},
+    {"월드 메뉴", "World menu"},
+    {"월드 이펙트 추가", "Add world effect"},
+    {"월드 추가", "Add world"},
+    {"월드 삭제", "Delete world"},
+    {"월드 켜기", "Enable world"},
+    {"월드 끄기", "Disable world"},
+    {"월드 배치", "Place world"},
+    {"월드 키 등록", "Register world key"},
+    {"월드 키 삭제", "Delete world key"},
+    {"월드에 추가", "Add to world"},
+    {"월드에서 빼기", "Remove from world"},
+    {"설치된 월드 이펙트가 없습니다", "No installed world effects"},
+    {"월드 이펙트가 없어요. 추가로 설치된 월드를 넣으세요.", "No world effects. Add an installed world with +."},
+    {"월드 이펙트가 없습니다. 월드를 추가하면 장면에 배치됩니다.", "No world effects. Added worlds are placed in the scene."},
+    {"켠 월드는 로비의 세부 탭(\"월드 이펙트\")과 재생 바의 화면 효과 버튼에서 끄거나 순서를 바꿀 수 있습니다.", "Enabled worlds can be turned off or reordered in the lobby's Details tab (\"World effect\") and with the screen effects button on the playback bar."},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

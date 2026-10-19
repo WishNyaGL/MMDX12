@@ -505,6 +505,11 @@ private:
     bool StudioExportVmdTo(const std::filesystem::path& path);  // selected model's motion (or the camera)
     void DrawStudioTopBar(float x0, float y0, float x1, float y1);
     void DrawStudioOutliner(float x0, float y0, float x1, float y1);
+    void StudioSelectWorld(uint32_t uid);              // 0 = no world selected
+    void DrawStudioWorldPanel(float w);                // world inspector: placement + keyable params
+    uint32_t studioSelectedWorld_ = 0;                 // selected world entity (0 = none)
+    std::vector<studio::StudioWorld> studioWorldBefore_;  // placement drag start (one undo step)
+    bool studioWorldPlaceDragging_ = false;
     void DrawStudioInspector(float x0, float y0, float x1, float y1);
     void DrawStudioTimeline(float x0, float y0, float x1, float y1);
     void DrawStudioViewport(float x0, float y0, float x1, float y1);
@@ -716,6 +721,10 @@ private:
     DirectX::XMFLOAT3 StudioPerformerCenter() const;  // center bone of the first character (teleport detection)
     void DrawStudioRenderMenu();                      // top bar popup: video / still
     void DrawStudioEffectsPanel(float x0, float y0, float x1, float y1);  // the "효과" panel: screen effects + effect stack
+    // Shared keyable typed params of a studio effect / world (key diamonds at the playhead; `kind` = EffectParam /
+    // WorldParam). True = a static value or a key changed this frame.
+    bool DrawKeyableParams(const ShaderPack& pk, studio::StudioEffect& fx, uint32_t uid, studio::RowKind kind,
+                           const char* idPrefix);
     void DrawStudioHelp();                            // shortcut overlay (? key / top bar button)
     bool StudioModal() const { return videoDialogOpen_ || studioHelpOpen_ || studioLeaveConfirm_ || studioLightPresetPending_ >= 0 ||
                                        studioBakeDialogOpen_ || studioBakeRunning_; }

@@ -841,10 +841,11 @@ void App::StudioSuggestShader(studio::StudioModel& m) {
 void App::StudioSelectModel(int index) {
     StudioDoc& d = *studio_;
     if (index < -1 || index >= (int)d.models.size()) return;
-    if (d.selectedModel == index && (index >= 0 || d.selectedLightUid == 0)) return;
+    if (d.selectedModel == index && (index >= 0 || (d.selectedLightUid == 0 && studioSelectedWorld_ == 0))) return;
     if (index >= 0) StudioPossess(false);  // possession belongs to the camera row
     d.selectedModel = index;
     d.selectedLightUid = 0;
+    studioSelectedWorld_ = 0;
     d.selection.clear();
     d.selectedRows.clear();
     d.selectedBones.clear();

@@ -51,6 +51,7 @@ void App::StudioSelectLight(uint32_t uid) {
     StudioPossess(false);  // camera possession does not belong to lights
     d.selectedModel = -1;
     d.selectedLightUid = uid;
+    studioSelectedWorld_ = 0;
     d.selection.clear();
     d.selectedRows.clear();
     d.selectedBones.clear();
@@ -262,7 +263,7 @@ void App::DrawStudioLightOutliner() {
         ImDrawList* cdl = ImGui::GetWindowDrawList();
         const ImVec2 a = ImGui::GetCursorScreenPos();
         const ImVec2 b(a.x + w, a.y + rowH);
-        const bool selected = (d.selectedModel == -1 && d.selectedLightUid == l.uid);
+        const bool selected = (d.selectedModel == -1 && d.selectedLightUid == l.uid && studioSelectedWorld_ == 0);
 
         ImGui::InvisibleButton("##row", ImVec2(w - Dp(40.0f), rowH));
         uiprobe::Info(ImGui::GetItemID(), "##row", l.name.c_str());   // MCP ui_click by name
