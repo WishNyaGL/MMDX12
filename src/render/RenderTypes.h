@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "render/ShaderInterop.h"
+#include "render/WorldTypes.h"
 
 namespace mmdx {
 
@@ -378,6 +379,8 @@ struct FrameView {
     bool videoExact = false;
     // Shader pack typed scene and audio inputs
     GpuPackInputs packInputs{};
+    // World pack entities (falling snow, ground cover ...): simulated and drawn by WorldPass (render/WorldTypes.h)
+    std::vector<WorldInstance> worlds;
 };
 
 struct RenderStats {
