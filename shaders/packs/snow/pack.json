@@ -49,7 +49,7 @@
         "blend": "alpha",
         "simulate": "SimulateFlakes",
         "shade": "ShadeFlakes",
-        "size": [0.015, 0.35]
+        "size": [0.02, 0.40]
       },
       {
         "name": "kick",
@@ -99,7 +99,7 @@
       "group": "falling",
       "type": "float",
       "label": { "ko": "밀도", "en": "Density", "ja": "密度", "zh": "密度" },
-      "default": 0.30,
+      "default": 0.50,
       "min": 0.0,
       "max": 1.0,
       "step": 0.05
@@ -119,8 +119,8 @@
       "group": "falling",
       "type": "float",
       "label": { "ko": "눈송이 크기", "en": "Flake Size", "ja": "雪片サイズ", "zh": "雪花大小" },
-      "default": 0.045,
-      "min": 0.010,
+      "default": 0.055,
+      "min": 0.015,
       "max": 0.300,
       "step": 0.005
     },

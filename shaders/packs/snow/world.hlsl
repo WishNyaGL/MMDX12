@@ -151,15 +151,15 @@ void SimulateFlakes(inout PackParticle p, PackSimInput s) {
         p.pos = PackLocalToWorld(float3(r * cos(theta), localY, r * sin(theta)));
         p.age = rnd.z * 10.0;
 
-        // Calmer snowfall: fine delicate flakes (90%), medium (8%), rare soft flakes (2%)
+        // Snowflake size distribution: typical flakes (82%), medium flakes (14%), near-camera flakes (4%)
         float rSize = PackRandom(s.id, 777u);
         float sizeScale = 1.0;
-        if (rSize < 0.90) {
-            sizeScale = lerp(0.20, 0.55, rSize / 0.90);
-        } else if (rSize < 0.98) {
-            sizeScale = lerp(0.55, 0.85, (rSize - 0.90) / 0.08);
+        if (rSize < 0.82) {
+            sizeScale = lerp(0.65, 1.05, rSize / 0.82);
+        } else if (rSize < 0.96) {
+            sizeScale = lerp(1.05, 1.65, (rSize - 0.82) / 0.14);
         } else {
-            sizeScale = lerp(0.85, 1.15, (rSize - 0.98) / 0.02);
+            sizeScale = lerp(1.65, 2.50, (rSize - 0.96) / 0.04);
         }
         p.size = flakeSize * sizeScale;
         p.vel = wind + float3(0.0, -fallSpeed, 0.0);
@@ -214,12 +214,12 @@ void SimulateFlakes(inout PackParticle p, PackSimInput s) {
 
         float rSize = PackRandom(s.id, 777u);
         float sizeScale = 1.0;
-        if (rSize < 0.90) {
-            sizeScale = lerp(0.20, 0.55, rSize / 0.90);
-        } else if (rSize < 0.98) {
-            sizeScale = lerp(0.55, 0.85, (rSize - 0.90) / 0.08);
+        if (rSize < 0.82) {
+            sizeScale = lerp(0.65, 1.05, rSize / 0.82);
+        } else if (rSize < 0.96) {
+            sizeScale = lerp(1.05, 1.65, (rSize - 0.82) / 0.14);
         } else {
-            sizeScale = lerp(0.85, 1.15, (rSize - 0.98) / 0.02);
+            sizeScale = lerp(1.65, 2.50, (rSize - 0.96) / 0.04);
         }
         p.size = flakeSize * sizeScale;
         p.vel = wind + float3(0.0, -fallSpeed, 0.0);
@@ -246,22 +246,23 @@ float4 ShadeFlakes(PackParticleShadeIn i) {
     float d = length(i.uv - 0.5);
     if (d > 0.5) return 0.0;
 
-    // Smooth feathering: soft falloff, no hard sphere boundary
-    float falloff = saturate(1.0 - d * 2.0);
-    float feather = falloff * falloff * (3.0 - 2.0 * falloff);
-    // Delicate transparency (max alpha ~0.50)
-    float alpha = feather * 0.50 * i.particle.color.a;
+    // Firm core with soft feathered edge: alpha ~0.75-0.85 in core
+    float edge = smoothstep(0.5, 0.20, d);
+    float alpha = edge * 0.85 * i.particle.color.a;
 
-    // Lighting strictly from scene light (sun + ambient) - matches theater stage lighting
+    // Light with sun (forward scatter) + hemisphere ambient (scene sky / ground)
     float3 sunColor = PackSunColor();
-    float3 ambient = PackAmbient();
+    float3 hemi = PackHemiAmbient(float3(0.0, 1.0, 0.0));
     float3 L = PackSunDir();
     float3 V = i.viewDir;
 
-    // Translucent forward scattering
+    // Translucent crystalline forward scattering
     float forward = saturate(dot(L, -V) * 0.5 + 0.5);
-    float3 lit = ambient * 0.65 + sunColor * (0.28 * forward + 0.15);
-    lit = min(lit, float3(0.72, 0.74, 0.78));
+    // As bright as the snow cover facing the sky (albedo ~0.95, sun + hemisphere), plus a little forward scatter, so
+    // flakes read as snow against a bright sky and still follow a dark stage's lighting.
+    // Flakes are drawn after the scene composite, so they also take the sky light they scatter (gSkyHorizon): against a
+    // bright sky they stay white instead of reading as dark specks.
+    float3 lit = 0.95 * (sunColor * (0.75 + 0.35 * forward) + hemi) + gSkyHorizon * 0.9;
     return float4(lit, alpha);
 }
 
@@ -366,7 +367,7 @@ float4 ShadeKick(PackParticleShadeIn i) {
     float alpha = smoothstep(0.5, feather, d) * i.particle.color.a;
 
     float3 sunColor = PackSunColor();
-    float3 ambient = PackAmbient();
-    float3 lit = (sunColor * 0.95 + ambient * 1.1) * 1.2; // Bright glowing puffs
+    float3 hemi = PackHemiAmbient(float3(0.0, 1.0, 0.0));
+    float3 lit = (sunColor * 0.95 + hemi * 1.1) * 1.1;
     return float4(lit, alpha);
 }
