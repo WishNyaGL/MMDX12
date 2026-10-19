@@ -281,6 +281,15 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 LOG_INFO("STUDIOEFFECT %zu pack=%s enabled=%d keys=%zu values=%s",
                          i, e.entry.pack.c_str(), (int)e.entry.enabled, keyCount, vals.c_str());
             }
+            for (size_t i = 0; i < d.worlds.size(); ++i) {
+                const studio::StudioWorld& w = d.worlds[i];
+                size_t keyCount = 0;
+                for (const auto& t : w.fx.tracks) keyCount += t.keys.size();
+                LOG_INFO("STUDIOWORLD %zu pack=%s enabled=%d keys=%zu place=(%.3f,%.3f,%.3f) (%.2f,%.2f,%.2f) %.3f",
+                         i, w.fx.entry.pack.c_str(), (int)w.fx.entry.enabled, keyCount,
+                         w.place.translation.x, w.place.translation.y, w.place.translation.z,
+                         w.place.rotationDeg.x, w.place.rotationDeg.y, w.place.rotationDeg.z, w.place.scale);
+            }
         }
     } else if (cmd == "studiobone") {  // studiobone <name>: click the bone's joint in the viewport
         const studio::StudioModel* m = studio_ ? studio_->Selected() : nullptr;
@@ -771,6 +780,78 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 }
                 studio::UpsertParamKey(*tr, studio::EffectParamKey{frame, val, stepped});
                 StudioPushTrackEdit(Tr("효과 키 등록"), before);
+                studio_->rowsKey = ~0ull;
+            }
+        }
+    } else if (cmd == "studioworld") {  // studioworld <add <pack id> | remove <index> | enable <index> <0|1> | place <index> tx ty tz rx ry rz s>
+        if (studio_ && !args.empty()) {
+            const std::string action = ToLowerAscii(args[0]);
+            if (action == "add" && args.size() >= 2) {
+                std::vector<studio::StudioWorld> before = studio_->worlds;
+                studio::StudioWorld w;
+                w.uid = studio_->nextWorldUid++;
+                w.name = args[1];
+                w.fx.entry.pack = args[1];
+                w.fx.entry.enabled = true;
+                studio_->worlds.push_back(std::move(w));
+                studio_->history.Push(std::make_unique<studio::WorldsCommand>(*studio_, Tr("월드 추가"), before, studio_->worlds));
+                ++studio_->projectVersion;
+                studio_->rowsKey = ~0ull;
+            } else if (action == "remove" && args.size() >= 2) {
+                size_t idx = (size_t)std::atoi(args[1].c_str());
+                if (idx < studio_->worlds.size()) {
+                    std::vector<studio::StudioWorld> before = studio_->worlds;
+                    studio_->worlds.erase(studio_->worlds.begin() + (long)idx);
+                    studio_->history.Push(std::make_unique<studio::WorldsCommand>(*studio_, Tr("월드 삭제"), before, studio_->worlds));
+                    ++studio_->projectVersion;
+                    studio_->rowsKey = ~0ull;
+                }
+            } else if (action == "enable" && args.size() >= 3) {
+                size_t idx = (size_t)std::atoi(args[1].c_str());
+                if (idx < studio_->worlds.size()) {
+                    std::vector<studio::StudioWorld> before = studio_->worlds;
+                    studio_->worlds[idx].fx.entry.enabled = std::atoi(args[2].c_str()) != 0;
+                    studio_->history.Push(std::make_unique<studio::WorldsCommand>(*studio_,
+                        studio_->worlds[idx].fx.entry.enabled ? Tr("월드 켜기") : Tr("월드 끄기"), before, studio_->worlds));
+                    ++studio_->projectVersion;
+                    studio_->rowsKey = ~0ull;
+                }
+            } else if (action == "place" && args.size() >= 9) {
+                size_t idx = (size_t)std::atoi(args[1].c_str());
+                if (idx < studio_->worlds.size()) {
+                    std::vector<studio::StudioWorld> before = studio_->worlds;
+                    studio::PropAttach& p = studio_->worlds[idx].place;
+                    p.translation = {(float)std::atof(args[2].c_str()), (float)std::atof(args[3].c_str()),
+                                     (float)std::atof(args[4].c_str())};
+                    p.rotationDeg = {(float)std::atof(args[5].c_str()), (float)std::atof(args[6].c_str()),
+                                     (float)std::atof(args[7].c_str())};
+                    p.scale = (float)std::atof(args[8].c_str());
+                    studio_->history.Push(std::make_unique<studio::WorldsCommand>(*studio_, Tr("월드 배치"), before, studio_->worlds));
+                    ++studio_->projectVersion;
+                }
+            }
+        }
+    } else if (cmd == "studioworldkey") {  // studioworldkey <index> <param key> <frame> <value> [stepped]
+        if (studio_ && args.size() >= 4) {
+            size_t idx = (size_t)std::atoi(args[0].c_str());
+            if (idx < studio_->worlds.size()) {
+                studio::StudioWorld& world = studio_->worlds[idx];
+                const std::string& param = args[1];
+                int frame = std::atoi(args[2].c_str());
+                float val = (float)std::atof(args[3].c_str());
+                bool stepped = args.size() > 4 && (args[4] == "1" || ToLowerAscii(args[4]) == "stepped" || ToLowerAscii(args[4]) == "true");
+                std::vector<studio::TrackState> before = {studio::CaptureTrack(*studio_, -1, studio::RowKind::WorldParam,
+                                                                               studio::WorldParamTrackName(world.uid, param))};
+                studio::EffectParamTrack* tr = nullptr;
+                for (auto& t : world.fx.tracks) {
+                    if (t.param == param) { tr = &t; break; }
+                }
+                if (!tr) {
+                    world.fx.tracks.push_back({param, {}});
+                    tr = &world.fx.tracks.back();
+                }
+                studio::UpsertParamKey(*tr, studio::EffectParamKey{frame, val, stepped});
+                StudioPushTrackEdit(Tr("월드 키 등록"), before);
                 studio_->rowsKey = ~0ull;
             }
         }

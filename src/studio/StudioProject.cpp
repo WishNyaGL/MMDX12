@@ -37,6 +37,14 @@ DirectX::XMMATRIX PropOffsetMatrix(const PropAttach& a) {
            DirectX::XMMatrixTranslation(a.translation.x, a.translation.y, a.translation.z);
 }
 
+size_t StudioWorld::ApproxBytes() const {
+    return sizeof(StudioWorld) + name.size() + fx.ApproxBytes();
+}
+
+bool StudioWorld::operator==(const StudioWorld& o) const {
+    return name == o.name && fx == o.fx && place == o.place;
+}
+
 namespace {
 
 // ASCII-only lowercase (multibyte UTF-8 bytes are never folded): for the case-insensitive
@@ -635,6 +643,35 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
             }
             j["effects"] = std::move(effects);
         }
+        // Version 3: placed world entities (same track JSON as effects + "place").
+        {
+            nlohmann::json worlds = nlohmann::json::array();
+            for (const StudioWorld& w : data.worlds) {
+                const StudioEffect& e = w.fx;
+                nlohmann::json jw;
+                jw["name"] = w.name;
+                jw["pack"] = e.entry.pack;
+                jw["enabled"] = e.entry.enabled;
+                nlohmann::json params = nlohmann::json::object();
+                for (const auto& [k, v] : e.entry.params) params[k] = v;
+                jw["params"] = std::move(params);
+                if (!e.entry.textureFolder.empty()) jw["textureFolder"] = e.entry.textureFolder;
+                nlohmann::json tracks = nlohmann::json::array();
+                for (const EffectParamTrack& t : e.tracks) {
+                    nlohmann::json keys = nlohmann::json::array();
+                    for (const EffectParamKey& k : t.keys) keys.push_back({k.frame, k.value, k.stepped ? 1 : 0});
+                    tracks.push_back({{"param", t.param}, {"keys", std::move(keys)}});
+                }
+                jw["tracks"] = std::move(tracks);
+                jw["place"] = {
+                    {"t", {w.place.translation.x, w.place.translation.y, w.place.translation.z}},
+                    {"r", {w.place.rotationDeg.x, w.place.rotationDeg.y, w.place.rotationDeg.z}},
+                    {"s", w.place.scale},
+                };
+                worlds.push_back(std::move(jw));
+            }
+            j["worlds"] = std::move(worlds);
+        }
         if (data.audioPath.empty()) {
             j["audio"] = nullptr;
         } else {
@@ -957,6 +994,55 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                     }
                 }
                 out.effects.push_back(std::move(e));
+            }
+        }
+
+        // Version 3: world entities. Missing keys keep defaults; malformed entries are skipped with a warning.
+        if (version >= 3 && j.contains("worlds") && j["worlds"].is_array()) {
+            for (const auto& jw : j["worlds"]) {
+                if (!jw.is_object()) {
+                    if (warnings) warnings->push_back("malformed world entry skipped");
+                    continue;
+                }
+                StudioWorld w;
+                w.name = ReadString(jw, "name", "");
+                w.fx.entry.pack = ReadString(jw, "pack", "");
+                if (w.fx.entry.pack.empty()) {
+                    if (warnings) warnings->push_back("world entry without a pack skipped");
+                    continue;
+                }
+                w.fx.entry.enabled = ReadBool(jw, "enabled", true);
+                if (jw.contains("params") && jw["params"].is_object())
+                    for (const auto& [k, v] : jw["params"].items())
+                        if (v.is_number()) w.fx.entry.params[k] = v.get<float>();
+                w.fx.entry.textureFolder = ReadString(jw, "textureFolder", "");
+                if (jw.contains("tracks") && jw["tracks"].is_array()) {
+                    for (const auto& jt : jw["tracks"]) {
+                        if (!jt.is_object()) continue;
+                        EffectParamTrack t;
+                        t.param = ReadString(jt, "param", "");
+                        if (t.param.empty()) continue;
+                        if (jt.contains("keys") && jt["keys"].is_array()) {
+                            for (const auto& jk : jt["keys"]) {
+                                if (!jk.is_array() || jk.size() < 2 || !jk[0].is_number() || !jk[1].is_number())
+                                    continue;
+                                EffectParamKey k;
+                                k.frame = jk[0].get<int32_t>();
+                                k.value = jk[1].get<float>();
+                                k.stepped = jk.size() >= 3 && jk[2].is_number() && jk[2].get<int>() != 0;
+                                UpsertParamKey(t, k);
+                            }
+                        }
+                        w.fx.tracks.push_back(std::move(t));
+                    }
+                }
+                if (jw.contains("place") && jw["place"].is_object()) {
+                    const nlohmann::json& pl = jw["place"];
+                    w.place.translation = ReadVec3(pl, "t", w.place.translation);
+                    w.place.rotationDeg = ReadVec3(pl, "r", w.place.rotationDeg);
+                    w.place.scale = (float)ReadDouble(pl, "s", w.place.scale);
+                }
+                out.worlds.push_back(std::move(w));
             }
         }
 

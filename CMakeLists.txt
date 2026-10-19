@@ -267,6 +267,12 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/look_preset_test.cpp)
   # app/Settings.h reaches render/Dx12Context.h, whose d3dx12.h comes from DirectX-Headers.
   target_link_libraries(look_preset_test PRIVATE mmdx_core Microsoft::DirectX-Headers)
 endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/tools/world_track_test.cpp)
+  # The collider track sampler (render/WorldTypes.cpp), without the whole renderer.
+  add_executable(world_track_test tools/world_track_test.cpp src/render/WorldTypes.cpp)
+  target_include_directories(world_track_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(world_track_test PRIVATE Microsoft::DirectX-Headers)
+endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_focus_test.cpp)
   add_executable(studio_focus_test tools/studio_focus_test.cpp src/studio/StudioFocus.cpp src/studio/StudioProject.cpp
                                    src/studio/StudioMotion.cpp src/studio/SceneLight.cpp src/studio/StudioEffects.cpp)

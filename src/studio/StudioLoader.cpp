@@ -305,6 +305,7 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
         out.projectPath = recovery ? pd.recoveryOf : file;
         out.mmePost = pd.mmePost;
         out.effects = pd.effects;
+        out.worlds = pd.worlds;
 
         const size_t n = pd.models.size();
         std::vector<int> remap(n, -1);

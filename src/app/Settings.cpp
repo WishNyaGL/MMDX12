@@ -406,6 +406,34 @@ bool AppSettings::Load(const std::filesystem::path& file) {
                 effectStack.push_back(std::move(e));
             }
         }
+        else if (key == "world") {
+            // world=<pack id>|<enabled 0/1>|<key>:<value>,<key>:<value>|<texture folder or -> (same as effect=)
+            const size_t a = value.find('|');
+            const size_t b = a == std::string::npos ? a : value.find('|', a + 1);
+            const size_t c = b == std::string::npos ? b : value.find('|', b + 1);
+            if (a != std::string::npos && a > 0 && b != std::string::npos) {
+                EffectStackEntry e;
+                e.pack = value.substr(0, a);
+                int en = 1;
+                if (ParseInt(value.substr(a + 1, b - a - 1), en)) e.enabled = en != 0;
+                if (c != std::string::npos) {
+                    const std::string list = value.substr(b + 1, c - b - 1);
+                    size_t pos = 0;
+                    while (pos < list.size()) {
+                        size_t end = list.find(',', pos);
+                        if (end == std::string::npos) end = list.size();
+                        const std::string item = list.substr(pos, end - pos);
+                        const size_t colon = item.find(':');
+                        if (colon != std::string::npos && ParseFloat(item.substr(colon + 1), f) && std::isfinite(f))
+                            e.params[item.substr(0, colon)] = f;
+                        pos = end + 1;
+                    }
+                    const std::string folder = value.substr(c + 1);
+                    if (!folder.empty() && folder != "-") e.textureFolder = folder;
+                }
+                worldStack.push_back(std::move(e));
+            }
+        }
         else if (key == "mmeEffect") {
             // mmeEffect=<enabled 0|1>|<path> (path last: effect paths may hold '|')
             const size_t a = value.find('|');
@@ -650,6 +678,16 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
             list += (list.empty() ? "" : ",") + k + ":" + buf;
         }
         std::fprintf(f, "effect=%s|%d|%s|%s\n", e.pack.c_str(), e.enabled ? 1 : 0, list.c_str(),
+                     e.textureFolder.empty() ? "-" : e.textureFolder.c_str());
+    }
+    for (const EffectStackEntry& e : worldStack) {
+        std::string list;
+        for (const auto& [k, v] : e.params) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.4g", v);
+            list += (list.empty() ? "" : ",") + k + ":" + buf;
+        }
+        std::fprintf(f, "world=%s|%d|%s|%s\n", e.pack.c_str(), e.enabled ? 1 : 0, list.c_str(),
                      e.textureFolder.empty() ? "-" : e.textureFolder.c_str());
     }
     for (const MmeEffectEntry& e : mmeEffects)

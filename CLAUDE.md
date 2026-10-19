@@ -82,6 +82,7 @@ progress.md is the session log. Read its latest entry first.
     lighting source (+ demo spots / key override; `studiostate` logs them), `studiokeyspot <spotIndex> [frame]` keys
     that spot's values through the ordinary undoable insert.
     Effect stack: `studioeffect <add <pack id>|remove <index>|enable <index> 0|1>`, `studioeffectkey <index> <param key> <frame> <value> [stepped]` (`studiostate` logs `STUDIOEFFECT`).
+    World entities: `studioworld <add <pack id>|remove <index>|enable <index> 0|1|place <index> tx ty tz rx ry rz s>`, `studioworldkey <index> <param key> <frame> <value> [stepped]` (`studiostate` logs `STUDIOWORLD`).
     While a script runs, real mouse/keyboard input is ignored.
     Frames count like `--frames`. Use it to click through editor features headlessly (examples: `captures/studio/t*.txt`).
   - `--frames N` counts frames only inside a scene or with `--screen`; a run with neither never quits.

@@ -206,6 +206,9 @@ bool App::FinishStudioLoad() {
         doc->effects = pkg.effects;
         doc->nextEffectUid = 1;
         for (auto& eff : doc->effects) eff.uid = doc->nextEffectUid++;
+        doc->worlds = pkg.worlds;
+        doc->nextWorldUid = 1;
+        for (auto& world : doc->worlds) world.uid = doc->nextWorldUid++;
     } else if (pkg.fromPmm) {
         // PMM import: a NEW unsaved project. Camera motion when the PMM had camera keys; the PMM has
         // no scene lights, so the Studio preset is the default (a PMM light track overrides it).
@@ -427,6 +430,7 @@ void App::UpdateStudio(double dt) {
     StudioPollJobs();
     StudioPollBake();
     StudioAutosave(false, false);
+    StudioPumpColliders();
     if (d.playing) {
         if (d.hasAudio && audio_.IsPlaying()) {
             const double a = audio_.PositionSeconds() + d.audioOffset;
@@ -450,6 +454,87 @@ void App::UpdateStudio(double dt) {
             }
         }
     }
+}
+
+// World entities (docs/effect_ecosystem.md §2 item 7): the studio cast's collider sources. Characters only.
+std::vector<CharacterSource> App::StudioColliderCast() const {
+    std::vector<CharacterSource> cast;
+    if (!studio_) return cast;
+    const studio::StudioDoc& d = *studio_;
+    for (const auto& m : d.models) {
+        if (!m->pmx || m->kind != studio::ModelKind::Character || !m->inst) continue;
+        CharacterSource src;
+        src.pmx = m->pmx;
+        if (m->boundVersion != m->motionVersion) {
+            const VmdMotion vmd = m->motion.ToVmd();
+            src.motion = BoundMotion::Bind(*m->pmx, {&vmd});
+        } else {
+            src.motion = m->bound;
+        }
+        src.motionVersion = m->motionVersion;
+        src.id = std::to_string(m->uid) + "|" + m->name;
+        const float scale = (m->libraryId.empty() ? 1.0f : settings_.CharacterScale(m->libraryId)) *
+                            std::max(0.01f, m->place.scale);
+        src.scale = scale;
+        const float kRad = 0.01745329252f;
+        DirectX::XMFLOAT4X4 root;
+        DirectX::XMStoreFloat4x4(&root,
+            DirectX::XMMatrixMultiply(
+                DirectX::XMMatrixRotationRollPitchYaw(m->place.rotationDeg.x * kRad, m->place.rotationDeg.y * kRad,
+                                                      m->place.rotationDeg.z * kRad),
+                DirectX::XMMatrixTranslation(m->place.translation.x / scale, m->place.translation.y / scale,
+                                            m->place.translation.z / scale)));
+        src.root = root;
+        cast.push_back(std::move(src));
+    }
+    return cast;
+}
+
+// Debounced background rebuild of the studio collider track (only while the project has world entities).
+void App::StudioPumpColliders() {
+    if (!studio_) return;
+    studio::StudioDoc& d = *studio_;
+    if (studioColliderFuture_.valid() &&
+        studioColliderFuture_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        studioColliders_ = studioColliderFuture_.get();
+    }
+    if (d.worlds.empty()) {
+        studioColliders_.reset();
+        studioColliderEditAt_ = -1.0;
+        studioColliderPendingVersion_ = 0;
+        return;
+    }
+    const std::vector<CharacterSource> cast = StudioColliderCast();
+    uint64_t version = 1469598103934665603ull;
+    const auto mix = [&](uint64_t v) { version = (version ^ v) * 1099511628211ull; };
+    for (const CharacterSource& c : cast) {
+        mix((uint64_t)(uintptr_t)c.pmx.get());
+        mix(c.motionVersion);
+        mix((uint64_t)(uintptr_t)c.motion.get());
+        const float* f = &c.root._11;
+        for (int i = 0; i < 16; ++i) {
+            uint32_t bits;
+            std::memcpy(&bits, &f[i], sizeof(bits));
+            mix(bits);
+        }
+        uint32_t sbits;
+        std::memcpy(&sbits, &c.scale, sizeof(sbits));
+        mix(sbits);
+    }
+    mix(d.history.Version());
+    // A model list / motion / cast change (history or the cast hash): start the 0.5 s debounce again.
+    if (version != studioColliderPendingVersion_) {
+        studioColliderPendingVersion_ = version;
+        studioColliderEditAt_ = timeSeconds_;
+    }
+    if (studioColliderFuture_.valid()) return;
+    if (version == studioColliderVersion_) return;
+    if (studioColliderEditAt_ >= 0.0 && timeSeconds_ - studioColliderEditAt_ < 0.5) return;
+    studioColliderVersion_ = version;
+    const double end = (double)d.EndFrame() / kMmdFps;
+    studioColliderFuture_ = std::async(std::launch::async, [cast, end] {
+        return BuildColliderTrack(cast, 0.0, end, 30.0f);
+    });
 }
 
 void App::UpdateStudioScene() {
@@ -750,6 +835,21 @@ void App::BuildStudioFrameView(FrameView& view) {
     for (const auto& m : d.models)
         if (m->visible && m->kind == ModelKind::Character && m->inst) { performer = m->inst.get(); break; }
     FillPackInputs(view, performer, d.time - d.audioOffset);
+
+    // World entities: one instance per enabled world, placed by `place`, params evaluated at the timeline frame.
+    const float worldFrame = (float)(d.time * kMmdFps);
+    for (const studio::StudioWorld& w : d.worlds) {
+        if (!w.fx.entry.enabled) continue;
+        WorldInstance inst;
+        inst.uid = w.uid;
+        inst.pack = w.fx.entry.pack;
+        DirectX::XMStoreFloat4x4(&inst.transform, studio::PropOffsetMatrix(w.place));
+        inst.params = studio::EvaluateEffect(w.fx, worldFrame).params;
+        inst.time = d.time;
+        inst.exact = !d.playing;
+        inst.colliders = studioColliders_;
+        view.worlds.push_back(std::move(inst));
+    }
 }
 
 namespace {
@@ -822,6 +922,17 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
         const std::string param = EffectParamNameOfIndex(*eff, pidx);
         if (param.empty()) return false;
         name = EffectParamTrackName(uid, param);
+        return true;
+    }
+    if (kind == RowKind::WorldParam) {
+        if (d.selectedModel >= 0) return false;
+        const uint32_t uid = RowGroupOf(row);
+        const uint32_t pidx = RowIndexOf(row);
+        const StudioWorld* world = d.FindWorld(uid);
+        if (!world) return false;
+        const std::string param = EffectParamNameOfIndex(world->fx, pidx);
+        if (param.empty()) return false;
+        name = WorldParamTrackName(uid, param);
         return true;
     }
     if (d.selectedModel < 0 || d.selectedModel >= (int)d.models.size()) return false;
@@ -986,6 +1097,34 @@ void App::StudioInsertKeys(const std::vector<uint64_t>& rows, int frame) {
                     UpsertParamKey(*tr, EffectParamKey{frame, val, false});
                 }
             }
+        } else if (kind == RowKind::WorldParam) {
+            uint32_t worldUid = 0;
+            std::string param;
+            if (ParseWorldParamTrackName(name, worldUid, param)) {
+                if (StudioWorld* world = d.FindWorld(worldUid)) {
+                    EffectParamTrack* tr = nullptr;
+                    for (auto& t : world->fx.tracks) {
+                        if (t.param == param) { tr = &t; break; }
+                    }
+                    if (!tr) {
+                        world->fx.tracks.push_back({param, {}});
+                        tr = &world->fx.tracks.back();
+                    }
+                    float fallback = 0.0f;
+                    if (auto it = world->fx.entry.params.find(param); it != world->fx.entry.params.end())
+                        fallback = it->second;
+                    else {
+                        const ShaderPack* pk = ShaderPacks().Find(world->fx.entry.pack);
+                        if (pk) {
+                            for (const auto& sp : pk->params) {
+                                if (sp.key == param) { fallback = sp.def; break; }
+                            }
+                        }
+                    }
+                    float val = EvaluateParamTrack(*tr, (float)frame, fallback);
+                    UpsertParamKey(*tr, EffectParamKey{frame, val, false});
+                }
+            }
         } else if (kind == RowKind::Bone) {
             auto& track = d.models[d.selectedModel]->motion.bones[name];
             BoneKf k;
@@ -1038,7 +1177,17 @@ std::vector<int> App::StudioRowFrames(uint64_t row) const {
                 }
             }
         }
-    } else {
+    } else if (kind == RowKind::WorldParam) {
+        uint32_t worldUid = 0;
+        std::string param;
+        if (ParseWorldParamTrackName(name, worldUid, param)) {
+            if (const StudioWorld* world = d.FindWorld(worldUid)) {
+                for (const auto& t : world->fx.tracks) {
+                    if (t.param == param) { add(t.keys); break; }
+                }
+            }
+        }
+    } else if (d.selectedModel < d.models.size()) {
         const MotionData& m = d.models[d.selectedModel]->motion;
         if (kind == RowKind::Bone) {
             if (auto it = m.bones.find(name); it != m.bones.end()) add(it->second);
@@ -1093,6 +1242,14 @@ void App::StudioSelectAll() {
                 }
             }
         }
+        for (const auto& world : d.worlds) {
+            for (const auto& tr : world.fx.tracks) {
+                if (!tr.keys.empty()) {
+                    uint32_t pidx = EffectParamIndexOfName(world.fx, tr.param);
+                    if (pidx != UINT32_MAX) all.insert(MakeRowId(RowKind::WorldParam, world.uid, pidx));
+                }
+            }
+        }
     }
     for (const auto& [group, children] : d.groupChildren) all.insert(group);
     for (uint64_t row : StudioExpandRows(all))
@@ -1128,6 +1285,21 @@ void App::StudioDeleteSelected(const char* undoName) {
             if (ParseEffectParamTrackName(track.second, effectUid, param)) {
                 if (StudioEffect* eff = d.FindEffect(effectUid)) {
                     for (auto& t : eff->tracks) {
+                        if (t.param == param) {
+                            std::vector<int32_t> fvec(fs.begin(), fs.end());
+                            EraseParamKeys(t, fvec);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        else if (kind == RowKind::WorldParam) {
+            uint32_t worldUid = 0;
+            std::string param;
+            if (ParseWorldParamTrackName(track.second, worldUid, param)) {
+                if (StudioWorld* world = d.FindWorld(worldUid)) {
+                    for (auto& t : world->fx.tracks) {
                         if (t.param == param) {
                             std::vector<int32_t> fvec(fs.begin(), fs.end());
                             EraseParamKeys(t, fvec);
@@ -1182,6 +1354,25 @@ void App::StudioCopySelected() {
                             for (const auto& pk : t.keys) {
                                 if (pk.frame == k.second) {
                                     c.effectParam = pk;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if (kind == RowKind::WorldParam) {
+            uint32_t worldUid = 0;
+            std::string param;
+            if (ParseWorldParamTrackName(name, worldUid, param)) {
+                if (const StudioWorld* world = d.FindWorld(worldUid)) {
+                    for (const auto& t : world->fx.tracks) {
+                        if (t.param == param) {
+                            for (const auto& pk : t.keys) {
+                                if (pk.frame == k.second) {
+                                    c.worldParam = pk;
                                     found = true;
                                     break;
                                 }
@@ -1301,6 +1492,25 @@ void App::StudioPaste(bool curvesOnly, bool mirrored) {
                 }
             }
         }
+        else if (kind == RowKind::WorldParam) {
+            uint32_t worldUid = 0;
+            std::string param;
+            if (ParseWorldParamTrackName(name, worldUid, param)) {
+                if (StudioWorld* world = d.FindWorld(worldUid)) {
+                    EffectParamTrack* tr = nullptr;
+                    for (auto& t : world->fx.tracks) {
+                        if (t.param == param) { tr = &t; break; }
+                    }
+                    if (!tr) {
+                        world->fx.tracks.push_back({param, {}});
+                        tr = &world->fx.tracks.back();
+                    }
+                    EffectParamKey pk = c.worldParam;
+                    pk.frame = f;
+                    UpsertParamKey(*tr, pk);
+                }
+            }
+        }
         else if (kind == RowKind::Bone) { BoneKf k = c.bone; k.frame = f; UpsertKey(d.models[d.selectedModel]->motion.bones[name], k); }
         else { MorphKf k = c.morph; k.frame = f; UpsertKey(d.models[d.selectedModel]->motion.morphs[name], k); }
         pasted.insert({row, f});
@@ -1365,6 +1575,16 @@ void App::StudioShiftFrames(bool remove) {
                 if (ParseEffectParamTrackName(name, effectUid, param)) {
                     if (StudioEffect* eff = d.FindEffect(effectUid)) {
                         for (auto& t : eff->tracks) {
+                            if (t.param == param) { apply(t.keys); break; }
+                        }
+                    }
+                }
+            } else if (kind == RowKind::WorldParam) {
+                uint32_t worldUid = 0;
+                std::string param;
+                if (ParseWorldParamTrackName(name, worldUid, param)) {
+                    if (StudioWorld* world = d.FindWorld(worldUid)) {
+                        for (auto& t : world->fx.tracks) {
                             if (t.param == param) { apply(t.keys); break; }
                         }
                     }
@@ -1496,7 +1716,8 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
             selectRowKeys(id, true);
             d.rowAnchor = id;
             if (RowKindOf(id) == RowKind::SceneLight) StudioSelectLight(RowIndexOf(id));
-            else if (IsCameraKind(RowKindOf(id)) || RowKindOf(id) == RowKind::EffectParam) d.selectedLightUid = 0;
+            else if (IsCameraKind(RowKindOf(id)) || RowKindOf(id) == RowKind::EffectParam ||
+                     RowKindOf(id) == RowKind::WorldParam) d.selectedLightUid = 0;
         }
         // bone rows also pick the bones for the viewport (the clicked one gets the gizmo)
         d.selectedBones.clear();
@@ -1563,6 +1784,20 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
                 if (ParseEffectParamTrackName(track.second, effectUid, param)) {
                     if (StudioEffect* eff = d.FindEffect(effectUid)) {
                         for (auto& t : eff->tracks) {
+                            if (t.param == param) {
+                                MoveKeyFrames(t.keys, fs, ev.moveDelta);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            else if (kind == RowKind::WorldParam) {
+                uint32_t worldUid = 0;
+                std::string param;
+                if (ParseWorldParamTrackName(track.second, worldUid, param)) {
+                    if (StudioWorld* world = d.FindWorld(worldUid)) {
+                        for (auto& t : world->fx.tracks) {
                             if (t.param == param) {
                                 MoveKeyFrames(t.keys, fs, ev.moveDelta);
                                 break;
@@ -1669,6 +1904,58 @@ void App::StudioRebuildRows() {
                     r.label = packName + " · " + paramLabel;
                     r.selected = d.selectedRows.count(r.id) != 0;
                     r.tint = IM_COL32(100, 210, 210, 255);
+                    keysOf(r.id, tr.keys, r.keys);
+                    for (const auto& k : tr.keys) summary.insert(k.frame);
+                    childIds.push_back(r.id);
+                    if (group.expanded) children.push_back(std::move(r));
+                }
+            }
+            for (int f : summary) group.keys.push_back({f, false});
+            d.rows.push_back(std::move(group));
+            for (auto& c : children) d.rows.push_back(std::move(c));
+        }
+
+        // world parameters: a row group "월드" under the camera target
+        bool hasAnyWorldKeys = false;
+        for (const auto& world : d.worlds) {
+            for (const auto& tr : world.fx.tracks) {
+                if (!tr.keys.empty()) { hasAnyWorldKeys = true; break; }
+            }
+            if (hasAnyWorldKeys) break;
+        }
+        if (hasAnyWorldKeys) {
+            TimelineRow group;
+            group.id = MakeRowId(RowKind::Group, 0, 1);
+            group.label = Tr("월드");
+            group.isGroup = true;
+            group.keysEditable = false;
+            group.expanded = !d.collapsed.count(group.id);
+            group.selected = d.selectedRows.count(group.id) != 0;
+            std::vector<uint64_t>& childIds = d.groupChildren[group.id];
+            std::set<int> summary;
+            std::vector<TimelineRow> children;
+            for (const auto& world : d.worlds) {
+                const ShaderPack* pk = ShaderPacks().Find(world.fx.entry.pack);
+                const std::string packName = pk ? pk->name.Get(PackLanguage()) : world.fx.entry.pack;
+                for (const auto& tr : world.fx.tracks) {
+                    if (tr.keys.empty()) continue;
+                    uint32_t pidx = EffectParamIndexOfName(world.fx, tr.param);
+                    if (pidx == UINT32_MAX) continue;
+                    TimelineRow r;
+                    r.depth = 1;
+                    r.id = MakeRowId(RowKind::WorldParam, world.uid, pidx);
+                    std::string paramLabel = tr.param;
+                    if (pk) {
+                        for (const auto& sp : pk->params) {
+                            if (sp.key == tr.param) {
+                                if (!sp.label.Empty()) paramLabel = sp.label.Get(PackLanguage());
+                                break;
+                            }
+                        }
+                    }
+                    r.label = (world.name.empty() ? packName : world.name) + " · " + paramLabel;
+                    r.selected = d.selectedRows.count(r.id) != 0;
+                    r.tint = IM_COL32(150, 190, 240, 255);
                     keysOf(r.id, tr.keys, r.keys);
                     for (const auto& k : tr.keys) summary.insert(k.frame);
                     childIds.push_back(r.id);
@@ -2450,11 +2737,13 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
         ImGui::EndChild();
         return;
     }
-    if (kind == RowKind::EffectParam) {
+    if (kind == RowKind::EffectParam || kind == RowKind::WorldParam) {
         uint32_t effectUid = 0;
         std::string param;
-        ParseEffectParamTrackName(name, effectUid, param);
-        StudioEffect* eff = d.FindEffect(effectUid);
+        if (kind == RowKind::EffectParam) ParseEffectParamTrackName(name, effectUid, param);
+        else ParseWorldParamTrackName(name, effectUid, param);
+        StudioWorld* world = kind == RowKind::WorldParam ? d.FindWorld(effectUid) : nullptr;
+        StudioEffect* eff = kind == RowKind::WorldParam ? (world ? &world->fx : nullptr) : d.FindEffect(effectUid);
         const ShaderPack* pk = eff ? ShaderPacks().Find(eff->entry.pack) : nullptr;
         const std::string packName = pk ? pk->name.Get(PackLanguage()) : (eff ? eff->entry.pack : std::string());
         std::string paramLabel = param;
@@ -2471,8 +2760,7 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
         }
         line(Tr("효과"), packName);
         line(Tr("파라미터"), paramLabel);
-        EffectParamKey* pkKey = nullptr;
-        if (eff) {
+        EffectParamKey* pkKey = nullptr;        if (eff) {
             for (auto& t : eff->tracks) {
                 if (t.param == param) {
                     for (auto& k : t.keys) {
@@ -2494,7 +2782,9 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
                 bool ch = widget();
                 PopFont();
                 if (ImGui::IsItemActivated()) {
-                    studioKeyBefore_ = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(effectUid, param))};
+                    studioKeyBefore_ = {CaptureTrack(d, -1, kind,
+                        kind == RowKind::WorldParam ? WorldParamTrackName(effectUid, param)
+                                                    : EffectParamTrackName(effectUid, param))};
                     studioKeyEdit_ = true;
                     studioKeyChanged_ = false;
                 }
@@ -2509,7 +2799,9 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
             }
             bool stepped = pkKey->stepped;
             if (Switch("##effparamstepped", Tr("계단식 보간"), &stepped, Tr("다음 키까지 현재 값을 유지합니다"))) {
-                std::vector<TrackState> before = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(effectUid, param))};
+                std::vector<TrackState> before = {CaptureTrack(d, -1, kind,
+                    kind == RowKind::WorldParam ? WorldParamTrackName(effectUid, param)
+                                                : EffectParamTrackName(effectUid, param))};
                 pkKey->stepped = stepped;
                 StudioPushTrackEdit(Tr("보간 변경"), before);
                 d.rowsKey = ~0ull;
@@ -2781,6 +3073,7 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
                 case RowKind::Focus: r.tint = IM_COL32(232, 96, 150, 255); break;
                 case RowKind::Accessory: r.tint = IM_COL32(120, 200, 160, 255); break;
                 case RowKind::EffectParam: r.tint = IM_COL32(100, 210, 210, 255); break;
+                case RowKind::WorldParam: r.tint = IM_COL32(150, 190, 240, 255); break;
                 default: break;
             }
         }
@@ -2874,11 +3167,13 @@ void App::DrawStudioKeyMenu() {
         bool hasEffectKeys = false;
         bool allStepped = true;
         for (const KeyId& k : d.selection) {
-            if (RowKindOf(k.first) == RowKind::EffectParam) {
+            if (RowKindOf(k.first) == RowKind::EffectParam || RowKindOf(k.first) == RowKind::WorldParam) {
                 hasEffectKeys = true;
                 uint32_t uid = RowGroupOf(k.first);
                 uint32_t pidx = RowIndexOf(k.first);
-                if (const StudioEffect* eff = d.FindEffect(uid)) {
+                const StudioEffect* eff = RowKindOf(k.first) == RowKind::WorldParam
+                    ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr) : d.FindEffect(uid);
+                if (eff) {
                     std::string param = EffectParamNameOfIndex(*eff, pidx);
                     for (const auto& t : eff->tracks) {
                         if (t.param == param) {
@@ -2900,10 +3195,13 @@ void App::DrawStudioKeyMenu() {
                 std::vector<TrackState> before = StudioCaptureSelectedTracks();
                 const bool newStepped = !allStepped;
                 for (const KeyId& k : d.selection) {
-                    if (RowKindOf(k.first) != RowKind::EffectParam) continue;
+                    if (RowKindOf(k.first) != RowKind::EffectParam && RowKindOf(k.first) != RowKind::WorldParam)
+                        continue;
                     uint32_t uid = RowGroupOf(k.first);
                     uint32_t pidx = RowIndexOf(k.first);
-                    if (StudioEffect* eff = d.FindEffect(uid)) {
+                    StudioEffect* eff = RowKindOf(k.first) == RowKind::WorldParam
+                        ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr) : d.FindEffect(uid);
+                    if (eff) {
                         std::string param = EffectParamNameOfIndex(*eff, pidx);
                         for (auto& t : eff->tracks) {
                             if (t.param == param) {

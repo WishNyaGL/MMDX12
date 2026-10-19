@@ -14,6 +14,7 @@
 #include "app/ThumbnailCache.h"
 #include "app/Updater.h"
 #include "app/VideoEncoder.h"
+#include "app/WorldColliders.h"
 #include "asset/AssetLibrary.h"
 #include "asset/MaterialChoice.h"
 #include "asset/RayMaterial.h"
@@ -189,6 +190,8 @@ struct AppOptions {
     std::string packIndex;     // --pack-index <url|path>: the online shader pack gallery index (testing)
     std::vector<EffectStackEntry> effectStack;  // --effect <id>[,<id>...] / none: the effect stack, this run
     bool effectSet = false;
+    std::vector<EffectStackEntry> worldStack;   // --world <id>[,<id>...] / none: the world stack, this run
+    bool worldSet = false;
     std::vector<MmeEffectEntry> mmeEffects;  // --mme <file>[,<file>...]: MME post effects, this run
     bool mmeSet = false;                     // --mme was given: it overrides the saved play-mode stack for one run
     bool mmePanelSet = false;                // --mme-panel <si>,<tr>
@@ -328,6 +331,12 @@ private:
             std::string displayName;
         };
         std::vector<Performer> extras;
+        // World entities (docs/effect_ecosystem.md §2 item 7): the collider track of the cast, built after the scene
+        // loads (whole song, 30 Hz) only while the world stack is not empty. The previous track stays in use until
+        // the worker's result arrives.
+        std::shared_ptr<const WorldColliderTrack> colliders;
+        std::future<std::shared_ptr<const WorldColliderTrack>> colliderFuture;
+        uint64_t colliderVersion = 0;
     };
 
     // --- lifecycle (App.cpp)
@@ -941,6 +950,11 @@ private:
     std::vector<MmeEffectEntry> StudioMmeEntries() const;
     // Studio project effect stack: evaluated entries for the frame (empty outside the studio).
     std::vector<EffectStackEntry> StudioEvaluatedEffects(float frame) const;
+    // World entities: the cast's collider sources and the background track build (play + studio).
+    std::vector<CharacterSource> PlayColliderCast() const;
+    std::vector<CharacterSource> StudioColliderCast() const;
+    void PumpColliderTrack();
+    void StudioPumpColliders();   // debounced rebuild of the studio track while the project has worlds
     // M6b: applies a studio MME stack change (add / remove / toggle) to the project and the renderer.
     void StudioMmeChanged();
     // P5: the per-character PBR material source. The global Ray-MMD switch off forces Default; the Auto workflow picks
@@ -1290,6 +1304,14 @@ private:
     };
     std::vector<std::unique_ptr<StudioJob>> studioJobs_;
     std::future<bool> studioAutosave_;             // recovery file writer
+    // World colliders (WorldColliders.h): the studio track is rebuilt in the background after motion / cast edits
+    // (debounced 0.5 s); the previous track stays in use until the new one is ready.
+    std::shared_ptr<const WorldColliderTrack> studioColliders_;
+    std::future<std::shared_ptr<const WorldColliderTrack>> studioColliderFuture_;
+    uint64_t studioColliderVersion_ = ~0ull;       // inputs the building / built track were made from
+    uint64_t studioColliderPendingVersion_ = 0;
+    double studioColliderEditAt_ = -1.0;           // timeSeconds_ of the last noticed edit (-1 = none)
+    uint64_t seenHistoryVersion_ = 0;
     double studioAutosaveAt_ = 0;                  // timeSeconds_ of the last autosave check
     bool recoveryChecked_ = false;                 // the select screen asked about a recovery file this session
     bool recoveryPrompt_ = false;

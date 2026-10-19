@@ -123,6 +123,9 @@ struct AppSettings {
     // video / still renders (the real-time renderers; GI / PT output skips it). Persisted as
     // "effect=<pack id>|<enabled>|<key>:<value>,...|<texture folder or ->|" ini lines, oldest first.
     std::vector<EffectStackEntry> effectStack;
+    // World packs ("type": "world"), the user's ordered stack: placed world entities for play mode / renders.
+    // Persisted as "world=" lines in the same format as "effect=", oldest first; --world overrides for one run.
+    std::vector<EffectStackEntry> worldStack;
     // M6b: the play-mode MME post stack (RenderSettings::mmeEffects). Persisted as
     // "mmeEffect=<enabled 0|1>|<path>" ini lines, oldest first; --mme overrides it for one run.
     std::vector<MmeEffectEntry> mmeEffects;

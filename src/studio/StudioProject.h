@@ -49,8 +49,17 @@ struct PropAttach {
 // Scaling(scale) * RotationRollPitchYaw(rad(x), rad(y), rad(z)) * Translation(translation).
 DirectX::XMMATRIX PropOffsetMatrix(const PropAttach& a);
 
-struct ProjectModel {
-    std::string name;                  // outliner label (UTF-8)
+// One placed world entity (docs/effect_ecosystem.md §2 item 7): a world pack with its keyed params and placement.
+struct StudioWorld {
+    uint32_t uid = 0;                 // StudioDoc::nextWorldUid, not saved
+    std::string name;                 // outliner label
+    StudioEffect fx;                  // pack id, enabled, static params, keyed param tracks
+    PropAttach place;                 // translation / rotationDeg / scale (parent unused)
+    size_t ApproxBytes() const;
+    bool operator==(const StudioWorld& o) const;   // ignores uid
+};
+
+struct ProjectModel {    std::string name;                  // outliner label (UTF-8)
     ModelKind kind = ModelKind::Character;
     std::filesystem::path path;        // model file, absolute
     std::filesystem::path fx;          // M5c: effect-object effects ("fx"; kind Effect only)
@@ -142,6 +151,8 @@ struct ProjectData {
     std::vector<MmePostEntry> mmePost;
     // Version 3: the project's effect stack (order = stack order). Empty = none.
     std::vector<StudioEffect> effects;
+    // Version 3: placed world entities ("worlds"). Empty = none.
+    std::vector<StudioWorld> worlds;
     std::filesystem::path recoveryOf;  // autosave (recovery) files only: the project it belongs to (empty: never saved)
 };
 

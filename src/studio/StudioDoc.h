@@ -76,10 +76,11 @@ struct StudioModel {
     bool IsProp() const { return kind == ModelKind::Prop || kind == ModelKind::Effect; }
 };
 
+
 // Timeline row ids: kind in the top byte, then a 24-bit group and a 32-bit index. Light is the camera VMD's light
 // track; SceneLight is the keys of one scene light (SceneLight.h): MakeRowId(RowKind::SceneLight, 0, light uid).
 // Focus is the studio's depth-of-field focus track (camera MotionData::focus, saved in the project, not in VMD).
-enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10 };
+enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11 };
 inline uint64_t MakeRowId(RowKind k, uint32_t group, uint32_t index) {
     return ((uint64_t)k << 56) | ((uint64_t)(group & 0xFFFFFF) << 32) | index;
 }
@@ -107,6 +108,14 @@ inline bool ParseEffectParamTrackName(const std::string& name, uint32_t& uid, st
     return true;
 }
 
+// The track name of a WorldParam row: "<world uid>:<param key>" (same shape as an effect param).
+inline std::string WorldParamTrackName(uint32_t uid, const std::string& param) {
+    return std::to_string(uid) + ":" + param;
+}
+inline bool ParseWorldParamTrackName(const std::string& name, uint32_t& uid, std::string& param) {
+    return ParseEffectParamTrackName(name, uid, param);
+}
+
 // The row that represents a bone/morph track in the key selection: a bone listed in two display frames has two rows,
 // but its keys are selected through the first one only (CanonicalRow), so counts and edits see each key once.
 uint64_t CanonicalRow(const StudioModel& m, RowKind kind, uint32_t index);
@@ -125,7 +134,7 @@ struct ClipboardKey {
     uint64_t row = 0;
     int offset = 0;  // frame relative to the first copied key
     BoneKf bone; MorphKf morph; CameraKf camera; LightKf light; ShadowKf shadow; LightKey sceneLight; FocusKf focus;
-    AccessoryKf accessory; EffectParamKey effectParam;
+    AccessoryKf accessory; EffectParamKey effectParam; EffectParamKey worldParam;
 };
 
 struct StudioDoc {
@@ -163,12 +172,21 @@ struct StudioDoc {
     // the play-mode stack (RenderSettings::packEffects) and offline renders use it. Saved in the project.
     std::vector<StudioEffect> effects;
     uint32_t nextEffectUid = 1;
+    // Version 3: world entities (StudioWorld above), keyable like effects. Saved in the project.
+    std::vector<StudioWorld> worlds;
+    uint32_t nextWorldUid = 1;
     StudioEffect* FindEffect(uint32_t uid) {
         for (StudioEffect& e : effects)
             if (e.uid == uid) return &e;
         return nullptr;
     }
     const StudioEffect* FindEffect(uint32_t uid) const { return const_cast<StudioDoc*>(this)->FindEffect(uid); }
+    StudioWorld* FindWorld(uint32_t uid) {
+        for (StudioWorld& w : worlds)
+            if (w.uid == uid) return &w;
+        return nullptr;
+    }
+    const StudioWorld* FindWorld(uint32_t uid) const { return const_cast<StudioDoc*>(this)->FindWorld(uid); }
     bool Dirty() const { return history.Version() != savedVersion || projectVersion != savedProjectVersion; }
     uint64_t ChangeStamp() const { return history.Version() + (projectVersion << 32); }
     void MarkSaved() { savedVersion = history.Version(); savedProjectVersion = projectVersion; }
@@ -280,13 +298,15 @@ struct TrackState {
     std::vector<LightKey> lightKeys;  // a scene light's keys
     std::vector<AccessoryKf> accessories;
     std::vector<EffectParamKey> effectParamKeys;
+    std::vector<EffectParamKey> worldParamKeys;
 
     size_t Bytes() const {
         return sizeof(TrackState) + name.size() + bones.capacity() * sizeof(BoneKf) + morphs.capacity() * sizeof(MorphKf) +
                cameras.capacity() * sizeof(CameraKf) + lights.capacity() * sizeof(LightKf) +
                shadows.capacity() * sizeof(ShadowKf) + focuses.capacity() * sizeof(FocusKf) +
                lightKeys.capacity() * sizeof(LightKey) + accessories.capacity() * sizeof(AccessoryKf) +
-               effectParamKeys.capacity() * sizeof(EffectParamKey);
+               effectParamKeys.capacity() * sizeof(EffectParamKey) +
+               worldParamKeys.capacity() * sizeof(EffectParamKey);
     }
 };
 // A SceneLight track is addressed by its uid (`name` = LightTrackName(uid)): restoring one whose light no longer
@@ -341,6 +361,29 @@ private:
     StudioDoc& doc_;
     std::string name_;
     std::vector<StudioEffect> before_, after_;
+};
+
+// Adds, removes, reorders or edits world entities (undoable): holds the whole list before and after.
+// Key edits of a world go through TrackEditCommand instead.
+class WorldsCommand : public Command {
+public:
+    WorldsCommand(StudioDoc& doc, std::string name, std::vector<StudioWorld> before, std::vector<StudioWorld> after)
+        : doc_(doc), name_(std::move(name)), before_(std::move(before)), after_(std::move(after)) {}
+    void Do() override { doc_.worlds = after_; doc_.rowsKey = ~0ull; }
+    void Undo() override { doc_.worlds = before_; doc_.rowsKey = ~0ull; }
+    std::string Name() const override { return name_; }
+    size_t Bytes() const override {
+        const auto list = [](const std::vector<StudioWorld>& v) {
+            size_t n = 0;
+            for (const StudioWorld& w : v) n += w.ApproxBytes();
+            return n;
+        };
+        return sizeof(*this) + name_.size() + list(before_) + list(after_);
+    }
+private:
+    StudioDoc& doc_;
+    std::string name_;
+    std::vector<StudioWorld> before_, after_;
 };
 
 class TrackEditCommand : public Command {
@@ -501,6 +544,8 @@ struct StudioPackage {
     std::vector<MmePostEntry> mmePost;
     // Version 3: the project's own effect stack (StudioEffects.h).
     std::vector<StudioEffect> effects;
+    // Version 3: the project's world entities (StudioWorld).
+    std::vector<StudioWorld> worlds;
     PmmEffectSettings pmmEffects;            // .pmm import: MME controller mapping (App applies it)
     int pmmWidth = 0, pmmHeight = 0;         // .pmm import: output resolution (aspect preset)
     float pmmFps = 0.0f;                     // .pmm import: preferred fps (informational)

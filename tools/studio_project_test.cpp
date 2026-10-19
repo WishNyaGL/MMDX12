@@ -360,6 +360,63 @@ static void TestEffects() {
     }
 }
 
+static void TestWorlds() {
+    const std::filesystem::path projDir = kTemp / "worlds";
+    const std::filesystem::path projFile = projDir / "worlds.mmdxproj";
+    ProjectData data;
+    StudioWorld w;
+    w.name = "snow field";
+    w.fx.entry.pack = "snow";
+    w.fx.entry.enabled = false;
+    w.fx.entry.params["density"] = 0.7f;
+    w.fx.entry.textureFolder = "F:/tex/world";
+    EffectParamTrack track;
+    track.param = "density";
+    track.keys = {{0, 0.2f, false}, {20, 1.0f, true}};
+    w.fx.tracks.push_back(track);
+    w.place.translation = {2.0f, 0.0f, -3.5f};
+    w.place.rotationDeg = {10.0f, 20.0f, 30.0f};
+    w.place.scale = 1.5f;
+    data.worlds.push_back(w);
+    std::string err;
+    Check(SaveProject(projFile, data, &err), "SaveProject with worlds", "%s", err.c_str());
+    {
+        std::ifstream in(projFile, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+        Check(!j.is_discarded() && j.value("version", 0) == 3, "world project format is version 3");
+        Check(j.contains("worlds") && j["worlds"].is_array() && j["worlds"].size() == 1 &&
+                  j["worlds"][0]["name"] == "snow field" && j["worlds"][0]["pack"] == "snow" &&
+                  j["worlds"][0]["enabled"] == false && j["worlds"][0]["tracks"].size() == 1 &&
+                  j["worlds"][0]["tracks"][0]["keys"].size() == 2 &&
+                  j["worlds"][0]["tracks"][0]["keys"][1][2] == 1 &&
+                  j["worlds"][0]["place"]["t"][2] == -3.5f && j["worlds"][0]["place"]["s"] == 1.5f,
+              "worlds are written as name / pack / enabled / params / tracks / place");
+    }
+    ProjectData loaded;
+    std::vector<std::string> warnings;
+    Check(LoadProject(projFile, loaded, &err, &warnings), "LoadProject with worlds", "%s", err.c_str());
+    Check(warnings.empty(), "world project loads without warnings");
+    Check(loaded.worlds.size() == data.worlds.size(), "world count kept");
+    if (loaded.worlds.size() == data.worlds.size()) {
+        Check(loaded.worlds[0] == data.worlds[0], "worlds round-trip exactly (ignoring uid)");
+        Check(loaded.worlds[0].fx.entry.enabled == false && loaded.worlds[0].fx.tracks[0].keys[1].stepped,
+              "disabled world and stepped key kept");
+    }
+    // absent key = no worlds
+    {
+        const std::filesystem::path legacy = kTemp / "worlds" / "legacy.mmdxproj";
+        std::filesystem::create_directories(legacy.parent_path());
+        std::ofstream f(legacy);
+        f << "{\"format\":\"mmdx12-studio-project\",\"version\":3,\"models\":[],\"camera\":null,\"audio\":null}";
+        f.close();
+        ProjectData l2;
+        warnings.clear();
+        Check(LoadProject(legacy, l2, &err, &warnings), "LoadProject without worlds", "%s", err.c_str());
+        Check(l2.worlds.empty(), "absent worlds key = no worlds");
+    }
+}
+
 static void TestRoundTrip() {
     const std::filesystem::path projDir = kTemp / "proj";
     const std::filesystem::path projFile = projDir / L"\u30C6\u30B9\u30C8.mmdxproj";  // テスト.mmdxproj
@@ -1374,6 +1431,7 @@ int main() {
 
     TestRoundTrip();
     TestEffects();
+    TestWorlds();
     TestAspectProject();
     TestSceneLightFile();
     TestSceneLightReading();

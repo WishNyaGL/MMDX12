@@ -265,6 +265,21 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
                     pos = end + 1;
                 }
             }
+        } else if (arg == L"--world") {
+            // --world <id>[,<id>...] / --world none: the world stack for this run (overrides the settings)
+            const std::string v = WideToUtf8(next());
+            opt.worldSet = true;
+            opt.worldStack.clear();
+            if (v != "none" && !v.empty()) {
+                size_t pos = 0;
+                while (pos <= v.size()) {
+                    size_t end = v.find(',', pos);
+                    if (end == std::string::npos) end = v.size();
+                    const std::string id = v.substr(pos, end - pos);
+                    if (!id.empty()) opt.worldStack.push_back({id, true, {}, {}});
+                    pos = end + 1;
+                }
+            }
         } else if (arg == L"--look") {
             // --look <id>: applies a look pack to the settings for this run (not persisted), like --effect
             opt.look = WideToUtf8(next());
@@ -493,6 +508,7 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.autoLuminous >= 0) settings_.autoLuminous = options_.autoLuminous != 0;
     if (options_.motionLighting >= 0) settings_.motionLighting = options_.motionLighting != 0;
     if (options_.effectSet) settings_.effectStack = options_.effectStack;   // --effect, this run only
+    if (options_.worldSet) settings_.worldStack = options_.worldStack;      // --world, this run only
     if (options_.lookSet && !options_.look.empty()) {   // --look: apply the look's groups for this run only
         const ShaderPack* pack = ShaderPacks().Find(options_.look);
         if (!pack || pack->type != PackType::Look || !pack->look || !pack->Selectable()) {
@@ -696,6 +712,7 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.motionLighting >= 0) settings_.motionLighting = persisted.motionLighting;
     if (!options_.lut.empty()) settings_.colorLut = persisted.colorLut;
     if (options_.effectSet) settings_.effectStack = persisted.effectStack;   // --effect, that run only
+    if (options_.worldSet) settings_.worldStack = persisted.worldStack;      // --world, that run only
     if (cliLookActive_) {   // --look, that run only
         ApplyLook(cliLookPrev_, settings_, nullptr);
         if (!cliLookCharacterId_.empty()) settings_.SetCharacterShader(cliLookCharacterId_, cliLookPrevSurface_);
@@ -2068,6 +2085,7 @@ void App::UnloadScene() {
     ctx_.WaitForGpu();
     renderer_.ReleaseVideoLayers();   // M8b: stop the song's video decode threads, free their buffers
     haveLastLiveCamera_ = false;
+    if (scene_ && scene_->colliderFuture.valid()) scene_->colliderFuture.wait();
     scene_.reset();
     mmeControllerQueue_.clear();      // auto-loaded MME controllers are per scene (freed with it)
     mmeControllerQueued_.clear();
@@ -2344,8 +2362,52 @@ void App::AppendMmeEffectObjects(FrameView& view, const std::vector<SceneRuntime
     }
 }
 
-void App::BuildFrameView(float frame, FrameView& view) {
-    view.frame = frame;
+// World entities (docs/effect_ecosystem.md §2 item 7): the cast's collider sources for the play-mode track.
+std::vector<CharacterSource> App::PlayColliderCast() const {
+    std::vector<CharacterSource> cast;
+    if (!scene_) return cast;
+    if (scene_->character) {
+        CharacterSource src;
+        src.pmx = scene_->character->ModelPtr();
+        src.motion = scene_->motion;
+        src.fps = scene_->motionFps > 0.0f ? scene_->motionFps : kMmdFps;
+        src.id = scene_->characterId;
+        cast.push_back(std::move(src));
+    }
+    for (size_t i = 0; i < scene_->extras.size(); ++i) {
+        const SceneRuntime::Performer& p = scene_->extras[i];
+        if (!p.instance) continue;
+        CharacterSource src;
+        src.pmx = p.instance->ModelPtr();
+        src.motion = p.motion;
+        src.fps = scene_->motionFps > 0.0f ? scene_->motionFps : kMmdFps;
+        src.id = p.characterId;
+        cast.push_back(std::move(src));
+    }
+    return cast;
+}
+
+// Starts a play-mode collider build (whole song, 30 Hz) when the world stack is not empty and none is running.
+void App::PumpColliderTrack() {
+    if (studio_) return;   // the studio's track is rebuilt by StudioPollJob path (StudioColliderCast)
+    if (!scene_) return;
+    if (scene_->colliderFuture.valid() &&
+        scene_->colliderFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        scene_->colliders = scene_->colliderFuture.get();
+    }
+    if (settings_.worldStack.empty()) {
+        scene_->colliders.reset();
+        return;
+    }
+    if (scene_->colliderFuture.valid()) return;
+    const double end = scene_->motionFps > 0.0f ? (double)scene_->endFrame / scene_->motionFps : 0.0;
+    const std::vector<CharacterSource> cast = PlayColliderCast();
+    scene_->colliderFuture = std::async(std::launch::async, [cast, end] {
+        return BuildColliderTrack(cast, 0.0, end, 30.0f);
+    });
+}
+
+void App::BuildFrameView(float frame, FrameView& view) {    view.frame = frame;
     if (useMotionCamera_ && scene_->camera) {
         CameraPose pose = scene_->camera->Evaluate(frame);
         CameraMotion::ToView(pose, &view.camera.view, &view.camera.eye);
@@ -2486,6 +2548,26 @@ void App::BuildFrameView(float frame, FrameView& view) {
                                 ? (double)(frame / scene_->motionFps)
                                 : playTime_;
     FillPackInputs(view, scene_ ? scene_->character.get() : nullptr, audioSec);
+
+    // World entities: one instance per enabled stack entry (identity transform), on the song clock used for the frame.
+    PumpColliderTrack();
+    if (scene_) {
+        uint32_t uid = 0;
+        for (const EffectStackEntry& e : settings_.worldStack) {
+            ++uid;
+            if (!e.enabled) continue;
+            WorldInstance w;
+            w.uid = uid;
+            w.pack = e.pack;
+            w.params = e.params;
+            w.time = offline_.mode != OfflineMode::None && scene_->motionFps > 0.0f
+                         ? (double)frame / scene_->motionFps
+                         : playTime_;
+            w.exact = !playing_ || offline_.mode != OfflineMode::None;
+            w.colliders = scene_->colliders;
+            view.worlds.push_back(std::move(w));
+        }
+    }
 }
 
 } // namespace mmdx

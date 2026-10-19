@@ -113,6 +113,24 @@ TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::stri
         }
         return s;
     }
+    if (kind == RowKind::WorldParam) {
+        uint32_t worldUid = 0;
+        std::string param;
+        if (ParseWorldParamTrackName(name, worldUid, param)) {
+            s.uid = worldUid;
+            const StudioWorld* world = doc.FindWorld(worldUid);
+            if (world) {
+                for (const EffectParamTrack& t : world->fx.tracks) {
+                    if (t.param == param) {
+                        s.existed = true;
+                        s.worldParamKeys = t.keys;
+                        break;
+                    }
+                }
+            }
+        }
+        return s;
+    }
     MotionData& m = doc.models[model]->motion;
     if (kind == RowKind::Bone) {
         auto it = m.bones.find(name);
@@ -159,6 +177,27 @@ void RestoreTrack(StudioDoc& doc, const TrackState& s) {
                         it->keys = s.effectParamKeys;
                     } else {
                         eff->tracks.push_back({param, s.effectParamKeys});
+                    }
+                }
+                doc.rowsKey = ~0ull;
+            }
+        }
+        return;
+    }
+    if (s.kind == RowKind::WorldParam) {
+        uint32_t worldUid = 0;
+        std::string param;
+        if (ParseWorldParamTrackName(s.name, worldUid, param)) {
+            if (StudioWorld* world = doc.FindWorld(worldUid)) {
+                auto it = std::find_if(world->fx.tracks.begin(), world->fx.tracks.end(),
+                                       [&](const EffectParamTrack& t) { return t.param == param; });
+                if (s.worldParamKeys.empty()) {
+                    if (it != world->fx.tracks.end()) world->fx.tracks.erase(it);
+                } else {
+                    if (it != world->fx.tracks.end()) {
+                        it->keys = s.worldParamKeys;
+                    } else {
+                        world->fx.tracks.push_back({param, s.worldParamKeys});
                     }
                 }
                 doc.rowsKey = ~0ull;
