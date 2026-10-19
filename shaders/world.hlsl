@@ -202,6 +202,10 @@ SurfacePsOut PSWorldSurface(SurfaceVsOut i) {
 #endif
 
 #if defined(WORLD_PARTICLE)
+// Post-composite particle draw: the resolved depth buffer (R32_FLOAT raw device depth) is sampled to fade particles
+// that approach / pass behind scene surfaces (soft particles).
+Texture2D<float> gSceneDepth : register(t0, space6);
+
 #if defined(WORLD_STATELESS)
 // stateless uses WORLD_SPAWN_FN directly
 #else
@@ -302,6 +306,56 @@ ParticlePsOut PSWorldParticle(ParticleVsOut i) {
     float2 prevNdc = i.prevClip.xy / max(i.prevClip.w, 1e-5);
     float2 vel = (curNdc - prevNdc) * float2(0.5, -0.5);
     o.velocity = float4(vel, 0.0, 0.0);
+    return o;
+}
+
+// Post-composite variant: one render target (lit), no velocity, soft depth fade against the resolved scene depth.
+// Depth is raw device depth from RenderTargets::depth (R32_FLOAT).
+struct ParticlePostPsOut {
+    float4 color : SV_Target0;
+};
+
+// Fade distance in view-space units (MMD units): a few hundredths, enough to hide a flake's ground intersection.
+static const float kParticleDepthFade = 0.25;
+
+ParticlePostPsOut PSWorldParticlePost(ParticleVsOut i) {
+    ParticlePostPsOut o;
+    o.color = 0.0;
+    if (i.posH.w <= 0.0) discard;
+
+    // Soft depth test: i.posH.w is the particle's view depth in this LH perspective projection.
+    int2 pixel = int2(i.posH.xy);
+    float sceneDepth = gSceneDepth.Load(int3(pixel, 0));
+    float sceneZ = LinearZ(sceneDepth);
+    float particleZ = i.posH.w;
+    float fade = saturate((sceneZ - particleZ) / kParticleDepthFade);
+    if (fade <= 0.0) discard;
+
+    PackParticle p;
+    p.pos = i.posWorld;
+    p.size = i.size;
+    p.vel = 0.0;
+    p.age = i.age;
+    p.color = i.color;
+    p.data = i.data;
+
+    PackParticleShadeIn sin;
+    sin.uv = i.uv;
+    sin.particle = p;
+    sin.viewDir = i.viewDir;
+    sin.posWorld = i.posWorld;
+
+    float4 col = WORLD_PARTICLE_SHADE_FN(sin);
+    if (col.a <= 0.001) discard;
+
+#if defined(WORLD_PARTICLE_ADD)
+    // Additive: the destination RGB is what fades; alpha rides along for consistency.
+    col.rgb *= fade;
+    col.a *= fade;
+#else
+    col.a *= fade;
+#endif
+    o.color = col;
     return o;
 }
 #endif

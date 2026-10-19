@@ -635,9 +635,26 @@ public:
     // Offline GI renderer draws world surfaces and particles into edgeColorMsaa / edgeDepthMsaa
     void DrawOffline(PassContext& pc, const Texture& edgeColorMsaa, const Texture& edgeDepthMsaa);
 
+    // Post-composite particle draw (raster / RT): alpha / additive blended into targets.lit, depth-tested against
+    // targets.depth (R32_FLOAT raw device depth). Uses the same per-instance state as Execute.
+    void DrawParticlesPost(PassContext& pc);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+// Draws world-effect particles after CompositePass (and before VolumetricPass / TaaPass), so they never appear in
+// SSR / SSAO / RT reflections. Holds the renderer's WorldPass (no second simulation state).
+class WorldParticlesPass final : public IRenderPass {
+public:
+    explicit WorldParticlesPass(WorldPass* world) : world_(world) {}
+    const char* Name() const override { return "WorldParticles"; }
+    bool CreatePipelines(Dx12Context&, const std::filesystem::path&, uint32_t) override { return true; }
+    void Execute(PassContext& pc) override { if (world_) world_->DrawParticlesPost(pc); }
+
+private:
+    WorldPass* world_;
 };
 
 } // namespace mmdx

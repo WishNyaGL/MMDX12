@@ -110,6 +110,7 @@ struct WorldPass::Impl {
             ComPtr<ID3D12PipelineState> psoSimulate;
             ComPtr<ID3D12PipelineState> psoSpawn;
             ComPtr<ID3D12PipelineState> psoDraw;
+            ComPtr<ID3D12PipelineState> psoDrawPost;
             ComPtr<ID3D12PipelineState> psoDrawOffline;
         };
         std::vector<ParticlePso> particles;
@@ -211,7 +212,8 @@ struct WorldPass::Impl {
     void SimulateInstance(PassContext& pc, const WorldInstance& inst, const ShaderPack& pack,
                           PackPipelines& pipes, InstanceState& state);
     void DrawInstance(PassContext& pc, const WorldInstance& inst, const ShaderPack& pack,
-                      PackPipelines& pipes, InstanceState& state, bool offline);
+                      PackPipelines& pipes, InstanceState& state, bool offline, bool drawParticles = true);
+    void DrawParticlesPost(PassContext& pc);
 };
 
 bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, uint32_t msaaSamples) {
@@ -300,7 +302,10 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
         CD3DX12_DESCRIPTOR_RANGE shadowRange;
         shadowRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 15, 0); // t15 space0 ShadowMap
 
-        CD3DX12_ROOT_PARAMETER p[9];
+        CD3DX12_DESCRIPTOR_RANGE sceneDepthRange;
+        sceneDepthRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 6); // t0 space6 SceneDepth (post particles)
+
+        CD3DX12_ROOT_PARAMETER p[10];
         p[0].InitAsConstantBufferView(0);                 // b0 SceneConstants
         p[1].InitAsConstantBufferView(1);                 // b1 WorldCB
         p[2].InitAsConstantBufferView(4);                 // b4 PackParamsExt
@@ -310,9 +315,10 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
         p[6].InitAsShaderResourceView(0, 2);              // t0 space2 gParticles
         p[7].InitAsShaderResourceView(1, 2);              // t1 space2 gPrevPos
         p[8].InitAsDescriptorTable(1, &shadowRange);      // t15 space0 ShadowMap
+        p[9].InitAsDescriptorTable(1, &sceneDepthRange);  // t0 space6 SceneDepth
 
         CD3DX12_ROOT_SIGNATURE_DESC rs;
-        rs.Init(9, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        rs.Init(10, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
         ComPtr<ID3DBlob> blob, err;
         if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
             LOG_ERROR("WorldPass: failed to serialize graphicsRootSig: %s",
@@ -536,6 +542,9 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
             std::string err;
             ComPtr<ID3DBlob> vs = CompileShaderDxc(hostShader, "VSWorldParticle", "vs_6_0", d, &err);
             ComPtr<ID3DBlob> ps = CompileShaderDxc(hostShader, "PSWorldParticle", "ps_6_0", d, &err);
+            ShaderDefines dPost = d;
+            if (p.blend == PackWorldParticleSystem::Blend::Add) dPost.push_back({"WORLD_PARTICLE_ADD", "1"});
+            ComPtr<ID3DBlob> psPost = CompileShaderDxc(hostShader, "PSWorldParticlePost", "ps_6_0", dPost, &err);
             if (vs && ps) {
                 D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
                 pso.pRootSignature = graphicsRootSig.Get();
@@ -582,11 +591,32 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                 pso.SampleDesc.Count = msaa;
                 CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pPipe.psoDraw)), "WorldPass: pPipe.psoDraw");
 
+                // Post-composite variant (1 RTV = lit, no MSAA, no depth target; depth comes from the depth SRV)
+                if (psPost) {
+                    pso.PS = {psPost->GetBufferPointer(), psPost->GetBufferSize()};
+                    pso.NumRenderTargets = 1;
+                    pso.RTVFormats[0] = RenderTargets::kColorFormat;
+                    pso.RTVFormats[1] = DXGI_FORMAT_UNKNOWN;
+                    pso.RTVFormats[2] = DXGI_FORMAT_UNKNOWN;
+                    pso.DSVFormat = DXGI_FORMAT_UNKNOWN;
+                    pso.DepthStencilState.DepthEnable = FALSE;
+                    pso.SampleDesc.Count = 1;
+                    pso.BlendState.RenderTarget[0] = rtBlend;
+                    CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pPipe.psoDrawPost)),
+                            "WorldPass: pPipe.psoDrawPost");
+                    pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+                    pso.DepthStencilState.DepthEnable = TRUE;
+                } else {
+                    LOG_ERROR("WorldPack '%s' particle '%s': PSWorldParticlePost failed: %s",
+                              pack.id.c_str(), p.name.c_str(), err.c_str());
+                }
+
                 // Offline GI variant (1 RTV, 4 MSAA)
                 pso.NumRenderTargets = 1;
                 pso.RTVFormats[0] = RenderTargets::kColorFormat;
                 pso.RTVFormats[1] = DXGI_FORMAT_UNKNOWN;
                 pso.RTVFormats[2] = DXGI_FORMAT_UNKNOWN;
+                pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
                 pso.SampleDesc.Count = 4;
                 CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pPipe.psoDrawOffline)), "WorldPass: pPipe.psoDrawOffline");
             } else {
@@ -1063,7 +1093,7 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
 }
 
 void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, const ShaderPack& pack,
-                                   PackPipelines& pipes, InstanceState& state, bool offline) {
+                                   PackPipelines& pipes, InstanceState& state, bool offline, bool drawParticles) {
     if (!pack.world) return;
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     Dx12Context& ctx = pc.ctx;
@@ -1156,6 +1186,7 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
     }
 
     // 2. Draw Particles (alpha / add, no depth write)
+    if (!drawParticles) return;
     for (size_t pi = 0; pi < pack.world->particles.size(); ++pi) {
         const auto& p = pack.world->particles[pi];
         auto& pPipe = pipes.particles[pi];
@@ -1179,6 +1210,132 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
 }
 
 // ---- WorldPass public interface -------------------------------------------------------------
+
+void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
+    if (pc.view.worlds.empty()) return;
+    if (pc.settings.shading == ViewShading::Wireframe || pc.settings.shading == ViewShading::Unlit ||
+        !pc.view.extraViews.empty()) {
+        return;
+    }
+    if (pc.path != RenderPath::Raster && pc.path != RenderPath::RayTraced) return;
+
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    Dx12Context& ctx = pc.ctx;
+    RenderTargets& t = pc.targets;
+    if (!t.lit || !t.depth) return;
+
+    t.lit.Transition(cmd, kRt);
+    t.depth.Transition(cmd, kSrv);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = ctx.RtvHeap().Cpu(t.lit.rtv);
+    cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+
+    const float* r = pc.view.mainRect;
+    const float px = std::floor(r[0] * (float)t.width), py = std::floor(r[1] * (float)t.height);
+    const float pw = std::floor((r[0] + r[2]) * (float)t.width) - px;
+    const float ph = std::floor((r[1] + r[3]) * (float)t.height) - py;
+    D3D12_VIEWPORT viewport{px, py, pw, ph, 0.0f, 1.0f};
+    D3D12_RECT scissor{(LONG)px, (LONG)py, (LONG)(px + pw), (LONG)(py + ph)};
+    cmd->RSSetViewports(1, &viewport);
+    cmd->RSSetScissorRects(1, &scissor);
+
+    cmd->SetGraphicsRootSignature(graphicsRootSig.Get());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    const D3D12_GPU_DESCRIPTOR_HANDLE depthTable = pc.transient.SrvTable(ctx, {&t.depth});
+    const D3D12_GPU_DESCRIPTOR_HANDLE shadowTable = pc.transient.SrvTable(
+        ctx, {t.shadowMap.res ? &t.shadowMap : nullptr});
+
+    for (const WorldInstance& inst : pc.view.worlds) {
+        const ShaderPack* pack = ShaderPacks().Find(inst.pack);
+        if (!pack || pack->type != PackType::World || !pack->world) continue;
+
+        auto* pipes = GetOrCompilePipelines(ctx, *pack);
+        if (!pipes) continue;
+
+        auto& state = GetOrCreateInstanceState(ctx, inst, *pack);
+        if (state.fieldDesc == DescriptorHeap::kInvalid) continue;
+
+        const D3D12_GPU_VIRTUAL_ADDRESS paramsExtVa = AllocParamsExt(*pack, inst.params);
+        D3D12_GPU_DESCRIPTOR_HANDLE packTexTable{};
+        const PackTextures::Set* ptSet = packTextures.Acquire(ctx, *pack, pack->dir);
+        if (ptSet && ptSet->srv != DescriptorHeap::kInvalid) {
+            packTexTable = ctx.SrvHeap().Gpu(ptSet->srv);
+        } else if (defaultPackTexSrv != DescriptorHeap::kInvalid) {
+            packTexTable = ctx.SrvHeap().Gpu(defaultPackTexSrv);
+        }
+
+        std::vector<WorldCollider> sampledColliders;
+        if (inst.colliders) inst.colliders->Sample(inst.time, sampledColliders);
+        const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
+
+        const float instStepDt = pack->world->step > 0.0f ? pack->world->step : (1.0f / 60.0f);
+        auto makeWorldCb = [&](uint32_t partIdx, uint32_t countOrGrid) {
+            WorldCbData cb{};
+            XMMATRIX mWorld = XMLoadFloat4x4(&inst.transform);
+            XMMATRIX mInvWorld = XMMatrixInverse(nullptr, mWorld);
+            XMStoreFloat4x4(&cb.localToWorld, mWorld);
+            XMStoreFloat4x4(&cb.worldToLocal, mInvWorld);
+            cb.worldTime = XMFLOAT4((float)inst.time, instStepDt, (float)state.simTime, 0.0f);
+            cb.worldParams = XMFLOAT4((float)sampledColliders.size(), (float)state.fields.size(),
+                                      (float)partIdx, (float)countOrGrid);
+
+            const LightParams& lp = pc.view.light;
+            XMVECTOR L = XMVector3Normalize(XMLoadFloat3(&lp.direction));
+            XMFLOAT3 lNorm;
+            XMStoreFloat3(&lNorm, L);
+            const float hasSun = (lp.sunIntensity > 0.0f) ? 1.0f : 0.0f;
+            cb.sunDir = XMFLOAT4(-lNorm.x, -lNorm.y, -lNorm.z, hasSun);
+            cb.sunColor = XMFLOAT4(lp.color.x * lp.sunIntensity, lp.color.y * lp.sunIntensity,
+                                   lp.color.z * lp.sunIntensity, pc.view.shadowDistance);
+            cb.ambient = XMFLOAT4(lp.groundColor.x, lp.groundColor.y, lp.groundColor.z, 0.0f);
+
+            for (size_t fi = 0; fi < std::min<size_t>(pack->world->fields.size(), 4); ++fi) {
+                const auto& f = pack->world->fields[fi];
+                cb.fieldExtent[fi] = XMFLOAT4((float)f.size, (float)f.size, f.extent,
+                                              f.extent > 0 ? (1.0f / f.extent) : 0);
+            }
+            return cb;
+        };
+
+        for (auto& f : state.fields) f.Previous().Transition(cmd, kSrv);
+        for (size_t pi = 0; pi < state.particles.size(); ++pi)
+            if (!pack->world->particles[pi].simulate.empty())
+                TransitionParticles(cmd, state.particles[pi],
+                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        cmd->SetGraphicsRootConstantBufferView(0, pc.sceneConstants);
+        cmd->SetGraphicsRootConstantBufferView(2, paramsExtVa);
+        cmd->SetGraphicsRootShaderResourceView(3, colVa);
+        cmd->SetGraphicsRootDescriptorTable(4, FieldTable(ctx, state));
+        cmd->SetGraphicsRootDescriptorTable(5, packTexTable);
+        cmd->SetGraphicsRootDescriptorTable(8, shadowTable);
+        cmd->SetGraphicsRootDescriptorTable(9, depthTable);
+
+        for (size_t pi = 0; pi < pack->world->particles.size(); ++pi) {
+            const auto& p = pack->world->particles[pi];
+            auto& pPipe = pipes->particles[pi];
+            auto& pBuf = state.particles[pi];
+            if (!pPipe.psoDrawPost) continue;
+
+            const auto cb = makeWorldCb((uint32_t)pi, p.count);
+            cmd->SetGraphicsRootConstantBufferView(1, AllocWorldCb(cb));
+            cmd->SetPipelineState(pPipe.psoDrawPost.Get());
+
+            if (!p.simulate.empty()) {
+                cmd->SetGraphicsRootShaderResourceView(6, pBuf.buffer->GetGPUVirtualAddress());
+                cmd->SetGraphicsRootShaderResourceView(7, pBuf.prevPos->GetGPUVirtualAddress());
+            }
+
+            const uint32_t vertexCount = p.count * 6;
+            cmd->DrawInstanced(vertexCount, 1, 0, 0);
+            pc.stats.drawCalls++;
+        }
+    }
+
+    t.lit.Transition(cmd, kSrv);
+}
 
 WorldPass::WorldPass() : impl_(std::make_unique<Impl>()) {}
 WorldPass::~WorldPass() = default;
@@ -1267,7 +1424,7 @@ void WorldPass::Execute(PassContext& pc) {
             if (!pipes) continue;
 
             auto& state = impl_->GetOrCreateInstanceState(ctx, inst, *pack);
-            impl_->DrawInstance(pc, inst, *pack, *pipes, state, false);
+            impl_->DrawInstance(pc, inst, *pack, *pipes, state, false, false);   // surfaces only; particles draw after composite
         }
     } else if (pc.path == RenderPath::PathTraced && t.ptEdges) {
         // In PathTraced mode, ScenePass::DrawPtEdges prepared colorMsaa, normalMsaa, velocityMsaa, depthMsaa
@@ -1305,6 +1462,8 @@ void WorldPass::Execute(PassContext& pc) {
         }
     }
 }
+
+void WorldPass::DrawParticlesPost(PassContext& pc) { impl_->DrawParticlesPost(pc); }
 
 void WorldPass::DrawOffline(PassContext& pc, const Texture& edgeColorMsaa, const Texture& edgeDepthMsaa) {
     if (pc.view.worlds.empty()) return;

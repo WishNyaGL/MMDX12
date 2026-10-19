@@ -174,12 +174,15 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     passes_.push_back(std::make_unique<MmeShadowPass>());
     passes_.push_back(std::make_unique<MmeOffscreenPass>());
     passes_.push_back(std::make_unique<ScenePass>());
-    passes_.push_back(std::make_unique<WorldPass>());
+    auto* worldPass = new WorldPass();   // also owned by passes_; WorldParticlesPass holds a non-owning pointer
+    passes_.push_back(std::unique_ptr<WorldPass>(worldPass));
     passes_.push_back(std::make_unique<ResolvePass>());
     passes_.push_back(std::make_unique<PathTracePass>());
     passes_.push_back(std::make_unique<SsaoPass>());
     passes_.push_back(std::make_unique<SsrPass>());
     passes_.push_back(std::make_unique<CompositePass>());
+    // World particles go after the composite (so SSR / SSAO / RT reflections never see them) and before volumetrics.
+    passes_.push_back(std::make_unique<WorldParticlesPass>(worldPass));
     passes_.push_back(std::make_unique<VolumetricPass>());
     passes_.push_back(std::make_unique<TaaPass>());
     passes_.push_back(std::make_unique<UpscalePass>());
