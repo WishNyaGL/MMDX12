@@ -1,0 +1,255 @@
+{
+  "format": 1,
+  "id": "snow",
+  "version": "1.0.0",
+  "apiVersion": 6,
+  "type": "world",
+  "name": {
+    "ko": "눈",
+    "en": "Snow",
+    "ja": "雪",
+    "zh": "雪"
+  },
+  "description": {
+    "ko": "내리는 눈, 발자국이 남는 쌓인 눈, 발로 차올리는 눈 효과를 제공하는 월드 셰이더 팩입니다.",
+    "en": "Built-in world snow effect featuring falling snow, dynamic ground snow cover with footprints, and kicked-up snow puffs.",
+    "ja": "降る雪、足跡が残る積雪、足元から舞い上がる雪の演出を提供するワールドシェーダーパックです。",
+    "zh": "提供漫天落雪、带脚印积雪地面以及踢起雪花效果的内置世界着色器包。"
+  },
+  "authors": [
+    { "name": "MMDX12" }
+  ],
+  "license": "MIT",
+  "world": {
+    "step": 0.0166667,
+    "rewind": 4.0,
+    "fields": [
+      {
+        "name": "cover",
+        "size": 1024,
+        "extent": 60.0,
+        "format": "rg16f",
+        "persistent": true,
+        "rate": 20.0,
+        "update": "UpdateCover"
+      }
+    ],
+    "surfaces": [
+      {
+        "field": "cover",
+        "grid": 256,
+        "height": "SnowHeight",
+        "shade": "SnowShade"
+      }
+    ],
+    "particles": [
+      {
+        "name": "fall",
+        "count": 24000,
+        "blend": "alpha",
+        "simulate": "SimulateFlakes",
+        "shade": "ShadeFlakes",
+        "size": [0.02, 0.6]
+      },
+      {
+        "name": "kick",
+        "count": 6000,
+        "blend": "alpha",
+        "simulate": "SimulateKick",
+        "shade": "ShadeKick",
+        "size": [0.02, 0.45]
+      }
+    ]
+  },
+  "groups": [
+    {
+      "id": "falling",
+      "label": {
+        "ko": "내리는 눈",
+        "en": "Falling Snow",
+        "ja": "降る雪",
+        "zh": "落雪"
+      },
+      "collapsed": false
+    },
+    {
+      "id": "cover",
+      "label": {
+        "ko": "쌓인 눈",
+        "en": "Snow Cover",
+        "ja": "積もった雪",
+        "zh": "积雪"
+      },
+      "collapsed": false
+    },
+    {
+      "id": "kick",
+      "label": {
+        "ko": "차올림",
+        "en": "Kicked Snow",
+        "ja": "雪の蹴り上げ",
+        "zh": "踢雪"
+      },
+      "collapsed": false
+    }
+  ],
+  "params": [
+    {
+      "key": "density",
+      "group": "falling",
+      "type": "float",
+      "label": { "ko": "밀도", "en": "Density", "ja": "密度", "zh": "密度" },
+      "default": 0.75,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.05
+    },
+    {
+      "key": "fall_speed",
+      "group": "falling",
+      "type": "float",
+      "label": { "ko": "낙하 속도", "en": "Fall Speed", "ja": "落下速度", "zh": "下落速度" },
+      "default": 2.5,
+      "min": 0.5,
+      "max": 10.0,
+      "step": 0.1
+    },
+    {
+      "key": "flake_size",
+      "group": "falling",
+      "type": "float",
+      "label": { "ko": "눈송이 크기", "en": "Flake Size", "ja": "雪片サイズ", "zh": "雪花大小" },
+      "default": 0.14,
+      "min": 0.02,
+      "max": 0.5,
+      "step": 0.01
+    },
+    {
+      "key": "wind",
+      "group": "falling",
+      "type": "vec3",
+      "label": { "ko": "바람", "en": "Wind", "ja": "風", "zh": "风力" },
+      "default": [0.5, 0.0, 0.2],
+      "min": -10.0,
+      "max": 10.0,
+      "step": 0.1
+    },
+    {
+      "key": "turbulence",
+      "group": "falling",
+      "type": "float",
+      "label": { "ko": "난류", "en": "Turbulence", "ja": "乱気流", "zh": "湍流" },
+      "default": 0.5,
+      "min": 0.0,
+      "max": 3.0,
+      "step": 0.05
+    },
+    {
+      "key": "area_radius",
+      "group": "falling",
+      "type": "float",
+      "label": { "ko": "범위 반경", "en": "Area Radius", "ja": "範囲半径", "zh": "范围半径" },
+      "default": 22.0,
+      "min": 5.0,
+      "max": 50.0,
+      "step": 1.0
+    },
+    {
+      "key": "spawn_height",
+      "group": "falling",
+      "type": "float",
+      "label": { "ko": "생성 높이", "en": "Spawn Height", "ja": "生成高さ", "zh": "生成高度" },
+      "default": 22.0,
+      "min": 5.0,
+      "max": 40.0,
+      "step": 1.0
+    },
+    {
+      "key": "depth",
+      "group": "cover",
+      "type": "float",
+      "label": { "ko": "적설 깊이", "en": "Depth", "ja": "積雪の深さ", "zh": "积雪深度" },
+      "default": 0.35,
+      "min": 0.05,
+      "max": 1.5,
+      "step": 0.01
+    },
+    {
+      "key": "footprint_depth",
+      "group": "cover",
+      "type": "float",
+      "label": { "ko": "발자국 깊이", "en": "Footprint Depth", "ja": "足跡の深さ", "zh": "脚印深度" },
+      "default": 0.85,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.05
+    },
+    {
+      "key": "footprint_width",
+      "group": "cover",
+      "type": "float",
+      "label": { "ko": "발자국 폭", "en": "Footprint Width", "ja": "足跡の幅", "zh": "脚印宽度" },
+      "default": 1.15,
+      "min": 0.5,
+      "max": 2.5,
+      "step": 0.05
+    },
+    {
+      "key": "refill_rate",
+      "group": "cover",
+      "type": "float",
+      "label": { "ko": "초당 복원량", "en": "Refill Per Second", "ja": "毎秒復元量", "zh": "每秒恢复量" },
+      "default": 0.015,
+      "min": 0.0,
+      "max": 0.2,
+      "step": 0.005
+    },
+    {
+      "key": "color",
+      "group": "cover",
+      "type": "color",
+      "label": { "ko": "눈 색상", "en": "Colour", "ja": "雪の色", "zh": "雪颜色" },
+      "default": [0.96, 0.97, 1.0]
+    },
+    {
+      "key": "sparkle",
+      "group": "cover",
+      "type": "float",
+      "label": { "ko": "반짝임", "en": "Sparkle", "ja": "輝き", "zh": "闪烁" },
+      "default": 0.7,
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.05
+    },
+    {
+      "key": "kick_amount",
+      "group": "kick",
+      "type": "float",
+      "label": { "ko": "차올림 양", "en": "Amount", "ja": "蹴り上げ量", "zh": "踢雪量" },
+      "default": 1.2,
+      "min": 0.0,
+      "max": 3.0,
+      "step": 0.1
+    },
+    {
+      "key": "kick_height",
+      "group": "kick",
+      "type": "float",
+      "label": { "ko": "차올림 높이", "en": "Height", "ja": "蹴り上げ高さ", "zh": "踢雪高度" },
+      "default": 1.6,
+      "min": 0.2,
+      "max": 5.0,
+      "step": 0.1
+    },
+    {
+      "key": "min_foot_speed",
+      "group": "kick",
+      "type": "float",
+      "label": { "ko": "최소 발 속도", "en": "Min Foot Speed", "ja": "最小足速度", "zh": "最小脚速度" },
+      "default": 0.8,
+      "min": 0.1,
+      "max": 5.0,
+      "step": 0.1
+    }
+  ]
+}
