@@ -27,6 +27,7 @@ cbuffer PbrRoot : register(b3) {
     uint gPbrIndex;    // material index into that buffer (0xFFFFFFFF = no record)
     uint gPbrDebug;    // PbrDebug channel 0..7
     uint gPbrActive;   // 0 = no PBR record for this draw
+    uint gModelIdInfo; // bit 7: isCharacter, bits 8-15: 1 + modelIndex
 };
 #ifndef MAT_HAS_TEXTURE
 #define MAT_HAS_TEXTURE 1u
@@ -94,6 +95,9 @@ struct PSOut {
     float4 color : SV_Target0;
     float4 normal : SV_Target1;
     float2 velocity : SV_Target2;
+#if defined(SCENE_HAS_ID) && SCENE_HAS_ID
+    uint id : SV_Target3;
+#endif
 };
 
 // Current / previous frame skinning (skinning.hlsli: linear blend or SDEF).
@@ -534,17 +538,30 @@ float3 PunctualSpecularGGX(float3 wp, float3 n, float3 V, float rough, float3 f0
     return sum;
 }
 
+#if defined(SCENE_HAS_ID) && SCENE_HAS_ID
+PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivity, float4 curClip, float4 prevClip, uint customId = 0) {
+    PSOut o;
+    o.color = float4(color, alpha);
+    float3 vn = normalize(mul(worldNormal, (float3x3)gView));
+    o.normal = float4(OctEncode(vn), alpha < 0.98 ? -1.0 : reflectivity, alpha);
+    o.velocity = Velocity(curClip, prevClip);
+    if (customId != 0u) {
+        o.id = (alpha < 0.98) ? 0u : customId;
+    } else {
+        o.id = (alpha < 0.98) ? 0u : (((7u & 7u) << 4) | (gModelIdInfo & 0xFF80u));
+    }
+    return o;
+}
+#else
 PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivity, float4 curClip, float4 prevClip) {
     PSOut o;
     o.color = float4(color, alpha);
     float3 vn = normalize(mul(worldNormal, (float3x3)gView));
-    // Translucent pixels (sheer curtains, glass, hair fringes) write "no AO" (negative reflectivity, the composite's
-    // nt.z < 0 rule): the normal target blends like the colour, so the mark wins where the translucent layer
-    // dominates, and SSAO no longer greys a sheer curtain by its folds (it also skips SSR there).
     o.normal = float4(OctEncode(vn), alpha < 0.98 ? -1.0 : reflectivity, alpha);
     o.velocity = Velocity(curClip, prevClip);
     return o;
 }
+#endif
 
 // ---- MMD material -----------------------------------------------------------------
 
@@ -929,9 +946,23 @@ PSOut PSPack(VSOut i, bool front : SV_IsFrontFace) {
     PackHeadFrame(s);
     PackResult r = PackShade(s);
     r.color += SrgbToLinear(saturate(gDiffuse.rgb * s.tex.rgb)) * gSunShadowColor.rgb * occ * gSunIntensity;
+#if defined(PACK_CAP_SURFACE_OUTPUT) && PACK_CAP_SURFACE_OUTPUT
+    s.N = normalize(r.normal);
+    r.color += r.emission;
+#endif
     // negative reflectivity = "no ambient occlusion here" (composite.hlsl); SSR / RT reflections skip it as well
     float refl = r.noAo ? -1.0 : (r.alpha > 0.9 ? r.reflectivity : 0.0);
+#if defined(SCENE_HAS_ID) && SCENE_HAS_ID
+    uint tag = 0;
+#if defined(PACK_CAP_SURFACE_OUTPUT) && PACK_CAP_SURFACE_OUTPUT
+    tag = r.tag;
+#endif
+    uint packClass = (PackClassLow(gPackClass) == PACK_CLASS_OFF) ? 7u : PackClassLow(gPackClass);
+    uint customId = (tag & 0xFu) | ((packClass & 0x7u) << 4) | (gModelIdInfo & 0xFF80u);
+    return PackOutput(r.color, r.alpha, s.N, refl, i.curClip, i.prevClip, customId);
+#else
     return PackOutput(r.color, r.alpha, s.N, refl, i.curClip, i.prevClip);
+#endif
 }
 #endif
 

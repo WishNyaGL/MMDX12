@@ -97,6 +97,13 @@ private:
     // RayTracing variants (DXC, ps_6_5, RT_SHADOWS=1); null when DXC/DXR is unavailable
     ComPtr<ID3D12PipelineState> psoCullBackRt_, psoNoCullRt_, psoFloorRt_;
     ComPtr<ID3D12PipelineState> psoAddBackRt_, psoAddNoCullRt_, psoNdBackRt_, psoNdNoCullRt_;
+    // ID target variants (4 MRTs: Color, Normal, Velocity, ID):
+    bool EnsureIdPipelines(Dx12Context& ctx);   // lazily builds the *Id_ PSOs; false = no ID image this frame
+    bool idTried_ = false;
+    ComPtr<ID3D12PipelineState> psoCullBackId_, psoNoCullId_;
+    ComPtr<ID3D12PipelineState> psoCullBackRtId_, psoNoCullRtId_;
+    ComPtr<ID3D12PipelineState> psoAddBackId_, psoAddNoCullId_, psoNdBackId_, psoNdNoCullId_;
+    ComPtr<ID3D12PipelineState> psoAddBackRtId_, psoAddNoCullRtId_, psoNdBackRtId_, psoNdNoCullRtId_;
     // path tracer outlines: depth-only pre-pass (PSDepthAlpha, colour writes off); null = PT draws no outlines
     ComPtr<ID3D12PipelineState> psoDepthBack_, psoDepthNoCull_;
     ComPtr<ID3D12RootSignature> rootSig_;
@@ -125,19 +132,20 @@ private:
     // character) with its own 16-SRV range + white fallback, dropped with the PSOs on reload.
     struct PackPipelines {
         ComPtr<ID3D12PipelineState> back, noCull, backRt, noCullRt, edge;
+        ComPtr<ID3D12PipelineState> backId, noCullId, backRtId, noCullRtId;
         bool failed = false, rtTried = false;
         using TextureSet = PackTextures::Set;
         std::map<std::string, TextureSet> sets;        // resolved folder (utf-8, "" = pack folder) -> its set
     };
     const PackPipelines* PackPsos(Dx12Context& ctx, const std::string& id, const std::filesystem::path& textureFolder,
-                                  bool rt);
+                                  bool rt, bool hasId = false);
     bool EnsurePackTextures(Dx12Context& ctx, const ShaderPack& pack, PackPipelines::TextureSet& set,
                             const std::filesystem::path& folder);
     void ReleasePackPsos(Dx12Context& ctx);   // waits for the GPU, frees the pack texture SRVs and PSOs
     std::map<std::string, PackPipelines> packPsos_;
     uint32_t packGeneration_ = 0;
     std::filesystem::path shaderDir_;
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC litDesc_{};   // the lit PSO desc (PS replaced per pack)
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC litDesc_{}, litDescId_{}; // the lit PSO descs (3 MRTs and 4 MRTs)
     ComPtr<ID3DBlob> vs_, vsRt_, vsDxc_;             // kept alive for litDesc_ / the pack PSOs
 };
 
@@ -148,7 +156,10 @@ public:
     void Execute(PassContext& pc) override;
 
 private:
-    FullscreenPipeline pipe_;
+    FullscreenPipeline pipe_, pipeId_;
+    std::filesystem::path shaderDir_;
+    uint32_t msaa_ = 1;
+    bool idTried_ = false;   // pipeId_ is built on the first frame with an ID target
 };
 
 class SsaoPass final : public IRenderPass {
@@ -379,7 +390,8 @@ public:
     // Offline GI: this instance's share of `stack` over the image `io`, ping-ponging through `scratch` (the same format), with
     // the image's effect inputs (depth R32_FLOAT, velocity, oct normal). The result is copied back into `io`; false: nothing ran.
     bool RunOffline(PassContext& pc, const std::vector<EffectStackEntry>& stack, Texture& io, Texture& scratch,
-                    Texture& depth, Texture& velocity, Texture& normal, const OfflineJobDesc* job = nullptr);
+                    Texture& depth, Texture& velocity, Texture& normal, const OfflineJobDesc* job = nullptr,
+                    Texture* id = nullptr);
 
 private:
     // Per-entry GPU state, keyed by pack id: its PSO plus one texture set per resolved folder (pack.json
@@ -406,7 +418,7 @@ private:
         const EffectPipelines* pipes = nullptr;
         const EffectStackEntry* entry = nullptr;
         size_t stackIndex = 0;
-        Texture *src = nullptr, *dst = nullptr, *depth = nullptr, *velocity = nullptr, *normal = nullptr;
+        Texture *src = nullptr, *dst = nullptr, *depth = nullptr, *velocity = nullptr, *normal = nullptr, *id = nullptr;
         uint32_t outW = 0, outH = 0;
         float dt = 0.0f;
         bool resetState = false;      // camera cut / resize / job reset
@@ -415,15 +427,15 @@ private:
     };
     void RunEntry(PassContext& pc, const EntryRun& run);
     void DropStaleStateSlots(Dx12Context& ctx, const std::vector<EffectStackEntry>& stack);
-    // API v5 intermediate-pass targets (RGBA16F), pooled by size
-    Texture* PassTarget(Dx12Context& ctx, uint32_t w, uint32_t h, uint32_t n);
+    // API v5 intermediate-pass targets (RGBA16F), pooled by size and mips
+    Texture* PassTarget(Dx12Context& ctx, uint32_t w, uint32_t h, uint32_t n, bool mips = false);
     void TrimPassPool(Dx12Context& ctx);
     void ReleasePassPool(Dx12Context& ctx);
     struct PoolTexture {
         Texture tex;
         uint64_t lastUse = 0;
     };
-    std::map<std::pair<uint32_t, uint32_t>, std::deque<PoolTexture>> passPool_;   // deque: stable addresses
+    std::map<std::tuple<uint32_t, uint32_t, bool>, std::deque<PoolTexture>> passPool_;   // deque: stable addresses
 
     bool AllocTargets(Dx12Context& ctx, uint32_t w, uint32_t h);
     bool AllocPostTargets(Dx12Context& ctx, uint32_t w, uint32_t h);
@@ -436,6 +448,16 @@ private:
     };
     using StateKey = std::pair<size_t, std::string>;
 
+    struct HistorySlot {
+        Texture tex[kPackMaxPasses];
+        bool valid[kPackMaxPasses] = {};
+        uint64_t lastPassExecution = 0;
+    };
+
+    void GenerateMips(PassContext& pc, Texture& tex);
+    ComPtr<ID3D12RootSignature> downsampleRootSig_;
+    ComPtr<ID3D12PipelineState> downsamplePso_;
+
     bool preBloom_;           // this instance's share: pre-bloom (HDR) or post (LDR) entries
     Texture ping_[2];         // RGBA16F ping-pong, outWidth x outHeight (pre-bloom share)
     Texture post_[2];         // RGBA8 ping-pong, outWidth x outHeight (post share)
@@ -443,6 +465,7 @@ private:
     std::filesystem::path shaderDir_;
     std::map<std::string, EffectPipelines> psos_;
     std::map<StateKey, StateSlot> stateSlots_;
+    std::map<StateKey, HistorySlot> historySlots_;
     uint64_t passExecutionCount_ = 0;
     bool resetRequested_ = false;
 };

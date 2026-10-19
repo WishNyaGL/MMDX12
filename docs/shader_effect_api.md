@@ -227,3 +227,70 @@ When `"inputs.audio"` is declared:
 - `float PackAudioSection()`: coarse song energy section (0.0 low / 0.5 mid / 1.0 high).
 - `float PackAudioBpm()`: song tempo in BPM. All audio inputs return 0 when no audio is loaded or analysis is not ready.
 
+## ID Target (`inputs.id`)
+
+When an effect pack declares `"requires": ["inputs.id"]` (or `"inputs": ["id"]`), the engine provides a non-MSAA `R16_UINT` ID buffer at render resolution (`gEffectId`, `t4, space6`).
+Pixels with alpha < 0.98 or belonging to the background clear to 0.
+
+### Bit Layout
+
+| Bits | Field | Description |
+| --- | --- | --- |
+| 0–3 | `tag` | 4-bit user tag (0..15) written by a surface pack via `PackResult.tag` / `PtPackOut.tag` |
+| 4–6 | `class` | Material class (0..5: `PACK_BODY`, `PACK_SKIN`, `PACK_FACE`, `PACK_EYE`, `PACK_HAIR`, `PACK_WEAPON`; 7 = none / pack off) |
+| 7 | `isCharacter` | 1 if character model, 0 if stage or other geometry |
+| 8–15 | `model` | Model index (1 + model index, 0 = background or transparent) |
+
+### HLSL Helpers
+
+- `uint PackSampleId(float2 uv)`: loads the 16-bit ID at the specified UV coordinate.
+- `uint PackIdModel(uint id)`: extracts the 1-based model index (`(id >> 8) & 0xFF`).
+- `uint PackIdClass(uint id)`: extracts the material class (`(id >> 4) & 0x7`).
+- `uint PackIdTag(uint id)`: extracts the custom tag (`id & 0xF`).
+- `bool PackIdIsCharacter(uint id)`: returns true if bit 7 is set.
+
+## Pass History and Mips (`passes.history`, `passes.mips`)
+
+Intermediate passes in API v5 can opt into temporal persistence and mip chains.
+
+### Pass History (`passes.history`)
+
+When an effect declares `"requires": ["passes.history"]`, any pass entry can specify `"history": true`:
+
+```json
+{
+  "apiVersion": 5,
+  "type": "effect",
+  "requires": ["passes.history"],
+  "passes": [
+    { "entry": "Accumulate", "scale": 1.0, "history": true }
+  ]
+}
+```
+
+- Each history pass retains its output from the previous frame in a dedicated history texture (`space9`).
+- The history buffer automatically resets (cleared to zero) on camera cut, scene load/reset, or resolution change.
+- Helpers:
+  - `float4 PackPassSampleHistory(uint passIndex, float2 uv)`: bilinearly samples pass `passIndex`'s history target.
+  - `float4 PackPassLoadHistory(uint passIndex, int2 px)`: point loads a texel from pass `passIndex`'s history target.
+
+### Pass Mips (`passes.mips`)
+
+When an effect declares `"requires": ["passes.mips"]`, any pass entry can specify `"mips": true`:
+
+```json
+{
+  "apiVersion": 5,
+  "type": "effect",
+  "requires": ["passes.mips"],
+  "passes": [
+    { "entry": "DownsampleBase", "scale": 0.5, "mips": true }
+  ]
+}
+```
+
+- After the pass executes, the engine generates a full mip chain down to 1x1 using a box downsample compute shader.
+- Helpers:
+  - `float4 PackPassSampleLevel(uint passIndex, float2 uv, float lod)`: samples pass `passIndex`'s target at explicit mip level `lod`.
+
+

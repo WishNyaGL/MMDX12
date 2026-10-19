@@ -166,3 +166,30 @@ When `"inputs.audio"` is declared:
 - `float PackAudioSection()`: coarse song energy section (0.0 low / 0.5 mid / 1.0 high).
 - `float PackAudioBpm()`: song tempo in BPM. All audio inputs return 0 when no audio is loaded or analysis is not ready.
 
+## Surface Output Bridge (`surface.output`)
+
+When a surface pack declares `"requires": ["surface.output"]` in `pack.json`:
+
+```json
+{
+  "apiVersion": 2,
+  "type": "surface",
+  "requires": ["surface.output"]
+}
+```
+
+The output structures gain fields for overriding normal, adding emission, and writing custom pixel tags.
+
+### Raster (`PackResult` in `surface.hlsl`)
+
+- `float3 normal`: custom shading normal (normalized by the engine) written to the G-buffer normal target.
+- `float3 emission`: additive linear emission added to the final lit color.
+- `uint tag`: 4-bit integer tag (0..15) written into bits 0–3 of the engine's ID buffer (`R16_UINT`).
+
+### Path Tracing / Offline GI (`PtPackOut` in `pt_surface.hlsl`)
+
+- `float3 normal`: custom shading normal used for subsequent ray bounces and reflections.
+- `float3 emission`: additive linear emission added along the ray throughput.
+- `uint tag`: 4-bit integer tag (0..15) recorded for the primary ray hit and written into bits 0–3 of the ID buffer.
+
+

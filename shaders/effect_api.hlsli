@@ -69,6 +69,21 @@ Texture2D<float4> gEffectSource : register(t0, space6);
 Texture2D<float> gEffectDepth : register(t1, space6);        // raw device depth (R32_FLOAT)
 Texture2D<float2> gEffectVelocity : register(t2, space6);    // uv(cur) - uv(prev) (R16G16_FLOAT)
 Texture2D<float4> gEffectNormal : register(t3, space6);      // oct normal .xy (RGBA16_FLOAT)
+#if defined(PACK_CAP_INPUTS_ID) && PACK_CAP_INPUTS_ID
+Texture2D<uint> gEffectId : register(t4, space6);            // non-MSAA R16_UINT ID target
+
+uint PackSampleId(float2 uv) {
+    uint w, h;
+    gEffectId.GetDimensions(w, h);
+    if (w == 0 || h == 0) return 0;
+    int2 px = clamp(int2(uv * float2(w, h)), 0, int2(w - 1, h - 1));
+    return gEffectId.Load(int3(px, 0));
+}
+uint PackIdModel(uint id) { return (id >> 8u) & 0xFFu; }
+uint PackIdClass(uint id) { return (id >> 4u) & 0x7u; }
+uint PackIdTag(uint id) { return id & 0xFu; }
+bool PackIdIsCharacter(uint id) { return ((id >> 7u) & 1u) != 0; }
+#endif
 
 cbuffer EffectParams : register(b2) { float4 gPackEffectParams[4]; }
 
@@ -116,6 +131,25 @@ float2 PackPassSize(uint n) {
 float4 PackPassSample(uint n, float2 uv) { return float4(0, 0, 0, 0); }
 float4 PackPassLoad(uint n, int2 px) { return float4(0, 0, 0, 0); }
 float2 PackPassSize(uint n) { return float2(0, 0); }
+#endif
+
+#if defined(PACK_CAP_PASSES_MIPS) && PACK_CAP_PASSES_MIPS
+#if PACK_PASS_COUNT > 0
+float4 PackPassSampleLevel(uint n, float2 uv, float lod) { return gPackPass[n & 7u].SampleLevel(gLinear, uv, lod); }
+#else
+float4 PackPassSampleLevel(uint n, float2 uv, float lod) { return float4(0, 0, 0, 0); }
+#endif
+#endif
+
+#if defined(PACK_CAP_PASSES_HISTORY) && PACK_CAP_PASSES_HISTORY
+#if PACK_PASS_COUNT > 0
+Texture2D<float4> gPackPassHistory[8] : register(t0, space9);
+float4 PackPassSampleHistory(uint n, float2 uv) { return gPackPassHistory[n & 7u].SampleLevel(gLinear, uv, 0); }
+float4 PackPassLoadHistory(uint n, int2 px) { return gPackPassHistory[n & 7u].Load(int3(px, 0)); }
+#else
+float4 PackPassSampleHistory(uint n, float2 uv) { return float4(0, 0, 0, 0); }
+float4 PackPassLoadHistory(uint n, int2 px) { return float4(0, 0, 0, 0); }
+#endif
 #endif
 
 // What a pass entry receives (float4 Entry(PackPassInput i)); the result is stored in its target.

@@ -10,12 +10,12 @@ namespace mmdx {
 
 bool Texture::Create(Dx12Context& ctx, uint32_t w, uint32_t h, DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS flags,
                      D3D12_RESOURCE_STATES initial, const wchar_t* name, uint32_t sampleCount,
-                     uint32_t arrayCount, const float* clearColor) {
+                     uint32_t arrayCount, const float* clearColor, uint16_t mips) {
     Release(ctx);
     ID3D12Device* device = ctx.Device();
     const bool isDepth = (flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0;
     const bool isRt = (flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
-    CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(fmt, w, h, (UINT16)arrayCount, 1, sampleCount, 0, flags);
+    CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(fmt, w, h, (UINT16)arrayCount, mips, sampleCount, 0, flags);
     D3D12_CLEAR_VALUE clear{};
     const D3D12_CLEAR_VALUE* clearPtr = nullptr;
     if (isDepth) {
@@ -40,6 +40,7 @@ bool Texture::Create(Dx12Context& ctx, uint32_t w, uint32_t h, DXGI_FORMAT fmt, 
     height = h;
     samples = sampleCount;
     arraySize = arrayCount;
+    mipLevels = mips > 0 ? mips : (1 + (uint32_t)std::floor(std::log2((double)std::max(std::max(w, h), 1u))));
 
     if (isRt) {
         rtv = ctx.RtvHeap().Allocate(arrayCount);
@@ -110,13 +111,13 @@ void Texture::WriteSrv(ID3D12Device* device, D3D12_CPU_DESCRIPTOR_HANDLE cpu) co
     d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     if (arraySize > 1) {
         d.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-        d.Texture2DArray.MipLevels = 1;
+        d.Texture2DArray.MipLevels = mipLevels > 0 ? mipLevels : 1;
         d.Texture2DArray.ArraySize = arraySize;
     } else if (samples > 1) {
         d.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
     } else {
         d.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        d.Texture2D.MipLevels = 1;
+        d.Texture2D.MipLevels = mipLevels > 0 ? mipLevels : 1;
     }
     device->CreateShaderResourceView(res.Get(), &d, cpu);
 }
@@ -318,8 +319,8 @@ bool ComputePipeline::Create(Dx12Context& ctx, const std::filesystem::path& file
                              const ShaderDefines& defines) {
     ID3D12Device* device = ctx.Device();
     CD3DX12_DESCRIPTOR_RANGE srv, uav, tex, buf;
-    srv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0, 0);
-    uav.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 8, 0, 0);
+    srv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 16, 0, 0);
+    uav.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 16, 0, 0);
     tex.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 2, 0);
     buf.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 3, 0);
     CD3DX12_ROOT_PARAMETER p[9];

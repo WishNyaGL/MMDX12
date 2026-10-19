@@ -281,6 +281,35 @@ void ShadowPass::Execute(PassContext& pc) {
 
 ScenePass::~ScenePass() = default;
 
+// Model .emd blend-hint variants of the lit PSOs (see ScenePass::CreatePipelines); hasId = a 4-MRT ID variant.
+static bool MakeBlendVariant(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& base, bool additive,
+                             ComPtr<ID3D12PipelineState>& back, ComPtr<ID3D12PipelineState>& noCull, const char* what,
+                             bool hasId) {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC d = base;
+    auto& rt0 = d.BlendState.RenderTarget[0];
+    rt0.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (additive) {
+        rt0.SrcBlend = D3D12_BLEND_SRC_ALPHA;   // MMD additive colour blend; the alpha channel keeps the base
+        rt0.DestBlend = D3D12_BLEND_ONE;
+        rt0.BlendOp = D3D12_BLEND_OP_ADD;
+    }
+    d.BlendState.RenderTarget[1].RenderTargetWriteMask = 0;   // normal target
+    d.BlendState.RenderTarget[2].RenderTargetWriteMask = 0;   // velocity target
+    if (hasId && d.NumRenderTargets >= 4) {
+        // Without independent blending (the non-ID variants) every target follows RT0, so the two lines above have
+        // no effect there; the ID variants need independent blending (UINT target), so mirror that behaviour
+        // exactly: normal / velocity follow RT0, the ID target is not written by blended passes.
+        d.BlendState.RenderTarget[1] = rt0;
+        d.BlendState.RenderTarget[2] = rt0;
+        d.BlendState.RenderTarget[3].RenderTargetWriteMask = 0;
+    }
+    d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    d.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    if (!CheckHr(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&back)), what)) return false;
+    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    return CheckHr(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&noCull)), what);
+}
+
 bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) {
     ID3D12Device* device = ctx.Device();
     CD3DX12_ROOT_PARAMETER params[15];
@@ -315,7 +344,7 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     params[13].InitAsDescriptorTable(1, &pointTable, D3D12_SHADER_VISIBILITY_PIXEL); // point shadow maps
     // Per-material PBR record selection (work unit P2): model record-buffer SRV index + material index +
     // --pbr-debug channel + active flag, as root constants (b3).
-    params[14].InitAsConstants(4, 3, 0, D3D12_SHADER_VISIBILITY_ALL);
+    params[14].InitAsConstants(8, 3, 0, D3D12_SHADER_VISIBILITY_ALL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[4];
     samplers[0].Init(0, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_WRAP,
@@ -404,15 +433,34 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     shaderDir_ = shaderDir;
     litDesc_ = pso;
+    litDescId_ = pso;
+    litDescId_.NumRenderTargets = 4;
+    litDescId_.RTVFormats[3] = RenderTargets::kIdFormat;
+    // A UINT target cannot blend: independent blend states, with the colour / normal / velocity targets keeping the
+    // shared RT0 state they get without independent blending.
+    litDescId_.BlendState.IndependentBlendEnable = TRUE;
+    litDescId_.BlendState.RenderTarget[1] = litDescId_.BlendState.RenderTarget[0];
+    litDescId_.BlendState.RenderTarget[2] = litDescId_.BlendState.RenderTarget[0];
+    litDescId_.BlendState.RenderTarget[3] = CD3DX12_BLEND_DESC(D3D12_DEFAULT).RenderTarget[0];
+    litDescId_.BlendState.RenderTarget[3].BlendEnable = FALSE;
+    litDescId_.BlendState.RenderTarget[3].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
     vs_ = vsLit;
     vsRt_.Reset();
     vsDxc_.Reset();
     ReleasePackPsos(ctx);
+    // ID-target variants (inputs.id effects) are built on first use (EnsureIdPipelines): no startup cost otherwise.
+    idTried_ = false;
+    for (ComPtr<ID3D12PipelineState>* p : {std::addressof(psoCullBackId_), std::addressof(psoNoCullId_), std::addressof(psoAddBackId_), std::addressof(psoAddNoCullId_),
+                                           std::addressof(psoNdBackId_), std::addressof(psoNdNoCullId_), std::addressof(psoCullBackRtId_), std::addressof(psoNoCullRtId_),
+                                           std::addressof(psoAddBackRtId_), std::addressof(psoAddNoCullRtId_), std::addressof(psoNdBackRtId_), std::addressof(psoNdNoCullRtId_)})
+        p->Reset();
     if (!CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&psoCullBack_)), "ScenePass: PSO back"))
         return false;
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     if (!CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&psoNoCull_)), "ScenePass: PSO no cull"))
         return false;
+
 
     // Model .emd blend-hint variants of the lit PSOs (MatFlag_Additive / MatFlag_NoDepthWrite; see GpuModel).
     // NoDepthWrite: the lit blend with depth write OFF. Additive: SrcBlend SRC_ALPHA / DestBlend ONE / ADD (MMD
@@ -420,22 +468,8 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     // SSAO / SSR / TAA / DoF keep reading the underlying surface. `base` supplies the VS / PS (lit, or the RT pair).
     const auto makeBlendVariant = [&](const D3D12_GRAPHICS_PIPELINE_STATE_DESC& base, bool additive,
                                       ComPtr<ID3D12PipelineState>& back, ComPtr<ID3D12PipelineState>& noCull,
-                                      const char* what) -> bool {
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC d = base;
-        auto& rt0 = d.BlendState.RenderTarget[0];
-        rt0.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        if (additive) {
-            rt0.SrcBlend = D3D12_BLEND_SRC_ALPHA;   // MMD additive colour blend; the alpha channel keeps the base
-            rt0.DestBlend = D3D12_BLEND_ONE;
-            rt0.BlendOp = D3D12_BLEND_OP_ADD;
-        }
-        d.BlendState.RenderTarget[1].RenderTargetWriteMask = 0;   // normal target
-        d.BlendState.RenderTarget[2].RenderTargetWriteMask = 0;   // velocity target
-        d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-        if (!CheckHr(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&back)), what)) return false;
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        return CheckHr(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&noCull)), what);
+                                      const char* what, bool hasId = false) -> bool {
+        return MakeBlendVariant(device, base, additive, back, noCull, what, hasId);
     };
     if (!makeBlendVariant(pso, false, psoNdBack_, psoNdNoCull_, "ScenePass: PSO no-depth-write")) return false;
     if (!makeBlendVariant(pso, true, psoAddBack_, psoAddNoCull_, "ScenePass: PSO additive")) return false;
@@ -617,7 +651,7 @@ std::string PackSetKey(const std::filesystem::path& folder) {
 } // namespace
 
 const ScenePass::PackPipelines* ScenePass::PackPsos(Dx12Context& ctx, const std::string& id,
-                                                    const std::filesystem::path& textureFolder, bool rt) {
+                                                    const std::filesystem::path& textureFolder, bool rt, bool hasId) {
     ShaderPackRegistry& reg = ShaderPacks();
     if (reg.Generation() != packGeneration_) {
         ReleasePackPsos(ctx);   // reload: the old PSOs / pack textures may still be in flight
@@ -664,6 +698,10 @@ const ScenePass::PackPipelines* ScenePass::PackPsos(Dx12Context& ctx, const std:
                                  {"PACK_TEX_SRGB_MASK", std::to_string(srgbMask) + "u"}};
     if (pack->HasCap("inputs.scene")) packDefines.push_back({"PACK_CAP_INPUTS_SCENE", "1"});
     if (pack->HasCap("inputs.audio")) packDefines.push_back({"PACK_CAP_INPUTS_AUDIO", "1"});
+    if (pack->HasCap("surface.output")) packDefines.push_back({"PACK_CAP_SURFACE_OUTPUT", "1"});
+    if (pack->HasCap("inputs.id")) packDefines.push_back({"PACK_CAP_INPUTS_ID", "1"});
+    if (pack->HasCap("passes.history")) packDefines.push_back({"PACK_CAP_PASSES_HISTORY", "1"});
+    if (pack->HasCap("passes.mips")) packDefines.push_back({"PACK_CAP_PASSES_MIPS", "1"});
     if (!p.back) {
         // DXC (FXC cannot #include a macro): shader model 6.0, so the VS is a DXC build of VSMain as well
         if (!vsDxc_) vsDxc_ = CompileShaderDxc(file, "VSMain", "vs_6_0");
@@ -712,6 +750,39 @@ const ScenePass::PackPipelines* ScenePass::PackPsos(Dx12Context& ctx, const std:
             }
         }
         if (!p.backRt) LOG_ERROR("shader pack '%s': ray-traced variant failed, using shadow maps", id.c_str());
+    }
+    if (hasId && !p.backId) {
+        if (!vsDxc_) vsDxc_ = CompileShaderDxc(file, "VSMain", "vs_6_0");
+        ShaderDefines packIdDefines = packDefines;
+        packIdDefines.push_back({"SCENE_HAS_ID", "1"});
+        std::string errors;
+        ComPtr<ID3DBlob> ps = vsDxc_ ? CompileShaderDxc(file, "PSPack", "ps_6_0", packIdDefines, &errors) : nullptr;
+        if (ps) {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC d = litDescId_;
+            d.VS = {vsDxc_->GetBufferPointer(), vsDxc_->GetBufferSize()};
+            d.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+            d.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+            if (SUCCEEDED(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&p.backId)))) {
+                d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                if (FAILED(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&p.noCullId)))) p.backId.Reset();
+            }
+        }
+    }
+    if (hasId && rt && vsRt_ && !p.backRtId) {
+        ShaderDefines rtIdDefines = packDefines;
+        rtIdDefines.push_back({"RT_SHADOWS", "1"});
+        rtIdDefines.push_back({"SCENE_HAS_ID", "1"});
+        ComPtr<ID3DBlob> ps = CompileShaderDxc(file, "PSPack", "ps_6_5", rtIdDefines);
+        if (ps) {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC d = litDescId_;
+            d.VS = {vsRt_->GetBufferPointer(), vsRt_->GetBufferSize()};
+            d.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+            d.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+            if (SUCCEEDED(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&p.backRtId)))) {
+                d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                if (FAILED(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&p.noCullRtId)))) p.backRtId.Reset();
+            }
+        }
     }
     return &p;
 }
@@ -1812,6 +1883,56 @@ bool ScenePass::DrawMmeEdges(PassContext& pc, GpuModel& model) {
     return drew;
 }
 
+// The 4-MRT (object / class ID) variants of the lit PSOs, built the first time an inputs.id effect is enabled.
+// A failure only disables the ID image (the frame keeps the 3-MRT PSOs); RT variants failing keep the raster ones.
+bool ScenePass::EnsureIdPipelines(Dx12Context& ctx) {
+    if (idTried_) return psoCullBackId_ != nullptr;
+    idTried_ = true;
+    ID3D12Device* device = ctx.Device();
+    const std::filesystem::path file = shaderDir_ / L"mmd.hlsl";
+    const ShaderDefines idDefines = {{"SCENE_HAS_ID", "1"}};
+    ComPtr<ID3DBlob> psId = ctx.Caps().shaderModel >= D3D_SHADER_MODEL_6_0
+                                ? CompileShaderDxc(file, "PSMain", "ps_6_0", idDefines)
+                                : CompileShader(file, "PSMain", "ps_5_1", idDefines);
+    if (!psId || !vs_) return false;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC dId = litDescId_;
+    dId.VS = {vs_->GetBufferPointer(), vs_->GetBufferSize()};
+    dId.PS = {psId->GetBufferPointer(), psId->GetBufferSize()};
+    dId.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    bool ok = CheckHr(device->CreateGraphicsPipelineState(&dId, IID_PPV_ARGS(&psoCullBackId_)), "ScenePass: PSO back id");
+    dId.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    ok = ok && CheckHr(device->CreateGraphicsPipelineState(&dId, IID_PPV_ARGS(&psoNoCullId_)), "ScenePass: PSO no cull id");
+    ok = ok && MakeBlendVariant(device, dId, false, psoNdBackId_, psoNdNoCullId_, "ScenePass: PSO no-depth-write id", true);
+    ok = ok && MakeBlendVariant(device, dId, true, psoAddBackId_, psoAddNoCullId_, "ScenePass: PSO additive id", true);
+    if (!ok) {
+        for (ComPtr<ID3D12PipelineState>* p : {std::addressof(psoCullBackId_), std::addressof(psoNoCullId_), std::addressof(psoAddBackId_), std::addressof(psoAddNoCullId_),
+                                               std::addressof(psoNdBackId_), std::addressof(psoNdNoCullId_)})
+            p->Reset();
+        return false;
+    }
+    if (vsRt_) {
+        const ShaderDefines rtIdDefines = {{"RT_SHADOWS", "1"}, {"SCENE_HAS_ID", "1"}};
+        ComPtr<ID3DBlob> psRtId = CompileShaderDxc(file, "PSMain", "ps_6_5", rtIdDefines);
+        bool okRt = psRtId != nullptr;
+        if (okRt) {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC d = litDescId_;
+            d.VS = {vsRt_->GetBufferPointer(), vsRt_->GetBufferSize()};
+            d.PS = {psRtId->GetBufferPointer(), psRtId->GetBufferSize()};
+            d.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+            okRt = CheckHr(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoCullBackRtId_)), "ScenePass: PSO back rt id");
+            d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            okRt = okRt && CheckHr(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoNoCullRtId_)), "ScenePass: PSO no cull rt id");
+            okRt = okRt && MakeBlendVariant(device, d, false, psoNdBackRtId_, psoNdNoCullRtId_, "ScenePass: PSO no-depth-write rt id", true);
+            okRt = okRt && MakeBlendVariant(device, d, true, psoAddBackRtId_, psoAddNoCullRtId_, "ScenePass: PSO additive rt id", true);
+        }
+        if (!okRt)
+            for (ComPtr<ID3D12PipelineState>* p : {std::addressof(psoCullBackRtId_), std::addressof(psoNoCullRtId_), std::addressof(psoAddBackRtId_),
+                                                   std::addressof(psoAddNoCullRtId_), std::addressof(psoNdBackRtId_), std::addressof(psoNdNoCullRtId_)})
+                p->Reset();
+    }
+    return true;
+}
+
 void ScenePass::OnResize(Dx12Context& ctx, RenderTargets& targets) {
     // The RR guides are created on the first RR frame (ScenePass::DrawGuides): a resize drops them.
     guideDiffuse_.Release(ctx);
@@ -1933,17 +2054,23 @@ void ScenePass::Execute(PassContext& pc) {
     Dx12Context& ctx = pc.ctx;
     RenderTargets& t = pc.targets;
 
+    const bool hasId = t.idTarget != nullptr && EnsureIdPipelines(ctx);
+    Texture* idTargetRes = hasId ? ((t.msaa > 1) ? &t.idMsaa : t.idTarget) : nullptr;
+
     t.colorMsaa.Transition(cmd, kRt);
     t.normalMsaa.Transition(cmd, kRt);
     t.velocityMsaa.Transition(cmd, kRt);
     t.depthMsaa.Transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] = {ctx.RtvHeap().Cpu(t.colorMsaa.rtv), ctx.RtvHeap().Cpu(t.normalMsaa.rtv),
-                                           ctx.RtvHeap().Cpu(t.velocityMsaa.rtv)};
+    if (hasId) idTargetRes->Transition(cmd, kRt);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {ctx.RtvHeap().Cpu(t.colorMsaa.rtv), ctx.RtvHeap().Cpu(t.normalMsaa.rtv),
+                                           ctx.RtvHeap().Cpu(t.velocityMsaa.rtv),
+                                           hasId ? ctx.RtvHeap().Cpu(idTargetRes->rtv) : D3D12_CPU_DESCRIPTOR_HANDLE{}};
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.DsvHeap().Cpu(t.depthMsaa.dsv);
     const float zero[4] = {0, 0, 0, 0};
-    for (auto& r : rtvs) cmd->ClearRenderTargetView(r, zero, 0, nullptr);
+    for (int i = 0; i < 3; ++i) cmd->ClearRenderTargetView(rtvs[i], zero, 0, nullptr);
+    if (hasId) cmd->ClearRenderTargetView(rtvs[3], zero, 0, nullptr);
     cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-    cmd->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
+    cmd->OMSetRenderTargets(hasId ? 4 : 3, rtvs, FALSE, &dsv);
 
     const bool rt = pc.path == RenderPath::RayTraced && pc.rt && psoCullBackRt_;
     const bool wire = pc.path == RenderPath::Raster && pc.settings.shading == ViewShading::Wireframe;
@@ -2011,8 +2138,10 @@ void ScenePass::Execute(PassContext& pc) {
             cmd->DrawInstanced(6, 1, 0, 0);
         }
 
-        for (GpuModel* model : pc.view.models) {
+        for (size_t mi = 0; mi < pc.view.models.size(); ++mi) {
+            GpuModel* model = pc.view.models[mi];
             if (!model) continue;
+            const uint32_t modelIdInfo = (((uint32_t)(mi + 1) & 0xFFu) << 8) | (model->Role() == ModelRole::Character ? 0x80u : 0u);
             BindModelBuffers(cmd, *model, pc.frame);
             cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
             cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
@@ -2020,8 +2149,9 @@ void ScenePass::Execute(PassContext& pc) {
             // shader pack: lit camera view only (unlit / wireframe / the flat ortho views keep the default shading)
             const PackPipelines* pack = nullptr;
             if (!model->ShaderPackId().empty() && !wire && !vd.ortho && pc.settings.shading == ViewShading::Lit)
-                pack = PackPsos(ctx, model->ShaderPackId(), model->ShaderTextureFolder(), rt);
+                pack = PackPsos(ctx, model->ShaderPackId(), model->ShaderTextureFolder(), rt, hasId);
             const bool packRt = pack && rt && pack->backRt;
+            const bool packRtId = pack && rt && pack->backRtId;
             if (pack) {   // the model's texture set (pack id + resolved folder), material AND edge draws
                 const auto it = pack->sets.find(PackSetKey(model->ShaderTextureFolder()));
                 if (it != pack->sets.end() && it->second.srv != DescriptorHeap::kInvalid)   // pack_api.hlsli gPackTex
@@ -2063,17 +2193,17 @@ void ScenePass::Execute(PassContext& pc) {
                 if (wire)
                     want = m.doubleSided ? psoWireNoCull_.Get() : psoWireBack_.Get();
                 else if (m.additive)
-                    want = m.doubleSided ? (rt && psoAddNoCullRt_ ? psoAddNoCullRt_.Get() : psoAddNoCull_.Get())
-                                         : (rt && psoAddBackRt_ ? psoAddBackRt_.Get() : psoAddBack_.Get());
+                    want = m.doubleSided ? (hasId && psoAddNoCullId_ ? (rt && psoAddNoCullRtId_ ? psoAddNoCullRtId_.Get() : psoAddNoCullId_.Get()) : (rt && psoAddNoCullRt_ ? psoAddNoCullRt_.Get() : psoAddNoCull_.Get()))
+                                         : (hasId && psoAddBackId_ ? (rt && psoAddBackRtId_ ? psoAddBackRtId_.Get() : psoAddBackId_.Get()) : (rt && psoAddBackRt_ ? psoAddBackRt_.Get() : psoAddBack_.Get()));
                 else if (m.noDepthWrite)
-                    want = m.doubleSided ? (rt && psoNdNoCullRt_ ? psoNdNoCullRt_.Get() : psoNdNoCull_.Get())
-                                         : (rt && psoNdBackRt_ ? psoNdBackRt_.Get() : psoNdBack_.Get());
+                    want = m.doubleSided ? (hasId && psoNdNoCullId_ ? (rt && psoNdNoCullRtId_ ? psoNdNoCullRtId_.Get() : psoNdNoCullId_.Get()) : (rt && psoNdNoCullRt_ ? psoNdNoCullRt_.Get() : psoNdNoCull_.Get()))
+                                         : (hasId && psoNdBackId_ ? (rt && psoNdBackRtId_ ? psoNdBackRtId_.Get() : psoNdBackId_.Get()) : (rt && psoNdBackRt_ ? psoNdBackRt_.Get() : psoNdBack_.Get()));
                 else if (usePack)
-                    want = m.doubleSided ? (packRt ? pack->noCullRt.Get() : pack->noCull.Get())
-                                         : (packRt ? pack->backRt.Get() : pack->back.Get());
+                    want = m.doubleSided ? (hasId && (packRtId ? pack->noCullRtId : pack->noCullId) ? (packRtId ? pack->noCullRtId.Get() : pack->noCullId.Get()) : (packRt ? pack->noCullRt.Get() : pack->noCull.Get()))
+                                         : (hasId && (packRtId ? pack->backRtId : pack->backId) ? (packRtId ? pack->backRtId.Get() : pack->backId.Get()) : (packRt ? pack->backRt.Get() : pack->back.Get()));
                 else
-                    want = m.doubleSided ? (rt ? psoNoCullRt_.Get() : psoNoCull_.Get())
-                                         : (rt ? psoCullBackRt_.Get() : psoCullBack_.Get());
+                    want = m.doubleSided ? (hasId && psoNoCullId_ ? (rt && psoNoCullRtId_ ? psoNoCullRtId_.Get() : psoNoCullId_.Get()) : (rt ? psoNoCullRt_.Get() : psoNoCull_.Get()))
+                                         : (hasId && psoCullBackId_ ? (rt && psoCullBackRtId_ ? psoCullBackRtId_.Get() : psoCullBackId_.Get()) : (rt ? psoCullBackRt_.Get() : psoCullBack_.Get()));
                 if (want != curPso) {
                     cmd->SetPipelineState(want);
                     curPso = want;
@@ -2087,11 +2217,11 @@ void ScenePass::Execute(PassContext& pc) {
                 const bool pbrRecord = model->HasPbrRecords() && !usePack && model->HasPbr() &&
                                        model->PbrIndex(matIndex) != DescriptorHeap::kInvalid;
                 if (pbrRecord) {
-                    const uint32_t c[4] = {model->PbrSrv(), model->PbrIndex(matIndex), pbrDebugChannel, 1u};
-                    cmd->SetGraphicsRoot32BitConstants(14, 4, c, 0);
+                    const uint32_t c[5] = {model->PbrSrv(), model->PbrIndex(matIndex), pbrDebugChannel, 1u, modelIdInfo};
+                    cmd->SetGraphicsRoot32BitConstants(14, 5, c, 0);
                 } else {
-                    const uint32_t c[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, pbrDebugChannel, 0u};
-                    cmd->SetGraphicsRoot32BitConstants(14, 4, c, 0);
+                    const uint32_t c[5] = {0xFFFFFFFFu, 0xFFFFFFFFu, pbrDebugChannel, 0u, modelIdInfo};
+                    cmd->SetGraphicsRoot32BitConstants(14, 5, c, 0);
                 }
                 cmd->DrawIndexedInstanced(m.indexCount, 1, m.indexStart, 0, 0);
                 pc.stats.drawCalls++;
@@ -2132,35 +2262,60 @@ void ScenePass::Execute(PassContext& pc) {
             }
         }
     }
+    if (hasId) {
+        idTargetRes->Transition(cmd, kSrv);
+    }
 }
 
 // ---- ResolvePass ---------------------------------------------------------------------------
 
 bool ResolvePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) {
-    return pipe_.Create(ctx, shaderDir / L"resolve.hlsl", "PSResolve",
-                        {RenderTargets::kColorFormat, RenderTargets::kNormalFormat, RenderTargets::kVelocityFormat,
-                         DXGI_FORMAT_R32_FLOAT},
-                        {{"MSAA_SAMPLES", std::to_string(msaa > 1 ? msaa : 1)}});
+    bool ok = pipe_.Create(ctx, shaderDir / L"resolve.hlsl", "PSResolve",
+                           {RenderTargets::kColorFormat, RenderTargets::kNormalFormat, RenderTargets::kVelocityFormat,
+                            DXGI_FORMAT_R32_FLOAT},
+                           {{"MSAA_SAMPLES", std::to_string(msaa > 1 ? msaa : 1)}});
+    // The ID variant (inputs.id effects with MSAA) is compiled on first use in Execute.
+    shaderDir_ = shaderDir;
+    msaa_ = msaa;
+    idTried_ = false;
+    pipeId_ = FullscreenPipeline{};
+    return ok;
 }
 
 void ResolvePass::Execute(PassContext& pc) {
     if (pc.path == RenderPath::PathTraced) return;
     RenderTargets& t = pc.targets;
     ID3D12GraphicsCommandList* cmd = pc.cmd;
+    if (t.idTarget && t.msaa > 1 && !idTried_) {
+        idTried_ = true;
+        pipeId_.Create(pc.ctx, shaderDir_ / L"resolve.hlsl", "PSResolve",
+                       {RenderTargets::kColorFormat, RenderTargets::kNormalFormat, RenderTargets::kVelocityFormat,
+                        DXGI_FORMAT_R32_FLOAT, RenderTargets::kIdFormat},
+                       {{"MSAA_SAMPLES", std::to_string(msaa_)}, {"RESOLVE_HAS_ID", "1"}});
+    }
+    const bool hasId = (t.idTarget != nullptr && t.msaa > 1 && pipeId_);
     t.colorMsaa.Transition(cmd, kSrv);
     t.normalMsaa.Transition(cmd, kSrv);
     t.velocityMsaa.Transition(cmd, kSrv);
     t.depthMsaa.Transition(cmd, kSrv);
+    if (hasId) t.idMsaa.Transition(cmd, kSrv);
     t.color.Transition(cmd, kRt);
     t.normal.Transition(cmd, kRt);
     t.velocity.Transition(cmd, kRt);
     t.depth.Transition(cmd, kRt);
-    auto table = pc.transient.SrvTable(pc.ctx, {&t.colorMsaa, &t.normalMsaa, &t.velocityMsaa, &t.depthMsaa});
-    pipe_.Draw(pc, {&t.color, &t.normal, &t.velocity, &t.depth}, table);
+    if (hasId) t.idTarget->Transition(cmd, kRt);
+    if (hasId) {
+        auto table = pc.transient.SrvTable(pc.ctx, {&t.colorMsaa, &t.normalMsaa, &t.velocityMsaa, &t.depthMsaa, &t.idMsaa});
+        pipeId_.Draw(pc, {&t.color, &t.normal, &t.velocity, &t.depth, t.idTarget}, table);
+    } else {
+        auto table = pc.transient.SrvTable(pc.ctx, {&t.colorMsaa, &t.normalMsaa, &t.velocityMsaa, &t.depthMsaa});
+        pipe_.Draw(pc, {&t.color, &t.normal, &t.velocity, &t.depth}, table);
+    }
     t.color.Transition(cmd, kSrv);
     t.normal.Transition(cmd, kSrv);
     t.velocity.Transition(cmd, kSrv);
     t.depth.Transition(cmd, kSrv);
+    if (hasId) t.idTarget->Transition(cmd, kSrv);
 }
 
 // ---- SsaoPass -------------------------------------------------------------------------------
@@ -2401,18 +2556,22 @@ void PathTracePass::Execute(PassContext& pc) {
         rrSpecular_.Transition(cmd, kUav);
         rrNormal_.Transition(cmd, kUav);
     }
+    const bool hasId = (t.idTarget != nullptr);
+    if (hasId) t.idTarget->Transition(cmd, kUav);
     const float c0[12] = {(float)std::clamp(pc.settings.ptSamples, 1u, 4u),
                           (float)std::clamp(pc.settings.ptBounces, 1u, 6u),
                           (pc.view.studioFloor && !pc.settings.exportAlpha) ? 1.0f : 0.0f,   // transparent export: no default floor
                           pc.settings.transparentBackground ? 1.0f : 0.0f,
                           (float)(pc.frame % 65536), 0, 0, 0,
-                          rr ? 1.0f : 0.0f, 0, 0, 0};
+                          rr ? 1.0f : 0.0f, 0, hasId ? 1.0f : 0.0f, 0};
     // The guide UAVs are unbound (null) when RR is off; the shader never writes them then.
     pipe->Dispatch(pc, {},
                    pc.transient.UavTable(pc.ctx, {&light_, &albedo_, &t.normal, &t.velocity, &t.depth,
                                                   rr ? &rrDiffuse_ : nullptr, rr ? &rrSpecular_ : nullptr,
-                                                  rr ? &rrNormal_ : nullptr}),
+                                                  rr ? &rrNormal_ : nullptr,
+                                                  hasId ? t.idTarget : nullptr}),
                    c0, 12, gx, gy);
+    if (hasId) t.idTarget->Transition(cmd, kSrv);
 
     if (rr) {
         // DLSS-RR replaces the temporal / a-trous denoiser: hand it the noisy radiance (light * albedo)

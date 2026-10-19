@@ -32,19 +32,22 @@ public:
     // `passes` = the pack's intermediate passes (API v5): one extra PSO each (PSPackPass with PACK_PASS_ENTRY, RGBA16F)
     // and the t0..t7 space8 table that binds their targets. Packs without passes / state keep the v3 layout exactly.
     bool Create(Dx12Context& ctx, const std::filesystem::path& file, bool preBloom, const ShaderDefines& defines,
-                std::string* errors, uint32_t stateFloats = 0, const std::vector<ShaderPack::Pass>* passes = nullptr) {
+                std::string* errors, uint32_t stateFloats = 0, const std::vector<ShaderPack::Pass>* passes = nullptr,
+                bool hasHistory = false) {
         ID3D12Device* device = ctx.Device();
         CD3DX12_DESCRIPTOR_RANGE inputs;
-        inputs.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 6);   // t0..t3, space6 (effect_api.hlsli)
+        inputs.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 6);   // t0..t4, space6 (effect_api.hlsli)
         CD3DX12_DESCRIPTOR_RANGE packTex;
         packTex.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 16, 0, 5);
         CD3DX12_DESCRIPTOR_RANGE stateRange;
         stateRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 7); // t0, space7 (effect_api.hlsli)
         CD3DX12_DESCRIPTOR_RANGE passRange;
         passRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kPackMaxPasses, 0, 8);   // t0..t7, space8 (API v5)
+        CD3DX12_DESCRIPTOR_RANGE historyRange;
+        historyRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kPackMaxPasses, 0, 9); // t0..t7, space9 (API v6)
         const size_t passCount = passes ? passes->size() : 0;
 
-        CD3DX12_ROOT_PARAMETER params[7];
+        CD3DX12_ROOT_PARAMETER params[8];
         params[0].InitAsConstantBufferView(0);                 // SceneConstants (gTime, gFrameIndex, ...)
         params[1].InitAsDescriptorTable(1, &inputs, D3D12_SHADER_VISIBILITY_PIXEL);
         params[2].InitAsConstants(16, 1);                      // PassCB: gP0 = (outW, outH, dt, reset), gP1 focus, gP2 target
@@ -58,6 +61,10 @@ public:
         if (passCount > 0) {
             passParam_ = paramCount;
             params[paramCount++].InitAsDescriptorTable(1, &passRange, D3D12_SHADER_VISIBILITY_PIXEL);
+        }
+        if (hasHistory) {
+            historyParam_ = paramCount;
+            params[paramCount++].InitAsDescriptorTable(1, &historyRange, D3D12_SHADER_VISIBILITY_PIXEL);
         }
 
         CD3DX12_STATIC_SAMPLER_DESC samplers[3];
@@ -137,10 +144,9 @@ public:
         return true;
     }
 
-    // The tables one draw binds: the frame inputs, the pack textures, the state slot and the pass targets (each
-    // optional but the inputs).
+    // The tables one draw binds: the frame inputs, the pack textures, the state slot, the pass targets and history.
     struct Tables {
-        D3D12_GPU_DESCRIPTOR_HANDLE inputs{}, packTex{}, state{}, passes{};
+        D3D12_GPU_DESCRIPTOR_HANDLE inputs{}, packTex{}, state{}, passes{}, history{};
     };
 
     void Draw(PassContext& pc, Texture& target, const Tables& tables, const float outConst[16], const float* params) const {
@@ -182,6 +188,7 @@ private:
         if (tables.packTex.ptr) cmd->SetGraphicsRootDescriptorTable(4, tables.packTex);
         if (stateParam_ && tables.state.ptr) cmd->SetGraphicsRootDescriptorTable(stateParam_, tables.state);
         if (passParam_ && tables.passes.ptr) cmd->SetGraphicsRootDescriptorTable(passParam_, tables.passes);
+        if (historyParam_ && tables.history.ptr) cmd->SetGraphicsRootDescriptorTable(historyParam_, tables.history);
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cmd->DrawInstanced(3, 1, 0, 0);
     }
@@ -190,7 +197,7 @@ private:
     ComPtr<ID3D12PipelineState> pso_;
     ComPtr<ID3D12PipelineState> psoState_;
     std::vector<ComPtr<ID3D12PipelineState>> passPsos_;
-    uint32_t stateParam_ = 0, passParam_ = 0;   // root parameter indices (0 = not in this layout)
+    uint32_t stateParam_ = 0, passParam_ = 0, historyParam_ = 0;   // root parameter indices (0 = not in this layout)
     bool hasState_ = false;
 };
 
@@ -199,6 +206,30 @@ PackEffectPass::~PackEffectPass() = default;
 
 bool PackEffectPass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t) {
     shaderDir_ = shaderDir;
+    // Build mip downsample pipeline
+    CD3DX12_DESCRIPTOR_RANGE srvRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    CD3DX12_DESCRIPTOR_RANGE uavRange(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
+    CD3DX12_ROOT_PARAMETER params[3];
+    params[0].InitAsConstants(2, 0); // b0: uint2 gDstSize
+    params[1].InitAsDescriptorTable(1, &srvRange); // t0
+    params[2].InitAsDescriptorTable(1, &uavRange); // u0
+    CD3DX12_STATIC_SAMPLER_DESC sampler;
+    sampler.Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                 D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    CD3DX12_ROOT_SIGNATURE_DESC rs;
+    rs.Init(3, params, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+    ComPtr<ID3DBlob> blob, err;
+    if (SUCCEEDED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
+        ctx.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                          IID_PPV_ARGS(&downsampleRootSig_));
+    }
+    ComPtr<ID3DBlob> cs = CompileShaderDxc(shaderDir / L"pass_downsample.hlsl", "CSMain", "cs_6_0");
+    if (downsampleRootSig_ && cs) {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc{};
+        psoDesc.pRootSignature = downsampleRootSig_.Get();
+        psoDesc.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+        ctx.Device()->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&downsamplePso_));
+    }
     return true;   // the per-pack PSOs are compiled lazily (Pipelines), like the surface packs
 }
 
@@ -214,6 +245,8 @@ void PackEffectPass::ReleaseTargets(Dx12Context& ctx) {
     post_[1].Release(ctx);
     ReleaseStateSlots(ctx);
     ReleasePassPool(ctx);
+    downsamplePso_.Reset();
+    downsampleRootSig_.Reset();
 }
 
 void PackEffectPass::ReleaseStateSlots(Dx12Context& ctx) {
@@ -222,6 +255,12 @@ void PackEffectPass::ReleaseStateSlots(Dx12Context& ctx) {
         slot.tex[1].Release(ctx);
     }
     stateSlots_.clear();
+    for (auto& [key, hist] : historySlots_) {
+        for (size_t i = 0; i < kPackMaxPasses; ++i) {
+            hist.tex[i].Release(ctx);
+        }
+    }
+    historySlots_.clear();
 }
 
 // Ping-pong targets at output resolution: RGBA16F (the pre-bloom share) and RGBA8 (the post share). Created
@@ -381,9 +420,14 @@ const PackEffectPass::EffectPipelines* PackEffectPass::Pipelines(Dx12Context& ct
     if (!pack->passes.empty()) defines.push_back({"PACK_PASS_COUNT", std::to_string(pack->passes.size())});
     if (pack->HasCap("inputs.scene")) defines.push_back({"PACK_CAP_INPUTS_SCENE", "1"});
     if (pack->HasCap("inputs.audio")) defines.push_back({"PACK_CAP_INPUTS_AUDIO", "1"});
+    if (pack->HasCap("surface.output")) defines.push_back({"PACK_CAP_SURFACE_OUTPUT", "1"});
+    if (pack->HasCap("inputs.id")) defines.push_back({"PACK_CAP_INPUTS_ID", "1"});
+    if (pack->HasCap("passes.history")) defines.push_back({"PACK_CAP_PASSES_HISTORY", "1"});
+    if (pack->HasCap("passes.mips")) defines.push_back({"PACK_CAP_PASSES_MIPS", "1"});
     std::string errors;
     auto pipe = std::make_unique<EffectPipeline>();
-    if (!pipe->Create(ctx, file, preBloom, defines, &errors, pack->stateFloats, &pack->passes)) {
+    const bool hasHistory = pack->HasCap("passes.history");
+    if (!pipe->Create(ctx, file, preBloom, defines, &errors, pack->stateFloats, &pack->passes, hasHistory)) {
         LOG_ERROR("shader effect '%s': compile failed, the effect is skipped%s%s", id.c_str(),
                   errors.empty() ? "" : ":\n", errors.c_str());
         reg.ReportError(id, errors.empty() ? "effect compile" : errors);
@@ -409,13 +453,14 @@ void PackEffectPass::ReleasePackPsos(Dx12Context& ctx) {
 
 // An intermediate-pass target (API v5) of w x h: the n-th one of that size this entry asked for. Pool textures are
 // shared by all entries (they run one after the other) and released when no entry used them for a while.
-Texture* PackEffectPass::PassTarget(Dx12Context& ctx, uint32_t w, uint32_t h, uint32_t n) {
-    auto& list = passPool_[{w, h}];
+Texture* PackEffectPass::PassTarget(Dx12Context& ctx, uint32_t w, uint32_t h, uint32_t n, bool mips) {
+    auto& list = passPool_[{w, h, mips}];
     while (list.size() <= n) {
         list.emplace_back();
         PoolTexture& pt = list.back();
-        if (!pt.tex.Create(ctx, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, kSrv,
-                           L"packeffect.pass")) {
+        const auto flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | (mips ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE);
+        if (!pt.tex.Create(ctx, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, flags, kSrv,
+                           L"packeffect.pass", 1, 1, nullptr, mips ? 0 : 1)) {
             LOG_ERROR("PackEffectPass: pass target creation failed (%ux%u)", w, h);
             list.pop_back();
             return nullptr;
@@ -438,9 +483,64 @@ void PackEffectPass::TrimPassPool(Dx12Context& ctx) {
 }
 
 void PackEffectPass::ReleasePassPool(Dx12Context& ctx) {
-    for (auto& [size, list] : passPool_)
+    for (auto& [key, list] : passPool_)
         for (PoolTexture& pt : list) pt.tex.Release(ctx);
     passPool_.clear();
+}
+
+void PackEffectPass::GenerateMips(PassContext& pc, Texture& tex) {
+    if (!downsamplePso_ || !downsampleRootSig_ || tex.mipLevels <= 1) return;
+    ID3D12Device* device = pc.ctx.Device();
+
+    tex.Transition(pc.cmd, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    for (uint32_t level = 1; level < tex.mipLevels; ++level) {
+        uint32_t dstW = std::max(1u, tex.width >> level);
+        uint32_t dstH = std::max(1u, tex.height >> level);
+
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+            tex.res.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            level);
+        pc.cmd->ResourceBarrier(1, &barrier);
+
+        uint32_t desc = pc.transient.Alloc(2);
+        if (desc == DescriptorHeap::kInvalid) break;
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture2D.MostDetailedMip = level - 1;
+        srvDesc.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(tex.res.Get(), &srvDesc, pc.ctx.SrvHeap().Cpu(desc));
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        uavDesc.Texture2D.MipSlice = level;
+        device->CreateUnorderedAccessView(tex.res.Get(), nullptr, &uavDesc, pc.ctx.SrvHeap().Cpu(desc + 1));
+
+        pc.cmd->SetComputeRootSignature(downsampleRootSig_.Get());
+        pc.cmd->SetPipelineState(downsamplePso_.Get());
+        const uint32_t sizeConst[2] = {dstW, dstH};
+        pc.cmd->SetComputeRoot32BitConstants(0, 2, sizeConst, 0);
+        pc.cmd->SetComputeRootDescriptorTable(1, pc.ctx.SrvHeap().Gpu(desc));
+        pc.cmd->SetComputeRootDescriptorTable(2, pc.ctx.SrvHeap().Gpu(desc + 1));
+
+        pc.cmd->Dispatch((dstW + 7) / 8, (dstH + 7) / 8, 1);
+
+        barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+            tex.res.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            level);
+        pc.cmd->ResourceBarrier(1, &barrier);
+    }
+
+    tex.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    tex.Transition(pc.cmd, kSrv);
 }
 
 // One stack entry over `src` into `dst`: the state update (v4), the intermediate passes (v5), then PackEffect.
@@ -448,7 +548,7 @@ void PackEffectPass::RunEntry(PassContext& pc, const EntryRun& r) {
     const ShaderPack& pack = *r.pack;
     const EffectPipelines& p = *r.pipes;
     EffectPipeline::Tables tables;
-    tables.inputs = pc.transient.SrvTable(pc.ctx, {r.src, r.depth, r.velocity, r.normal});
+    tables.inputs = pc.transient.SrvTable(pc.ctx, {r.src, r.depth, r.velocity, r.normal, r.id});
     tables.packTex = p.texSrv != DescriptorHeap::kInvalid ? pc.ctx.SrvHeap().Gpu(p.texSrv) : D3D12_GPU_DESCRIPTOR_HANDLE{};
     const PackParamValues values = pack.Resolve(r.entry->params);
     // gP0 = (outW, outH, dt, reset), gP1 = focus (effect_api.hlsli), gP2 = (target w, h, pass index (-1 = none), 0)
@@ -497,16 +597,49 @@ void PackEffectPass::RunEntry(PassContext& pc, const EntryRun& r) {
         tables.state = slotSrv[slot.cur];
     }
 
+    const bool hasHistory = pack.HasCap("passes.history");
+    HistorySlot* histSlot = nullptr;
+    Texture* histTex[kPackMaxPasses] = {};
+    if (hasHistory) {
+        StateKey key{r.stackIndex, r.entry->pack};
+        auto [it, inserted] = historySlots_.try_emplace(key);
+        histSlot = &it->second;
+        const bool resetHistAll = inserted || r.resetState || (histSlot->lastPassExecution + 1 != passExecutionCount_);
+        const size_t passCount = std::min(pack.passes.size(), (size_t)kPackMaxPasses);
+        for (size_t k = 0; k < passCount; ++k) {
+            if (!pack.passes[k].history) continue;
+            const uint32_t w = std::max(1u, (uint32_t)std::lround(r.outW * pack.passes[k].scale));
+            const uint32_t h = std::max(1u, (uint32_t)std::lround(r.outH * pack.passes[k].scale));
+            if (!histSlot->tex[k] || histSlot->tex[k].width != w || histSlot->tex[k].height != h) {
+                histSlot->tex[k].Create(pc.ctx, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, kSrv, L"packeffect.passHistory");
+                histSlot->valid[k] = false;
+            }
+            const bool resetPass = resetHistAll || !histSlot->valid[k];
+            if (resetPass && histSlot->tex[k]) {
+                histSlot->tex[k].Transition(pc.cmd, kRt);
+                const float zero[4] = {0, 0, 0, 0};
+                pc.cmd->ClearRenderTargetView(pc.ctx.RtvHeap().Cpu(histSlot->tex[k].rtv), zero, 0, nullptr);
+                histSlot->tex[k].Transition(pc.cmd, kSrv);
+                histSlot->valid[k] = true;
+            }
+            histTex[k] = &histSlot->tex[k];
+        }
+        tables.history = pc.transient.SrvTable(pc.ctx, {histTex[0], histTex[1], histTex[2], histTex[3],
+                                                        histTex[4], histTex[5], histTex[6], histTex[7]});
+    }
+
     // intermediate passes: each into its own pooled RGBA16F target; the table binds all of them (a pass never reads
     // its own target or a later one, and root signature 1.0 descriptors are only checked when they are read)
     const size_t passCount = std::min(pack.passes.size(), p.pipe->PassCount());
     if (passCount > 0) {
         Texture* passTex[kPackMaxPasses] = {};
-        std::map<std::pair<uint32_t, uint32_t>, uint32_t> perSize;
+        std::map<std::tuple<uint32_t, uint32_t, bool>, uint32_t> perSize;
         for (size_t k = 0; k < passCount; ++k) {
             const uint32_t w = std::max(1u, (uint32_t)std::lround(r.outW * pack.passes[k].scale));
             const uint32_t h = std::max(1u, (uint32_t)std::lround(r.outH * pack.passes[k].scale));
-            passTex[k] = PassTarget(pc.ctx, w, h, perSize[{w, h}]++);
+            const bool needMips = pack.passes[k].mips;
+            passTex[k] = PassTarget(pc.ctx, w, h, perSize[{w, h, needMips}]++, needMips);
             if (!passTex[k]) return;
         }
         tables.passes = pc.transient.SrvTable(pc.ctx, {passTex[0], passTex[1], passTex[2], passTex[3], passTex[4],
@@ -520,7 +653,35 @@ void PackEffectPass::RunEntry(PassContext& pc, const EntryRun& r) {
             passTex[k]->Transition(pc.cmd, kRt);
             p.pipe->DrawPass(pc, k, *passTex[k], tables, pcst, values.data());
             passTex[k]->Transition(pc.cmd, kSrv);
+
+            // pass.history: copy current pass result into history slot
+            if (hasHistory && histSlot && pack.passes[k].history && histSlot->tex[k]) {
+                passTex[k]->Transition(pc.cmd, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                histSlot->tex[k].Transition(pc.cmd, D3D12_RESOURCE_STATE_COPY_DEST);
+                if (passTex[k]->mipLevels == 1) {
+                    pc.cmd->CopyResource(histSlot->tex[k].res.Get(), passTex[k]->res.Get());
+                } else {
+                    D3D12_TEXTURE_COPY_LOCATION dstLoc{}, srcLoc{};
+                    dstLoc.pResource = histSlot->tex[k].res.Get();
+                    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    dstLoc.SubresourceIndex = 0;
+                    srcLoc.pResource = passTex[k]->res.Get();
+                    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    srcLoc.SubresourceIndex = 0;
+                    pc.cmd->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+                }
+                histSlot->tex[k].Transition(pc.cmd, kSrv);
+                passTex[k]->Transition(pc.cmd, kSrv);
+            }
+
+            // pass.mips: generate mip chain
+            if (pack.passes[k].mips && passTex[k]->mipLevels > 1) {
+                GenerateMips(pc, *passTex[k]);
+            }
         }
+    }
+    if (hasHistory && histSlot) {
+        histSlot->lastPassExecution = passExecutionCount_;
     }
 
     r.dst->Transition(pc.cmd, kRt);
@@ -583,11 +744,13 @@ void PackEffectPass::RunStack(PassContext& pc, bool preBloom) {
     t.depth.Transition(pc.cmd, kSrv);
     t.velocity.Transition(pc.cmd, kSrv);
     t.normal.Transition(pc.cmd, kSrv);
+    if (t.idTarget) t.idTarget->Transition(pc.cmd, kSrv);
 
     EntryRun run;
     run.depth = &t.depth;
     run.velocity = &t.velocity;
     run.normal = &t.normal;
+    run.id = t.idTarget;
     run.outW = t.outWidth;
     run.outH = t.outHeight;
     run.dt = dt;
@@ -640,6 +803,16 @@ void PackEffectPass::DropStaleStateSlots(Dx12Context& ctx, const std::vector<Eff
             ++it;
         }
     }
+    for (auto it = historySlots_.begin(); it != historySlots_.end();) {
+        if (activeKeys.find(it->first) == activeKeys.end()) {
+            for (size_t i = 0; i < kPackMaxPasses; ++i) {
+                it->second.tex[i].Release(ctx);
+            }
+            it = historySlots_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // Offline GI: does this share have an enabled entry whose pipeline compiles (the PSO is built here, once, as in RunStack)?
@@ -660,7 +833,8 @@ bool PackEffectPass::Ready(Dx12Context& ctx, const std::vector<EffectStackEntry>
 // the offline image as the frame; the effect inputs are the image's own G-buffer copies. The offline renderer keeps the
 // frame in its own targets, so no RenderTargets are involved.
 bool PackEffectPass::RunOffline(PassContext& pc, const std::vector<EffectStackEntry>& stack, Texture& io, Texture& scratch,
-                                Texture& depth, Texture& velocity, Texture& normal, const OfflineJobDesc* job) {
+                                Texture& depth, Texture& velocity, Texture& normal, const OfflineJobDesc* job,
+                                Texture* id) {
     struct StackItem {
         size_t index;
         const EffectStackEntry* entry;
@@ -686,11 +860,13 @@ bool PackEffectPass::RunOffline(PassContext& pc, const std::vector<EffectStackEn
     depth.Transition(pc.cmd, kSrv);
     velocity.Transition(pc.cmd, kSrv);
     normal.Transition(pc.cmd, kSrv);
+    if (id) id->Transition(pc.cmd, kSrv);
 
     EntryRun run;
     run.depth = &depth;
     run.velocity = &velocity;
     run.normal = &normal;
+    run.id = id;
     run.outW = io.width;
     run.outH = io.height;
     run.dt = dt;

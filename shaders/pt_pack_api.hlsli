@@ -54,6 +54,11 @@ struct PtPackOut {
     float3 specular;      // additive linear radiance, already includes any rim / matcap the author wants
     float2 terminator;    // N.L edges (lo, hi) of the shadow terminator smoothstep; hi <= lo = engine default (-0.12, 0.22)
     bool flatFace;        // bool: use the engine's existing flat-face handling = no GI gradient on this surface
+#if defined(PACK_CAP_SURFACE_OUTPUT) && PACK_CAP_SURFACE_OUTPUT
+    float3 normal;
+    float3 emission;
+    uint tag;
+#endif
 };
 
 // Optional second return, opted in with PT_PACK_HAS_LIGHTING + PackEvaluateLighting. It separates the

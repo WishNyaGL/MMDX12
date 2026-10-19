@@ -22,7 +22,7 @@ struct Texture {
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;     // resource format (may be typeless)
     DXGI_FORMAT srvFormat = DXGI_FORMAT_UNKNOWN;  // view format for SRVs
-    uint32_t width = 0, height = 0, samples = 1, arraySize = 1;
+    uint32_t width = 0, height = 0, samples = 1, arraySize = 1, mipLevels = 1;
     uint32_t rtv = DescriptorHeap::kInvalid;      // ctx.RtvHeap(), arraySize entries for arrays
     uint32_t dsv = DescriptorHeap::kInvalid;      // ctx.DsvHeap(), arraySize entries for arrays
 
@@ -32,7 +32,7 @@ struct Texture {
     // R32_TYPELESS; DSV uses D32_FLOAT and SRVs R32_FLOAT).
     bool Create(Dx12Context& ctx, uint32_t w, uint32_t h, DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS flags,
                 D3D12_RESOURCE_STATES initial, const wchar_t* name, uint32_t samples = 1,
-                uint32_t arraySize = 1, const float* clearColor = nullptr);
+                uint32_t arraySize = 1, const float* clearColor = nullptr, uint16_t mips = 1);
     void Release(Dx12Context& ctx);  // frees views; the resource is released via DeferRelease
     // Records a transition barrier if the state differs.
     void Transition(ID3D12GraphicsCommandList* cmd, D3D12_RESOURCE_STATES to);
@@ -72,11 +72,13 @@ struct RenderTargets {
     static constexpr DXGI_FORMAT kVelocityFormat = DXGI_FORMAT_R16G16_FLOAT;      // uv(current) - uv(previous)
     static constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_R32_TYPELESS;
     static constexpr DXGI_FORMAT kLdrFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    static constexpr DXGI_FORMAT kIdFormat = DXGI_FORMAT_R16_UINT;
     // MSAA scene targets (written by ScenePass)
-    Texture colorMsaa, normalMsaa, velocityMsaa, depthMsaa;
+    Texture colorMsaa, normalMsaa, velocityMsaa, depthMsaa, idMsaa;
     // Resolved (1 sample) copies (written by ResolvePass, or as UAVs by PathTracePass).
     // color/normal/velocity/depth/lit also allow unordered access.
     Texture color, normal, velocity, depth;   // depth: R32_FLOAT, raw device depth (closest sample)
+    Texture id;       // non-MSAA R16_UINT ID image at render resolution (written when idTarget != nullptr)
     Texture lit;      // CompositePass: color * AO + SSR (+ fog)
     Texture ldr;      // PostPass output (output resolution), sRGB-encoded 8-bit (what PresentPass shows)
     // Shadow cascades (owned here so the scene pass can bind them)
@@ -86,7 +88,8 @@ struct RenderTargets {
     // Outputs of optional passes for this frame (null when the pass is disabled)
     Texture* ao = nullptr;        // R8 (half res), SsaoPass after blur
     Texture* ssr = nullptr;       // RGBA16F (half res), SsrPass
-    Texture* hdrFinal = nullptr;  // input of PostPass: &lit, the TAA output, or the upscaler output (output res)
+    Texture* hdrFinal = nullptr;  // input of PostPass: &lit, the TAA output, or the upscaler output (output resolution)
+    Texture* idTarget = nullptr;  // non-MSAA R16_UINT ID image at render resolution; null when no enabled effect requires inputs.id
     Texture* bloom = nullptr;     // half output res, BloomPass: rgb bloom, a = luminance x linear depth
     float bloomScale = 1.0f;      // BloomPass: normalisation of `bloom` (1 / sum of the mip level weights)
     Texture* uiBackdrop = nullptr;  // RGBA8, blurred final image for frosted UI panels

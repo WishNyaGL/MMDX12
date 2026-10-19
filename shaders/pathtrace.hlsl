@@ -23,6 +23,7 @@ RWTexture2D<float> gDepthOut : register(u4);
 RWTexture2D<float4> gDiffuseAlbedoOut : register(u5);
 RWTexture2D<float4> gSpecularAlbedoOut : register(u6);
 RWTexture2D<float4> gGuideNormalOut : register(u7);   // rgb = world normal, a = roughness (packed roughness mode)
+RWTexture2D<uint> gIdOut : register(u8);
 
 // Average specular reflectance for the RR guide (DLSS-RR guide appendix, EnvBRDFApprox2).
 float3 RrSpecularAlbedo(float3 specColor, float alpha, float NoV) {
@@ -164,6 +165,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
     float3 radiance = 0;
     float3 primAlbedo = 0, primNormal = 0, primPos = 0, primPrev = 0, primRd = 0;
     float primRefl = 0, primRough = 0.5, primCosV = 1.0;
+    uint primId = 0;
     bool primHit = false;
     [loop] for (uint s = 0; s < sampleCount; ++s) {
         uint rng = RngSeed(pix, (uint)gP1.x, s);
@@ -218,8 +220,13 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
 #ifdef PT_PACK_HAS_LIGHTING
             float flatIndirect = 0.0;   // pack's flat indirect requesting (falls back to flat)
 #endif
+            uint hitId = 0;
             if (hitMesh) {
                 RtGeometry g = LoadGeometry(hit.instanceId, hit.geometryIndex);
+                uint modelIdx = (g.flags >> 24) & 0xFFu;
+                uint isChar = (g.flags & RTG_CHARACTER) ? 0x80u : 0u;
+                uint packClass = 7u;
+                uint tag = 0u;
                 RtSurface sf = FetchSurface(g, hit.prim, hit.bary);
                 if (dot(sf.faceNormal, dir) > 0) sf.faceNormal = -sf.faceNormal;
                 if (dot(sf.normal, sf.faceNormal) < 0) sf.normal = -sf.normal;
@@ -255,6 +262,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     if (isPtPackHit) {
                         RtPtPackRecord rec = LoadPtPackRecord(g.packSrv);
                         if (rec.materialClass != PACK_CLASS_OFF) {
+                            packClass = rec.materialClass & 0x7u;
                             isPbrHit = false;   // the pack wins the PBR record (raster rule)
                             PtPackBindRecord(rec);
                             PtPackBindGeometry(g);
@@ -289,6 +297,11 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
 
                             PtPackOut ptPackOut = PackEvaluate(packIn);
                             albedo = ptPackOut.albedo;
+#if defined(PACK_CAP_SURFACE_OUTPUT) && PACK_CAP_SURFACE_OUTPUT
+                            tag = ptPackOut.tag & 0xFu;
+                            n = normalize(ptPackOut.normal);
+                            radiance += throughput * ptPackOut.emission;
+#endif
                             // the pack decides: MAT_FLAT (a material without toon) would drop its terminator
                             flat = ptPackOut.flatFace ? 1.0 : 0.0;
 #ifdef PT_PACK_HAS_LIGHTING
@@ -371,6 +384,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                         }
                     }
                 }
+                hitId = (tag & 0xFu) | ((packClass & 0x7u) << 4) | isChar | (modelIdx << 8);
             } else {
                 pos = origin + dir * tp;
                 prevPos = pos;
@@ -392,6 +406,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 primPos = pos;
                 primPrev = prevPos;
                 primHit = true;
+                primId = hitId;
             }
 
             // Fresnel-weighted specular probability (PBR: Schlick F(N.V) luminance vs the diffuse weight)
@@ -542,6 +557,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
         float4 prev = mul(float4(primRd, 0.0), gPrevViewProjNoJitter);
         float2 vel = (cur.xy / cur.w - prev.xy / prev.w) * float2(0.5, -0.5);
         gVelocityOut[pix] = vel;
+        if (gP2.z > 0.5) gIdOut[pix] = 0u;
         return;
     }
 
@@ -564,4 +580,5 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
     float4 prev = mul(float4(primPrev, 1.0), gPrevViewProjNoJitter);
     float2 vel = (cur.xy / cur.w - prev.xy / prev.w) * float2(0.5, -0.5);
     gVelocityOut[pix] = vel;
+    if (gP2.z > 0.5) gIdOut[pix] = primId;
 }

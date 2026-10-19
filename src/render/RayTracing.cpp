@@ -392,7 +392,8 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
     auto* geom = reinterpret_cast<RtGeometry*>(
         geometriesMapped_ + (size_t)slot * geometryCapacity_ * sizeof(RtGeometry));
     uint32_t base = 0;
-    for (GpuModel* m : models) {
+    for (size_t modelIdx = 0; modelIdx < models.size(); ++modelIdx) {
+        GpuModel* m = models[modelIdx];
         if (!usable(m) || !EnsureModelResources(*m)) continue;
         auto& rt = m->Rt();
         for (int part = 0; part < 2; ++part) {
@@ -494,7 +495,8 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
             e.indexSrv = rt.srv + 1;
             e.indexStart = m2.indexStart;
             e.flags = c.flags | (m2.castShadow ? RtGeom_CastShadow : 0) | (alphaTest ? RtGeom_AlphaTest : 0) |
-                      ((m->Role() == ModelRole::Character || m->Dynamic()) ? RtGeom_Character : 0);
+                      ((m->Role() == ModelRole::Character || m->Dynamic()) ? RtGeom_Character : 0) |
+                      (((uint32_t)(modelIdx + 1) & 0xFFu) << 24);
             e.diffuse = c.diffuse;
             e.specular = c.specular;
             e.specularPower = c.specularPower;

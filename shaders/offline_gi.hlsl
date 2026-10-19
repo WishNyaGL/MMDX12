@@ -50,6 +50,7 @@ RWTexture2D<float2> gMoments : register(u2);
 RWTexture2D<float4> gGbuffer : register(u3);
 RWTexture2D<uint> gCounter : register(u4);
 RWTexture2D<float4> gEdgeAccum : register(u5);
+RWTexture2D<uint> gGbufId : register(u6);
 
 struct PtLight {
     float3 pos; float invRange;
@@ -1098,6 +1099,7 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
     bool primHit = false;
     float3 primAlbedo = 1, primN = 0;
     float primZ = 1e6, primT = 0.0, chainT = 0.0;
+    uint primId = 0;
     const uint maxDepth = gP3.x >= 1.0 ? min((uint)gP3.x, kMaxDepth) : kMaxDepth;
     [loop] for (uint depth = 0; depth <= maxDepth; ++depth) {
         Surf s;
@@ -1166,6 +1168,10 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
                 ptPackOut = PackEvaluate(packIn);
                 s.albedo = ptPackOut.albedo;
                 s.flat = ptPackOut.flatFace;   // the pack decides, not MAT_FLAT (as in pathtrace.hlsl)
+#if defined(PACK_CAP_SURFACE_OUTPUT) && PACK_CAP_SURFACE_OUTPUT
+                s.n = normalize(ptPackOut.normal);
+                s.emission += ptPackOut.emission;
+#endif
 #ifdef PT_PACK_HAS_LIGHTING
                 ptPackLgt = PackEvaluateLighting(packIn, ptPackOut);
 #endif
@@ -1186,6 +1192,20 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
             // virtual depth along the glass chain (a reflection may hit something behind the camera)
             primZ = max(chainT * dot(d0, gInvView[2].xyz), gNearZ);
             primT = chainT;
+            uint modelIdx = (s.g.flags >> 24) & 0xFFu;
+            uint isChar = (s.g.flags & RTG_CHARACTER) ? 0x80u : 0u;
+            uint packClass = 7u;
+            uint tag = 0u;
+#ifdef MMDX_PT_PACK
+            if (isPtPackHit) {
+                RtPtPackRecord rec = LoadPtPackRecord(s.g.packSrv);
+                packClass = rec.materialClass & 0x7u;
+#if defined(PACK_CAP_SURFACE_OUTPUT) && PACK_CAP_SURFACE_OUTPUT
+                tag = ptPackOut.tag & 0xFu;
+#endif
+            }
+#endif
+            primId = (tag & 0xFu) | ((packClass & 0x7u) << 4) | isChar | (modelIdx << 8);
             specChain = false;
         }
 
@@ -1310,6 +1330,9 @@ void CSRender(uint3 id : SV_DispatchThreadID) {
     gAlbedoAccum[pix] = gAlbedoAccum[pix] + float4(primAlbedo, primHit ? 1.0 : 0.0);
     float tl = Perceptual(radiance);
     gMoments[pix] = gMoments[pix] + float2(tl, tl * tl);
-    if (sampleIndex == 0u) gGbuffer[pix] = primHit ? float4(primN, primZ) : float4(0, 0, 0, 1e6);
+    if (sampleIndex == 0u) {
+        gGbuffer[pix] = primHit ? float4(primN, primZ) : float4(0, 0, 0, 1e6);
+        gGbufId[pix] = primHit ? primId : 0u;
+    }
 }
 

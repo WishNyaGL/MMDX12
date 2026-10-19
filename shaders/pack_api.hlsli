@@ -58,6 +58,11 @@ struct PackResult {
     float alpha;
     float reflectivity;   // 0..1, SSR / RT reflection strength
     bool noAo;            // true: SSAO / RTAO do not darken this pixel (faces); also disables reflections
+#if defined(PACK_CAP_SURFACE_OUTPUT) && PACK_CAP_SURFACE_OUTPUT
+    float3 normal;        // world space, the host uses it for the normal target / SSAO / SSR / RT reflections instead of s.N
+    float3 emission;      // linear HDR added to the lit colour like AutoLumEmission
+    uint tag;             // 0..15, author bits
+#endif
 };
 
 // Pack parameter i (0..15), in pack.json order; the user's slider value or the manifest default.

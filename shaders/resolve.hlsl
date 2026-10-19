@@ -11,11 +11,17 @@ Texture2DMS<float4> gColor : register(t0);
 Texture2DMS<float4> gNormal : register(t1);
 Texture2DMS<float2> gVelocity : register(t2);
 Texture2DMS<float> gDepth : register(t3);
+#if defined(RESOLVE_HAS_ID) && RESOLVE_HAS_ID
+Texture2DMS<uint> gId : register(t4);
+#endif
 #else
 Texture2D<float4> gColor : register(t0);
 Texture2D<float4> gNormal : register(t1);
 Texture2D<float2> gVelocity : register(t2);
 Texture2D<float> gDepth : register(t3);
+#if defined(RESOLVE_HAS_ID) && RESOLVE_HAS_ID
+Texture2D<uint> gId : register(t4);
+#endif
 #endif
 
 struct ResolveOut {
@@ -23,6 +29,9 @@ struct ResolveOut {
     float4 normal : SV_Target1;
     float2 velocity : SV_Target2;
     float depth : SV_Target3;
+#if defined(RESOLVE_HAS_ID) && RESOLVE_HAS_ID
+    uint id : SV_Target4;
+#endif
 };
 
 ResolveOut PSResolve(FsOut i) {
@@ -49,11 +58,17 @@ ResolveOut PSResolve(FsOut i) {
     o.normal.w = cov / MSAA_SAMPLES;
     o.velocity = gVelocity.Load(p, bestIdx);
     o.depth = best;
+#if defined(RESOLVE_HAS_ID) && RESOLVE_HAS_ID
+    o.id = gId.Load(p, bestIdx);
+#endif
 #else
     o.color = gColor.Load(int3(p, 0));
     o.normal = gNormal.Load(int3(p, 0));
     o.velocity = gVelocity.Load(int3(p, 0));
     o.depth = gDepth.Load(int3(p, 0));
+#if defined(RESOLVE_HAS_ID) && RESOLVE_HAS_ID
+    o.id = gId.Load(int3(p, 0));
+#endif
 #endif
     return o;
 }

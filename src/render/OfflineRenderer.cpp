@@ -140,7 +140,7 @@ struct OfflineRenderer::Impl {
     // image targets (job size; recreated in Begin when the size changes)
     uint32_t width = 0, height = 0;
     Texture accum, albedo, moments, gbuf, edgeLayer, edgeAccum, denoiseA, denoiseB, ldr, bloomA, bloomB;
-    Texture litA, litB, ldrB, fxDepth, fxNormal, fxVel;   // effect stage: lit HDR and post ping-pong, effect inputs
+    Texture litA, litB, ldrB, fxDepth, fxNormal, fxVel, gbufId;   // effect stage: lit HDR and post ping-pong, effect inputs
     Texture edgeColorMsaa, edgeDepthMsaa;
     // M5b: the MME layer's host MRTs (colour = edgeColorMsaa, normal + velocity here); the MME colour is resolved
     // with the outlines into edgeLayer and composited exactly like the raster / PT MME layer.
@@ -238,7 +238,8 @@ D3D12_GPU_DESCRIPTOR_HANDLE OfflineRenderer::Impl::GiTable(ID3D12GraphicsCommand
     gbuf.Transition(cmd, kUav);
     counter.Transition(cmd, kUav);
     edgeAccum.Transition(cmd, kUav);
-    return t.UavTable(*ctx, {&accum, &albedo, &moments, &gbuf, &counter, &edgeAccum});
+    gbufId.Transition(cmd, kUav);
+    return t.UavTable(*ctx, {&accum, &albedo, &moments, &gbuf, &counter, &edgeAccum, &gbufId});
 }
 
 void OfflineRenderer::Impl::DispatchPost(PassContext& pc, const ComputePipeline& pipe, Texture* target,
@@ -306,6 +307,7 @@ bool OfflineRenderer::Impl::EnsureTargets(uint32_t w, uint32_t h) {
     fxDepth.Release(c);
     fxNormal.Release(c);
     fxVel.Release(c);
+    gbufId.Release(c);
     effectPre.ReleaseTargets(c);    // the effect packs' pass targets / state slots of the old size
     effectPost.ReleaseTargets(c);
     mmePost.ReleaseTargets(c);
@@ -316,6 +318,7 @@ bool OfflineRenderer::Impl::EnsureTargets(uint32_t w, uint32_t h) {
     ok &= accum.Create(c, w, h, DXGI_FORMAT_R32G32B32A32_FLOAT, uav, kUav, L"offline.accum");
     ok &= albedo.Create(c, w, h, DXGI_FORMAT_R32G32B32A32_FLOAT, uav, kUav, L"offline.albedo");
     ok &= gbuf.Create(c, w, h, DXGI_FORMAT_R32G32B32A32_FLOAT, uav, kUav, L"offline.gbuffer");
+    ok &= gbufId.Create(c, w, h, RenderTargets::kIdFormat, uav, kUav, L"offline.gbufId");
     ok &= moments.Create(c, w, h, DXGI_FORMAT_R32G32_FLOAT, uav, kUav, L"offline.moments");
     ok &= denoiseA.Create(c, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrvAll, L"offline.denoiseA");
     ok &= denoiseB.Create(c, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrvAll, L"offline.denoiseB");
@@ -402,6 +405,10 @@ void OfflineRenderer::Impl::PreparePackEdges() {
                                  {"PACK_TEX_SRGB_MASK", std::to_string(srgbMask) + "u"}};
         if (pack->HasCap("inputs.scene")) defines.push_back({"PACK_CAP_INPUTS_SCENE", "1"});
         if (pack->HasCap("inputs.audio")) defines.push_back({"PACK_CAP_INPUTS_AUDIO", "1"});
+        if (pack->HasCap("surface.output")) defines.push_back({"PACK_CAP_SURFACE_OUTPUT", "1"});
+        if (pack->HasCap("inputs.id")) defines.push_back({"PACK_CAP_INPUTS_ID", "1"});
+        if (pack->HasCap("passes.history")) defines.push_back({"PACK_CAP_PASSES_HISTORY", "1"});
+        if (pack->HasCap("passes.mips")) defines.push_back({"PACK_CAP_PASSES_MIPS", "1"});
         const std::filesystem::path file = shaderDir / L"offline_edge_pack.hlsl";
         std::string errors;
         ComPtr<ID3DBlob> vs = CompileShaderDxc(file, "VSEdgeOfflinePack", "vs_6_0", defines, &errors);
@@ -922,7 +929,7 @@ void OfflineRenderer::Impl::Finish(PassContext& pc) {
     if (preFx) {
         const float lc[8] = {0.0f, 0.0f, 0.0f, 0.0f, (float)w, (float)h, 0.0f, (float)edgeLayers};
         DispatchPost(pc, litCompose, &litA, &denoiseA, nullptr, lc, Groups(w), Groups(h));
-        effectPre.RunOffline(pc, job.effects, litA, litB, fxDepth, fxVel, fxNormal, &job);
+        effectPre.RunOffline(pc, job.effects, litA, litB, fxDepth, fxVel, fxNormal, &job, &gbufId);
     }
 
     const bool convolve = job.bloomConvolution && fft;
@@ -944,7 +951,7 @@ void OfflineRenderer::Impl::Finish(PassContext& pc) {
     const float fin[8] = {1.0f, job.bloom ? 1.0f : 0.0f, convolve ? kConvolutionBloomIntensity : 0.08f, 1.0f,
                           (float)w, (float)h, 0.12f, (float)edgeLayers};
     DispatchPost(pc, finalize, &ldr, lit ? &litA : &denoiseA, &bloomA, fin, Groups(w), Groups(h), lit ? 1.0f : 0.0f);
-    if (postFx) effectPost.RunOffline(pc, job.effects, ldr, ldrB, fxDepth, fxVel, fxNormal, &job);
+    if (postFx) effectPost.RunOffline(pc, job.effects, ldr, ldrB, fxDepth, fxVel, fxNormal, &job, &gbufId);
     // M5b: the MME post effects run on the same sRGB image, after the pack post effects (ping-pong through ldrB).
     // M5c: the effect objects' post/scene parts join the chain (their panel is `(self)`).
     if (mme) {
@@ -1175,7 +1182,7 @@ void OfflineRenderer::Shutdown() {
     for (Texture* t : {&m.accum, &m.albedo, &m.moments, &m.gbuf, &m.edgeLayer, &m.edgeAccum, &m.denoiseA, &m.denoiseB, &m.ldr, &m.bloomA, &m.bloomB, &m.edgeColorMsaa,
                        &m.edgeDepthMsaa, &m.edgeNormalMsaa, &m.edgeVelocityMsaa, &m.mmeShadowMap, &m.mmeShadowDepth,
                        &m.counter, &m.volA, &m.volB, 
-                       &m.litA, &m.litB, &m.ldrB, &m.fxDepth, &m.fxNormal, &m.fxVel})
+                       &m.litA, &m.litB, &m.ldrB, &m.fxDepth, &m.fxNormal, &m.fxVel, &m.gbufId})
         t->Release(ctx);
     if (m.sceneCb && m.sceneCbMapped) m.sceneCb->Unmap(0, nullptr);
     if (m.lightBuf && m.lightMapped) m.lightBuf->Unmap(0, nullptr);

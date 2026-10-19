@@ -380,10 +380,11 @@ void Renderer::EnsureTargets(uint32_t width, uint32_t height, uint32_t outWidth,
 void Renderer::ReleaseTargets() {
     for (auto& pass : passes_) pass->ReleaseTargets(*ctx_);
     for (Texture* t : {&targets_.colorMsaa, &targets_.normalMsaa, &targets_.velocityMsaa, &targets_.depthMsaa,
-                       &targets_.color, &targets_.normal, &targets_.velocity, &targets_.depth, &targets_.lit,
-                       &targets_.ldr})
+                       &targets_.idMsaa, &targets_.color, &targets_.normal, &targets_.velocity, &targets_.depth,
+                       &targets_.id, &targets_.lit, &targets_.ldr})
         t->Release(*ctx_);
     targets_.ao = targets_.ssr = targets_.hdrFinal = targets_.bloom = targets_.uiBackdrop = nullptr;
+    targets_.idTarget = nullptr;
     targets_.width = targets_.height = targets_.outWidth = targets_.outHeight = 0;
     targets_.msaa = 1;
 }
@@ -636,6 +637,34 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     // Wireframe / unlit (and quad views) skip the effect packs: flat frames have nothing for them to read
     // (RunStack checks the same conditions per frame; this also skips their target allocation).
     if (nonLit || quad) frameSettings.packEffects.clear();
+
+    bool needsId = false;
+    for (const auto& entry : frameSettings.packEffects) {
+        if (entry.enabled) {
+            if (const ShaderPack* p = ShaderPacks().Find(entry.pack)) {
+                if (p->HasCap("inputs.id")) {
+                    needsId = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (needsId) {
+        const auto rtUav = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        if (!targets_.id || targets_.id.width != w || targets_.id.height != h) {
+            targets_.id.Create(*ctx_, w, h, RenderTargets::kIdFormat, rtUav,
+                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, L"scene.id");
+        }
+        if (targets_.msaa > 1 && (!targets_.idMsaa || targets_.idMsaa.width != w || targets_.idMsaa.height != h || targets_.idMsaa.samples != targets_.msaa)) {
+            targets_.idMsaa.Create(*ctx_, w, h, RenderTargets::kIdFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET, L"scene.id.msaa", targets_.msaa);
+        }
+        targets_.idTarget = &targets_.id;
+    } else {
+        if (targets_.id) targets_.id.Release(*ctx_);
+        if (targets_.idMsaa) targets_.idMsaa.Release(*ctx_);
+        targets_.idTarget = nullptr;
+    }
 
     stats_.drawCalls = 0;
     stats_.triangles = 0;
