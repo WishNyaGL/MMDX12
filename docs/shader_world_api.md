@@ -236,6 +236,8 @@ struct PackParticleShadeIn {
   - `PackSunDir()`: Vector pointing toward the sun.
   - `PackSunColor()`: Sun light color and intensity.
   - `PackAmbient()`: Ambient light color.
+  - `PackHemiAmbient(normal)`: the scene's sky / ground hemisphere light for a world-space normal (ambient that
+    follows the stage lighting; `PackAmbient()` is only the ground colour).
   - `PackSunShadow(worldPos)`: Sun shadow visibility factor in [0, 1], from the scene's cascaded shadow map in
     raster camera views; 1 in ray-traced / path-traced frames and offline GI (no shadow map there in v1).
 - **Deterministic Hashing**:

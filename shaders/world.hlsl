@@ -184,7 +184,7 @@ SurfacePsOut PSWorldSurface(SurfaceVsOut i) {
     float3 sunColor = PackSunColor();
     // Ambient: the scene's sky / ground hemisphere (the same terms the lit scene shader uses), so the surface
     // matches the stage in every render path; the composite adds nothing on top (nt.z = -1 below).
-    float3 hemi = lerp(gGroundColor, gSkyZenith, saturate(sout.normal.y * 0.5 + 0.5)) * gHemiStrength;
+    float3 hemi = PackHemiAmbient(sout.normal);
     float3 ambient = max(PackAmbient(), hemi);
     float3 lit = sout.albedo * (sunColor * (NdotL * shadow) + ambient) + sout.emission;
 

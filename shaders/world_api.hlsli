@@ -125,6 +125,11 @@ inline float3 PackLocalToWorldVec(float3 vecLocal) {
 inline float3 PackSunDir() { return gSunDir.xyz; }
 inline float3 PackSunColor() { return gSunColor.rgb; }
 inline float3 PackAmbient() { return gAmbient.rgb; }
+// The scene's sky / ground hemisphere light for a world-space normal (the same terms the lit scene shader uses):
+// use it for ambient on particles and surfaces so they follow the stage lighting (a bright day vs a dark hall).
+inline float3 PackHemiAmbient(float3 n) {
+    return lerp(gGroundColor, gSkyZenith, saturate(n.y * 0.5 + 0.5)) * gHemiStrength;
+}
 
 // Forward declaration of PackSunShadow, implemented by host
 float PackSunShadow(float3 worldPos);
