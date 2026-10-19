@@ -182,12 +182,16 @@ SurfacePsOut PSWorldSurface(SurfaceVsOut i) {
     float NdotL = saturate(dot(sout.normal, L));
     float shadow = PackSunShadow(i.posWorld);
     float3 sunColor = PackSunColor();
-    float3 ambient = PackAmbient();
+    // Ambient: the scene's sky / ground hemisphere (the same terms the lit scene shader uses), so the surface
+    // matches the stage in every render path; the composite adds nothing on top (nt.z = -1 below).
+    float3 hemi = lerp(gGroundColor, gSkyZenith, saturate(sout.normal.y * 0.5 + 0.5)) * gHemiStrength;
+    float3 ambient = max(PackAmbient(), hemi);
     float3 lit = sout.albedo * (sunColor * (NdotL * shadow) + ambient) + sout.emission;
 
     o.color = float4(lit, sout.alpha);
     float3 viewN = normalize(mul(sout.normal, (float3x3)gView));
-    o.normal = float4(OctEncode(viewN), sout.roughness, 0.0);
+    // normal target: view normal, reflectivity -1 = no SSAO / SSR (the host already lit it), coverage 1
+    o.normal = float4(OctEncode(viewN), -1.0, 1.0);
 
     float2 curNdc = i.curClip.xy / max(i.curClip.w, 1e-5);
     float2 prevNdc = i.prevClip.xy / max(i.prevClip.w, 1e-5);
