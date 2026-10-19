@@ -170,6 +170,21 @@ bool PrintManifest(const ShaderPack& pack, const std::string& error) {
         printf("  pt_surface: %s\n", pack.hasPtSurface ? "yes" : "no");
     }
     PrintTextures(pack);
+    if (pack.requiresCaps.empty()) {
+        printf("  requires: (none)\n");
+    } else {
+        printf("  requires:");
+        for (const std::string& r : pack.requiresCaps) printf(" %s", r.c_str());
+        printf("\n");
+    }
+    if (pack.inputMask == 0) {
+        printf("  inputs: (none)\n");
+    } else {
+        printf("  inputs:");
+        for (uint8_t i = 0; i < (uint8_t)mmdx::PackInput::Count; ++i)
+            if (pack.inputMask & (1u << i)) printf(" %s", mmdx::PackInputName((mmdx::PackInput)i));
+        printf("\n");
+    }
     if (pack.params.empty()) {
         printf("  params: (none)\n");
     } else {

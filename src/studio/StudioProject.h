@@ -8,6 +8,7 @@
 #include "asset/MaterialChoice.h"
 #include "render/ShaderPack.h"
 #include "studio/SceneLight.h"
+#include "studio/StudioEffects.h"
 #include "studio/StudioMotion.h"
 #include <DirectXMath.h>
 #include <cstdint>
@@ -18,8 +19,10 @@
 namespace mmdx::studio {
 
 // Version 2: the studio lights are scene objects (editor "lights"). Version 1 projects carried a lighting source +
-// spot rig ("lighting", "useLightTrack"); LoadProject converts them to scene lights. Older builds reject version 2.
-inline constexpr int kProjectFormatVersion = 2;
+// spot rig ("lighting", "useLightTrack"); LoadProject converts them to scene lights.
+// Version 3: the studio's effect stack ("effects": pack, enabled, params, texture folder, keyed params). Version 1 / 2
+// files load with no effects. Older builds reject version 3.
+inline constexpr int kProjectFormatVersion = 3;
 inline constexpr const char* kProjectFormatName = "mmdx12-studio-project";
 inline constexpr const wchar_t* kProjectExtension = L".mmdxproj";
 
@@ -137,6 +140,8 @@ struct ProjectData {
     // M6b: the project's own MME post stack (docs/mme/mme_design.md §2.10/§2.13). While the studio is open this
     // replaces the play-mode stack (RenderSettings::mmeEffects); offline renders from the studio use it. Empty = none.
     std::vector<MmePostEntry> mmePost;
+    // Version 3: the project's effect stack (order = stack order). Empty = none.
+    std::vector<StudioEffect> effects;
     std::filesystem::path recoveryOf;  // autosave (recovery) files only: the project it belongs to (empty: never saved)
 };
 

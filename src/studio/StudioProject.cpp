@@ -613,6 +613,28 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                 mme.push_back({{"path", RelPath(e.path, dir)}, {"enabled", e.enabled}});
             j["mmeEffects"] = std::move(mme);
         }
+        // Version 3: the project's effect stack (order = stack order).
+        {
+            nlohmann::json effects = nlohmann::json::array();
+            for (const StudioEffect& e : data.effects) {
+                nlohmann::json je;
+                je["pack"] = e.entry.pack;
+                je["enabled"] = e.entry.enabled;
+                nlohmann::json params = nlohmann::json::object();
+                for (const auto& [k, v] : e.entry.params) params[k] = v;
+                je["params"] = std::move(params);
+                if (!e.entry.textureFolder.empty()) je["textureFolder"] = e.entry.textureFolder;
+                nlohmann::json tracks = nlohmann::json::array();
+                for (const EffectParamTrack& t : e.tracks) {
+                    nlohmann::json keys = nlohmann::json::array();
+                    for (const EffectParamKey& k : t.keys) keys.push_back({k.frame, k.value, k.stepped ? 1 : 0});
+                    tracks.push_back({{"param", t.param}, {"keys", std::move(keys)}});
+                }
+                je["tracks"] = std::move(tracks);
+                effects.push_back(std::move(je));
+            }
+            j["effects"] = std::move(effects);
+        }
         if (data.audioPath.empty()) {
             j["audio"] = nullptr;
         } else {
@@ -893,6 +915,48 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                 e.path = ResolvePath(ReadString(je, "path", ""), dir);
                 e.enabled = ReadBool(je, "enabled", true);
                 if (!e.path.empty()) out.mmePost.push_back(std::move(e));
+            }
+        }
+
+        // Version 3: the project's effect stack. Missing keys keep defaults; malformed entries are skipped with a warning.
+        if (version >= 3 && j.contains("effects") && j["effects"].is_array()) {
+            for (const auto& je : j["effects"]) {
+                if (!je.is_object()) {
+                    if (warnings) warnings->push_back("malformed effect entry skipped");
+                    continue;
+                }
+                StudioEffect e;
+                e.entry.pack = ReadString(je, "pack", "");
+                if (e.entry.pack.empty()) {
+                    if (warnings) warnings->push_back("effect entry without a pack skipped");
+                    continue;
+                }
+                e.entry.enabled = ReadBool(je, "enabled", true);
+                if (je.contains("params") && je["params"].is_object())
+                    for (const auto& [k, v] : je["params"].items())
+                        if (v.is_number()) e.entry.params[k] = v.get<float>();
+                e.entry.textureFolder = ReadString(je, "textureFolder", "");
+                if (je.contains("tracks") && je["tracks"].is_array()) {
+                    for (const auto& jt : je["tracks"]) {
+                        if (!jt.is_object()) continue;
+                        EffectParamTrack t;
+                        t.param = ReadString(jt, "param", "");
+                        if (t.param.empty()) continue;
+                        if (jt.contains("keys") && jt["keys"].is_array()) {
+                            for (const auto& jk : jt["keys"]) {
+                                if (!jk.is_array() || jk.size() < 2 || !jk[0].is_number() || !jk[1].is_number())
+                                    continue;
+                                EffectParamKey k;
+                                k.frame = jk[0].get<int32_t>();
+                                k.value = jk[1].get<float>();
+                                k.stepped = jk.size() >= 3 && jk[2].is_number() && jk[2].get<int>() != 0;
+                                UpsertParamKey(t, k);
+                            }
+                        }
+                        e.tracks.push_back(std::move(t));
+                    }
+                }
+                out.effects.push_back(std::move(e));
             }
         }
 

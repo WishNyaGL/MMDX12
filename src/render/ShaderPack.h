@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mmdx {
@@ -120,6 +121,35 @@ struct PackAuthor {
     std::string url;    // homepage / profile, may be empty (http/https only, anything else is dropped)
 };
 
+// Typed scene inputs an effect pack can read (pack.json "inputs"). The JSON names are PackInputName(): performer.head,
+// performer.center, performer.hand_l, performer.hand_r, performer.foot_l, performer.foot_r, light.key, camera.focus,
+// audio. Every performer.* / light.key / camera.focus input requires the "inputs.scene" capability; audio requires
+// "inputs.audio".
+enum class PackInput : uint8_t {
+    PerformerHead = 0,
+    PerformerCenter,
+    PerformerHandL,
+    PerformerHandR,
+    PerformerFootL,
+    PerformerFootR,
+    LightKey,
+    CameraFocus,
+    Audio,
+    Count
+};
+const char* PackInputName(PackInput input);
+
+// The capability table: `apiVersion` 0 = never implied by the version (must be declared in "requires").
+struct PackCapability {
+    std::string_view name;
+    int apiVersion;
+};
+inline constexpr PackCapability kPackCapabilities[] = {
+    {"adduv", 6},      {"pt.lighting", 6}, {"state", 4},        {"passes", 5},
+    {"replaces.dof", 5}, {"textures", 2},  {"effect", 3},       {"inputs.scene", 0},
+    {"inputs.audio", 0},
+};
+
 struct ShaderPackParam {
     std::string key;
     LocalizedText label;          // "label": string or localized object; empty -> key
@@ -203,6 +233,11 @@ struct ShaderPack {
     std::vector<PackTexture> textures;    // at most kPackMaxTextures; optional extra textures (PackSampleTex)
     bool hasEdge = false;                 // surface.hlsl sets PACK_HAS_EDGE: the pack draws the outlines too (PackEdge)
     bool hasPtSurface = false;            // pt_surface.hlsl exists next to surface.hlsl (offline GI stills)
+    // Declared capabilities ("requires": ["state", ...]) and typed scene inputs ("inputs"): see kPackCapabilities.
+    std::vector<std::string> requiresCaps;   // "requires": declared capabilities (the spec's name is a C++20 keyword)
+    uint32_t inputMask = 0;               // bit per PackInput
+    // True when `cap` is declared in "requires" or implied by the pack's apiVersion (kPackCapabilities).
+    bool HasCap(std::string_view cap) const;
     // state
     PackStatus status = PackStatus::Ready;
     std::string statusMessage;            // English, for the log / the pack details (compiler output may be long)

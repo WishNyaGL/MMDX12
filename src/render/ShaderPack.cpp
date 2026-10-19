@@ -58,6 +58,17 @@ LocalizedText Text(const nlohmann::json& j, const char* key) {
 
 bool HttpUrl(const std::string& s) { return s.rfind("https://", 0) == 0 || s.rfind("http://", 0) == 0; }
 
+bool ParsePackInput(const std::string& s, PackInput& out) {
+    for (uint8_t i = 0; i < (uint8_t)PackInput::Count; ++i) {
+        const PackInput in = (PackInput)i;
+        if (s == PackInputName(in)) {
+            out = in;
+            return true;
+        }
+    }
+    return false;
+}
+
 // ---- small file helpers (all filesystem calls take an error_code, never throw) --------------------------------------
 
 uint64_t Fnv(uint64_t h, const void* data, size_t n) {
@@ -310,6 +321,29 @@ std::string PackLanguage() {
 
 // ---- ShaderPack -------------------------------------------------------------------------------------------------------
 
+const char* PackInputName(PackInput input) {
+    switch (input) {
+    case PackInput::PerformerHead: return "performer.head";
+    case PackInput::PerformerCenter: return "performer.center";
+    case PackInput::PerformerHandL: return "performer.hand_l";
+    case PackInput::PerformerHandR: return "performer.hand_r";
+    case PackInput::PerformerFootL: return "performer.foot_l";
+    case PackInput::PerformerFootR: return "performer.foot_r";
+    case PackInput::LightKey: return "light.key";
+    case PackInput::CameraFocus: return "camera.focus";
+    case PackInput::Audio: return "audio";
+    default: return "";
+    }
+}
+
+bool ShaderPack::HasCap(std::string_view cap) const {
+    for (const std::string& r : requiresCaps)
+        if (r == cap) return true;
+    for (const PackCapability& c : kPackCapabilities)
+        if (c.name == cap && c.apiVersion != 0 && apiVersion >= c.apiVersion) return true;
+    return false;
+}
+
 PackClass ShaderPack::Classify(const std::string& name, const std::string& nameEn, const std::string& texture) const {
     for (const Rule& r : rules) {
         for (const std::string& m : r.match)
@@ -363,6 +397,8 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     out.stateFloats = 0;
     out.passes.clear();
     out.replacesDof = false;
+    out.requiresCaps.clear();
+    out.inputMask = 0;
     out.status = PackStatus::Ready;
     out.statusMessage.clear();
 
@@ -611,6 +647,62 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
             }
     }
 
+    // requires: optional array of capability names (kPackCapabilities). Unknown = Incompatible: an app that lacks a
+    // feature refuses the pack cleanly instead of calling the manifest invalid.
+    std::vector<std::string> unknownCaps;
+    if (auto it = j.find("requires"); it != j.end()) {
+        if (!it->is_array()) {
+            problems.push_back("requires must be an array of capability names");
+        } else {
+            for (const auto& r : *it) {
+                if (!r.is_string()) {
+                    problems.push_back("requires entries must be strings");
+                    continue;
+                }
+                const std::string cap = r.get<std::string>();
+                bool known = false;
+                for (const PackCapability& c : kPackCapabilities) known |= c.name == cap;
+                if (!known) {
+                    unknownCaps.push_back(cap);
+                    continue;
+                }
+                out.requiresCaps.push_back(cap);
+            }
+        }
+    }
+
+    // inputs: optional array of PackInput names (surface and effect packs). performer.* / light.key / camera.focus need
+    // "inputs.scene", audio needs "inputs.audio".
+    if (auto it = j.find("inputs"); it != j.end()) {
+        if (!it->is_array()) {
+            problems.push_back("inputs must be an array of input names");
+        } else {
+            for (const auto& r : *it) {
+                if (!r.is_string()) {
+                    problems.push_back("inputs entries must be strings");
+                    continue;
+                }
+                const std::string name = r.get<std::string>();
+                PackInput in;
+                if (!ParsePackInput(name, in)) {
+                    problems.push_back("inputs: unknown input '" + name + "'");
+                    continue;
+                }
+                out.inputMask |= 1u << (uint8_t)in;
+            }
+            if (out.inputMask & (1u << (uint8_t)PackInput::Audio)) {
+                if (!out.HasCap("inputs.audio"))
+                    problems.push_back("input 'audio' needs the \"inputs.audio\" capability in requires");
+            }
+            uint32_t sceneInputs = 0;
+            for (uint8_t i = 0; i < (uint8_t)PackInput::Audio; ++i) sceneInputs |= 1u << i;
+            if (out.inputMask & sceneInputs) {
+                if (!out.HasCap("inputs.scene"))
+                    problems.push_back("scene inputs need the \"inputs.scene\" capability in requires");
+            }
+        }
+    }
+
     // state: optional "state": { "floats": N } (1..16), effect packs only, apiVersion must be 4
     if (auto it = j.find("state"); it != j.end()) {
         if (!it->is_object()) {
@@ -628,7 +720,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                 }
             }
         }
-        if (out.apiVersion < 4) {
+        if (!out.HasCap("state")) {
             problems.push_back("packs with 'state' must declare \"apiVersion\": 4 or newer");
         }
         if (out.type != PackType::Effect) {
@@ -669,7 +761,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                 out.passes.push_back(std::move(pass));
             }
         }
-        if (out.apiVersion < 5) problems.push_back("packs with 'passes' must declare \"apiVersion\": 5 or newer");
+        if (!out.HasCap("passes")) problems.push_back("packs with 'passes' must declare \"apiVersion\": 5 or newer");
         if (out.type != PackType::Effect) problems.push_back("passes are only supported for effect packs");
     }
 
@@ -683,7 +775,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                 else problems.push_back("replaces: unknown entry (known: \"dof\")");
             }
         }
-        if (out.apiVersion < 5) problems.push_back("packs with 'replaces' must declare \"apiVersion\": 5 or newer");
+        if (!out.HasCap("replaces.dof")) problems.push_back("packs with 'replaces' must declare \"apiVersion\": 5 or newer");
         if (out.type != PackType::Effect || out.stage != PackEffectStage::PreBloom)
             problems.push_back("replaces needs an effect pack with \"stage\": \"pre-bloom\"");
     }
@@ -712,6 +804,12 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     if (!problems.empty()) {
         out.status = PackStatus::InvalidManifest;
         out.statusMessage = JoinProblems(problems);
+        error = out.statusMessage;
+        return false;
+    }
+    if (!unknownCaps.empty()) {
+        out.status = PackStatus::Incompatible;
+        out.statusMessage = "requires unsupported capability '" + unknownCaps.front() + "'";
         error = out.statusMessage;
         return false;
     }

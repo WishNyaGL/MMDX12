@@ -254,6 +254,112 @@ static std::vector<SceneLight> MakeTestLights() {
     return out;
 }
 
+// Effects of the project stack: 2 entries, one disabled, linear + stepped tracks, a texture folder.
+static std::vector<StudioEffect> MakeTestEffects() {
+    std::vector<StudioEffect> out;
+    {
+        StudioEffect e;
+        e.uid = 1;
+        e.entry.pack = "hoyo_toon_v2";
+        e.entry.enabled = true;
+        e.entry.params["intensity"] = 0.75f;
+        e.entry.params["threshold"] = 0.25f;
+        e.entry.textureFolder = "F:/tex/effect";
+        EffectParamTrack t;
+        t.param = "intensity";
+        t.keys = {{0, 0.0f, false}, {30, 1.0f, false}, {60, 0.5f, false}};
+        e.tracks.push_back(t);
+        EffectParamTrack s;
+        s.param = "threshold";
+        s.keys = {{10, 0.2f, true}, {40, 0.8f, false}};
+        e.tracks.push_back(s);
+        out.push_back(std::move(e));
+    }
+    {
+        StudioEffect e;
+        e.uid = 2;
+        e.entry.pack = "vignette";
+        e.entry.enabled = false;
+        EffectParamTrack t;
+        t.param = "amount";
+        t.keys = {{0, 0.1f, false}, {15, 0.9f, false}};
+        e.tracks.push_back(t);
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
+static void TestEffects() {
+    // EvaluateParamTrack: empty, before / between / after, stepped
+    {
+        const EffectParamTrack empty;
+        Check(EvaluateParamTrack(empty, 12.0f, 0.3f) == 0.3f, "empty track returns the fallback");
+    }
+    {
+        EffectParamTrack t;
+        t.keys = {{10, 0.0f, false}, {20, 1.0f, false}};
+        Check(EvaluateParamTrack(t, 0.0f, 9.0f) == 0.0f, "before the first key returns the first value");
+        Check(Near(EvaluateParamTrack(t, 15.0f, 9.0f), 0.5f), "between linear keys interpolates");
+        Check(EvaluateParamTrack(t, 25.0f, 9.0f) == 1.0f, "after the last key returns the last value");
+    }
+    {
+        EffectParamTrack t;
+        t.keys = {{10, 0.0f, true}, {20, 1.0f, false}};
+        Check(EvaluateParamTrack(t, 15.0f, 9.0f) == 0.0f, "a stepped key holds until the next key");
+    }
+    // EvaluateEffect: tracked params replace the static values, fallback is the static value
+    {
+        std::vector<StudioEffect> effects = MakeTestEffects();
+        const EffectStackEntry e = EvaluateEffect(effects[0], 15.0f);
+        Check(Near(e.params.at("intensity"), 0.5f) && Near(e.params.at("threshold"), 0.2f) &&
+                  e.pack == "hoyo_toon_v2" && e.textureFolder == "F:/tex/effect",
+              "EvaluateEffect applies track values at the frame");
+    }
+    // Upsert / erase
+    {
+        EffectParamTrack t;
+        UpsertParamKey(t, {10, 1.0f, false});
+        UpsertParamKey(t, {0, 0.0f, false});
+        UpsertParamKey(t, {5, 0.5f, true});
+        UpsertParamKey(t, {10, 2.0f, true});
+        Check(t.keys.size() == 3 && t.keys[0].frame == 0 && t.keys[1].frame == 5 && t.keys[2].frame == 10 &&
+                  t.keys[2].value == 2.0f && t.keys[2].stepped,
+              "UpsertParamKey sorts and replaces the key at the same frame");
+        EraseParamKeys(t, {5});
+        Check(t.keys.size() == 2 && t.keys[0].frame == 0 && t.keys[1].frame == 10, "EraseParamKeys removes the frames");
+    }
+    // project round trip
+    const std::filesystem::path projDir = kTemp / "effects";
+    const std::filesystem::path projFile = projDir / "fx.mmdxproj";
+    ProjectData data;
+    data.effects = MakeTestEffects();
+    std::string err;
+    Check(SaveProject(projFile, data, &err), "SaveProject with effects", "%s", err.c_str());
+    {
+        std::ifstream in(projFile, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+        Check(!j.is_discarded() && j.value("version", 0) == 3, "effect project format is version 3");
+        Check(j.contains("effects") && j["effects"].is_array() && j["effects"].size() == 2 &&
+                  j["effects"][0]["pack"] == "hoyo_toon_v2" && j["effects"][1]["enabled"] == false &&
+                  j["effects"][0]["textureFolder"] == "F:/tex/effect" && j["effects"][0]["tracks"].size() == 2 &&
+                  j["effects"][0]["tracks"][1]["keys"].size() == 2 && j["effects"][0]["tracks"][1]["keys"][0].size() == 3 &&
+                  j["effects"][0]["tracks"][1]["keys"][0][2] == 1,
+              "effects are written as pack / enabled / params / textureFolder / tracks");
+    }
+    ProjectData loaded;
+    std::vector<std::string> warnings;
+    Check(LoadProject(projFile, loaded, &err, &warnings), "LoadProject with effects", "%s", err.c_str());
+    Check(warnings.empty(), "effect project loads without warnings");
+    Check(loaded.effects.size() == data.effects.size(), "effect count kept");
+    if (loaded.effects.size() == data.effects.size()) {
+        Check(loaded.effects[0] == data.effects[0] && loaded.effects[1] == data.effects[1],
+              "effects round-trip exactly (ignoring uid)");
+        Check(loaded.effects[1].entry.enabled == false && loaded.effects[0].tracks[1].keys[0].stepped,
+              "disabled entry and stepped key kept");
+    }
+}
+
 static void TestRoundTrip() {
     const std::filesystem::path projDir = kTemp / "proj";
     const std::filesystem::path projFile = projDir / L"\u30C6\u30B9\u30C8.mmdxproj";  // テスト.mmdxproj
@@ -600,7 +706,7 @@ static void TestSceneLightFile() {
         text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     }
     const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-    Check(kProjectFormatVersion == 2 && !j.is_discarded() && j.value("version", 0) == 2, "project format version is 2");
+    Check(kProjectFormatVersion == 3 && !j.is_discarded() && j.value("version", 0) == 3, "project format version is 3");
     const nlohmann::json& e = j["editor"];
     Check(e.contains("lights") && e["lights"].is_array() && e["lights"].size() == 8 && !e.contains("lighting") &&
               !e.contains("useLightTrack"),
@@ -763,7 +869,7 @@ static void TestAreaLightProject() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 2, "area light project format is version 2");
+        Check(!j.is_discarded() && j.value("version", 0) == 3, "area light project format is version 3");
         const nlohmann::json& l = j["editor"]["lights"][0];
         Check(l["kind"] == "area", "area light JSON kind is \"area\"");
         Check(l["values"].contains("size") && l["values"]["size"].is_array() && l["values"]["size"].size() == 2 &&
@@ -1267,6 +1373,7 @@ int main() {
     std::filesystem::create_directories(kTemp, ec);
 
     TestRoundTrip();
+    TestEffects();
     TestAspectProject();
     TestSceneLightFile();
     TestSceneLightReading();
