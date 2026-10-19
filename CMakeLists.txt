@@ -248,6 +248,13 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_project_test.cpp)
   # which mmdx_anim builds; mmdx_core carries core/asset and the json include dir.
   target_link_libraries(studio_project_test PRIVATE mmdx_core mmdx_anim)
 endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/tools/look_preset_test.cpp)
+  # The Look data layer (render) and its settings mapping (app), without the whole app.
+  add_executable(look_preset_test tools/look_preset_test.cpp src/render/LookPreset.cpp src/app/LookApply.cpp)
+  target_include_directories(look_preset_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  # app/Settings.h reaches render/Dx12Context.h, whose d3dx12.h comes from DirectX-Headers.
+  target_link_libraries(look_preset_test PRIVATE mmdx_core Microsoft::DirectX-Headers)
+endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_focus_test.cpp)
   add_executable(studio_focus_test tools/studio_focus_test.cpp src/studio/StudioFocus.cpp src/studio/StudioProject.cpp
                                    src/studio/StudioMotion.cpp src/studio/SceneLight.cpp src/studio/StudioEffects.cpp)
