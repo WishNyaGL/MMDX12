@@ -136,6 +136,7 @@ TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::stri
         auto it = m.bones.find(name);
         s.existed = it != m.bones.end();
         if (s.existed) s.bones = it->second;
+        s.staticFlag = m.staticBones.count(name) != 0;
     } else if (kind == RowKind::Accessory) {
         s.existed = !m.accessory.empty();
         s.accessories = m.accessory;
@@ -143,6 +144,7 @@ TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::stri
         auto it = m.morphs.find(name);
         s.existed = it != m.morphs.end();
         if (s.existed) s.morphs = it->second;
+        s.staticFlag = m.staticMorphs.count(name) != 0;
     }
     return s;
 }
@@ -211,11 +213,15 @@ void RestoreTrack(StudioDoc& doc, const TrackState& s) {
         if (s.kind == RowKind::Bone) {
             if (s.bones.empty()) m.bones.erase(s.name);
             else m.bones[s.name] = s.bones;
+            if (s.staticFlag) m.staticBones.insert(s.name);
+            else m.staticBones.erase(s.name);
         } else if (s.kind == RowKind::Accessory) {
             m.accessory = s.accessories;
         } else {
             if (s.morphs.empty()) m.morphs.erase(s.name);
             else m.morphs[s.name] = s.morphs;
+            if (s.staticFlag) m.staticMorphs.insert(s.name);
+            else m.staticMorphs.erase(s.name);
         }
     }
     doc.TouchModel(s.model);  // scene light rows returned above

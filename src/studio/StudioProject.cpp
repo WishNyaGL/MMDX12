@@ -534,6 +534,17 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
             if (m.kind == ModelKind::Effect && !m.fx.empty()) jm["fx"] = RelPath(m.fx, dir);
             jm["libraryId"] = m.libraryId;            jm["visible"] = m.visible;
             if (m.physicsOff) jm["physics"] = false;  // P2.2: only written when off (absent = physics on)
+            // constant (stopwatch-off) bone / morph tracks: names of single frame-0 key tracks flagged static
+            {
+                nlohmann::json sb = nlohmann::json::array();
+                for (const std::string& n : m.motion.staticBones)
+                    if (IsStaticBoneTrack(m.motion, n)) sb.push_back(n);
+                if (!sb.empty()) jm["staticBones"] = std::move(sb);
+                nlohmann::json sm = nlohmann::json::array();
+                for (const std::string& n : m.motion.staticMorphs)
+                    if (IsStaticMorphTrack(m.motion, n)) sm.push_back(n);
+                if (!sm.empty()) jm["staticMorphs"] = std::move(sm);
+            }
             if (m.kind != ModelKind::Prop && m.kind != ModelKind::Effect && !(m.place == PropAttach{})) {  // identity placement is not written
                 jm["place"] = {
                     {"t", {m.place.translation.x, m.place.translation.y, m.place.translation.z}},
@@ -912,6 +923,13 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                         if (warnings) warnings->push_back("motion missing: " + PathToUtf8(vmdPath));
                     }
                 }
+                // constant (stopwatch-off) bone / morph tracks (after the motion load, which replaces it)
+                if (m.contains("staticBones") && m["staticBones"].is_array())
+                    for (const nlohmann::json& n : m["staticBones"])
+                        if (n.is_string()) pm.motion.staticBones.insert(n.get<std::string>());
+                if (m.contains("staticMorphs") && m["staticMorphs"].is_array())
+                    for (const nlohmann::json& n : m["staticMorphs"])
+                        if (n.is_string()) pm.motion.staticMorphs.insert(n.get<std::string>());
                 remap[oldIndex] = (int)out.models.size();
                 out.models.push_back(std::move(pm));
             }

@@ -151,6 +151,26 @@ void App::StudioSelectBone(int bone, bool toggle) {
     d.rowsKey = ~0ull;
 }
 
+// Inspector → timeline sync for a morph (like StudioSelectBone for bones): the morph's row is picked, its group
+// un-collapsed and scrolled into view, and its key at the playhead selected if there is one. No tab switch.
+void App::StudioSelectMorph(int morph) {
+    StudioDoc& d = *studio_;
+    StudioModel* m = StudioPoseModel();
+    if (!m || morph < 0 || morph >= (int)m->pmx->morphs.size()) return;
+    const int frame = d.Frame();
+    const uint64_t row = CanonicalRow(*m, RowKind::Morph, (uint32_t)morph);
+    d.selectedRows.clear();
+    d.selection.clear();
+    d.selectedRows.insert(row);
+    d.rowAnchor = row;
+    const auto it = m->motion.morphs.find(m->pmx->morphs[(size_t)morph].name);
+    if (it != m->motion.morphs.end() && FindKey(it->second, frame)) d.selection.insert({row, frame});
+    d.collapsed.erase(MakeRowId(RowKind::Group, RowGroupOf(row), 0));  // reveal the row
+    d.scrollRowId = row;
+    d.scrollToRow = 3;
+    d.rowsKey = ~0ull;
+}
+
 void App::StudioRegisterPose(bool allBones, const PoseLayer* layerBefore, const char* undoName) {
     StudioDoc& d = *studio_;
     StudioModel* m = StudioPoseModel();
@@ -1467,6 +1487,101 @@ void App::DrawStudioBoneTab(float w) {
             ImGui::Dummy(ImVec2(w, Dp(26.0f)));
         }
         {
+            // stopwatch line: animated = the bone's track has keys and is not a static (constant) track
+            const auto it = m->motion.bones.find(b.name);
+            const bool animated = it != m->motion.bones.end() && !it->second.empty() &&
+                                  !IsStaticBoneTrack(m->motion, b.name);
+            const bool keyed = it != m->motion.bones.end() && FindKey(it->second, frame) != nullptr;
+            ImGui::BeginGroup();
+            if (Stopwatch("##bonestopwatch", animated)) {
+                std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Bone, b.name)};
+                if (!animated) {
+                    // OFF → ON: key the current value at the playhead (one undo step)
+                    const PoseBone cur0 = StudioCurrentPose(*m)[(size_t)bone];
+                    BoneKf k;
+                    FillLinearInterp(k.interp);
+                    k.frame = frame;
+                    k.t = cur0.t;
+                    k.r = cur0.r;
+                    UpsertKey(m->motion.bones[b.name], k);
+                    m->motion.staticBones.erase(b.name);
+                    StudioPushTrackEdit(Tr("애니메이션 켜기"), before);
+                } else {
+                    // ON → OFF: confirm modal; on confirm all keys are removed and the playhead value becomes the
+                    // constant (one frame-0 key flagged static)
+                    studioStopwatchLabel_ = b.name;
+                    studioStopwatchOff_ = [this, &d, bi = bone, name = b.name] {
+                        StudioModel* mm = d.Selected();
+                        if (!mm) return;
+                        std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Bone, name)};
+                        const PoseBone cur1 = StudioCurrentPose(*mm)[(size_t)bi];
+                        BoneKf k;
+                        FillLinearInterp(k.interp);
+                        k.frame = 0;
+                        k.t = cur1.t;
+                        k.r = cur1.r;
+                        mm->motion.bones[name] = {k};
+                        mm->motion.staticBones.insert(name);
+                        StudioPushTrackEdit(Tr("애니메이션 끄기"), before);
+                        ++mm->motionVersion;
+                        d.rowsKey = ~0ull;
+                    };
+                }
+                ++m->motionVersion;
+                d.rowsKey = ~0ull;
+            }
+            if (animated) {
+                ImGui::SameLine(0.0f, 0.0f);
+                const auto jumpKey = [&](int dir) {
+                    int target = -1;
+                    if (dir < 0) {
+                        for (const BoneKf& kf : it->second) { if (kf.frame < frame) target = kf.frame; else break; }
+                    } else {
+                        for (const BoneKf& kf : it->second) { if (kf.frame > frame) { target = kf.frame; break; } }
+                    }
+                    if (target < 0) return;
+                    StudioSetPlaying(false);
+                    StudioSeek(target / (double)kMmdFps);
+                };
+                const auto toggleKey = [&] {
+                    std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Bone, b.name)};
+                    if (keyed) {
+                        EraseKey(m->motion.bones[b.name], frame);
+                        StudioPushTrackEdit(Tr("본 키 삭제"), before);
+                    } else {
+                        const PoseBone cur0 = StudioCurrentPose(*m)[(size_t)bone];
+                        BoneKf k;
+                        if (const BoneKf* existing = FindKey(it->second, frame)) k = *existing;
+                        else FillLinearInterp(k.interp);
+                        k.frame = frame;
+                        k.t = cur0.t;
+                        k.r = cur0.r;
+                        UpsertKey(m->motion.bones[b.name], k);
+                        m->motion.staticBones.erase(b.name);
+                        StudioPushTrackEdit(Tr("본 키 등록"), before);
+                    }
+                    ++m->motionVersion;
+                    d.rowsKey = ~0ull;
+                };
+                const int nav = KeyNav("##bonekeynav",
+                                       std::any_of(it->second.begin(), it->second.end(),
+                                                   [frame](const BoneKf& kf) { return kf.frame < frame; }),
+                                       keyed,
+                                       std::any_of(it->second.begin(), it->second.end(),
+                                                   [frame](const BoneKf& kf) { return kf.frame > frame; }));
+                if (nav == -1) jumpKey(-1);
+                else if (nav == 1) jumpKey(1);
+                else if (nav == 2) toggleKey();
+            }
+            ImGui::SameLine(0.0f, Dp(6.0f));
+            const ImVec2 lc = ImGui::GetCursorScreenPos();
+            Text(cdl, Font::Regular, size::Caption, ImVec2(lc.x, lc.y + Dp(4.0f)), animated ? p.ink2 : p.ink3,
+                 animated ? Tr("애니메이션 (키 사용)") : Tr("장면 전체에 같은 값"));
+            ImGui::Dummy(ImVec2(1.0f, Dp(22.0f)));
+            ImGui::EndGroup();
+            ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+        }
+        {
             // capability badges
             ImVec2 c = ImGui::GetCursorScreenPos(), bs;
             const auto badge = [&](const char* t, bool accent) {
@@ -1510,7 +1625,32 @@ void App::DrawStudioBoneTab(float w) {
         float r[3] = {e.x, e.y, e.z};
         const auto [tChanged, tEnded] = field("##bonet", Tr("위치"), t, b.flags & PmxBone_Movable, 0.02f, "%.2f");
         const auto [rChanged, rEnded] = field("##boner", Tr("회전"), r, b.flags & PmxBone_Rotatable, 0.25f, "%.1f°");
-        if (tChanged || rChanged) {
+        // stopwatch rule: an animated bone (or auto-key) ends the edit as a key at the playhead; a bone that is not
+        // animated edits its constant (a single frame-0 key flagged static) directly, without the pose layer. A bone
+        // already edited in the pose layer (gizmo / VPD) keeps that path.
+        const auto bit = m->motion.bones.find(b.name);
+        const bool boneAnimated = bit != m->motion.bones.end() && !bit->second.empty() && !IsStaticBoneTrack(m->motion, b.name);
+        if ((tChanged || rChanged) && !edited && !boneAnimated && !d.autoKey && !studioKeyEdit_) {
+            studioKeyBefore_ = {CaptureTrack(d, d.selectedModel, RowKind::Bone, b.name)};
+            studioKeyEdit_ = true;
+            studioKeyChanged_ = false;
+        }
+        if ((tChanged || rChanged) && studioKeyEdit_) {
+            std::vector<BoneKf>& track = m->motion.bones[b.name];
+            BoneKf k;
+            if (!track.empty() && track.front().frame == 0) k = track.front();  // keep its interpolation
+            else FillLinearInterp(k.interp);
+            k.frame = 0;
+            k.t = cur.t;
+            k.r = cur.r;
+            if (tChanged) k.t = {t[0], t[1], t[2]};
+            if (rChanged) k.r = QuatFromEulerDeg({r[0], r[1], r[2]});
+            track = {k};
+            m->motion.staticBones.insert(b.name);
+            ++m->motionVersion;
+            studioKeyChanged_ = true;
+            d.rowsKey = ~0ull;
+        } else if (tChanged || rChanged) {
             PoseLayer& pose = m->pose;
             if (pose.frame != frame) pose = PoseLayer{};
             pose.frame = frame;
@@ -1520,8 +1660,11 @@ void App::DrawStudioBoneTab(float w) {
             pose.bones[bone] = v;
         }
         if ((tEnded || rEnded) && studioPoseFieldEdit_) {
-            StudioSetPose(Tr("본 값 편집"), studioPoseBefore_);
             studioPoseFieldEdit_ = false;
+            if (studioKeyEdit_) StudioEndKeyEdit();
+            else if (boneAnimated && !d.autoKey && !m->pose.Empty() && m->pose.frame == frame)
+                StudioRegisterPose(false, &studioPoseBefore_, Tr("본 값 편집"));
+            else StudioSetPose(Tr("본 값 편집"), studioPoseBefore_);
         }
         {
             const ImVec2 c = ImGui::GetCursorScreenPos();
@@ -1619,6 +1762,7 @@ void App::DrawStudioMorphTab(float w) {
     const Palette& p = P();
     const PmxModel& pmx = *m->pmx;
     const int frame = d.Frame();
+    bool changedMorphs = false;
 
     SearchField("##morphfilter", d.morphFilter, sizeof(d.morphFilter), Tr("모프 검색"), w / Dpi());
     ImGui::Dummy(ImVec2(w, Dp(6.0f)));
@@ -1665,40 +1809,128 @@ void App::DrawStudioMorphTab(float w) {
                 ImGui::PushID(i);
                 const auto ov = m->pose.frame == frame ? m->pose.morphs.find(i) : m->pose.morphs.end();
                 const bool edited = m->pose.frame == frame && ov != m->pose.morphs.end();
+                const std::string& mname = pmx.morphs[(size_t)i].name;
+                const auto mt = m->motion.morphs.find(mname);
+                const bool animated = mt != m->motion.morphs.end() && !mt->second.empty() &&
+                                      !IsStaticMorphTrack(m->motion, mname);
+                const bool staticTrack = IsStaticMorphTrack(m->motion, mname);
                 float v = edited ? ov->second : m->inst->MorphWeight(i);
                 const ImVec2 c = ImGui::GetCursorScreenPos();
                 const ImGuiID id = ImGui::GetID("##slider");
                 const ImRect bb(c, ImVec2(c.x + w, c.y + rowH));
+                const ImRect hit(ImVec2(c.x + Dp(28.0f), c.y), bb.Max);  // the stopwatch / key diamond own the left edge
                 ImGui::ItemSize(bb);
-                if (ImGui::ItemAdd(bb, id)) {
+                const ImVec2 rowEnd = ImGui::GetCursorScreenPos();
+                if (ImGui::ItemAdd(hit, id)) {
                     bool hovered = false, held = false;
-                    ImGui::ButtonBehavior(bb, id, &hovered, &held, ImGuiButtonFlags_PressedOnClick);
+                    ImGui::ButtonBehavior(hit, id, &hovered, &held, ImGuiButtonFlags_PressedOnClick);
                     const float labelW = w * 0.42f, valueW = Dp(40.0f);
-                    const float sx0 = c.x + labelW + Dp(6.0f), sx1 = c.x + w - valueW - Dp(4.0f);
-                    if (ImGui::IsItemActivated() && !studioPoseFieldEdit_) {
-                        studioPoseBefore_ = m->pose;
-                        studioPoseFieldEdit_ = true;
+                    const float sx0 = c.x + labelW + Dp(6.0f) + Dp(16.0f), sx1 = c.x + w - valueW - Dp(4.0f);
+                    // A morph edited in the pose layer (VPD import) keeps that path; otherwise the slider writes the
+                    // motion directly (stopwatch rule): animated or auto-key = the key at the playhead, else the
+                    // constant (a single frame-0 key flagged static). One undo step per drag.
+                    if (ImGui::IsItemActivated()) {
+                        StudioSelectMorph(i);
+                        if (edited) {
+                            if (!studioPoseFieldEdit_) {
+                                studioPoseBefore_ = m->pose;
+                                studioPoseFieldEdit_ = true;
+                            }
+                        } else if (!studioKeyEdit_) {
+                            studioKeyBefore_ = {CaptureTrack(d, d.selectedModel, RowKind::Morph, mname)};
+                            studioKeyEdit_ = true;
+                            studioKeyChanged_ = false;
+                        }
                     }
                     if (held) {
                         const float nv = std::clamp((ImGui::GetIO().MousePos.x - sx0) / std::max(sx1 - sx0, 1.0f), 0.0f, 1.0f);
                         const float snapped = std::round(nv * 100.0f) / 100.0f;
-                        if (!edited || snapped != v) {
-                            PoseLayer& pose = m->pose;
-                            if (pose.frame != frame) pose = PoseLayer{};
-                            pose.frame = frame;
-                            pose.morphs[i] = snapped;
+                        if (snapped != v) {
+                            if (edited) {
+                                m->pose.morphs[i] = snapped;
+                            } else if (studioKeyEdit_) {
+                                std::vector<MorphKf>& track = m->motion.morphs[mname];
+                                if (animated || d.autoKey) {
+                                    UpsertKey(track, MorphKf{frame, snapped});
+                                    if (staticTrack) m->motion.staticMorphs.erase(mname);
+                                } else {
+                                    track = {MorphKf{0, snapped}};
+                                    m->motion.staticMorphs.insert(mname);
+                                }
+                                ++m->motionVersion;
+                                studioKeyChanged_ = true;
+                                d.rowsKey = ~0ull;
+                            }
                             v = snapped;
                         }
                     }
-                    if (ImGui::IsItemDeactivated() && studioPoseFieldEdit_) {
-                        StudioSetPose(Tr("모프 편집"), studioPoseBefore_);
-                        studioPoseFieldEdit_ = false;
+                    if (ImGui::IsItemDeactivated()) {
+                        if (studioPoseFieldEdit_) {
+                            StudioSetPose(Tr("모프 편집"), studioPoseBefore_);
+                            studioPoseFieldEdit_ = false;
+                        }
+                        StudioEndKeyEdit();
                     }
                     if (hovered || held) dl->AddRectFilled(c, bb.Max, WithAlpha(p.ink, 0.04f), Dp(6.0f));
-                    const auto it = m->motion.morphs.find(pmx.morphs[(size_t)i].name);
-                    const bool keyed = it != m->motion.morphs.end() && FindKey(it->second, frame);
-                    if (keyed) Icon(dl, icon::Diamond, 9.0f, ImVec2(c.x + Dp(6.0f), c.y + rowH * 0.5f), p.accent);
-                    TextEllipsis(dl, Font::Regular, size::Small, ImVec2(c.x + Dp(14.0f), c.y + Dp(5.0f)), c.x + labelW,
+                    // stopwatch ("애니메이션 켜기") at the left of the row; animated rows also get a small key diamond
+                    {
+                        const bool keyedHere = mt != m->motion.morphs.end() && FindKey(mt->second, frame) != nullptr;
+                        ImGui::SetCursorScreenPos(ImVec2(c.x + Dp(2.0f), c.y + (rowH - Dp(14.0f)) * 0.5f));
+                        if (Stopwatch("##mstopwatch", animated, 14.0f)) {
+                            StudioSelectMorph(i);
+                            std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Morph, mname)};
+                            if (!animated) {
+                                UpsertKey(m->motion.morphs[mname], MorphKf{frame, v});
+                                if (staticTrack) m->motion.staticMorphs.erase(mname);
+                                StudioPushTrackEdit(Tr("애니메이션 켜기"), before);
+                            } else {
+                                studioStopwatchLabel_ = mname;
+                                const int mi = i;
+                                studioStopwatchOff_ = [this, &d, mi, mname] {
+                                    StudioModel* mm = d.Selected();
+                                    if (!mm) return;
+                                    std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Morph, mname)};
+                                    // the playhead value becomes the constant (one frame-0 key flagged static)
+                                    const auto kt = mm->motion.morphs.find(mname);
+                                    float val = kt != mm->motion.morphs.end() && !kt->second.empty()
+                                                    ? SampleMorph(kt->second, d.Frame()) : mm->inst->MorphWeight(mi);
+                                    mm->motion.morphs[mname] = {MorphKf{0, val}};
+                                    mm->motion.staticMorphs.insert(mname);
+                                    StudioPushTrackEdit(Tr("애니메이션 끄기"), before);
+                                    ++mm->motionVersion;
+                                    d.rowsKey = ~0ull;
+                                };
+                            }
+                            ++m->motionVersion;
+                            d.rowsKey = ~0ull;
+                            changedMorphs = true;
+                        }
+                        if (animated) {
+                            const ImVec2 dc(c.x + Dp(20.0f), c.y + rowH * 0.5f);
+                            const float dr = Dp(4.0f);
+                            const ImU32 kc = keyedHere ? p.accent : p.ink3;
+                            const ImVec2 pts[4] = {{dc.x, dc.y - dr}, {dc.x + dr, dc.y}, {dc.x, dc.y + dr}, {dc.x - dr, dc.y}};
+                            if (keyedHere) dl->AddConvexPolyFilled(pts, 4, kc);
+                            else dl->AddPolyline(pts, 4, kc, ImDrawFlags_Closed, 1.5f);
+                            ImGui::SetCursorScreenPos(ImVec2(c.x + Dp(14.0f), c.y));
+                            if (ImGui::InvisibleButton("##mkeybtn", ImVec2(Dp(13.0f), rowH))) {
+                                StudioSelectMorph(i);
+                                std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Morph, mname)};
+                                if (keyedHere) {
+                                    EraseKey(m->motion.morphs[mname], frame);
+                                    StudioPushTrackEdit(Tr("모프 키 삭제"), before);
+                                } else {
+                                    UpsertKey(m->motion.morphs[mname], MorphKf{frame, v});
+                                    StudioPushTrackEdit(Tr("모프 키 등록"), before);
+                                }
+                                ++m->motionVersion;
+                                d.rowsKey = ~0ull;
+                                changedMorphs = true;
+                            }
+                        }
+                    }
+                    ImGui::SetCursorScreenPos(rowEnd);  // the buttons above must not stretch the row
+                    TextEllipsis(dl, Font::Regular, size::Small, ImVec2(c.x + Dp(30.0f), c.y + Dp(5.0f)), c.x + labelW + Dp(16.0f),
                                  edited ? p.warn : p.ink, pmx.morphs[(size_t)i].name.c_str());
                     const float cy = c.y + rowH * 0.5f, th = Dp(4.0f);
                     dl->AddRectFilled(ImVec2(sx0, cy - th * 0.5f), ImVec2(sx1, cy + th * 0.5f), p.sunken, th);
@@ -1727,6 +1959,10 @@ void App::DrawStudioMorphTab(float w) {
         ImGui::Dummy(ImVec2(w, Dp(24.0f)));
     }
     ImGui::Dummy(ImVec2(w, Dp(12.0f)));
+    if (changedMorphs) {
+        m->BuildRowGroups();
+        d.rowsKey = ~0ull;
+    }
 }
 
 } // namespace mmdx

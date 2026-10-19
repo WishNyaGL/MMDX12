@@ -299,6 +299,7 @@ struct TrackState {
     std::vector<AccessoryKf> accessories;
     std::vector<EffectParamKey> effectParamKeys;
     std::vector<EffectParamKey> worldParamKeys;
+    bool staticFlag = false;       // Bone/Morph: the track was flagged constant (MotionData::staticBones/staticMorphs)
 
     size_t Bytes() const {
         return sizeof(TrackState) + name.size() + bones.capacity() * sizeof(BoneKf) + morphs.capacity() * sizeof(MorphKf) +

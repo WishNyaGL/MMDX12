@@ -88,6 +88,13 @@ bool MenuItem(const char* id, const char* label, const char* icon = nullptr, con
 // Card hit area (screen rect a..b): an invisible item so hover / click / nav work like any widget. `label` names it
 // for automation (MCP ui_click): the card's visible title.
 bool CardItem(const char* id, ImVec2 a, ImVec2 b, bool* hovered, const char* label = nullptr);
+// After-Effects style stopwatch ("애니메이션 켜기"): icon button, accent when `animated`, p.ink3 otherwise.
+// Tooltip "애니메이션 켜기" / "애니메이션 끄기 (키프레임 모두 삭제)". True when clicked.
+bool Stopwatch(const char* id, bool animated, float sizePx = 22.0f);
+// Key navigation cluster ◀ ◆ ▶ for one track: returns -1 (jump to the previous key), 1 (next key), 2 (toggle the key
+// at the playhead) or 0 (nothing). `hasPrev` / `hasNext` disable the carets when there is no such key; the diamond is
+// filled accent when `keyedHere` (a key at the playhead).
+int KeyNav(const char* id, bool hasPrev, bool keyedHere, bool hasNext, float sizePx = 22.0f);
 void ProgressBar(ImDrawList* dl, ImVec2 a, ImVec2 b, float fraction);
 void Badge(ImDrawList* dl, ImVec2 pos, const char* text, ImU32 bg, ImU32 fg, ImVec2* outSize = nullptr);
 void Tooltip(const char* text);  // after an item, when hovered

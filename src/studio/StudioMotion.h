@@ -180,6 +180,11 @@ struct MotionData {
     std::vector<ShadowKf> shadow;
     std::vector<FocusKf> focus;                   // the studio's DoF focus track (never written to VMD)
     std::vector<AccessoryKf> accessory;           // a prop's accessory keys (never written to VMD)
+    // "Constant" bone / morph tracks (stopwatch off, inspector edits): VMD has no constant value, so a constant is a
+    // track with exactly ONE key at frame 0 flagged here. A flag is only meaningful while its track is a single
+    // frame-0 key; any other edit (add / move / paste / delete) makes the track animated again. See IsStaticBoneTrack /
+    // IsStaticMorphTrack. Never written to VMD (saved in the project only).
+    std::set<std::string> staticBones, staticMorphs;
 
     bool Empty() const {
         return bones.empty() && morphs.empty() && ik.empty() && visibility.empty() && camera.empty() && light.empty() &&
@@ -206,6 +211,20 @@ struct MotionData {
     // one VMD IK record listing the state of ALL IK tracks at that frame (last key at or before it; enabled before the first).
     VmdMotion ToVmd() const;
 };
+
+// Animated(bone/morph) = the track has keys and is not a "static" (constant) track: a single frame-0 key flagged in
+// MotionData::staticBones / staticMorphs. A flag whose track is not a single frame-0 key is ignored, so any timeline
+// edit (add / move / paste / delete) naturally makes the track animated again.
+inline bool IsStaticBoneTrack(const MotionData& m, const std::string& name) {
+    const auto it = m.bones.find(name);
+    return it != m.bones.end() && it->second.size() == 1 && it->second.front().frame == 0 &&
+           m.staticBones.count(name) != 0;
+}
+inline bool IsStaticMorphTrack(const MotionData& m, const std::string& name) {
+    const auto it = m.morphs.find(name);
+    return it != m.morphs.end() && it->second.size() == 1 && it->second.front().frame == 0 &&
+           m.staticMorphs.count(name) != 0;
+}
 
 // Interpolated values between keys, exactly as BoundMotion::Evaluate computes them (before the first key: the first
 // key, after the last: the last). The returned key's interpolation block is the next key's (or linear past the end).

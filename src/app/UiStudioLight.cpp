@@ -169,90 +169,19 @@ void App::DrawStudioLightOutliner() {
     using namespace ui;
     StudioDoc& d = *studio_;
     const Palette& p = P();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
     const float w = ImGui::GetContentRegionAvail().x;
     const float rowH = Dp(40.0f);
 
-    // Group header: "조명" with preset menu button and "+" add menu button
-    {
-        const ImVec2 a = ImGui::GetCursorScreenPos();
-        const float headH = Dp(32.0f);
-        const ImVec2 b(a.x + w, a.y + headH);
-        Text(dl, Font::Semibold, size::Caption, ImVec2(a.x + Dp(16.0f), a.y + Dp(8.0f)), p.ink3, Tr("조명"));
-
-        // Preset and add menus: labeled, an icon alone does not say what the menu holds
-        const float addW = 64.0f, presetW = 76.0f;
-        ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(12.0f + addW + 4.0f + presetW), a.y + Dp(1.0f)));
-        if (Button("##lightpresets", Tr("프리셋"), icon::Sliders, ButtonKind::Ghost, ImVec2(presetW, 30.0f)))
-            ImGui::OpenPopup("##lightpresetspopup");
-        Tooltip(Tr("조명 목록을 프리셋으로 바꾸기"));
-        ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(12.0f + addW), a.y + Dp(1.0f)));
-        if (Button("##addlight", Tr("추가"), icon::Plus, ButtonKind::Ghost, ImVec2(addW, 30.0f)))
-            ImGui::OpenPopup("##addlightpopup");
-        Tooltip(Tr("조명 추가: 점광원, 스팟, 면광원"));
-
-        if (ImGui::BeginPopup("##lightpresetspopup")) {
-            if (MenuItem("##pre_0", Tr("스튜디오"), icon::Sun)) {
-                studioLightPresetPending_ = 0;
-                ImGui::CloseCurrentPopup();
-            }
-            if (MenuItem("##pre_1", Tr("노을"), icon::Sun)) {
-                studioLightPresetPending_ = 1;
-                ImGui::CloseCurrentPopup();
-            }
-            if (MenuItem("##pre_2", Tr("콘서트"), icon::MicrophoneStage)) {
-                studioLightPresetPending_ = 2;
-                ImGui::CloseCurrentPopup();
-            }
-            if (MenuItem("##pre_3", Tr("밤"), icon::Moon)) {
-                studioLightPresetPending_ = 3;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-
-        if (ImGui::BeginPopup("##addlightpopup")) {
-            if (MenuItem("##add_pt", Tr("점광원"), icon::Lightbulb)) {
-                StudioAddLight(LightKind::Point);
-                ImGui::CloseCurrentPopup();
-            }
-            if (MenuItem("##add_sp", Tr("스팟"), icon::Aperture)) {
-                StudioAddLight(LightKind::Spot);
-                ImGui::CloseCurrentPopup();
-            }
-            if (MenuItem("##add_ar", Tr("면광원"), icon::Image)) {
-                StudioAddLight(LightKind::Area);
-                ImGui::CloseCurrentPopup();
-            }
-            bool hasSun = false, hasAmbient = false;
-            for (const auto& l : d.lights) {
-                if (l.kind == LightKind::Sun) hasSun = true;
-                if (l.kind == LightKind::Ambient) hasAmbient = true;
-            }
-            if (!hasSun) {
-                if (MenuItem("##add_sun", Tr("메인 조명"), icon::Sun)) {
-                    StudioAddLight(LightKind::Sun);
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            if (!hasAmbient) {
-                if (MenuItem("##add_amb", Tr("환경광"), icon::Globe)) {
-                    StudioAddLight(LightKind::Ambient);
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            ImGui::EndPopup();
-        }
-
-        ImGui::SetCursorScreenPos(ImVec2(a.x, b.y));
-        ImGui::Dummy(ImVec2(w, 0.0f));
-    }
-
     if (d.lights.empty()) {
-        const ImVec2 c = ImGui::GetCursorScreenPos();
-        Text(dl, Font::Regular, size::Caption, ImVec2(c.x + Dp(16.0f), c.y + Dp(4.0f)), p.ink3,
-             Tr("조명이 없어요. 추가 또는 프리셋으로 넣으세요."));
-        ImGui::Dummy(ImVec2(w, Dp(26.0f)));
+        ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x + Dp(16.0f), ImGui::GetCursorScreenPos().y + Dp(2.0f)));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w - Dp(32.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+        PushFont(Font::Regular, size::Caption);
+        ImGui::TextWrapped("%s", Tr("조명이 없어요. 추가 › 조명에서 넣으세요."));
+        PopFont();
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(w - Dp(16.0f), Dp(6.0f)));
     }
 
     // Light rows
@@ -448,7 +377,7 @@ void App::DrawStudioLightInspector(float w) {
         const int frame = d.Frame();
         LightKey* k = FindKey(light->keys, frame);
         const bool isKeyed = (k != nullptr);
-        const bool willKey = isKeyed || d.autoKey;
+        const bool willKey = isKeyed || !light->keys.empty() || d.autoKey;
 
         bool changed = row(label, [&] { return widget(); });
 
@@ -494,7 +423,7 @@ void App::DrawStudioLightInspector(float w) {
         return changed;
     };
 
-    // Header: Kind label
+    // Header: Kind label + the light's stopwatch (its keys hold all values) with the key diamond and ◀ ▶
     {
         const char* kindLabel = light->kind == LightKind::Sun ? Tr("태양") :
                                 light->kind == LightKind::Point ? Tr("점광원") :
@@ -502,6 +431,78 @@ void App::DrawStudioLightInspector(float w) {
                                 light->kind == LightKind::Area ? Tr("면광원") : Tr("환경광");
         Text(cdl, Font::Regular, size::Caption, ImGui::GetCursorScreenPos(), p.ink3, kindLabel);
         ImGui::Dummy(ImVec2(w, Dp(16.0f)));
+
+        // A VMD-linked sun's colour / direction follow the camera VMD: read-only exactly as today (no stopwatch).
+        const bool vmdLinkedSun = light->kind == LightKind::Sun && light->vmdLink && !d.camera.light.empty();
+        if (!vmdLinkedSun) {
+            const bool animated = !light->keys.empty();
+            const bool keyed = FindKey(light->keys, d.Frame()) != nullptr;
+            if (Stopwatch("##lightstopwatch", animated)) {
+                if (!animated) {
+                    // OFF → ON: key the current values at the playhead (one undo step)
+                    StudioBeginLightEdit(light->uid, true);
+                    LightKey k{d.Frame(), SampleLightValues(*light, d.Frame())};
+                    UpsertKey(light->keys, k);
+                    studioLightChanged_ = true;
+                    StudioEndLightEdit(light->uid);
+                    d.rowsKey = ~0ull;
+                } else {
+                    // ON → OFF: confirm modal; on confirm all keys are removed and the playhead value becomes the
+                    // constant (one undo step through the LightsCommand snapshot)
+                    studioStopwatchLabel_ = light->name;
+                    studioStopwatchOff_ = [this, &d, uid = light->uid] {
+                        if (SceneLight* l = d.FindLight(uid)) {
+                            std::vector<SceneLight> before = d.lights;
+                            l->v = SampleLightValues(*l, d.Frame());
+                            l->keys.clear();
+                            d.history.Push(std::make_unique<LightsCommand>(d, Tr("애니메이션 끄기"), before, d.lights));
+                            d.rowsKey = ~0ull;
+                        }
+                    };
+                }
+            }
+            if (animated) {
+                ImGui::SameLine(0.0f, 0.0f);
+                const auto jumpKey = [&](int dir) {
+                    int target = -1;
+                    if (dir < 0) {
+                        for (const LightKey& k : light->keys) { if (k.frame < d.Frame()) target = k.frame; else break; }
+                    } else {
+                        for (const LightKey& k : light->keys) { if (k.frame > d.Frame()) { target = k.frame; break; } }
+                    }
+                    if (target < 0) return;
+                    StudioSetPlaying(false);
+                    StudioSeek(target / (double)kMmdFps);
+                };
+                const auto toggleKey = [&] {
+                    StudioBeginLightEdit(light->uid, true);
+                    if (LightKey* k = FindKey(light->keys, d.Frame())) {
+                        EraseKey(light->keys, d.Frame());
+                    } else {
+                        UpsertKey(light->keys, LightKey{d.Frame(), SampleLightValues(*light, d.Frame())});
+                    }
+                    studioLightChanged_ = true;
+                    StudioEndLightEdit(light->uid);
+                    d.rowsKey = ~0ull;
+                };
+                const int nav = KeyNav("##lightkeynav",
+                                       std::any_of(light->keys.begin(), light->keys.end(),
+                                                   [f = d.Frame()](const LightKey& k) { return k.frame < f; }),
+                                       keyed,
+                                       std::any_of(light->keys.begin(), light->keys.end(),
+                                                   [f = d.Frame()](const LightKey& k) { return k.frame > f; }));
+                if (nav == -1) jumpKey(-1);
+                else if (nav == 1) jumpKey(1);
+                else if (nav == 2) toggleKey();
+            }
+            // say what the stopwatch does: the light's values animate (keys) or stay constant over the scene
+            ImGui::SameLine(0.0f, Dp(6.0f));
+            const ImVec2 lc = ImGui::GetCursorScreenPos();
+            Text(cdl, Font::Regular, size::Caption, ImVec2(lc.x, lc.y + Dp(4.0f)), animated ? p.ink2 : p.ink3,
+                 animated ? Tr("애니메이션 (키 사용)") : Tr("장면 전체에 같은 값"));
+            ImGui::Dummy(ImVec2(1.0f, Dp(22.0f)));
+            ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+        }
     }
 
     // Rename (undoable)

@@ -506,8 +506,12 @@ private:
     void DrawStudioTopBar(float x0, float y0, float x1, float y1);
     void DrawStudioOutliner(float x0, float y0, float x1, float y1);
     void StudioSelectWorld(uint32_t uid);              // 0 = no world selected
+    void StudioAddWorld(const std::string& packId);    // add an installed world pack as a world entity (undoable)
     void DrawStudioWorldPanel(float w);                // world inspector: placement + keyable params
     uint32_t studioSelectedWorld_ = 0;                 // selected world entity (0 = none)
+    bool studioOutlinerOpen_[3] = {true, true, true};  // outliner group folds: 장면 / 조명 / 월드 이펙트
+    bool studioKeyMenuRuler_ = false;                  // the timeline menu was opened on the ruler (range items only)
+    bool studioInspectorToKey_ = false;                // a timeline key click scrolls the inspector to the key fields
     std::vector<studio::StudioWorld> studioWorldBefore_;  // placement drag start (one undo step)
     bool studioWorldPlaceDragging_ = false;
     void DrawStudioInspector(float x0, float y0, float x1, float y1);
@@ -600,6 +604,7 @@ private:
     void DrawStudioLightOutliner();
     void DrawStudioLightInspector(float w);
     void DrawStudioLightPresetConfirm();
+    void DrawStudioStopwatchConfirm();  // "애니메이션 끄기" modal (pending while studioStopwatchOff_ is set)
     void StudioBeginLightEdit(uint32_t uid, bool keyEdit);
     void StudioEndLightEdit(uint32_t uid);
 
@@ -610,6 +615,7 @@ private:
     // --- pose editing (UiStudioPose.cpp): bone overlay, picking, gizmo, pose layer, morph panel, VPD, mirror
     studio::StudioModel* StudioPoseModel();          // the selected model (pose editable: any kind)
     void StudioSelectBone(int bone, bool toggle);    // viewport pick / bone row click: selection sync (-1 clears)
+    void StudioSelectMorph(int morph);               // morph slider / stopwatch: select the morph's timeline row and reveal it
     std::vector<studio::PoseBone> StudioCurrentPose(const studio::StudioModel& m) const;  // effective anim values
     void StudioSetPose(const char* undoName, const studio::PoseLayer& before);  // push the selected model's layer edit
     // keys for the edited bones/morphs (all: every listed bone). layerBefore: the layer an undo restores (auto-key)
@@ -727,7 +733,7 @@ private:
                            const char* idPrefix);
     void DrawStudioHelp();                            // shortcut overlay (? key / top bar button)
     bool StudioModal() const { return videoDialogOpen_ || studioHelpOpen_ || studioLeaveConfirm_ || studioLightPresetPending_ >= 0 ||
-                                       studioBakeDialogOpen_ || studioBakeRunning_; }
+                                       studioStopwatchOff_ || studioBakeDialogOpen_ || studioBakeRunning_; }
 
     // --- scripted UI input for tests (UiScript.cpp) and MCP
     void PumpUiScript();  // before ImGui::NewFrame: feeds the events due at framesInScene_
@@ -1352,7 +1358,8 @@ private:
     char studioRenameBuf_[128] = {};
     char studioAddFilter_[64] = {};
     bool studioThumbsShown_ = false;               // the add popup's thumbnail grid was drawn (pump thumbnails)
-    int studioAddPage_ = 0;                        // "+" popup page: 0 menu, 1 characters, 2 stages, 3 songs
+    int studioAddPage_ = 0;   // "+" popup page: 0 root (장면 › / 조명 › / 월드 이펙트 ›), 1 characters, 2 stages, 3 songs,
+                              // 4 장면 (캐릭터/스테이지/소품/MME/곡/음원/VMD), 5 조명, 6 조명 프리셋, 7 월드 이펙트
     uint32_t studioReplaceUid_ = 0;                // "+" popup in replace mode: the model whose file is swapped (0: add)
     bool studioOpenAdd_ = false;                   // the outliner opens the "+" popup next frame (model menu's replace)
     bool studioHelpOpen_ = false;                  // shortcut overlay
@@ -1393,6 +1400,9 @@ private:
     uint32_t studioLightEditingUid_ = 0;
     std::vector<studio::TrackState> studioLightKeyBefore_;
     std::vector<studio::SceneLight> studioLightBaseBefore_;
+    // stopwatch-off confirm modal (pending while the callback is set)
+    std::string studioStopwatchLabel_;
+    std::function<void()> studioStopwatchOff_;
 
     enum class LightDragPart { None = 0, PosGizmo, AimGizmo, SunRotate, ConeHandle, RangeHandle };
     LightDragPart studioLightDragPart_ = LightDragPart::None;

@@ -924,16 +924,26 @@ void App::DrawStudioAddMenu() {
         // replace mode (the model menu's "모델 바꾸기"): the library lists swap that model's file instead of adding
         const int replaceIdx = studioReplaceUid_ ? d.IndexOfUid(studioReplaceUid_) : -1;
         if (replaceIdx < 0) studioReplaceUid_ = 0;
-        const auto header = [&](const char* title) {
+        const bool replaceMode = studioReplaceUid_ != 0;
+        // list pages show a search field; the root / 장면 / 조명 / 프리셋 pages do not
+        const bool withSearch = studioAddPage_ == 1 || studioAddPage_ == 2 || studioAddPage_ == 3 || studioAddPage_ == 7;
+        const auto header = [&](const char* title, int backPage) {
             if (IconButton("##addback", icon::CaretLeft, Tr("뒤로"), false, 28.0f)) {
-                studioAddPage_ = 0;
+                if (replaceMode) {  // replace mode only enters the library pages directly: back closes
+                    ImGui::CloseCurrentPopup();
+                } else {
+                    studioAddPage_ = backPage;
+                }
                 studioReplaceUid_ = 0;
+                studioAddFilter_[0] = 0;
             }
             const ImVec2 c = ImGui::GetItemRectMin();
             Text(ImGui::GetWindowDrawList(), Font::Semibold, size::Small, ImVec2(c.x + Dp(36.0f), c.y + Dp(5.0f)), p.ink, title);
             Gap(6.0f);
-            SearchField("##addfilter", studioAddFilter_, sizeof(studioAddFilter_), Tr("검색"), bodyW);
-            Gap(6.0f);
+            if (withSearch) {
+                SearchField("##addfilter", studioAddFilter_, sizeof(studioAddFilter_), Tr("검색"), bodyW);
+                Gap(6.0f);
+            }
         };
         const std::string needle = ToLowerAscii(studioAddFilter_);
         const auto match = [&](const std::string& a, const std::string& b) {
@@ -941,7 +951,20 @@ void App::DrawStudioAddMenu() {
                    ToLowerAscii(b).find(needle) != std::string::npos;
         };
         if (studioAddPage_ == 0) {
-            SectionLabel(Tr("모델"));
+            if (MenuItemChip("##addroot_scene", Tr("장면"), icon::PersonSimple, "›")) {
+                studioAddPage_ = 4;
+                studioAddFilter_[0] = 0;
+            }
+            if (MenuItemChip("##addroot_light", Tr("조명"), icon::Lightbulb, "›")) {
+                studioAddPage_ = 5;
+                studioAddFilter_[0] = 0;
+            }
+            if (MenuItemChip("##addroot_world", Tr("월드 이펙트"), icon::Sparkle, "›")) {
+                studioAddPage_ = 7;
+                studioAddFilter_[0] = 0;
+            }
+        } else if (studioAddPage_ == 4) {
+            header(Tr("장면 추가"), 0);
             if (MenuItemChip("##addch", Tr("캐릭터"), icon::PersonSimple, "›")) { studioAddPage_ = 1; studioAddFilter_[0] = 0; }
             if (MenuItemChip("##addst", Tr("스테이지"), icon::Mountains, "›")) { studioAddPage_ = 2; studioAddFilter_[0] = 0; }
             if (MenuItemChip("##addprop", Tr("소품 (파일에서)"), icon::Cube)) {
@@ -953,7 +976,6 @@ void App::DrawStudioAddMenu() {
                 StudioAddMmeObjectDialog();
             }
             MenuSeparator();
-            SectionLabel(Tr("모션 · 음원"));
             if (MenuItemChip("##addsong", Tr("라이브러리 곡 적용"), icon::Music, "›")) { studioAddPage_ = 3; studioAddFilter_[0] = 0; }
             if (MenuItemChip("##addaudio", d.hasAudio ? Tr("음원 바꾸기 (파일)") : Tr("음원 (파일)"), icon::MusicNotes)) {
                 ImGui::CloseCurrentPopup();
@@ -965,12 +987,88 @@ void App::DrawStudioAddMenu() {
                 ImGui::CloseCurrentPopup();
                 StudioImportVmd();
             }
+        } else if (studioAddPage_ == 5) {
+            header(Tr("조명 추가"), 0);
+            if (MenuItemChip("##addpreset", Tr("조명 프리셋 불러오기"), icon::Sliders, "›")) {
+                studioAddPage_ = 6;
+                studioAddFilter_[0] = 0;
+            }
+            MenuSeparator();
+            if (MenuItemChip("##add_pt", Tr("점광원"), icon::Lightbulb)) {
+                ImGui::CloseCurrentPopup();
+                StudioAddLight(LightKind::Point);
+            }
+            if (MenuItemChip("##add_sp", Tr("스팟"), icon::Aperture)) {
+                ImGui::CloseCurrentPopup();
+                StudioAddLight(LightKind::Spot);
+            }
+            if (MenuItemChip("##add_ar", Tr("면광원"), icon::Image)) {
+                ImGui::CloseCurrentPopup();
+                StudioAddLight(LightKind::Area);
+            }
+            bool hasSun = false, hasAmbient = false;
+            for (const auto& l : d.lights) {
+                if (l.kind == LightKind::Sun) hasSun = true;
+                if (l.kind == LightKind::Ambient) hasAmbient = true;
+            }
+            if (!hasSun) {
+                if (MenuItemChip("##add_sun", Tr("메인 조명"), icon::Sun)) {
+                    ImGui::CloseCurrentPopup();
+                    StudioAddLight(LightKind::Sun);
+                }
+            }
+            if (!hasAmbient) {
+                if (MenuItemChip("##add_amb", Tr("환경광"), icon::Globe)) {
+                    ImGui::CloseCurrentPopup();
+                    StudioAddLight(LightKind::Ambient);
+                }
+            }
+        } else if (studioAddPage_ == 6) {
+            header(Tr("조명 프리셋 불러오기"), 5);
+            if (MenuItemChip("##pre_0", Tr("스튜디오"), icon::Sun)) {
+                studioLightPresetPending_ = 0;
+                ImGui::CloseCurrentPopup();
+            }
+            if (MenuItemChip("##pre_1", Tr("노을"), icon::Sun)) {
+                studioLightPresetPending_ = 1;
+                ImGui::CloseCurrentPopup();
+            }
+            if (MenuItemChip("##pre_2", Tr("콘서트"), icon::MicrophoneStage)) {
+                studioLightPresetPending_ = 2;
+                ImGui::CloseCurrentPopup();
+            }
+            if (MenuItemChip("##pre_3", Tr("밤"), icon::Moon)) {
+                studioLightPresetPending_ = 3;
+                ImGui::CloseCurrentPopup();
+            }
+        } else if (studioAddPage_ == 7) {
+            header(Tr("월드 이펙트 추가"), 0);
+            int shown = 0;
+            for (const ShaderPack& pk : ShaderPacks().Packs()) {
+                if (pk.type != PackType::World || !PackUsable(&pk)) continue;
+                const std::string name = pk.name.Get(PackLanguage());
+                if (!match(name, pk.id)) continue;
+                ++shown;
+                ImGui::PushID(pk.id.c_str());
+                if (MenuItemChip("##worldadd", name.c_str(), icon::Sparkle)) {
+                    ImGui::CloseCurrentPopup();
+                    StudioAddWorld(pk.id);
+                }
+                ImGui::PopID();
+            }
+            if (shown == 0) {
+                PushFont(Font::Regular, size::Small);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+                ImGui::TextUnformatted(needle.empty() ? Tr("설치된 월드 이펙트가 없습니다") : Tr("검색 결과가 없습니다"));
+                ImGui::PopStyleColor();
+                PopFont();
+            }
         } else if (studioAddPage_ == 1 || studioAddPage_ == 2) {
             const bool chars = studioAddPage_ == 1;
             const uint32_t replaceUid = studioReplaceUid_;
             const std::string title = replaceUid ? std::string(Tr("모델 바꾸기 · ")) + d.models[(size_t)replaceIdx]->name
                                                  : std::string(chars ? Tr("캐릭터 추가") : Tr("스테이지 추가"));
-            header(title.c_str());
+            header(title.c_str(), 4);
             if (replaceUid) {
                 PushFont(Font::Regular, size::Caption);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
@@ -1064,7 +1162,7 @@ void App::DrawStudioAddMenu() {
                 StudioAddModelDialog(chars ? ModelKind::Character : ModelKind::Stage, replaceUid);
             }
         } else {
-            header(Tr("라이브러리 곡 적용"));
+            header(Tr("라이브러리 곡 적용"), 4);
             const StudioModel* sel = d.Selected();
             const std::string hint = sel && sel->kind == ModelKind::Character
                                          ? std::string(Tr("댄스 → ")) + sel->name + Tr(", 카메라와 음원도 함께")
@@ -1155,7 +1253,7 @@ void App::DrawStudioModelMenu(int index) {
                 }
             }
             Tooltip(Tr("모션 키 · 배치 · 셰이더는 그대로 두고 모델만 바꿔요"));
-            if (!m.IsStage()) {
+            {   // stages take motions too (moving stage parts: keyed stages are re-posed every frame)
                 if (MenuItemChip("##mimport", Tr("모션 VMD 불러오기…"), icon::DownloadSimple)) {
                     ImGui::CloseCurrentPopup();
                     StudioSelectModel(index);

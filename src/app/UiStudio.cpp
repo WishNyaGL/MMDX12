@@ -1768,7 +1768,15 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
                 if (d.activeBone < 0) d.activeBone = (int)RowIndexOf(row);
             }
         }
-        if (!ev.selectKeys.empty()) d.inspectorTab = 0;
+        // a key click brings its properties up in the inspector's "키" tab
+        if (!ev.selectKeys.empty() && StudioPoseModel()) d.inspectorTab = 0;
+        if (!ev.selectKeys.empty()) studioInspectorToKey_ = true;  // scroll the inspector to the key's fields
+        // a plain click on exactly one bone key also makes that bone the active bone (the gizmo follows)
+        if (ev.selectMode == SelectMode::Replace && ev.selectKeys.size() == 1
+            && RowKindOf(ev.selectKeys[0].row) == RowKind::Bone) {
+            d.activeBone = (int)RowIndexOf(ev.selectKeys[0].row);
+            d.selectedBones = {d.activeBone};
+        }
         d.rowsKey = ~0ull;
     }
     if (ev.moveKeys && !d.selection.empty()) {
@@ -2301,7 +2309,7 @@ void App::DrawStudio() {
         DrawStudioViewport(x0, y0, x1, y1);
     });
     if (studio_.get() != &d) return;
-    panel(Tr("장면"), "studio_outliner", true, true, [&](float x0, float y0, float x1, float y1) { DrawStudioOutliner(x0, y0, x1, y1); });
+    panel(Tr("하이어라키"), "studio_outliner", true, true, [&](float x0, float y0, float x1, float y1) { DrawStudioOutliner(x0, y0, x1, y1); });
     panel(Tr("속성"), "studio_inspector", true, true, [&](float x0, float y0, float x1, float y1) { DrawStudioInspector(x0, y0, x1, y1); });
     // effects: a tab next to the properties (layouts saved before it existed get it docked there too)
     if (ImGuiWindow* insp = ImGui::FindWindowByName("###studio_inspector"); insp && insp->DockId)
@@ -2321,6 +2329,7 @@ void App::DrawStudio() {
     if (studio_.get() != &d) return;  // left (or replaced) from the prompt
     DrawStudioHelp();
     DrawStudioLightPresetConfirm();
+    DrawStudioStopwatchConfirm();   // stopwatch off: "키프레임을 모두 지웁니다"
     DrawStudioBakeDialog();    // P2.2: the physics bake options / progress modal
     DrawVideoRenderDialog();   // the render dialog (top bar render menu); starting it leaves for Screen::Offline
     if (screen_ != Screen::Studio) return;
@@ -2473,11 +2482,11 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), p.surface);
     dl->AddLine(ImVec2(x1 - 0.5f, y0), ImVec2(x1 - 0.5f, y1), p.line);
-    Text(dl, Font::Semibold, size::Caption, ImVec2(x0 + Dp(16.0f), y0 + Dp(14.0f)), p.ink3, Tr("장면"));
-    // "+": add a character / stage / prop / audio / song (library or file)
+    Text(dl, Font::Semibold, size::Caption, ImVec2(x0 + Dp(16.0f), y0 + Dp(14.0f)), p.ink3, Tr("하이어라키"));
+    // "+": add a scene item / light / world effect (one drill-down popup)
     ImGui::SetCursorScreenPos(ImVec2(x1 - Dp(12.0f + 64.0f), y0 + Dp(5.0f)));
     const bool addClicked = Button("##addmodel", Tr("추가"), icon::Plus, ButtonKind::Ghost, ImVec2(64.0f, 30.0f));
-    Tooltip(Tr("캐릭터, 스테이지, 소품, 음원, 곡 추가"));
+    Tooltip(Tr("장면, 조명, 월드 이펙트 추가"));
     if (addClicked) {
         studioAddPage_ = 0;
         studioReplaceUid_ = 0;
@@ -2550,58 +2559,125 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
     char sub[160];
     std::snprintf(sub, sizeof(sub), Tr("키 %d개"),
                   (int)(d.camera.camera.size() + d.camera.light.size() + d.camera.shadow.size()));
-    row(-1, icon::VideoCamera, Tr("카메라 VMD"), sub, nullptr);
-    DrawStudioLightOutliner();
-    // world entities (installed world packs, keyable like effects)
-    {
-        const float w = ImGui::GetContentRegionAvail().x;
-        {
-            const ImVec2 a = ImGui::GetCursorScreenPos();
-            const float headH = Dp(32.0f);
-            const ImVec2 b(a.x + w, a.y + headH);
-            Text(dl, Font::Semibold, size::Caption, ImVec2(a.x + Dp(16.0f), a.y + Dp(8.0f)), p.ink3, Tr("월드"));
-            ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(12.0f + 64.0f), a.y + Dp(1.0f)));
-            if (Button("##worldadd", Tr("추가"), icon::Plus, ButtonKind::Ghost, ImVec2(64.0f, 30.0f)))
-                ImGui::OpenPopup("##worldaddpopup");
-            Tooltip(Tr("월드 이펙트 추가"));
-            if (ImGui::BeginPopup("##worldaddpopup")) {
-                const std::string lang = PackLanguage();
-                bool any = false;
-                for (const ShaderPack& pk : ShaderPacks().Packs()) {
-                    if (pk.type != PackType::World || !PackUsable(&pk)) continue;
-                    any = true;
-                    const std::string rid = "##worldadd_" + pk.id;
-                    if (MenuItem(rid.c_str(), pk.name.Get(lang).c_str())) {
-                        std::vector<StudioWorld> before = d.worlds;
-                        StudioWorld nw;
-                        nw.uid = d.nextWorldUid++;
-                        nw.name = pk.name.Get(lang);
-                        nw.fx.entry.pack = pk.id;
-                        nw.fx.entry.enabled = true;
-                        d.worlds.push_back(std::move(nw));
-                        d.history.Push(std::make_unique<WorldsCommand>(d, Tr("월드 추가"), before, d.worlds));
-                        ++d.projectVersion;
-                        d.rowsKey = ~0ull;
-                        studioSelectedWorld_ = d.worlds.back().uid;
-                        StudioSelectWorld(studioSelectedWorld_);
-                        ImGui::CloseCurrentPopup();
-                    }
+
+    // Collapsible group header: caret + label + count, full-width clickable (the fold lives in studioOutlinerOpen_)
+    int groupCount[3] = {0, 0, 0};
+    groupCount[0] = (int)d.models.size() + 1 + (d.hasAudio ? 1 : 0);  // models + camera row + audio row
+    groupCount[1] = (int)d.lights.size();
+    groupCount[2] = (int)d.worlds.size();
+    const auto group = [&](int gi, const char* id, const char* label) {
+        char count[32];
+        std::snprintf(count, sizeof(count), "%d", groupCount[gi]);
+        const float gw = ImGui::GetContentRegionAvail().x;
+        const ImVec2 a = ImGui::GetCursorScreenPos();
+        const float headH = Dp(32.0f);
+        const ImVec2 b(a.x + gw, a.y + headH);
+        ImGui::InvisibleButton(id, ImVec2(gw, headH));
+        const bool hovered = ImGui::IsItemHovered();
+        if (hovered) ImGui::GetWindowDrawList()->AddRectFilled(a, b, WithAlpha(p.ink, 0.05f), Dp(8.0f));
+        if (ImGui::IsItemClicked()) studioOutlinerOpen_[gi] = !studioOutlinerOpen_[gi];
+        Icon(ImGui::GetWindowDrawList(), studioOutlinerOpen_[gi] ? icon::CaretDown : icon::CaretRight, 14.0f,
+             ImVec2(a.x + Dp(20.0f), a.y + headH * 0.5f), p.ink3);
+        Text(ImGui::GetWindowDrawList(), Font::Semibold, size::Caption, ImVec2(a.x + Dp(36.0f), a.y + Dp(8.0f)), p.ink3, label);
+        Text(ImGui::GetWindowDrawList(), Font::Regular, size::Caption,
+             ImVec2(a.x + Dp(42.0f) + TextSize(Font::Semibold, size::Caption, label).x, a.y + Dp(8.0f)), WithAlpha(p.ink3, 0.7f), count);
+        ImGui::SetCursorScreenPos(ImVec2(a.x, b.y));
+        ImGui::Dummy(ImVec2(gw, 0.0f));
+    };
+
+    // --- 장면 group: camera, characters, props, stages, audio, loads, empty hint ---
+    group(0, "##grp_scene", Tr("장면"));
+    if (studioOutlinerOpen_[0]) {
+        row(-1, icon::VideoCamera, Tr("카메라 VMD"), sub, nullptr);
+        // characters first (they are what gets animated), then props, then stage parts
+        for (int pass = 0; pass < 3; ++pass) {
+            const ModelKind kind = pass == 0 ? ModelKind::Character : pass == 1 ? ModelKind::Prop : ModelKind::Stage;
+            for (int i = 0; i < (int)d.models.size(); ++i) {
+                StudioModel& m = *d.models[i];
+                if (m.kind != kind) continue;
+                size_t keys = 0;
+                for (const auto& [n, k] : m.motion.bones) keys += k.size();
+                for (const auto& [n, k] : m.motion.morphs) keys += k.size();
+                if (m.IsStage()) {
+                    std::snprintf(sub, sizeof(sub), "%s", Tr("스테이지"));
+                } else if (m.IsProp()) {
+                    const int pi = m.attach.parent >= 0 ? d.IndexOfUid((uint32_t)m.attach.parent) : -1;
+                    if (pi >= 0)
+                        std::snprintf(sub, sizeof(sub), "%s · %s%s%s", Tr("소품"), d.models[pi]->name.c_str(),
+                                      m.attach.bone.empty() ? "" : " / ", m.attach.bone.c_str());
+                    else
+                        std::snprintf(sub, sizeof(sub), "%s", Tr("소품 · 월드"));
+                } else {
+                    std::snprintf(sub, sizeof(sub), Tr("키 %d개"), (int)keys);
                 }
-                if (!any) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
-                    ImGui::TextUnformatted(Tr("설치된 월드 이펙트가 없습니다"));
-                    ImGui::PopStyleColor();
-                }
-                ImGui::EndPopup();
+                const char* glyph = m.IsStage() ? icon::Mountains : m.IsProp() ? icon::Cube : icon::PersonSimple;
+                row(i, glyph, m.name.c_str(), sub, &m.visible);
             }
-            ImGui::SetCursorScreenPos(ImVec2(a.x, b.y));
-            ImGui::Dummy(ImVec2(w, 0.0f));
         }
+        // the audio track last (offset / replace / remove from its menu)
+        if (d.hasAudio) {
+            const std::string name = PathToUtf8(d.audioPath.filename());
+            if (std::fabs(d.audioOffset) > 1e-4) std::snprintf(sub, sizeof(sub), Tr("음원 · 오프셋 %+.2f초"), d.audioOffset);
+            else std::snprintf(sub, sizeof(sub), "%s", Tr("음원"));
+            row(-2, icon::MusicNotes, name.c_str(), sub, nullptr);
+        }
+        // loads in progress
+        for (const auto& job : studioJobs_) {
+            ImDrawList* cdl = ImGui::GetWindowDrawList();
+            const ImVec2 a = ImGui::GetCursorScreenPos();
+            const float w = ImGui::GetContentRegionAvail().x;
+            const float t = (float)ImGui::GetTime();
+            // spinning notch
+            const ImVec2 c(a.x + Dp(26.0f), a.y + rowH * 0.5f);
+            cdl->PathArcTo(c, Dp(6.5f), t * 6.0f, t * 6.0f + 4.2f, 16);
+            cdl->PathStroke(p.accent, 0, Dp(2.0f));
+            TextEllipsis(cdl, Font::Semibold, size::Small, ImVec2(a.x + Dp(44.0f), a.y + Dp(4.0f)), a.x + w - Dp(14.0f), p.ink2,
+                         job->label.c_str());
+            ProgressBar(cdl, ImVec2(a.x + Dp(44.0f), a.y + Dp(26.0f)), ImVec2(a.x + w - Dp(16.0f), a.y + Dp(30.0f)),
+                        job->progress.fraction.load(std::memory_order_relaxed));
+            ImGui::Dummy(ImVec2(w, rowH));
+        }
+        // empty project: say what to do next
+        if (d.models.empty() && studioJobs_.empty()) {
+            const float w = ImGui::GetContentRegionAvail().x;
+            const ImVec2 a(ImGui::GetCursorScreenPos().x + Dp(16.0f), ImGui::GetCursorScreenPos().y + Dp(14.0f));
+            ImDrawList* cdl = ImGui::GetWindowDrawList();
+            Text(cdl, Font::Semibold, size::Small, a, p.ink2, Tr("모델이 없어요"));
+            ImGui::SetCursorScreenPos(ImVec2(a.x, a.y + Dp(24.0f)));
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w - Dp(32.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+            PushFont(Font::Regular, size::Caption);
+            ImGui::TextWrapped("%s", Tr("캐릭터, 스테이지, 소품, 음원은 추가 › 장면에서 라이브러리나 파일로 넣어요."));
+            PopFont();
+            ImGui::PopStyleColor();
+            ImGui::PopTextWrapPos();
+            ImGui::SetCursorScreenPos(ImVec2(a.x, ImGui::GetCursorScreenPos().y + Dp(10.0f)));
+            if (Button("##emptyadd", Tr("캐릭터 추가"), icon::Plus, ButtonKind::Secondary, ImVec2((w - Dp(32.0f)) / Dpi(), 36.0f))) {
+                openAdd = true;
+                studioAddPage_ = 1;
+                studioReplaceUid_ = 0;
+            }
+        }
+    }
+
+    // --- 조명 group: the light rows (the add menu's 조명 page adds / applies presets) ---
+    group(1, "##grp_light", Tr("조명"));
+    if (studioOutlinerOpen_[1]) DrawStudioLightOutliner();
+
+    // --- 월드 이펙트 group: world entity rows (installed world packs, keyable like effects) ---
+    group(2, "##grp_world", Tr("월드 이펙트"));
+    if (studioOutlinerOpen_[2]) {
+        const float w = ImGui::GetContentRegionAvail().x;
         if (d.worlds.empty()) {
-            const ImVec2 c = ImGui::GetCursorScreenPos();
-            Text(dl, Font::Regular, size::Caption, ImVec2(c.x + Dp(16.0f), c.y + Dp(4.0f)), p.ink3,
-                 Tr("월드 이펙트가 없어요. 추가로 설치된 월드를 넣으세요."));
-            ImGui::Dummy(ImVec2(w, Dp(26.0f)));
+            ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x + Dp(16.0f), ImGui::GetCursorScreenPos().y + Dp(2.0f)));
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w - Dp(32.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+            PushFont(Font::Regular, size::Caption);
+            ImGui::TextWrapped("%s", Tr("월드 이펙트가 없어요. 추가 › 월드 이펙트에서 넣으세요."));
+            PopFont();
+            ImGui::PopStyleColor();
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(w - Dp(16.0f), Dp(6.0f)));
         }
         uint32_t removeWorld = 0;
         for (size_t i = 0; i < d.worlds.size(); ++i) {
@@ -2662,75 +2738,6 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
             d.rowsKey = ~0ull;
         }
     }
-    // characters first (they are what gets animated), then props, then stage parts
-    for (int pass = 0; pass < 3; ++pass) {
-        const ModelKind kind = pass == 0 ? ModelKind::Character : pass == 1 ? ModelKind::Prop : ModelKind::Stage;
-        for (int i = 0; i < (int)d.models.size(); ++i) {
-            StudioModel& m = *d.models[i];
-            if (m.kind != kind) continue;
-            size_t keys = 0;
-            for (const auto& [n, k] : m.motion.bones) keys += k.size();
-            for (const auto& [n, k] : m.motion.morphs) keys += k.size();
-            if (m.IsStage()) {
-                std::snprintf(sub, sizeof(sub), "%s", Tr("스테이지"));
-            } else if (m.IsProp()) {
-                const int pi = m.attach.parent >= 0 ? d.IndexOfUid((uint32_t)m.attach.parent) : -1;
-                if (pi >= 0)
-                    std::snprintf(sub, sizeof(sub), "%s · %s%s%s", Tr("소품"), d.models[pi]->name.c_str(),
-                                  m.attach.bone.empty() ? "" : " / ", m.attach.bone.c_str());
-                else
-                    std::snprintf(sub, sizeof(sub), "%s", Tr("소품 · 월드"));
-            } else {
-                std::snprintf(sub, sizeof(sub), Tr("키 %d개"), (int)keys);
-            }
-            const char* glyph = m.IsStage() ? icon::Mountains : m.IsProp() ? icon::Cube : icon::PersonSimple;
-            row(i, glyph, m.name.c_str(), sub, &m.visible);
-        }
-    }
-    // the audio track last (offset / replace / remove from its menu)
-    if (d.hasAudio) {
-        const std::string name = PathToUtf8(d.audioPath.filename());
-        if (std::fabs(d.audioOffset) > 1e-4) std::snprintf(sub, sizeof(sub), Tr("음원 · 오프셋 %+.2f초"), d.audioOffset);
-        else std::snprintf(sub, sizeof(sub), "%s", Tr("음원"));
-        row(-2, icon::MusicNotes, name.c_str(), sub, nullptr);
-    }
-    // loads in progress
-    for (const auto& job : studioJobs_) {
-        ImDrawList* cdl = ImGui::GetWindowDrawList();
-        const ImVec2 a = ImGui::GetCursorScreenPos();
-        const float w = ImGui::GetContentRegionAvail().x;
-        const float t = (float)ImGui::GetTime();
-        // spinning notch
-        const ImVec2 c(a.x + Dp(26.0f), a.y + rowH * 0.5f);
-        cdl->PathArcTo(c, Dp(6.5f), t * 6.0f, t * 6.0f + 4.2f, 16);
-        cdl->PathStroke(p.accent, 0, Dp(2.0f));
-        TextEllipsis(cdl, Font::Semibold, size::Small, ImVec2(a.x + Dp(44.0f), a.y + Dp(4.0f)), a.x + w - Dp(14.0f), p.ink2,
-                     job->label.c_str());
-        ProgressBar(cdl, ImVec2(a.x + Dp(44.0f), a.y + Dp(26.0f)), ImVec2(a.x + w - Dp(16.0f), a.y + Dp(30.0f)),
-                    job->progress.fraction.load(std::memory_order_relaxed));
-        ImGui::Dummy(ImVec2(w, rowH));
-    }
-    // empty project: say what to do next
-    if (d.models.empty() && studioJobs_.empty()) {
-        const float w = ImGui::GetContentRegionAvail().x;
-        const ImVec2 a(ImGui::GetCursorScreenPos().x + Dp(16.0f), ImGui::GetCursorScreenPos().y + Dp(14.0f));
-        ImDrawList* cdl = ImGui::GetWindowDrawList();
-        Text(cdl, Font::Semibold, size::Small, a, p.ink2, Tr("모델이 없어요"));
-        ImGui::SetCursorScreenPos(ImVec2(a.x, a.y + Dp(24.0f)));
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w - Dp(32.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
-        PushFont(Font::Regular, size::Caption);
-        ImGui::TextWrapped("%s", Tr("캐릭터, 스테이지, 소품, 음원은 ＋ 추가 버튼으로 라이브러리나 파일에서 추가해요."));
-        PopFont();
-        ImGui::PopStyleColor();
-        ImGui::PopTextWrapPos();
-        ImGui::SetCursorScreenPos(ImVec2(a.x, ImGui::GetCursorScreenPos().y + Dp(10.0f)));
-        if (Button("##emptyadd", Tr("캐릭터 추가"), icon::Plus, ButtonKind::Secondary, ImVec2((w - Dp(32.0f)) / Dpi(), 36.0f))) {
-            openAdd = true;
-            studioAddPage_ = 1;
-            studioReplaceUid_ = 0;
-        }
-    }
     if (menuFor != -100) ImGui::OpenPopup("##modelmenu");
     static int menuModel = -1;  // the row whose menu is open (one popup at a time)
     if (menuFor != -100) menuModel = menuFor;
@@ -2743,6 +2750,25 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
     }
     ImGui::SetNextWindowPos(ImVec2(x1 - Dp(12.0f + 28.0f), y0 + Dp(38.0f)), ImGuiCond_Appearing);
     DrawStudioAddMenu();
+}
+
+void App::StudioAddWorld(const std::string& packId) {
+    StudioDoc& d = *studio_;
+    const ShaderPack* pk = ShaderPacks().Find(packId);
+    if (!pk) return;
+    const std::string lang = PackLanguage();
+    std::vector<StudioWorld> before = d.worlds;
+    StudioWorld nw;
+    nw.uid = d.nextWorldUid++;
+    nw.name = pk->name.Get(lang);
+    nw.fx.entry.pack = pk->id;
+    nw.fx.entry.enabled = true;
+    d.worlds.push_back(std::move(nw));
+    d.history.Push(std::make_unique<WorldsCommand>(d, Tr("월드 추가"), before, d.worlds));
+    ++d.projectVersion;
+    d.rowsKey = ~0ull;
+    studioSelectedWorld_ = d.worlds.back().uid;
+    StudioSelectWorld(studioSelectedWorld_);
 }
 
 void App::StudioSelectWorld(uint32_t uid) {
@@ -2810,6 +2836,25 @@ void App::DrawStudioWorldPanel(float w) {
             ++d.projectVersion;
         }
     }
+}
+
+// Bone-key Euler degrees, same convention as the read-only display in DrawStudioInspector (pitch = asin(-m._32),
+// yaw = atan2(m._31, m._33), roll = atan2(m._12, m._22) of XMMatrixRotationQuaternion); verified round trip with
+// XMQuaternionRotationRollPitchYaw (max error ~2e-5 over random quaternions).
+static DirectX::XMFLOAT3 StudioKeyEulerDeg(const DirectX::XMFLOAT4& q) {
+    const DirectX::XMMATRIX r = DirectX::XMMatrixRotationQuaternion(DirectX::XMLoadFloat4(&q));
+    DirectX::XMFLOAT4X4 m;
+    DirectX::XMStoreFloat4x4(&m, r);
+    return {DirectX::XMConvertToDegrees(std::asin(std::clamp(-m._32, -1.0f, 1.0f))),
+            DirectX::XMConvertToDegrees(std::atan2(m._31, m._33)),
+            DirectX::XMConvertToDegrees(std::atan2(m._12, m._22)) + 0.0f};
+}
+static DirectX::XMFLOAT4 StudioKeyQuatFromEulerDeg(const DirectX::XMFLOAT3& e) {
+    const DirectX::XMVECTOR q = DirectX::XMQuaternionRotationRollPitchYaw(DirectX::XMConvertToRadians(e.x),
+        DirectX::XMConvertToRadians(e.y), DirectX::XMConvertToRadians(e.z));
+    DirectX::XMFLOAT4 out;
+    DirectX::XMStoreFloat4(&out, DirectX::XMQuaternionNormalize(q));
+    return out;
 }
 
 void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
@@ -2931,6 +2976,10 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
     char buf[128];
     std::snprintf(buf, sizeof(buf), Tr("선택한 키 %d개"), (int)d.selection.size());
     {
+        if (studioInspectorToKey_) {  // a timeline key click: bring its fields up (the model panels sit above them)
+            ImGui::SetScrollHereY(0.0f);
+            studioInspectorToKey_ = false;
+        }
         const ImVec2 c = ImGui::GetCursorScreenPos();
         Text(cdl, Font::Semibold, size::Small, c, p.ink2, buf);
         ImGui::Dummy(ImVec2(w, Dp(26.0f)));
@@ -2957,27 +3006,88 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
         ImGui::EndChild();
         return;
     }
-    if (kind == RowKind::SceneLight) {  // light keys have no curve editor; their values are shown, not edited, here
-        const LightKey* k = sceneLight ? FindKey(sceneLight->keys, first->second) : nullptr;
+    if (kind == RowKind::SceneLight) {  // light keys: their values are editable here (one key at a time)
+        SceneLight* light = sceneLight ? const_cast<SceneLight*>(sceneLight) : nullptr;
+        LightKey* k = light ? FindKey(light->keys, first->second) : nullptr;
         if (k) {
-            const LightValues& v = k->v;
+            LightValues& v = k->v;
+            const auto beginLightKeyEdit = [&] {
+                if (studioKeyEdit_) return;
+                studioKeyBefore_ = {CaptureTrack(d, -1, RowKind::SceneLight, LightTrackName(light->uid))};
+                studioKeyEdit_ = true;
+                studioKeyChanged_ = false;
+            };
+            bool colorRow = false;  // the color field reports its own activation (its popup outlives the swatch item)
+            const auto row = [&](const char* lbl, auto&& widget) {
+                const ImVec2 c = ImGui::GetCursorScreenPos();
+                Text(cdl, Font::Regular, size::Small, ImVec2(c.x, c.y + Dp(5.0f)), p.ink3, lbl);
+                ImGui::SetCursorScreenPos(ImVec2(c.x + Dp(64.0f), c.y));
+                ImGui::SetNextItemWidth(w - Dp(64.0f));
+                PushFont(Font::Regular, size::Small);
+                bool ch = widget();
+                PopFont();
+                if (!colorRow) {  // one undo step per drag
+                    if (ImGui::IsItemActivated()) beginLightKeyEdit();
+                    if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
+                }
+                ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+                return ch;
+            };
+            bool changed = false, colorEnded = false;
             if (sceneLight->kind == LightKind::Sun) {
-                std::snprintf(buf, sizeof(buf), "%.2f, %.2f, %.2f", v.direction.x, v.direction.y, v.direction.z);
-                line(Tr("방향"), buf);
+                float dir[3] = {v.direction.x, v.direction.y, v.direction.z};
+                if (row(Tr("방향"), [&] { return ImGui::DragFloat3("##skeydir", dir, 0.01f, -1.0f, 1.0f, "%.2f"); })) {
+                    beginLightKeyEdit();
+                    const float len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+                    if (len > 1e-6f) { v.direction = {dir[0] / len, dir[1] / len, dir[2] / len}; changed = true; }
+                }
             } else {
-                std::snprintf(buf, sizeof(buf), "%.1f, %.1f, %.1f", v.position.x, v.position.y, v.position.z);
-                line(Tr("위치"), buf);
+                float pos[3] = {v.position.x, v.position.y, v.position.z};
+                if (row(Tr("위치"), [&] { return ImGui::DragFloat3("##skeypos", pos, 0.02f, 0.0f, 0.0f, "%.2f"); })) {
+                    beginLightKeyEdit();
+                    v.position = {pos[0], pos[1], pos[2]};
+                    changed = true;
+                }
             }
-            std::snprintf(buf, sizeof(buf), "%.2f, %.2f, %.2f", v.color.x, v.color.y, v.color.z);
-            line(Tr("색"), buf);
-            std::snprintf(buf, sizeof(buf), "%.2f", v.intensity);
-            line(Tr("강도"), buf);
+            {
+                float col[3] = {v.color.x, v.color.y, v.color.z};
+                bool activated = false, deactivated = false;
+                colorRow = true;
+                const bool colChanged = row(Tr("색"), [&] { return ui::ColorField("##skeycol", col, &activated, &deactivated); });
+                colorRow = false;
+                if (colChanged) {
+                    beginLightKeyEdit();
+                    v.color = {col[0], col[1], col[2]};
+                    changed = true;
+                }
+                if (activated) beginLightKeyEdit();
+                colorEnded = deactivated;
+            }
+            {
+                float inten = v.intensity;
+                if (row(Tr("강도"), [&] { return ImGui::DragFloat("##skeyinten", &inten, 0.02f, 0.0f, FLT_MAX, "%.2f"); })) {
+                    beginLightKeyEdit();
+                    v.intensity = std::max(0.0f, inten);
+                    changed = true;
+                }
+            }
             if (sceneLight->kind == LightKind::Spot) {
-                std::snprintf(buf, sizeof(buf), "%.1f, %.1f, %.1f", v.aim.x, v.aim.y, v.aim.z);
-                line(Tr("조준"), buf);
-                std::snprintf(buf, sizeof(buf), "%.1f°", DirectX::XMConvertToDegrees(v.coneOuter));
-                line(Tr("원뿔 각도"), buf);
+                float aim[3] = {v.aim.x, v.aim.y, v.aim.z};
+                if (row(Tr("조준"), [&] { return ImGui::DragFloat3("##skeyaim", aim, 0.02f, 0.0f, 0.0f, "%.2f"); })) {
+                    beginLightKeyEdit();
+                    v.aim = {aim[0], aim[1], aim[2]};
+                    changed = true;
+                }
+                float cone = DirectX::XMConvertToDegrees(v.coneOuter);
+                if (row(Tr("원뿔 각도"), [&] { return ImGui::DragFloat("##skeycone", &cone, 0.25f, 1.0f, 89.0f, "%.1f°"); })) {
+                    beginLightKeyEdit();
+                    v.coneOuter = DirectX::XMConvertToRadians(std::clamp(cone, 1.0f, 89.0f));
+                    if (v.coneInner > v.coneOuter) v.coneInner = v.coneOuter;
+                    changed = true;
+                }
             }
+            if (changed) studioKeyChanged_ = true;
+            if (colorEnded) StudioEndKeyEdit();
         }
         ImGui::EndChild();
         return;
@@ -3099,8 +3209,41 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
     StudioModel* m = d.Selected();
     if (kind == RowKind::Morph) {
         const MorphKf* k = m ? FindKey(m->motion.morphs[name], first->second) : nullptr;
-        std::snprintf(buf, sizeof(buf), "%.3f", k ? k->weight : 0.0f);
-        line(Tr("값"), buf);
+        float weight = k ? k->weight : 0.0f;
+        const auto row = [&](const char* lbl, auto&& widget) {
+            const ImVec2 c = ImGui::GetCursorScreenPos();
+            Text(cdl, Font::Regular, size::Small, ImVec2(c.x, c.y + Dp(5.0f)), p.ink3, lbl);
+            ImGui::SetCursorScreenPos(ImVec2(c.x + Dp(64.0f), c.y));
+            ImGui::SetNextItemWidth(w - Dp(64.0f));
+            PushFont(Font::Regular, size::Small);
+            bool ch = widget();
+            PopFont();
+            if (ImGui::IsItemActivated()) {
+                studioKeyBefore_.clear();
+                // every selected key that is a morph row of this model: one undo step covers all of them
+                for (const KeyId& s : d.selection) {
+                    RowKind kk;
+                    std::string nn;
+                    if (!StudioTrackOfRow(s.first, kk, nn) || kk != RowKind::Morph) continue;
+                    studioKeyBefore_.push_back(CaptureTrack(d, d.selectedModel, kk, nn));
+                }
+                studioKeyEdit_ = true;
+                studioKeyChanged_ = false;
+            }
+            if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
+            ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+            return ch;
+        };
+        if (row(Tr("값"), [&] { return ImGui::SliderFloat("##morphkey", &weight, 0.0f, 1.0f, "%.3f"); })) {
+            for (const KeyId& s : d.selection) {
+                RowKind kk;
+                std::string nn;
+                if (!StudioTrackOfRow(s.first, kk, nn) || kk != RowKind::Morph) continue;
+                if (MorphKf* mk = FindKey(m->motion.morphs[nn], s.second)) mk->weight = std::clamp(weight, 0.0f, 1.0f);
+            }
+            studioKeyChanged_ = true;
+            ++m->motionVersion;
+        }
         ImGui::Dummy(ImVec2(w, Dp(6.0f)));
         const ImVec2 c = ImGui::GetCursorScreenPos();
         Text(cdl, Font::Regular, size::Caption, c, p.ink3, Tr("모프 키는 항상 선형으로 보간돼요."));
@@ -3112,22 +3255,43 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
     uint8_t channelCurves[6][4] = {};  // every channel of the first key: the other ones are drawn behind the edited one
     for (auto& c : channelCurves) c[0] = c[1] = 20, c[2] = c[3] = 107;
     if (kind == RowKind::Bone) {
-        const BoneKf* k = m ? FindKey(m->motion.bones[name], first->second) : nullptr;
+        BoneKf* k = m ? FindKey(m->motion.bones[name], first->second) : nullptr;
         if (k) {
-            std::snprintf(buf, sizeof(buf), "%.2f, %.2f, %.2f", k->t.x, k->t.y, k->t.z);
-            line(Tr("위치"), buf);
-            // MMD shows bone rotations as Euler degrees
-            const DirectX::XMVECTOR q = DirectX::XMLoadFloat4(&k->r);
-            const DirectX::XMMATRIX r = DirectX::XMMatrixRotationQuaternion(q);
-            DirectX::XMFLOAT4X4 rm;
-            DirectX::XMStoreFloat4x4(&rm, r);
-            const float pitch = std::asin(std::clamp(-rm._32, -1.0f, 1.0f));
-            const float yaw = std::atan2(rm._31, rm._33);
-            const float roll = std::atan2(rm._12, rm._22);
-            // + 0.0f turns -0.0 into 0.0 for display
-            std::snprintf(buf, sizeof(buf), "%.1f°, %.1f°, %.1f°", DirectX::XMConvertToDegrees(pitch) + 0.0f,
-                          DirectX::XMConvertToDegrees(yaw) + 0.0f, DirectX::XMConvertToDegrees(roll) + 0.0f);
-            line(Tr("회전"), buf);
+            const auto row = [&](const char* lbl, auto&& widget) {
+                const ImVec2 c = ImGui::GetCursorScreenPos();
+                Text(cdl, Font::Regular, size::Small, ImVec2(c.x, c.y + Dp(5.0f)), p.ink3, lbl);
+                ImGui::SetCursorScreenPos(ImVec2(c.x + Dp(64.0f), c.y));
+                ImGui::SetNextItemWidth(w - Dp(64.0f));
+                PushFont(Font::Regular, size::Small);
+                bool ch = widget();
+                PopFont();
+                if (ImGui::IsItemActivated()) {
+                    studioKeyBefore_ = {CaptureTrack(d, d.selectedModel, kind, name)};
+                    studioKeyEdit_ = true;
+                    studioKeyChanged_ = false;
+                }
+                if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
+                ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+                return ch;
+            };
+            {
+                float pos[3] = {k->t.x, k->t.y, k->t.z};
+                if (row(Tr("위치"), [&] { return ImGui::DragFloat3("##bonekeypos", pos, 0.02f, 0.0f, 0.0f, "%.2f"); })) {
+                    k->t = {pos[0], pos[1], pos[2]};
+                    studioKeyChanged_ = true;
+                    ++m->motionVersion;
+                }
+            }
+            {
+                // MMD shows bone rotations as Euler degrees
+                const DirectX::XMFLOAT3 e = StudioKeyEulerDeg(k->r);
+                float rot[3] = {e.x, e.y, e.z};
+                if (row(Tr("회전"), [&] { return ImGui::DragFloat3("##bonekeyrot", rot, 0.25f, 0.0f, 0.0f, "%.1f°"); })) {
+                    k->r = StudioKeyQuatFromEulerDeg({rot[0], rot[1], rot[2]});
+                    studioKeyChanged_ = true;
+                    ++m->motionVersion;
+                }
+            }
             d.curveChannel = std::clamp(d.curveChannel, 0, 3);
             GetBoneCurve(k->interp, d.curveChannel, curve);
             for (int ch = 0; ch < 4; ++ch) GetBoneCurve(k->interp, ch, channelCurves[ch]);
@@ -3305,7 +3469,7 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
         ImVec2 bs;
         Badge(dl, ImVec2(tx, cy - Dp(10.0f)), buf, p.accentSoft, p.accentInk, &bs);
         ImGui::SetCursorScreenPos(ImVec2(tx + bs.x + Dp(2.0f), cy - Dp(14.0f)));
-        if (IconButton("##clearrange", icon::X, Tr("구간 해제  (눈금자 우클릭)"), false, 28.0f)) d.view.rangeStart = d.view.rangeEnd = -1;
+        if (IconButton("##clearrange", icon::X, Tr("구간 해제"), false, 28.0f)) d.view.rangeStart = d.view.rangeEnd = -1;
     }
 
     // right side: frame insert/delete | physics | view
@@ -3396,6 +3560,7 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
     if (ev.contextMenu) {
         studioKeyMenuFrame_ = ev.contextFrame;
         studioKeyMenuRow_ = ev.contextRow;
+        studioKeyMenuRuler_ = ev.contextOnRuler;
         ImGui::OpenPopup("##keymenu");
     }
     DrawStudioKeyMenu();
@@ -3423,6 +3588,30 @@ void App::DrawStudioKeyMenu() {
              ImVec2(ImGui::GetCursorScreenPos().x + Dp(10.0f), ImGui::GetCursorScreenPos().y + Dp(4.0f)), P().ink3, title);
         ImGui::Dummy(ImVec2(1, Dp(24.0f)));
         bool close = false;
+        // frame range (also Shift+drag on the ruler): start / end at the clicked frame, clear
+        const auto rangeItems = [&] {
+            TimelineView& v = d.view;
+            if (MenuItem("##km_rangestart", Tr("여기부터 구간 시작"), icon::CaretLineRight, nullptr)) {
+                v.rangeStart = f;
+                if (v.rangeEnd < f) v.rangeEnd = std::max(f, d.EndFrame());
+                close = true;
+            }
+            if (MenuItem("##km_rangeend", Tr("여기까지 구간 끝"), icon::CaretLineLeft, nullptr)) {
+                v.rangeEnd = f;
+                if (v.rangeStart < 0 || v.rangeStart > f) v.rangeStart = v.rangeStart < 0 ? 0 : f;
+                close = true;
+            }
+            ImGui::BeginDisabled(!d.HasRange());
+            if (MenuItem("##km_rangeclear", Tr("구간 해제"), icon::X, nullptr)) { v.rangeStart = v.rangeEnd = -1; close = true; }
+            ImGui::EndDisabled();
+        };
+        if (studioKeyMenuRuler_) {  // the ruler: the range only
+            rangeItems();
+            if (close) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+            ImGui::PopStyleVar();
+            return;
+        }
         if (studioKeyMenuRow_ && RowKindOf(studioKeyMenuRow_) != RowKind::Group &&
             MenuItem("##km_add", Tr("여기에 키 추가"), icon::Plus, Tr("더블클릭"))) {
             TimelineEvents add;
@@ -3509,6 +3698,13 @@ void App::DrawStudioKeyMenu() {
         ImGui::BeginDisabled(!keys);
         if (MenuItem("##km_del", Tr("삭제"), icon::Trash, "Del")) { StudioDeleteSelected(Tr("키 삭제")); close = true; }
         ImGui::EndDisabled();
+        {   // separator before the range items
+            ImGui::Dummy(ImVec2(1, Dp(3.0f)));
+            const ImVec2 c = ImGui::GetCursorScreenPos();
+            ImGui::GetWindowDrawList()->AddLine(c, ImVec2(c.x + ImGui::GetContentRegionAvail().x, c.y), P().line);
+            ImGui::Dummy(ImVec2(1, Dp(4.0f)));
+        }
+        rangeItems();
         if (close) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
@@ -3769,7 +3965,7 @@ void App::DrawStudioViewport(float x0, float y0, float x1, float y1) {
     }
     if (d.models.empty() && studioJobs_.empty()) {
         const char* t1 = Tr("빈 프로젝트");
-        const char* t2 = Tr("왼쪽 위의 ＋ 추가 버튼으로 캐릭터와 스테이지를 추가하세요");
+        const char* t2 = Tr("추가 › 장면으로 캐릭터와 스테이지를 넣으세요");
         const ImVec2 s1 = TextSize(Font::Semibold, size::Title, t1), s2 = TextSize(Font::Regular, size::Small, t2);
         const float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
         const float bw = std::max(s1.x, s2.x) + Dp(48.0f), bh = s1.y + s2.y + Dp(40.0f);

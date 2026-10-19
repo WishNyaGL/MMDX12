@@ -1020,6 +1020,56 @@ bool MenuItem(const char* id, const char* label, const char* icon, const char* h
     return pressed;
 }
 
+bool Stopwatch(const char* id, bool animated, float sizePx) {
+    const char* tip = animated ? Tr("애니메이션 끄기 (키프레임 모두 삭제)") : Tr("애니메이션 켜기");
+    if (!IconButton(id, icon::Timer, tip, animated, sizePx)) return false;
+    return true;
+}
+
+int KeyNav(const char* id, bool hasPrev, bool keyedHere, bool hasNext, float sizePx) {
+    ImGuiWindow* w = ImGui::GetCurrentWindow();
+    if (w->SkipItems) return 0;
+    ImGui::PushID(id);
+    const Palette& p = P();
+    int result = 0;
+    const float cell = Dp(sizePx * 0.8f);
+    // ◀ previous key
+    ImGui::BeginDisabled(!hasPrev);
+    if (IconButton("##prevkey", icon::CaretLeft, Tr("이전 키"), false, sizePx * 0.8f)) result = -1;
+    ImGui::EndDisabled();
+    ImGui::SameLine(0.0f, 0.0f);
+    // ◆ toggle the key at the playhead
+    {
+        const ImGuiID gid = w->GetID("##keyhere");
+        const float s = Dp(sizePx * 0.8f);
+        const ImRect bb(w->DC.CursorPos, ImVec2(w->DC.CursorPos.x + s, w->DC.CursorPos.y + s));
+        ImGui::ItemSize(bb);
+        if (ImGui::ItemAdd(bb, gid)) {
+            uiprobe::Info(gid, "##keyhere", Tr("이 프레임 키 추가/삭제"));
+            bool hovered = false, held = false;
+            const bool pressed = ImGui::ButtonBehavior(bb, gid, &hovered, &held);
+            if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (hovered || held) w->DrawList->AddRectFilled(bb.Min, bb.Max, WithAlpha(p.ink, held ? 0.10f : 0.06f), Dp(6.0f));
+            const float dr = s * 0.22f;
+            const ImVec2 dc(bb.Min.x + s * 0.5f, bb.Min.y + s * 0.5f);
+            const ImVec2 pts[4] = {{dc.x, dc.y - dr}, {dc.x + dr, dc.y}, {dc.x, dc.y + dr}, {dc.x - dr, dc.y}};
+            const ImU32 kc = keyedHere ? p.accent : p.ink3;
+            if (keyedHere) w->DrawList->AddConvexPolyFilled(pts, 4, kc);
+            else w->DrawList->AddPolyline(pts, 4, kc, ImDrawFlags_Closed, 1.5f);
+            ImGui::RenderNavCursor(bb, gid);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) Tooltip(Tr("이 프레임 키 추가/삭제"));
+            if (pressed) result = 2;
+        }
+    }
+    ImGui::SameLine(0.0f, 0.0f);
+    // ▶ next key
+    ImGui::BeginDisabled(!hasNext);
+    if (IconButton("##nextkey", icon::CaretRight, Tr("다음 키"), false, sizePx * 0.8f)) result = 1;
+    ImGui::EndDisabled();
+    ImGui::PopID();
+    return result;
+}
+
 void Tooltip(const char* text) {
     if (!ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) return;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(10.0f), Dp(6.0f)));

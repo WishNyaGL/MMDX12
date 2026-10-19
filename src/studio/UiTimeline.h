@@ -29,15 +29,18 @@ struct TimelineView {
     float scrollFrame = 0.0f;   // frame at the left edge of the key area, >= 0
     float scrollY = 0.0f;       // vertical scroll in screen px
     int rangeStart = -1, rangeEnd = -1;  // frame range (inclusive), -1 = none. Shift+drag on the ruler sets it,
-                                         // right click on the ruler clears it. The caller may also write it.
+                                         // right click on the ruler asks for the host's menu (ev.contextOnRuler). The caller may also write it.
     // transient drag state, written/read only by the widget:
     int dragMode = 0;           // 0 none, 1 scrub, 2 move keys, 3 box select, 4 range select, 5 horizontal scrollbar
     int dragDelta = 0;          // frames the dragged selection is currently offset by (move preview)
-    ImVec2 boxStart{0, 0};      // box select anchor in screen px
     uint64_t anchorRow = 0; int anchorFrame = 0;  // key under the mouse when a move drag started
     int rangeAnchor = 0;                 // frame where the range drag started
     int dragMinFrame = 0;                // smallest selected key frame, computed once when a key drag starts
     float hscrollGrab = 0.0f;            // mouse x offset inside the scrollbar thumb while dragging it
+    float dragGrabFrame = 0.0f;          // frame under the mouse when a key move drag started (content coordinates)
+    float boxAnchorFrame = 0.0f;         // box select anchor as a frame (content coordinates: stays put while the view auto-scrolls)
+    float boxAnchorY = 0.0f;             // box select anchor as content px below the rows area's top (content coordinates)
+    uint64_t scrollToRow = 0;            // caller writes a row id: the widget scrolls it into view on the next call, then resets it to 0 (0 = no request; unknown id is just reset)
 };
 
 struct TimelineKeyRef { uint64_t row; int frame; };
@@ -56,12 +59,13 @@ struct TimelineEvents {
     bool rowClick = false; uint64_t rowClickId = 0; RowClickMode rowClickMode = RowClickMode::Replace;  // label clicked
     bool rangeChanged = false;                         // view.rangeStart/rangeEnd were changed by the widget this frame
     bool contextMenu = false; int contextFrame = 0; uint64_t contextRow = 0;  // right click in the key area (row 0 = none)
+    bool contextOnRuler = false;                       // the context menu event came from the ruler: contextRow = 0, contextFrame = frame under the mouse
 };
 
 // Draws the timeline into the current ImGui window at the cursor, filling `size` (x or y <= 0 means "remaining space").
 //   label column on the left (width 220 unscaled px, rows 24 px tall, ruler 28 px tall),
 //   key area on the right. `currentFrame` draws the playhead; `maxFrame` limits horizontal scrolling (plus a margin of 120 frames).
-//   Features: label clicks, Shift+drag range on the ruler, right click on the ruler clears the range, right click on the keys asks for the host's key menu, wheel on the ruler zooms, scrollbar at the bottom.
+//   Features: label clicks, Shift+drag range on the ruler, right click on the ruler asks for the host's range menu (ev.contextOnRuler: range start here / range end here / clear range), right click on the keys asks for the host's key menu, wheel on the ruler zooms, scrollbar at the bottom.
 // Returns true if any event flag in `ev` is set.
 bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows, int currentFrame, int maxFrame,
               TimelineView& view, TimelineEvents& ev);

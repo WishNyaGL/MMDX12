@@ -192,6 +192,7 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                         if (view.dragMinFrame == 2147483647) view.dragMinFrame = 0;
                         view.dragMode = 2;
                         view.dragDelta = 0;
+                        view.dragGrabFrame = view.scrollFrame + (mousePos.x - originX) / (view.pxPerFrame * Dpi());
                     }
                 }
             }
@@ -208,7 +209,8 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                     }
                 } else {
                     view.dragMode = 3;
-                    view.boxStart = mousePos;
+                    view.boxAnchorFrame = view.scrollFrame + (mousePos.x - originX) / (view.pxPerFrame * Dpi());
+                    view.boxAnchorY = (mousePos.y - contentY) + view.scrollY;  // content px below the rows area's top
                 }
             }
         }
@@ -231,23 +233,64 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
             }
             changed = true;
         } else if (mousePos.y >= bb.Min.y && mousePos.y < contentY && mousePos.x >= keyAreaX) {
-            if (view.rangeStart != -1 || view.rangeEnd != -1) {
-                view.rangeStart = -1;
-                view.rangeEnd = -1;
-                ev.rangeChanged = true;
-                changed = true;
-            }
+            // ruler: the host's range menu (range start here / range end here / clear range); the range itself is untouched
+            ev.contextMenu = true;
+            ev.contextOnRuler = true;
+            ev.contextFrame = std::max(0, (int)std::round((mousePos.x - originX) / (view.pxPerFrame * Dpi()) + view.scrollFrame));
+            ev.contextRow = 0;
+            changed = true;
         }
     }
 
     // ButtonBehavior clears the active id in the release frame, so drags are tracked by view.dragMode.
     if ((held || ImGui::IsItemActive()) && leftDown) {
+        // Edge auto-scroll (modes 2/3/4): scroll when the mouse is near/past the key area's edges, faster the
+        // further past the edge zone it is; frame-rate independent via io.DeltaTime, up to ~2 screens/second.
+        if (view.dragMode >= 2 && view.dragMode <= 4 && keyAreaW > 0.0f && ImGui::IsMouseDragging(ImGuiMouseButton_Left, Dp(3.0f))) {
+            const float edgeZone = Dp(24.0f);
+            const float mouseInArea = mousePos.x - keyAreaX;  // px from the key area's left edge
+            float dir = 0.0f;   // -1 scroll left, +1 scroll right
+            float dist = 0.0f;  // px past the inner edge of the zone (0 inside the zone)
+            if (mouseInArea < edgeZone) {
+                dir = -1.0f;
+                dist = edgeZone - mouseInArea;  // grows inside the zone and keeps growing when outside
+            } else if (mouseInArea > keyAreaW - edgeZone) {
+                dir = 1.0f;
+                dist = mouseInArea - (keyAreaW - edgeZone);
+            }
+            if (io.DeltaTime > 0.0f) {
+                if (dir != 0.0f) {
+                    float t = std::min(dist / edgeZone, 1.0f);  // 0 at the zone's inner edge, 1 past it
+                    const float speed = (0.25f + 1.75f * t) * keyAreaW;  // px per second: 0.25..2 screens/second
+                    view.scrollFrame += dir * speed * io.DeltaTime / (view.pxPerFrame * Dpi());
+                    view.scrollFrame = std::clamp(view.scrollFrame, 0.0f, maxScrollFrame);
+                }
+                if (view.dragMode == 2 || view.dragMode == 3) {
+                    // The same vertically against the rows area (independent of the horizontal edges).
+                    const float rowsTop = contentY;
+                    const float rowsBottom = bb.Max.y - sbH;
+                    const float mouseFromTop = mousePos.y - rowsTop;
+                    const float rowsH = std::max(0.0f, rowsBottom - rowsTop);
+                    float vdir = 0.0f, vdist = 0.0f;
+                    if (mouseFromTop < edgeZone && mouseFromTop < rowsH) { vdir = -1.0f; vdist = edgeZone - mouseFromTop; }
+                    else if (rowsH > edgeZone && mousePos.y > rowsBottom - edgeZone) { vdir = 1.0f; vdist = mousePos.y - (rowsBottom - edgeZone); }
+                    if (vdir != 0.0f) {
+                        const float speed = (0.25f + 0.75f * std::min(vdist / edgeZone, 1.0f)) * rowsH;  // up to 1 screen height per second
+                        view.scrollY += vdir * speed * io.DeltaTime;
+                        view.scrollY = std::clamp(view.scrollY, 0.0f, maxScrollY);
+                    }
+                }
+            }
+        }
         if (view.dragMode == 1) {
             ev.seek = true;
             ev.seekFrame = std::max(0, (int)std::round((mousePos.x - originX) / (view.pxPerFrame * Dpi()) + view.scrollFrame));
             changed = true;
         } else if (view.dragMode == 2) {
-            float dx = mousePos.x - io.MouseClickedPos[0].x;
+            // dragDelta from the frame under the mouse vs the grab point in CONTENT coordinates, so the keys
+            // follow the mouse even while the view auto-scrolls.
+            float mouseFrame = view.scrollFrame + (mousePos.x - originX) / (view.pxPerFrame * Dpi());
+            float dx = (mouseFrame - view.dragGrabFrame) * view.pxPerFrame * Dpi();
             if (std::abs(dx) >= Dp(3.0f)) {
                 view.dragDelta = (int)std::round(dx / (view.pxPerFrame * Dpi()));
                 if (view.dragMinFrame + view.dragDelta < 0) {
@@ -294,26 +337,32 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
         } else if (view.dragMode == 3) {
             ev.select = true;
             ev.selectMode = (io.KeyShift || io.KeyCtrl) ? SelectMode::Add : SelectMode::Replace;
-            float bx0 = std::min(view.boxStart.x, mousePos.x);
-            float bx1 = std::max(view.boxStart.x, mousePos.x);
-            float by0 = std::min(view.boxStart.y, mousePos.y);
-            float by1 = std::max(view.boxStart.y, mousePos.y);
-            
-            int firstRow = std::max(0, (int)std::floor((by0 - contentY + view.scrollY) / rowHeight));
-            int lastRow = std::min((int)rows.size() - 1, (int)((by1 - contentY + view.scrollY) / rowHeight));
-            float f0 = view.scrollFrame + (bx0 - originX) / (view.pxPerFrame * Dpi());
-            float f1 = view.scrollFrame + (bx1 - originX) / (view.pxPerFrame * Dpi());
-            
+            // The box anchor is in content coordinates (frame + px below the rows area's top), so the selection
+            // still resolves correctly after the view auto-scrolled (anchor possibly off screen).
+            float anchorX = originX + (view.boxAnchorFrame - view.scrollFrame) * view.pxPerFrame * Dpi();
+            float anchorY = contentY + view.boxAnchorY - view.scrollY;
+            float bx0 = std::min(anchorX, mousePos.x);
+            float bx1 = std::max(anchorX, mousePos.x);
+            float by0 = std::min(anchorY, mousePos.y);
+            float by1 = std::max(anchorY, mousePos.y);
+
+            float f0f = view.scrollFrame + (bx0 - originX) / (view.pxPerFrame * Dpi());
+            float f1f = view.scrollFrame + (bx1 - originX) / (view.pxPerFrame * Dpi());
+            // Row range in content px: independent of the current scroll.
+            float row0f = by0 - contentY + view.scrollY;
+            float row1f = by1 - contentY + view.scrollY;
+            int firstRow = std::max(0, (int)std::floor(row0f / rowHeight));
+            int lastRow = std::min((int)rows.size() - 1, (int)std::floor(row1f / rowHeight));
+
             for (int ri = firstRow; ri <= lastRow; ++ri) {
                 const auto& r = rows[ri];
                 if (!r.keysEditable) continue;
-                float rowY = contentY - view.scrollY + ri * rowHeight + rowHeight * 0.5f;
-                if (rowY >= by0 && rowY <= by1) {
-                    auto it = std::lower_bound(r.keys.begin(), r.keys.end(), (int)std::floor(f0),
+                float rowCenter = ri * rowHeight + rowHeight * 0.5f;  // content px
+                if (rowCenter >= row0f && rowCenter <= row1f) {
+                    auto it = std::lower_bound(r.keys.begin(), r.keys.end(), (int)std::floor(f0f),
                         [](const TimelineKey& a, int b) { return a.frame < b; });
-                    for (; it != r.keys.end() && it->frame <= std::ceil(f1); ++it) {
-                        float kx = originX + (it->frame - view.scrollFrame) * view.pxPerFrame * Dpi();
-                        if (kx >= bx0 && kx <= bx1) {
+                    for (; it != r.keys.end() && it->frame <= std::ceil(f1f); ++it) {
+                        if ((float)it->frame >= f0f && (float)it->frame <= f1f) {
                             ev.selectKeys.push_back({r.id, it->frame});
                         }
                     }
@@ -326,6 +375,27 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     
     if (!leftDown) {
         if (view.dragMode >= 1 && view.dragMode <= 5) view.dragMode = 0;
+    }
+
+    // Caller request: scroll a row into view (~1 row of margin), then clear the request (unknown id = just clear).
+    if (view.scrollToRow != 0) {
+        for (int ri = 0; ri < (int)rows.size(); ++ri) {
+            if (rows[ri].id == view.scrollToRow) {
+                float rowTop = ri * rowHeight;             // content px
+                float rowBottom = rowTop + rowHeight;
+                float visTop = view.scrollY;
+                float visBottom = view.scrollY + contentH;
+                if (rowTop < visTop || rowBottom > visBottom) {  // partly visible counts as not visible
+                    if (rowTop < visTop) {
+                        view.scrollY = rowTop - rowHeight;
+                    } else {
+                        view.scrollY = rowBottom - contentH + rowHeight;
+                    }
+                }
+                break;
+            }
+        }
+        view.scrollToRow = 0;
     }
 
     view.scrollFrame = std::clamp(view.scrollFrame, 0.0f, maxScrollFrame);
@@ -478,8 +548,14 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     }
     
     if (view.dragMode == 3) {
-        dl->AddRectFilled(view.boxStart, mousePos, WithAlpha(p.accent, 0.2f));
-        dl->AddRect(view.boxStart, mousePos, p.accent);
+        // Box drawn from the content-coordinate anchor: its origin corner stays on the frame/row where the
+        // drag began even while the view auto-scrolls under the mouse.
+        float anchorX = originX + (view.boxAnchorFrame - view.scrollFrame) * view.pxPerFrame * Dpi();
+        float anchorY = contentY + view.boxAnchorY - view.scrollY;
+        ImVec2 b0(std::min(anchorX, mousePos.x), std::min(anchorY, mousePos.y));
+        ImVec2 b1(std::max(anchorX, mousePos.x), std::max(anchorY, mousePos.y));
+        dl->AddRectFilled(b0, b1, WithAlpha(p.accent, 0.2f));
+        dl->AddRect(b0, b1, p.accent);
     }
     
     dl->PopClipRect();
