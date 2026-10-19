@@ -184,3 +184,4 @@ This is already true technically: pack.json `"textures"` resolve user folder →
 | 2026-10-19 | `PackDeform` stays deferred (not part of Phases 1-3). |
 | 2026-10-19 | Sample world pack "snow" (falling snow + ground snow cover that the performers' feet kick up and leave prints in) ships built-in (`shaders/packs/snow`). |
 | 2026-10-19 | Work lands as local commits per phase on master (no push, no release); the website repo is committed and deployed. |
+| 2026-10-19 | Pack parameters (capability `params.ext`): up to 128 (one float4 slot each in a constant buffer, per model for surface packs), types float / int / bool / color (sRGB picker, linear in HLSL) / vec3, collapsible groups (`"groups"` + per-param `"group"`). Stored values keep the `map<string, float>` format (vector components as `key#0..2`), so ini / projects / looks are unchanged; color / vec3 key per component on the timeline, int / bool stepped. Packs without the capability keep the 16-float layout. |
