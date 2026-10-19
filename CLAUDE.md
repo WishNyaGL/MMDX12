@@ -306,7 +306,7 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     TAA / upscaler. `ViewProj::ortho` makes the overlays / gizmos work in those views; the active view is the one under the
     mouse (`studioActiveView_`).
 - Shader packs (an ecosystem: anyone can make one; docs + gallery on mmdx.codingbot.kr `/<lang>/docs/shader-packs/`, sources
-  in the website repo): opt-in per-character replacements of the scene pass's material shading. A pack = `pack.json`
+  in the website repo; direction + decisions for the native effect ecosystem vs MME: docs/effect_ecosystem.md): opt-in per-character replacements of the scene pass's material shading. A pack = `pack.json`
   (metadata, localized names, authors, license, tags, `apiVersion`, material class rules, <= 16 params) + `surface.hlsl`
   implementing `PackShade` (contract: `shaders/pack_api.hlsli`, `kPackApiVersion`) + optional `preview.png|jpg` (AFTER) and
   `preview_before.png|jpg` (same frame without the pack; index.json `previewBefore`); with both, the manager's detail panes
