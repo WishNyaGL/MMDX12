@@ -69,10 +69,10 @@ int main() {
               packs.size() == 1 && revoked.empty(),
           "revoked ignored for third-party indexes");
 
-    // types: look / world parsed but incompatible, surface / effect compatible
+    // types: look parsed and compatible now that the build supports it; world parsed but incompatible
     Check(ParseShaderPackIndex(Index("look"), kOfficial, packs, error) && packs.size() == 1 && packs[0].type == "look",
           "look type parsed");
-    Check(!packs.empty() && !packs[0].Compatible(), "look incompatible");
+    Check(!packs.empty() && packs[0].Compatible(), "look compatible");
     Check(ParseShaderPackIndex(Index("world"), kOfficial, packs, error) && packs.size() == 1 &&
               packs[0].type == "world",
           "world type parsed");

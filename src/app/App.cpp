@@ -18,6 +18,7 @@
 #include <json.hpp>
 
 #include "app/Lighting.h"
+#include "app/LookApply.h"
 #include "app/UiKit.h"
 #include "render/MmeSemantics.h"
 #include "core/Log.h"
@@ -264,6 +265,10 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
                     pos = end + 1;
                 }
             }
+        } else if (arg == L"--look") {
+            // --look <id>: applies a look pack to the settings for this run (not persisted), like --effect
+            opt.look = WideToUtf8(next());
+            opt.lookSet = true;
         } else if (arg == L"--mme") {
             // --mme <file>[,<file>...]: MMDX12 MME post effects for this run, in list order
             const std::string v = WideToUtf8(next());
@@ -488,6 +493,20 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.autoLuminous >= 0) settings_.autoLuminous = options_.autoLuminous != 0;
     if (options_.motionLighting >= 0) settings_.motionLighting = options_.motionLighting != 0;
     if (options_.effectSet) settings_.effectStack = options_.effectStack;   // --effect, this run only
+    if (options_.lookSet && !options_.look.empty()) {   // --look: apply the look's groups for this run only
+        const ShaderPack* pack = ShaderPacks().Find(options_.look);
+        if (!pack || pack->type != PackType::Look || !pack->look || !pack->Selectable()) {
+            LOG_WARN("--look: no usable look pack '%s'", options_.look.c_str());
+        } else {
+            cliLook_ = *pack->look;
+            cliLookPrev_ = CaptureLook(persisted, nullptr);
+            cliLookActive_ = true;
+            for (const LookPackRef& ref : cliLook_.packs)
+                if (!ref.id.empty() && !ShaderPacks().Find(ref.id))
+                    LOG_WARN("--look %s: referenced pack '%s' is not installed", options_.look.c_str(), ref.id.c_str());
+            ApplyLook(cliLook_, settings_, nullptr);
+        }
+    }
     if (options_.classic) {   // --classic: vanilla-MMD look for this run only (never saved to the ini)
         settings_.ssao = false;
         settings_.ssr = false;
@@ -677,6 +696,11 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.motionLighting >= 0) settings_.motionLighting = persisted.motionLighting;
     if (!options_.lut.empty()) settings_.colorLut = persisted.colorLut;
     if (options_.effectSet) settings_.effectStack = persisted.effectStack;   // --effect, that run only
+    if (cliLookActive_) {   // --look, that run only
+        ApplyLook(cliLookPrev_, settings_, nullptr);
+        if (!cliLookCharacterId_.empty()) settings_.SetCharacterShader(cliLookCharacterId_, cliLookPrevSurface_);
+        cliLookActive_ = false;
+    }
     settings_.Save(settingsPath_);
 
     ctx_.Shutdown();
@@ -1898,6 +1922,13 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     s->characterGpu = renderer_.CreateModel(batch, *pkg.character.pmx, pkg.character.textures,
                                             ModelRole::Character, &pkg.character.pbr);
     if (!s->characterGpu) return false;
+    if (cliLookActive_ && cliLook_.setsSurface && !s->characterId.empty()) {
+        cliLookCharacterId_ = s->characterId;
+        cliLookPrevSurface_ = settings_.CharacterShader(s->characterId);
+        ShaderChoice lookChoice = cliLookPrevSurface_;
+        ApplyLook(cliLook_, settings_, &lookChoice);
+        settings_.SetCharacterShader(s->characterId, lookChoice);
+    }
     s->characterGpu->SetDefaultPackTextureFolder(pkg.character.defaultPackTextureFolder);
     s->characterGpu->SetMaterialBlendHints(pkg.character.materialBlend, pkg.character.materialBlendDefault);
 

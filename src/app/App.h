@@ -22,6 +22,7 @@
 #include "render/ColorLut.h"
 #include "render/Dx12Context.h"
 #include "render/MmeDiagnostics.h"
+#include "render/LookPreset.h"
 #include "render/Renderer.h"
 #include "studio/AutoIk.h"
 #include "studio/Gizmo.h"
@@ -177,6 +178,8 @@ struct AppOptions {
     bool noPhysics = false;    // --no-physics: override settings for this run
     std::string shaderPack;    // --shader-pack <id|none>: the character's shader pack for this run (play and studio)
     bool shaderPackSet = false;
+    std::string look;          // --look <id>: applies a look pack to this run's settings (not persisted)
+    bool lookSet = false;
     int materialSource = 0;    // --material-source <default|ray>: per-material PBR source for this run (0 default, 1 ray)
     bool materialSourceSet = false;   // --material-source was given: it wins over the saved per-character choices
     int mmeGlobal = -1;        // --mme-global <0|1>: global MME switch for this run (-1 = settings.mmeEnabled)
@@ -981,6 +984,16 @@ private:
     // Play character: the saved settings choice or the --shader-pack override. A character with no saved choice also
     // gets SuggestShaderPack (a toast only; the choice is never set by the app).
     ShaderChoice PlayShaderChoice(const GpuModel& gpu, const std::string& characterId);
+    // Applies the look pack `id` to settings_ (and the centre character when a scene is loaded). `persist` saves the
+    // ini like a UI change (ui-script); the CLI one-shot never persists and is reverted on exit. False = no such look.
+    bool ApplyLookById(const std::string& id, bool persist);
+    // Writes a look pack from the current settings into ShaderPacks().UserRoot() / id.
+    bool ExportLook(const std::string& id, const std::string& displayName);
+    bool cliLookActive_ = false;      // --look: applied to this run only, reverted before the ini is saved
+    LookData cliLook_;                // the CLI look
+    LookData cliLookPrev_;            // the settings' groups before it
+    std::string cliLookCharacterId_;  // the scene character its surface group touched
+    ShaderChoice cliLookPrevSurface_; // that character's choice before it
     // Shows ONE toast per (installed pack that Suggests the model's traits, character id), remembered in
     // AppSettings::characterShaderSuggested. Skipped in headless / scripted runs and with --shader-pack. The first
     // suggesting pack in registry order wins. Cheap to call every frame (checked ids are cached per session).

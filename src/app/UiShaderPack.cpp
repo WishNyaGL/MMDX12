@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "app/Icons.h"
+#include "app/LookApply.h"
 #include "asset/MmeAssign.h"
 #include "asset/PmxModel.h"
 #include "asset/RayMaterial.h"
@@ -113,6 +114,44 @@ bool PackMatches(const std::string& needle, const std::string& id, const Localiz
     for (const std::string& t : tags)
         if (has(t)) return true;
     return false;
+}
+
+bool App::ApplyLookById(const std::string& id, bool persist) {
+    const ShaderPack* pack = ShaderPacks().Find(id);
+    if (!pack || pack->type != PackType::Look || !pack->look || !pack->Selectable()) {
+        LOG_WARN("look: no usable look pack '%s'", id.c_str());
+        return false;
+    }
+    const LookData& look = *pack->look;
+    for (const LookPackRef& ref : look.packs) {
+        if (ref.id.empty() || ShaderPacks().Find(ref.id)) continue;
+        LOG_WARN("look %s: referenced pack '%s' is not installed", id.c_str(), ref.id.c_str());
+    }
+    std::string characterId;
+    if (scene_ && !scene_->characterId.empty()) characterId = scene_->characterId;
+    ShaderChoice choice = characterId.empty() ? ShaderChoice{} : settings_.CharacterShader(characterId);
+    ApplyLook(look, settings_, characterId.empty() ? nullptr : &choice);
+    if (!characterId.empty() && look.setsSurface) settings_.SetCharacterShader(characterId, choice);
+    if (persist) settings_.Save(settingsPath_);
+    LOG_INFO("LOOK applied %s", id.c_str());
+    return true;
+}
+
+bool App::ExportLook(const std::string& id, const std::string& displayName) {
+    std::string characterId;
+    if (scene_ && !scene_->characterId.empty()) characterId = scene_->characterId;
+    ShaderChoice surface = characterId.empty() ? ShaderChoice{} : settings_.CharacterShader(characterId);
+    const LookData look = CaptureLook(settings_, characterId.empty() ? nullptr : &surface);
+    LocalizedText name;
+    name.byLang[""] = displayName.empty() ? id : displayName;
+    LocalizedText display = name;
+    std::string error;
+    if (!ShaderPacks().WriteLookPack(ShaderPacks().UserRoot() / Utf8ToPath(id), id, display, {}, "", look, &error)) {
+        LOG_WARN("look export failed: %s", error.c_str());
+        return false;
+    }
+    LOG_INFO("LOOK exported %s", id.c_str());
+    return true;
 }
 
 void App::ApplyShaderChoice(GpuModel& gpu, const ShaderChoice& choice) {

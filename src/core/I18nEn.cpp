@@ -93,6 +93,7 @@ const Entry kEnglish[] = {
     {"리더보드를 불러오지 못했습니다", "Could not load the leaderboard"},
     {"리더보드에 제출", "Submit to leaderboard"},
     {"리더보드에 표시될 이름", "Name shown on the leaderboard"},
+    {"룩", "Looks"},
     {"마무리 중…", "Finishing…"},
     {"머리카락과 옷의 흔들림", "Hair and cloth sway"},
     {"모션 로드", "Loading motion"},

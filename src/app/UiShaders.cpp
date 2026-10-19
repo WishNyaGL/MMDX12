@@ -111,7 +111,9 @@ const ShaderPack* InstalledVersionOf(const std::string& id) {
 }
 
 // "효과" / "표면" type badge text for a card.
-const char* TypeLabel(PackType t) { return t == PackType::Effect ? Tr("효과") : Tr("표면"); }
+const char* TypeLabel(PackType t) {
+    return t == PackType::Effect ? Tr("효과") : t == PackType::Look ? Tr("룩") : Tr("표면");
+}
 
 } // namespace
 
@@ -247,12 +249,12 @@ void App::DrawShaders() {
 
         float curX = tabsR + Dp(12.0f);
 
-        // type filter: Segmented (전체 / 셰이더 / 효과) — the installed / online tabs only
+        // type filter: Segmented (전체 / 셰이더 / 효과 / 룩) — the installed / online tabs only
         if (shaderTab_ < 2) {
-            const char* typeLabels[] = {Tr("전체"), Tr("셰이더"), Tr("효과")};
-            int curType = std::clamp(settings_.shaderType[shaderTab_], 0, 2);
+            const char* typeLabels[] = {Tr("전체"), Tr("셰이더"), Tr("효과"), Tr("룩")};
+            int curType = std::clamp(settings_.shaderType[shaderTab_], 0, 3);
             ImGui::SetCursorScreenPos(ImVec2(curX, top + Dp(2.0f)));
-            if (Segmented("##packtype", typeLabels, 3, &curType, 0.0f, 36.0f)) {
+            if (Segmented("##packtype", typeLabels, 4, &curType, 0.0f, 36.0f)) {
                 settings_.shaderType[shaderTab_] = curType;
                 settings_.Save(settingsPath_);
             }
@@ -288,13 +290,14 @@ void App::DrawShaders() {
 
         // Compute match count for result count and search field layout
         const std::string needle = ToLowerAscii(shaderFilter_);
-        const int curType0 = std::clamp(settings_.shaderType[0], 0, 2);
-        const int curType1 = std::clamp(settings_.shaderType[1], 0, 2);
+        const int curType0 = std::clamp(settings_.shaderType[0], 0, 3);
+        const int curType1 = std::clamp(settings_.shaderType[1], 0, 3);
         int matchCount = 0;
         if (shaderTab_ == 0) {
             for (const ShaderPack& pk : reg.Packs()) {
                 if (curType0 == 1 && pk.type != PackType::Surface) continue;
                 if (curType0 == 2 && pk.type != PackType::Effect) continue;
+                if (curType0 == 3 && pk.type != PackType::Look) continue;
                 if (!PackMatches(needle, pk.id, pk.name, pk.authors, pk.tags)) continue;
                 ++matchCount;
             }
@@ -302,6 +305,7 @@ void App::DrawShaders() {
             for (const RemotePack& rp : shaderStore_.Packs()) {
                 if (curType1 == 1 && rp.type != "surface") continue;
                 if (curType1 == 2 && rp.type != "effect") continue;
+                if (curType1 == 3 && rp.type != "look") continue;
                 if (!PackMatches(needle, rp.id, rp.name, rp.authors, rp.tags)) continue;
                 ++matchCount;
             }
@@ -395,6 +399,7 @@ void App::DrawShaders() {
             for (const ShaderPack& pk : reg.Packs()) {
                 if (curType == 1 && pk.type != PackType::Surface) continue;
                 if (curType == 2 && pk.type != PackType::Effect) continue;
+                if (curType == 3 && pk.type != PackType::Look) continue;
                 if (!PackMatches(needle, pk.id, pk.name, pk.authors, pk.tags)) continue;
                 installedList.push_back(&pk);
             }
@@ -476,6 +481,7 @@ void App::DrawShaders() {
                 for (const RemotePack& rp : shaderStore_.Packs()) {
                     if (curType == 1 && rp.type != "surface") continue;
                     if (curType == 2 && rp.type != "effect") continue;
+                    if (curType == 3 && rp.type != "look") continue;
                     if (!PackMatches(needle, rp.id, rp.name, rp.authors, rp.tags)) continue;
                     onlineList.push_back(&rp);
                 }

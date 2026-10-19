@@ -430,10 +430,10 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "shaderType") {
             const size_t sep = value.find_first_of(",|");
             if (sep != std::string::npos) {
-                if (ParseInt(value.substr(0, sep), i)) shaderType[0] = std::clamp(i, 0, 2);
-                if (ParseInt(value.substr(sep + 1), i)) shaderType[1] = std::clamp(i, 0, 2);
+                if (ParseInt(value.substr(0, sep), i)) shaderType[0] = std::clamp(i, 0, 3);
+                if (ParseInt(value.substr(sep + 1), i)) shaderType[1] = std::clamp(i, 0, 3);
             } else if (ParseInt(value, i)) {
-                shaderType[0] = std::clamp(i, 0, 2);
+                shaderType[0] = std::clamp(i, 0, 3);
             }
         }
         else if (key == "playPanelTab" && ParseInt(value, i)) playPanelTab = std::clamp(i, 0, 2);

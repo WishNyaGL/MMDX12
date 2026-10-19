@@ -774,6 +774,14 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 studio_->rowsKey = ~0ull;
             }
         }
+    } else if (cmd == "look") {  // look <id>: applies a look pack and saves the settings like a UI change
+        if (!args.empty()) ApplyLookById(args[0], true);
+    } else if (cmd == "lookexport") {  // lookexport <id> <name...>
+        if (!args.empty()) {
+            std::string name;
+            for (size_t i = 1; i < args.size(); ++i) name += (i > 1 ? " " : "") + args[i];
+            ExportLook(args[0], name);
+        }
     } else if (cmd == "mmeglobal") {  // mmeglobal <0|1>: the saved global MME switch
         if (!args.empty()) {
             settings_.mmeEnabled = std::atoi(args[0].c_str()) != 0;

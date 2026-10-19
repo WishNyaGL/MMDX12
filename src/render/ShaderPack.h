@@ -14,11 +14,14 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace mmdx {
+
+struct LookData;
 
 // The PackShade / PackEffect contract version (pack_api.hlsli / effect_api.hlsli PACK_API_VERSION). A pack declares
 // the version it was written for; packs with a higher version are listed as incompatible and never compiled.
@@ -31,7 +34,7 @@ using PackParamValues = std::array<float, kPackMaxParams>;
 
 // What a pack does: replace the character material shading (surface.hlsl, default; every v1/v2 pack) or a whole-screen
 // effect (effect.hlsl, PackEffect in effect_api.hlsli, one entry of the user's effect stack).
-enum class PackType : uint8_t { Surface = 0, Effect };
+enum class PackType : uint8_t { Surface = 0, Effect, Look };
 // Where an effect pack injects ("stage"): "pre-bloom" (linear HDR before BloomPass) or "post" (default; after
 // PostPass / tonemap, display-referred sRGB into the LDR target).
 enum class PackEffectStage : uint8_t { Post = 0, PreBloom };
@@ -210,6 +213,7 @@ struct ShaderPack {
     std::string installedSha;           // online installs: the installed zip's SHA-256 (.mmdx_install.json)
     // "type": "surface" (default; material shading) or "effect" (PackEffect; pack.json "stage" = pre-bloom / post)
     PackType type = PackType::Surface;
+    std::shared_ptr<const LookData> look;            // look packs: the parsed "look" block
     PackEffectStage stage = PackEffectStage::Post;   // effect packs only
     uint32_t stateFloats = 0;                        // effect packs only: "state": { "floats": N } (1..16)
     // effect packs only (API v5): "passes" = intermediate passes that run before PackEffect, in order. Each draws
@@ -314,6 +318,11 @@ public:
     // in pack.json. `id` must be valid and unused. Rescans. Returns the new folder.
     bool CreateFromTemplate(const std::string& id, const std::string& name, const std::string& author,
                             std::filesystem::path& dir, std::string& error, bool effect = false);
+    // Writes a look pack (apiVersion 6, "type": "look", the LookToJson block) into <folder>/pack.json, creating the
+    // folder. Atomic tmp + rename like the other writes. Rescans afterwards.
+    bool WriteLookPack(const std::filesystem::path& folder, const std::string& id, const LocalizedText& name,
+                       const std::vector<PackAuthor>& authors, const std::string& license, const LookData& look,
+                       std::string* error);
 
     // Per-pack user texture folder: game textures that can't be redistributed live outside the pack. Set from the
     // shader manager screen and saved in the ini (AppSettings::packTextureFolders); empty `dir` = clear. Changing it

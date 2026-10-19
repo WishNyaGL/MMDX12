@@ -15,7 +15,7 @@ namespace mmdx {
 
 // Gallery types this build can use. `look` / `world` are parsed and listed but stay incompatible until the build
 // gains support for them (flip the constant when it does).
-inline constexpr bool kPackTypeLookCompatible = false;
+inline constexpr bool kPackTypeLookCompatible = true;
 inline constexpr bool kPackTypeWorldCompatible = false;
 
 struct RemotePack {

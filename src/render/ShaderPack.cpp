@@ -8,6 +8,7 @@
 #include "core/Log.h"
 #include "core/NetUtil.h"
 #include "core/TextUtil.h"
+#include "render/LookPreset.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -399,6 +400,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     out.hasEdge = false;
     out.hasPtSurface = false;
     out.type = PackType::Surface;
+    out.look.reset();
     out.stage = PackEffectStage::Post;
     out.stateFloats = 0;
     out.passes.clear();
@@ -445,7 +447,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     if (auto it = j.find("format"); it != j.end() && !it->is_number())
         problems.push_back("format must be a number");
 
-    // type: "surface" (default) or "effect"; an effect pack picks its injection point with "stage"
+    // type: "surface" (default), "effect" or "look"; effect / look packs pick their content with "stage" / "look"
     const std::string type = ToLowerAscii(Str(j, "type"));
     if (type.empty() || type == "surface") {
         out.type = PackType::Surface;
@@ -458,8 +460,25 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
             out.stage = PackEffectStage::PreBloom;
         else
             problems.push_back("stage '" + Str(j, "stage") + "' must be \"post\" or \"pre-bloom\"");
+    } else if (type == "look") {
+        out.type = PackType::Look;
     } else {
-        problems.push_back("type '" + Str(j, "type") + "' must be \"surface\" or \"effect\"");
+        problems.push_back("type '" + Str(j, "type") + "' must be \"surface\", \"effect\" or \"look\"");
+    }
+
+    // look: the LookData block of a look pack (render/LookPreset.h); a "look" key on any other pack is a problem
+    if (auto it = j.find("look"); it != j.end() && !it->is_null()) {
+        if (out.type != PackType::Look) {
+            problems.push_back("look is only supported for look packs");
+        } else {
+            auto data = std::make_shared<LookData>();
+            std::vector<std::string> lookProblems;
+            ParseLookJson(*it, *data, lookProblems);
+            for (const std::string& p : lookProblems) problems.push_back("look: " + p);
+            out.look = std::move(data);
+        }
+    } else if (out.type == PackType::Look) {
+        problems.push_back("look packs need a \"look\" object");
     }
 
     out.name = Text(j, "name");
@@ -542,6 +561,9 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     }
 
     // classes: class body/skin/face/eye/hair with a match array; unknown classes are a problem
+    if (auto it = j.find("classes"); it != j.end()) {
+        if (out.type == PackType::Look) problems.push_back("classes are not supported for look packs");
+    }
     if (auto it = j.find("classes"); it != j.end() && it->is_array()) {
         for (const auto& r : *it) {
             if (!r.is_object()) continue;
@@ -577,6 +599,9 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     }
 
     // params: at most kPackMaxParams, unique non-empty keys, label string or localized object
+    if (auto it = j.find("params"); it != j.end()) {
+        if (out.type == PackType::Look) problems.push_back("params are not supported for look packs");
+    }
     if (auto it = j.find("params"); it != j.end() && it->is_array()) {
         for (const auto& p : *it) {
             if (!p.is_object()) {
@@ -693,6 +718,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     // inputs: optional array of PackInput names (surface and effect packs). performer.* / light.key / camera.focus need
     // "inputs.scene", audio needs "inputs.audio".
     if (auto it = j.find("inputs"); it != j.end()) {
+        if (out.type == PackType::Look) problems.push_back("inputs are not supported for look packs");
         if (!it->is_array()) {
             problems.push_back("inputs must be an array of input names");
         } else {
@@ -724,6 +750,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
 
     // state: optional "state": { "floats": N } (1..16), effect packs only, apiVersion must be 4
     if (auto it = j.find("state"); it != j.end()) {
+        if (out.type == PackType::Look) problems.push_back("state is not supported for look packs");
         if (!it->is_object()) {
             problems.push_back("state must be an object with \"floats\": N");
         } else {
@@ -749,6 +776,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
 
     // passes (API v5): optional "passes": [ { "entry": "Name", "scale": 0.5 }, ... ], effect packs only
     if (auto it = j.find("passes"); it != j.end()) {
+        if (out.type == PackType::Look) problems.push_back("passes are not supported for look packs");
         if (!it->is_array()) {
             problems.push_back("passes must be an array of { \"entry\": name, \"scale\": s }");
         } else {
@@ -829,13 +857,26 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     out.preview = pickPreview(L"preview");
     out.previewBefore = pickPreview(L"preview_before");
 
-    // the pack's shader file must match its type (an effect pack implements PackEffect in effect.hlsl)
+    // the pack's shader file must match its type (an effect pack implements PackEffect in effect.hlsl; a look pack
+    // needs no shader and is never compiled)
     if (out.type == PackType::Effect) {
         if (!fs::is_regular_file(dir / L"effect.hlsl", ec)) problems.push_back("effect packs need effect.hlsl");
-    } else if (!fs::is_regular_file(dir / L"surface.hlsl", ec)) {
-        problems.push_back("surface.hlsl is missing");
-    } else {
-        out.hasPtSurface = fs::is_regular_file(dir / L"pt_surface.hlsl", ec);
+    } else if (out.type == PackType::Surface) {
+        if (!fs::is_regular_file(dir / L"surface.hlsl", ec)) {
+            problems.push_back("surface.hlsl is missing");
+        } else {
+            out.hasPtSurface = fs::is_regular_file(dir / L"pt_surface.hlsl", ec);
+        }
+    }
+    // a look pack's bundled LUT must be an existing png inside the pack
+    if (out.type == PackType::Look && out.look && !out.look->lutFile.empty()) {
+        const std::string& lut = out.look->lutFile;
+        const std::string ext = ToLowerAscii(PathToUtf8(fs::path(Utf8ToPath(lut)).extension()));
+        if (!ValidPackTexturePath(lut) || ext != ".png") {
+            problems.push_back("look.lutFile must be a png path inside the pack");
+        } else if (!fs::is_regular_file(dir / Utf8ToPath(lut), ec)) {
+            problems.push_back("look.lutFile not found: " + lut);
+        }
     }
 
     if (!problems.empty()) {
@@ -1205,6 +1246,65 @@ bool ShaderPackRegistry::CreateFromTemplate(const std::string& id, const std::st
         }
     }
     dir = dest;
+    Scan();
+    return true;
+}
+
+bool ShaderPackRegistry::WriteLookPack(const std::filesystem::path& folder, const std::string& id,
+                                       const LocalizedText& name, const std::vector<PackAuthor>& authors,
+                                       const std::string& license, const LookData& look, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (!ValidShaderPackId(id)) return fail(Tr("id는 소문자 a-z, 0-9, _, -만 사용할 수 있습니다"));
+
+    nlohmann::json authorArray = nlohmann::json::array();
+    for (const PackAuthor& a : authors) {
+        nlohmann::json entry = {{"name", a.name}};
+        if (!a.role.empty()) entry["role"] = a.role;
+        if (HttpUrl(a.url)) entry["url"] = a.url;
+        authorArray.push_back(std::move(entry));
+    }
+    nlohmann::json manifest = {
+        {"id", id},
+        {"version", "1.0.0"},
+        {"apiVersion", kPackApiVersion},
+        {"type", "look"},
+        {"name", name.byLang},
+        {"authors", authorArray},
+        {"license", license},
+        {"requires", nlohmann::json::array()},
+        {"look", LookToJson(look)},
+    };
+
+    std::error_code ec;
+    std::filesystem::create_directories(folder, ec);
+    if (ec) return fail(Tr("팩 폴더를 만들지 못했습니다"));
+
+    const std::filesystem::path manifestPath = folder / Utf8ToPath(kManifestName);
+    const std::filesystem::path tmp = folder / Utf8ToPath(std::string(kManifestName) + ".tmp");
+    {
+        std::ofstream out(tmp, std::ios::binary);
+        out << manifest.dump(2);
+        out.flush();
+        if (!out) {
+            out.close();
+            std::error_code e2;
+            std::filesystem::remove(tmp, e2);
+            return fail(Tr("pack.json을 쓰지 못했습니다"));
+        }
+    }
+    std::filesystem::rename(tmp, manifestPath, ec);
+    if (ec) {
+        std::error_code e2;
+        std::filesystem::remove(manifestPath, e2);
+        std::filesystem::rename(tmp, manifestPath, ec);
+        if (ec) {
+            std::filesystem::remove(tmp, e2);
+            return fail(Tr("pack.json을 쓰지 못했습니다"));
+        }
+    }
     Scan();
     return true;
 }

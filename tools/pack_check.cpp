@@ -8,6 +8,7 @@
 #include "asset/ImageLoader.h"
 #include "render/RenderPass.h"
 #include "render/ShaderPack.h"
+#include "render/LookPreset.h"
 
 #include <Windows.h>
 #include <json.hpp>
@@ -165,6 +166,29 @@ bool PrintManifest(const ShaderPack& pack, const std::string& error) {
         for (const mmdx::ShaderPack::Pass& pass : pack.passes)
             printf("  pass: %s (scale %.4g)\n", pass.entry.c_str(), pass.scale);
         if (pack.replacesDof) printf("  replaces: dof\n");
+    } else if (pack.type == mmdx::PackType::Look) {
+        printf("  type: look\n");
+        if (pack.look) {
+            const mmdx::LookData& look = *pack.look;
+            printf("  look sets:");
+            if (look.setsLighting) printf(" lighting");
+            if (look.setsEffects) printf(" effects");
+            if (look.setsColor) printf(" color");
+            if (look.setsSurface) printf(" surface");
+            printf("\n");
+            if (look.hasSurface) {
+                printf("  look surface: %s\n", look.surface.pack.empty() ? "(none)" : look.surface.pack.c_str());
+                for (const auto& [mat, cls] : look.surface.materials)
+                    printf("  look surface material %s: %d\n", mat.c_str(), cls);
+            }
+            for (const mmdx::EffectStackEntry& e : look.effects)
+                printf("  look effect: %s (%s)\n", e.pack.c_str(), e.enabled ? "enabled" : "disabled");
+            if (!look.colorLut.empty()) printf("  look lut: %s\n", look.colorLut.c_str());
+            if (!look.lutFile.empty()) printf("  look lutFile: %s\n", look.lutFile.c_str());
+            for (const mmdx::LookPackRef& ref : look.packs)
+                printf("  look pack: %s%s%s\n", ref.id.c_str(), ref.minVersion.empty() ? "" : " min ",
+                       ref.minVersion.empty() ? "" : ref.minVersion.c_str());
+        }
     } else {
         printf("  type: surface\n");
         printf("  pt_surface: %s\n", pack.hasPtSurface ? "yes" : "no");
@@ -467,6 +491,9 @@ int wmain(int argc, wchar_t** argv) {
     if (compile) {
         const bool effect = pack.type == mmdx::PackType::Effect;
         const wchar_t* packFile = effect ? L"effect.hlsl" : L"surface.hlsl";
+        if (pack.type == mmdx::PackType::Look) {
+            printf("compile: skipped (look packs have no shader)\n");
+        } else {
         const fs::path mmdHlsl = mmdx::ExecutableDir() / L"shaders" / (effect ? L"effect.hlsl" : L"mmd.hlsl");
         if (!fs::is_regular_file(mmdHlsl, ec)) {
             printf("[problem] %s not found\n", mmdx::PathToUtf8(mmdHlsl).c_str());
@@ -587,6 +614,7 @@ int wmain(int argc, wchar_t** argv) {
                     }
                 }
             }
+        }
         }
     }
 
