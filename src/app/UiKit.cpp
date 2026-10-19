@@ -641,9 +641,12 @@ bool SliderRow(const char* id, const char* label, float* v, float vmin, float vm
     Text(dl, Font::Semibold, size::Small, ImVec2(origin.x + width - vs.x, origin.y + Dp(1.0f)), p.ink2, value);
     ImGui::Dummy(ImVec2(width, Dp(22.0f)));
 
+    // The slider line starts at the row's left edge: when the label line follows other widgets on the same line
+    // (stopwatch, key navigation), the slider still spans the full row instead of the label line's remaining width.
+    const float sliderW = ImGui::GetContentRegionAvail().x;
     const ImGuiID gid = w->GetID(id);
     const float h = Dp(20.0f);
-    const ImRect bb(w->DC.CursorPos, ImVec2(w->DC.CursorPos.x + width, w->DC.CursorPos.y + h));
+    const ImRect bb(w->DC.CursorPos, ImVec2(w->DC.CursorPos.x + sliderW, w->DC.CursorPos.y + h));
     ImGui::ItemSize(bb);
     if (!ImGui::ItemAdd(bb, gid)) return false;
     uiprobe::Info(gid, id, label);
@@ -801,8 +804,10 @@ bool ColorField(const char* id, float rgb[3], bool* activated, bool* deactivated
             SrgbToOklab(col, lab);
             for (int i = 0; i < 3; ++i) {
                 ImGui::PushID(i);
-                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-                if (ImGui::SliderFloat(kCh[2][i], &lab[i], i == 0 ? 0.0f : -0.4f, i == 0 ? 1.0f : 0.4f,
+                // fixed width (the RGB / HSV picker's): the popup auto-resizes, so the available width would grow
+                // with the slider every frame; "##" = no label beside the slider (the value text names the channel)
+                ImGui::SetNextItemWidth(Dp(224.0f));
+                if (ImGui::SliderFloat("##oklab", &lab[i], i == 0 ? 0.0f : -0.4f, i == 0 ? 1.0f : 0.4f,
                                        i == 0 ? "L %.3f" : (i == 1 ? "a %.3f" : "b %.3f"))) {
                     float out[3];
                     OklabToSrgb(lab, out);
