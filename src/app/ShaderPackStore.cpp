@@ -65,13 +65,42 @@ fs::path TempZip(const std::string& id, const std::string& version) {
 } // namespace
 
 bool RemotePack::Compatible() const {
+    if (type == "look" && !kPackTypeLookCompatible) return false;
+    if (type == "world" && !kPackTypeWorldCompatible) return false;
     if (apiVersion > kPackApiVersion) return false;
+    for (const std::string& cap : requiresCaps) {
+        bool known = false;
+        for (const PackCapability& c : kPackCapabilities) known |= c.name == cap;
+        if (!known) return false;
+    }
     return minAppVersion.empty() || net::CompareVersions(minAppVersion, MMDX12_VERSION) <= 0;
+}
+
+namespace {
+
+std::string LowerAscii(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](char c) { return (char)tolower((unsigned char)c); });
+    return s;
+}
+
+} // namespace
+
+bool IsOfficialIndexUrl(const std::string& url) {
+    std::string a = LowerAscii(url);
+    const size_t q = a.find('?');
+    if (q != std::string::npos) a.resize(q);
+    return a == LowerAscii(ShaderPackStore::kDefaultIndexUrl);
 }
 
 bool ParseShaderPackIndex(const std::string& json, const std::string& indexUrl, std::vector<RemotePack>& out,
                           std::string& error) {
+    return ParseShaderPackIndex(json, indexUrl, out, nullptr, error);
+}
+
+bool ParseShaderPackIndex(const std::string& json, const std::string& indexUrl, std::vector<RemotePack>& out,
+                          std::vector<std::string>* revoked, std::string& error) {
     out.clear();
+    if (revoked) revoked->clear();
     nlohmann::json j;
     try {
         j = nlohmann::json::parse(json);
@@ -83,6 +112,17 @@ bool ParseShaderPackIndex(const std::string& json, const std::string& indexUrl, 
         error = "index: no packs array";
         return false;
     }
+    const bool official = IsOfficialIndexUrl(indexUrl);
+    std::vector<std::string> revokedHashes;
+    if (official) {
+        if (auto r = j.find("revoked"); r != j.end() && r->is_array())
+            for (const auto& x : *r) {
+                if (!x.is_string()) continue;
+                const std::string h = LowerAscii(x.get<std::string>());
+                if (h.size() == 64) revokedHashes.push_back(h);
+            }
+        if (revoked) *revoked = revokedHashes;
+    }
     for (const auto& p : j["packs"]) {
         if (!p.is_object()) continue;
         RemotePack r;
@@ -91,7 +131,10 @@ bool ParseShaderPackIndex(const std::string& json, const std::string& indexUrl, 
         if (!ValidShaderPackId(r.id) || r.version.empty()) continue;   // unusable entry
         r.apiVersion = p.value("apiVersion", 1);
         r.type = Str(p, "type");
-        if (r.type != "effect") r.type = "surface";
+        if (r.type != "effect" && r.type != "look" && r.type != "world") r.type = "surface";
+        r.source = indexUrl;
+        r.owner = Str(p, "owner");
+        r.verified = official && p.value("verified", false);
         r.updated = Str(p, "updated");
         r.minAppVersion = Str(p, "minAppVersion");
         r.name = Text(p, "name");
@@ -112,6 +155,9 @@ bool ParseShaderPackIndex(const std::string& json, const std::string& indexUrl, 
         if (auto t = p.find("tags"); t != p.end() && t->is_array())
             for (const auto& x : *t)
                 if (x.is_string()) r.tags.push_back(x.get<std::string>());
+        if (auto t = p.find("requires"); t != p.end() && t->is_array())
+            for (const auto& x : *t)
+                if (x.is_string()) r.requiresCaps.push_back(x.get<std::string>());
         r.builtIn = p.value("builtIn", false);
         r.previewUrl = Resolve(indexUrl, Str(p, "preview"));
         r.previewBeforeUrl = Resolve(indexUrl, Str(p, "previewBefore"));
@@ -121,9 +167,18 @@ bool ParseShaderPackIndex(const std::string& json, const std::string& indexUrl, 
         r.size = p.value("size", (uint64_t)0);
         r.paramCount = p.value("params", 0);
         if (r.downloadUrl.empty() || r.sha256.size() != 64) continue;   // never install unverifiable files
+        bool isRevoked = false;
+        for (const std::string& h : revokedHashes) isRevoked |= h == r.sha256;
+        if (isRevoked) continue;
         out.push_back(std::move(r));
     }
     return true;
+}
+
+bool UpdateAllowed(const ShaderPack& installed, const RemotePack& remote) {
+    if (installed.source != PackSource::Online) return false;
+    if (installed.installedFrom.empty() || remote.source != installed.installedFrom) return false;
+    return net::CompareVersions(remote.version, installed.version) > 0;
 }
 
 // ---- jobs (shared with their worker thread; the worker only writes, then sets done) ----------------------------
@@ -134,6 +189,7 @@ struct ShaderPackStore::IndexJob {
     bool ok = false;
     std::string error;
     std::vector<RemotePack> packs;
+    std::vector<std::string> revoked;
 };
 
 struct ShaderPackStore::InstallJob {
@@ -155,33 +211,62 @@ struct ShaderPackStore::PreviewJob {
 
 ShaderPackStore::~ShaderPackStore() = default;   // detached workers hold their own job references
 
-void ShaderPackStore::Refresh(const std::string& url) {
+void ShaderPackStore::Refresh(const std::string& url) { Refresh(std::vector<std::string>{url}); }
+
+void ShaderPackStore::Refresh(const std::vector<std::string>& urls) {
     if (state_ == IndexState::Loading) return;
     state_ = IndexState::Loading;
-    url_ = url;
     error_.clear();
-    auto job = std::make_shared<IndexJob>();
-    job->url = url;
-    indexJob_ = job;
-    std::thread([job] {
-        std::string body;
-        if (net::IsLocalSource(job->url)) {
-            std::ifstream in(net::LocalPathOf(job->url), std::ios::binary);
-            body.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-            if (!in && body.empty()) job->error = "cannot read " + job->url;
-        } else {
-            net::HttpGet(job->url, body, job->error, kMaxIndexBytes);
-        }
-        if (!body.empty()) job->ok = ParseShaderPackIndex(body, job->url, job->packs, job->error);
-        job->done = true;
-    }).detach();
+    sources_.clear();
+    indexJobs_.clear();
+    // official first, then the user's, keeping the requested order within each group
+    std::vector<std::string> ordered;
+    for (const std::string& u : urls)
+        if (IsOfficialIndexUrl(u)) ordered.push_back(u);
+    for (const std::string& u : urls)
+        if (!IsOfficialIndexUrl(u)) ordered.push_back(u);
+    if (ordered.empty()) ordered.push_back(kDefaultIndexUrl);
+    url_ = ordered.front();
+    for (const std::string& u : ordered) {
+        sources_.push_back({u, IndexState::Loading, std::string()});
+        auto job = std::make_shared<IndexJob>();
+        job->url = u;
+        indexJobs_.push_back(job);
+        std::thread([job] {
+            std::string body;
+            if (net::IsLocalSource(job->url)) {
+                std::ifstream in(net::LocalPathOf(job->url), std::ios::binary);
+                body.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+                if (!in && body.empty()) job->error = "cannot read " + job->url;
+            } else {
+                net::HttpGet(job->url, body, job->error, kMaxIndexBytes);
+            }
+            if (!body.empty()) job->ok = ParseShaderPackIndex(body, job->url, job->packs, &job->revoked, job->error);
+            job->done = true;
+        }).detach();
+    }
 }
+
+ShaderPackStore::IndexState ShaderPackStore::SourceState(const std::string& url) const {
+    for (const SourceStateEntry& s : sources_)
+        if (s.url == url) return s.state;
+    return IndexState::Idle;
+}
+
+const std::string& ShaderPackStore::SourceError(const std::string& url) const {
+    static const std::string kEmpty;
+    for (const SourceStateEntry& s : sources_)
+        if (s.url == url) return s.error;
+    return kEmpty;
+}
+
+std::vector<std::string> ShaderPackStore::RevokedHashes() const { return revoked_; }
 
 void ShaderPackStore::Install(const RemotePack& pack) {
     if (Installing(pack.id)) return;
     auto job = std::make_shared<InstallJob>();
     job->pack = pack;
-    job->indexUrl = url_;
+    job->indexUrl = pack.source.empty() ? url_ : pack.source;
     installs_.push_back(job);
     std::thread([job] {
         const RemotePack& p = job->pack;
@@ -220,11 +305,37 @@ float ShaderPackStore::Progress(const std::string& id) const {
 
 std::vector<ShaderPackStore::Event> ShaderPackStore::Poll(ShaderPackRegistry& registry) {
     std::vector<Event> events;
-    if (indexJob_ && indexJob_->done) {
-        if (indexJob_->ok) {
-            packs_ = std::move(indexJob_->packs);
-            state_ = IndexState::Ready;
-            LOG_INFO("shader pack store: %zu packs from %s", packs_.size(), indexJob_->url.c_str());
+    if (!indexJobs_.empty()) {
+        bool allDone = true;
+        for (const auto& j : indexJobs_) allDone &= j->done.load();
+        if (allDone) {
+            std::vector<RemotePack> merged;
+            std::vector<std::string> revoked;
+            int failures = 0;
+            for (const auto& job : indexJobs_) {
+                for (SourceStateEntry& s : sources_) {
+                    if (s.url != job->url) continue;
+                    if (job->ok) {
+                        s.state = IndexState::Ready;
+                        s.error.clear();
+                    } else {
+                        s.state = IndexState::Failed;
+                        s.error = job->error;
+                        ++failures;
+                        LOG_WARN("shader pack store: index %s: %s", job->url.c_str(), job->error.c_str());
+                    }
+                }
+                if (job->ok) {
+                    LOG_INFO("shader pack store: %zu packs from %s", job->packs.size(), job->url.c_str());
+                    for (RemotePack& p : job->packs) merged.push_back(std::move(p));
+                    if (IsOfficialIndexUrl(job->url)) revoked = job->revoked;
+                }
+            }
+            packs_ = std::move(merged);
+            revoked_ = std::move(revoked);
+            registry.ApplyRevocations(revoked_);
+            state_ = failures == (int)indexJobs_.size() ? IndexState::Failed : IndexState::Ready;
+            if (state_ == IndexState::Failed) error_ = Tr("온라인 목록을 불러오지 못했습니다");
             // previews: cached by id + version, downloaded once
             std::error_code ec;
             fs::create_directories(PreviewDir(), ec);
@@ -284,12 +395,8 @@ std::vector<ShaderPackStore::Event> ShaderPackStore::Poll(ShaderPackRegistry& re
                     }
                 }
             }
-        } else {
-            state_ = IndexState::Failed;
-            error_ = Tr("온라인 목록을 불러오지 못했습니다");
-            LOG_WARN("shader pack store: index %s: %s", indexJob_->url.c_str(), indexJob_->error.c_str());
+            indexJobs_.clear();
         }
-        indexJob_.reset();
     }
     for (auto it = previews_.begin(); it != previews_.end();) {
         if (!(*it)->done) { ++it; continue; }

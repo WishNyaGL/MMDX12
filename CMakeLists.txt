@@ -248,6 +248,13 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_project_test.cpp)
   # which mmdx_anim builds; mmdx_core carries core/asset and the json include dir.
   target_link_libraries(studio_project_test PRIVATE mmdx_core mmdx_anim)
 endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/tools/gallery_index_test.cpp)
+  # The gallery index parser (app/ShaderPackStore.cpp) without the whole app; ShaderPackRegistry comes from
+  # mmdx_render, and ShaderPackStore.cpp's NetUtil pulls WinHTTP.
+  add_executable(gallery_index_test tools/gallery_index_test.cpp src/app/ShaderPackStore.cpp)
+  target_include_directories(gallery_index_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(gallery_index_test PRIVATE mmdx_render winhttp)
+endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tools/look_preset_test.cpp)
   # The Look data layer (render) and its settings mapping (app), without the whole app.
   add_executable(look_preset_test tools/look_preset_test.cpp src/render/LookPreset.cpp src/app/LookApply.cpp)

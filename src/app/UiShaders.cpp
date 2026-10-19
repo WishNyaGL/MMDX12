@@ -60,6 +60,7 @@ const char* StatusLabel(PackStatus s, ImU32& bg, ImU32& fg) {
     case PackStatus::Incompatible: bg = p.warnSoft; fg = p.warn; return Tr("호환되지 않음");
     case PackStatus::InvalidManifest: bg = p.dangerSoft; fg = p.danger; return Tr("매니페스트 오류");
     case PackStatus::Duplicate: bg = p.warnSoft; fg = p.warn; return Tr("중복된 id");
+    case PackStatus::Revoked: bg = p.dangerSoft; fg = p.danger; return Tr("갤러리에서 차단됨");
     default: return nullptr;
     }
 }

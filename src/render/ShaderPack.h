@@ -161,9 +161,11 @@ struct ShaderPackParam {
 // the sampled space: sRGB textures (default) get an _SRGB SRV and sample as LINEAR values, others
 // are UNORM (raw values; data maps).
 struct PackTexture {
+    enum class Origin : uint8_t { Bundled, User };
     std::string file;    // required, relative to the pack, no "..", no drive / root
     bool clamp = false;  // "address": "clamp" (else "wrap")
     bool srgb = true;    // "srgb"
+    Origin origin = Origin::Bundled;   // "origin": bundled (ships with the pack) or user (user-supplied)
 };
 
 enum class PackSource : uint8_t { BuiltIn, User, Online };
@@ -174,6 +176,7 @@ enum class PackStatus : uint8_t {
     Incompatible,     // apiVersion > kPackApiVersion, or minAppVersion newer than this build
     InvalidManifest,  // listed so authors see why; statusMessage says what is wrong; never selectable
     Duplicate,        // same id as an earlier pack (built-in wins, then folder order); never selectable
+    Revoked,          // a zip on the official index's revocation list; never selectable
 };
 
 struct ShaderPack {
@@ -203,6 +206,7 @@ struct ShaderPack {
     std::filesystem::path dir;          // holds pack.json and surface.hlsl
     PackSource source = PackSource::User;
     std::string installedFrom;          // online installs: the index URL they came from (.mmdx_install.json)
+    std::string installedSha;           // online installs: the installed zip's SHA-256 (.mmdx_install.json)
     // "type": "surface" (default; material shading) or "effect" (PackEffect; pack.json "stage" = pre-bloom / post)
     PackType type = PackType::Surface;
     PackEffectStage stage = PackEffectStage::Post;   // effect packs only
@@ -282,6 +286,9 @@ public:
     const ShaderPack* Find(const std::string& id) const;      // any status
     uint32_t Generation() const { return generation_; }
 
+    // Installed packs whose zip SHA-256 is listed get PackStatus::Revoked (never selectable). Bumps Generation().
+    void ApplyRevocations(const std::vector<std::string>& hashes);
+
     // ScenePass reports compile results; the status survives Scan() while the pack's files are unchanged.
     void ReportCompiled(const std::string& id);
     void ReportError(const std::string& id, const std::string& message);
@@ -294,7 +301,7 @@ public:
     // the files first: only pack.json, *.hlsl, *.hlsli, *.png, *.jpg, *.md, *.txt, LICENSE*; no links; total <= 32 MB.
     // `installedFrom` non-empty writes .mmdx_install.json. Rescans. Returns false with a user-facing (Korean) error.
     bool InstallFolder(const std::filesystem::path& src, const std::string& installedFrom, std::string& id,
-                       std::string& error);
+                       std::string& error, const std::string& installedSha = {});
     // Extracts a .zip into a temp folder (Windows tar.exe, as the updater) and installs it with InstallFolder.
     bool InstallZip(const std::filesystem::path& zip, const std::string& installedFrom, std::string& id, std::string& error);
     // Deletes an installed (User / Online) pack's folder. Built-in packs cannot be removed. Rescans.
@@ -328,6 +335,7 @@ private:
     uint64_t stamp_ = 0;
     std::map<std::string, std::pair<uint64_t, PackStatus>> statusById_;   // files stamp -> status
     std::map<std::string, std::string> messageById_;
+    std::vector<std::string> revokedHashes_;
 };
 
 // True when `stack` has an enabled, selectable effect pack that declares "replaces": ["dof"]: the engine's depth of field

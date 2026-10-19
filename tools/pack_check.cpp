@@ -107,8 +107,8 @@ void PrintTextures(const ShaderPack& pack) {
     }
     for (size_t i = 0; i < pack.textures.size(); ++i) {
         const mmdx::PackTexture& t = pack.textures[i];
-        printf("  texture %zu: %s (%s, %s)\n", i, t.file.c_str(), t.clamp ? "clamp" : "wrap",
-               t.srgb ? "srgb" : "raw");
+        printf("  texture %zu: %s (%s, %s, origin %s)\n", i, t.file.c_str(), t.clamp ? "clamp" : "wrap",
+               t.srgb ? "srgb" : "raw", t.origin == mmdx::PackTexture::Origin::Bundled ? "bundled" : "user");
     }
 }
 
@@ -236,7 +236,12 @@ bool CheckTextures(const ShaderPack& pack, const fs::path& dir) {
         const fs::path path = dir / rel;
         std::error_code ec;
         if (!fs::is_regular_file(path, ec)) {
-            printf("  [warn] texture %zu (%s): file not found (may be user-supplied)\n", i, t.file.c_str());
+            if (t.origin == mmdx::PackTexture::Origin::Bundled) {
+                printf("  [problem] texture %zu (%s): bundled file not found (broken pack)\n", i, t.file.c_str());
+                ok = false;
+            } else {
+                printf("  [warn] texture %zu (%s): file not found (may be user-supplied)\n", i, t.file.c_str());
+            }
             continue;
         }
         const uint64_t bytes = (uint64_t)fs::file_size(path, ec);

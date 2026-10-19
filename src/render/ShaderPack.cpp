@@ -250,6 +250,12 @@ bool LoadPackFolder(const fs::path& dir, PackSource source, ShaderPack& out) {
                     out.source = PackSource::Online;
                     out.installedFrom = it->get<std::string>();
                 }
+                const auto sha = m.find("sha256");
+                if (sha != m.end() && sha->is_string()) {
+                    out.installedSha = sha->get<std::string>();
+                    std::transform(out.installedSha.begin(), out.installedSha.end(), out.installedSha.begin(),
+                                   [](char c) { return (char)tolower((unsigned char)c); });
+                }
             }
         } catch (const std::exception&) {
             // a broken marker is ignored: the pack still installs as a user pack
@@ -634,6 +640,19 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                     continue;
                 }
                 if (auto s = x.find("srgb"); s != x.end() && s->is_boolean()) t.srgb = s->get<bool>();
+                const std::string origin = ToLowerAscii(Str(x, "origin"));
+                if (origin.empty()) {
+                    std::error_code oec;
+                    t.origin = fs::is_regular_file(dir / Utf8ToPath(t.file), oec) ? PackTexture::Origin::Bundled
+                                                                                 : PackTexture::Origin::User;
+                } else if (origin == "bundled") {
+                    t.origin = PackTexture::Origin::Bundled;
+                } else if (origin == "user") {
+                    t.origin = PackTexture::Origin::User;
+                } else {
+                    problems.push_back("texture '" + t.file + "': origin must be bundled or user");
+                    continue;
+                }
                 const std::string ext = ToLowerAscii(PathToUtf8(fs::path(Utf8ToPath(t.file)).extension()));
                 if (ext != ".png" && ext != ".jpg" && ext != ".jpeg") {
                     problems.push_back("texture '" + t.file + "' must be a png / jpg / jpeg file");
@@ -878,6 +897,19 @@ void ShaderPackRegistry::Scan() {
     }
     packs_ = std::move(packs);
     stamp_ = PollStamp(roots);
+    if (!revokedHashes_.empty()) {
+        for (ShaderPack& p : packs_) {
+            if (p.installedSha.empty()) continue;
+            bool revoked = false;
+            for (const std::string& h : revokedHashes_) revoked |= h == p.installedSha;
+            if (revoked) {
+                p.status = PackStatus::Revoked;
+                p.statusMessage = "revoked by the gallery";
+                statusById_[p.id] = {statusById_[p.id].first, p.status};
+                messageById_[p.id] = p.statusMessage;
+            }
+        }
+    }
     ++generation_;
     LOG_INFO("shader packs: %zu loaded (generation %u)", packs_.size(), generation_);
 }
@@ -924,8 +956,27 @@ void ShaderPackRegistry::ReportError(const std::string& id, const std::string& m
 
 // ---- install / uninstall ----------------------------------------------------------------------------------------------
 
+void ShaderPackRegistry::ApplyRevocations(const std::vector<std::string>& hashes) {
+    revokedHashes_ = hashes;
+    if (hashes.empty()) return;
+    bool changed = false;
+    for (ShaderPack& p : packs_) {
+        if (p.installedSha.empty()) continue;
+        bool revoked = false;
+        for (const std::string& h : hashes) revoked |= h == p.installedSha;
+        if (!revoked || p.status == PackStatus::Revoked) continue;
+        p.status = PackStatus::Revoked;
+        p.statusMessage = "revoked by the gallery";
+        statusById_[p.id] = {statusById_[p.id].first, p.status};
+        messageById_[p.id] = p.statusMessage;
+        changed = true;
+        LOG_WARN("shader pack %s: %s", p.id.c_str(), p.statusMessage.c_str());
+    }
+    if (changed) ++generation_;
+}
+
 bool ShaderPackRegistry::InstallFolder(const std::filesystem::path& src, const std::string& installedFrom,
-                                       std::string& id, std::string& error) {
+                                       std::string& id, std::string& error, const std::string& installedSha) {
     std::error_code ec;
     // pack.json at the root, or one level below (zips usually wrap the pack folder)
     fs::path root = src;
@@ -1004,7 +1055,7 @@ bool ShaderPackRegistry::InstallFolder(const std::filesystem::path& src, const s
         std::snprintf(iso, sizeof(iso), "%04d-%02d-%02dT%02d:%02d:%02dZ", st.wYear, st.wMonth, st.wDay, st.wHour,
                       st.wMinute, st.wSecond);
         const nlohmann::json marker = {{"from", installedFrom}, {"version", parsed.version},
-                                       {"installedAt", iso}};
+                                       {"sha256", installedSha}, {"installedAt", iso}};
         std::ofstream out(dest / L".mmdx_install.json", std::ios::binary);
         out << marker.dump(2);
     }
@@ -1062,7 +1113,7 @@ bool ShaderPackRegistry::InstallZip(const std::filesystem::path& zip, const std:
         it.increment(e2);
         ec = e2;
     }
-    return InstallFolder(temp, installedFrom, id, error);
+    return InstallFolder(temp, installedFrom, id, error, net::Sha256OfFile(zip, nullptr));
 }
 
 bool ShaderPackRegistry::Uninstall(const std::string& id, std::string& error) {
