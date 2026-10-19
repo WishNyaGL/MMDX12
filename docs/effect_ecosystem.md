@@ -1,6 +1,8 @@
 # MMDX12 native effect ecosystem: design direction
 
-Status: direction v1 (2026-10-19). Architect: Claude, debated with Gemini (gemini-4-argon, two read-only rounds),
+Status: built and shipped in 2.4.0 (2026-10-20): capabilities / inputs, studio effect stack, looks, open gallery,
+surface output / ID image / pass history + mips, params.ext, world effects + the built-in Snow. Not built: PackDeform,
+the studio world gizmo and world transform keys. Direction v1 (2026-10-19). Architect: Claude, debated with Gemini (gemini-4-argon, two read-only rounds),
 decisions by the owner (§7). Inputs: `docs/shader_effect_api.md`, `docs/shader_pt_api.md`, `shaders/pack_api.hlsli`,
 `shaders/effect_api.hlsli`, `src/render/ShaderPack.h`, `src/app/ShaderPackStore.h`, `docs/mme/mme_design.md`,
 `docs/mme/compat_list.md`, `docs/mme/research/effects_catalog.md`.

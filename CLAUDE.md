@@ -319,7 +319,7 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   `shaders/packs/<id>`, installed in `<exe>/shader_packs/<id>`; template `shaders/pack_template`; `tools/pack_check`.
   Registry `render/ShaderPack.*` (status per pack, hot reload `PollChanges`, install / uninstall / template); online gallery
   `app/ShaderPackStore.*` (index.json, SHA-256 checked zips); manager screen `app/UiShaders.cpp` (Screen::Shaders, top tab
-  "셰이더", `--screen shaders|shaders-online`; per-tab type filter + sort `shaderType=` / `shaderSort=` ini, index.json
+  "이펙트" - the ecosystem is "MMDX 이펙트": 표면 셰이더 / 화면 효과 / 월드 이펙트 / 룩, "팩" = the distribution unit; `--screen shaders|shaders-online`; per-tab type filter + sort `shaderType=` / `shaderSort=` ini, index.json
   `type` / `updated`), shared picker `app/UiShaderPack.cpp`. Networking / zip / version helpers live
   in `core/NetUtil.*` (shared with the updater).
   `GpuModel::SetShaderPack` writes class / head bone / params into `MaterialConstants`; `ScenePass::PackPsos` compiles
@@ -397,6 +397,18 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   RunOffline). Gallery examples on it: lens_dirt, lens_reflection, lens_flare, bokeh_dof, screen_ao (and
   chromatic_aberration 2.0.0, still v3). MMD scenes rarely hold HDR lights (a lit window is ~0.4 linear): the lens packs
   pick "lights" by luminance x local contrast, not a plain threshold.
+- World effects (docs/shader_world_api.md, contract `render/WorldTypes.h`): `"type": "world"` packs (`world.hlsl`, a
+  pack.json `"world"` block: particles / fields / heightfield surfaces) drawn by `WorldPass` (`render/PassWorld.cpp`):
+  deterministic fixed-step GPU simulation toward `WorldInstance::time` (re-simulation on seeks: persistent fields from 0 on
+  their own k / rate grid, the rest over the rewind window; per-frame upload chunks, persistent field descriptors),
+  surfaces in the scene MSAA targets (raster / RT; host-lit with sun shadow from the cascades + `PackHemiAmbient`), particles
+  after the composite into `lit` (`WorldParticlesPass`, soft depth fade; never in SSR / SSAO), PT / offline GI through the
+  outline layer. Characters interact through a collider track (feet / toes / wrists, 30 Hz, no physics; play mode builds
+  it once per scene: `WORLD colliders ready` log line). Play mode: `AppSettings::worldStack` (`--world id|none`, the 화면 효과
+  panel's 월드 이펙트 section, manager "월드에 추가"); studio: outliner 월드 entities with placement + keyable params
+  (`RowKind::WorldParam`, saved in .mmdxproj). Built-in `shaders/packs/snow` ("눈"): falling snow, a 200-unit snow cover
+  with footprints (print colour / tint params), landing particles that thin out on trodden snow. No world gizmo / transform
+  keys yet. Zero cost without worlds.
 - MME (docs/mme/mme_design.md; compatibility list docs/mme/compat_list.md): own .fx parser / preprocessor / IR in
   `asset/Mme*`, FXC SM5 wrappers `render/MmeCompiler` (object mode = host MRT), `render/MmeRuntime` (instances per
   (file, objectMode), targets, samplers, constant ring), `MmeScriptVM`, `MmeSemantics` (CONTROLOBJECT: missing object =
