@@ -2445,12 +2445,15 @@ void App::PumpColliderTrack() {
     if (scene_->colliderFuture.valid() &&
         scene_->colliderFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         scene_->colliders = scene_->colliderFuture.get();
+        if (scene_->colliders)
+            LOG_INFO("WORLD colliders ready: %u per sample, %u samples at %.0f Hz", scene_->colliders->perSample,
+                     scene_->colliders->sampleCount, scene_->colliders->rate);
     }
     if (settings_.worldStack.empty()) {
         scene_->colliders.reset();
         return;
     }
-    if (scene_->colliderFuture.valid()) return;
+    if (scene_->colliderFuture.valid() || scene_->colliders) return;   // one build per scene (play mode never edits motions)
     const double end = scene_->motionFps > 0.0f ? (double)scene_->endFrame / scene_->motionFps : 0.0;
     const std::vector<CharacterSource> cast = PlayColliderCast();
     scene_->colliderFuture = std::async(std::launch::async, [cast, end] {
