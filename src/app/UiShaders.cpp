@@ -486,7 +486,7 @@ void App::DrawShaders() {
                 badges.push_back({typeText, typeCol});
                 badges.push_back({SourceLabel(pk->source), {WithAlpha(p.ink, 0.06f), p.ink2}});
                 const RemotePack* rp = remoteOf(pk->id);
-                else if (rp && !rp->verified) badges.push_back({Tr("미검수"), {WithAlpha(p.ink, 0.06f), p.ink3}});
+                if (rp && !rp->verified) badges.push_back({Tr("미검수"), {WithAlpha(p.ink, 0.06f), p.ink3}});
                 ImU32 bg = 0, fg = 0;
                 if (const char* st = StatusLabel(pk->status, bg, fg)) badges.push_back({st, {bg, fg}});
                 if (packGuard_.Quarantined(pk->id)) badges.push_back({Tr("충돌로 비활성화됨"), {p.dangerSoft, p.danger}});
@@ -566,7 +566,7 @@ void App::DrawShaders() {
                                                                      : std::make_pair(WithAlpha(p.ink, 0.05f), p.ink2);
                     badges.push_back({typeText, typeCol});
                     const ShaderPack* inst = InstalledVersionOf(rp->id);
-                    else badges.push_back({Tr("미검수"), {WithAlpha(p.ink, 0.06f), p.ink3}});
+                    if (!rp->verified) badges.push_back({Tr("미검수"), {WithAlpha(p.ink, 0.06f), p.ink3}});
                     if (!rp->Compatible()) badges.push_back({Tr("호환되지 않음"), {p.warnSoft, p.warn}});
                     else if (inst && UpdateAllowed(*inst, *rp))
                         badges.push_back({Tr("업데이트 있음"), {p.accentSoft, p.accentInk}});
