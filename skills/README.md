@@ -8,6 +8,9 @@ motion as an animator would;
 each carries a treatment template, a critique rubric and tool recipes as references so the judgement stays the core
 and the procedure stays a means. No scripts, no VMD parsing, no repository paths are involved.
 
+`mmdx12-mme-porter` is the exception: it ports an MME effect folder to a native pack through `docs/mme_porting.md`
+(licence first).
+
 ## Requirements
 
 - MMDX12 is running with MCP enabled (Detail Settings > MCP Control, or launched with `--mcp`).
