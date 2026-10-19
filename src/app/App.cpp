@@ -1586,7 +1586,9 @@ void App::ApplyRenderSettings() {
     rs.bloomThreshold = settings_.bloomThreshold;
     rs.bloomLook = settings_.bloomLook;
     rs.lutIntensity = settings_.lutIntensity;
-    rs.packEffects = settings_.effectStack;   // effect packs (the shader screens edit it)
+    // effect packs (the shader screens edit them); while the studio is open, the project's own stack evaluated at the
+    // playhead (keyed parameters, docs/effect_ecosystem.md), as the MME post stack below
+    rs.packEffects = studio_ ? StudioEvaluatedEffects((float)(studio_->time * kMmdFps)) : settings_.effectStack;
     // M6b: the MME post stack. --mme overrides for one run; while the studio is open the project's own stack
     // replaces the play-mode one (docs/mme/mme_design.md §2.10). The global MME switch off disables it everywhere.
     rs.mmeEffects = !MmeGlobalEnabled() ? std::vector<MmeEffectEntry>{}
@@ -2007,6 +2009,7 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         LOG_INFO("camera vmd: light track %zu keys, self-shadow track %zu keys", s->lightTrack.size(), s->shadowTrack.size());
     s->endFrame = pkg.endFrame;
     s->motionFps = pkg.motionFps;
+    s->audioPath = pkg.audioPath;
     s->hasAudio = !pkg.audioPath.empty() && audio_.Load(pkg.audioPath);
     if (s->hasAudio)
         LOG_INFO("audio: playing %s", PathToUtf8(pkg.audioPath.filename()).c_str());
@@ -2311,6 +2314,7 @@ void App::AppendMmeEffectObjects(FrameView& view, const std::vector<SceneRuntime
 }
 
 void App::BuildFrameView(float frame, FrameView& view) {
+    view.frame = frame;
     if (useMotionCamera_ && scene_->camera) {
         CameraPose pose = scene_->camera->Evaluate(frame);
         CameraMotion::ToView(pose, &view.camera.view, &view.camera.eye);
@@ -2447,6 +2451,10 @@ void App::BuildFrameView(float frame, FrameView& view) {
     if (options_.quitAfterFrames > 0 || !options_.uiScript.empty() || options_.mcp == 1 || HeadlessRun()) {
         view.effectDt = 1.0f / 60.0f;
     }
+    const double audioSec = (offline_.mode != OfflineMode::None && scene_ && scene_->motionFps > 0.0f)
+                                ? (double)(frame / scene_->motionFps)
+                                : playTime_;
+    FillPackInputs(view, scene_ ? scene_->character.get() : nullptr, audioSec);
 }
 
 } // namespace mmdx

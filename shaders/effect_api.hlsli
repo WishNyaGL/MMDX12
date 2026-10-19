@@ -178,4 +178,6 @@ uint2 PackFxTexSize(uint i) {
 
 uint PackFxTexCount() { return (uint)PACK_TEX_COUNT; }
 
+#include "pack_inputs.hlsli"
+
 #endif

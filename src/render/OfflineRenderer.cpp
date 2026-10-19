@@ -396,10 +396,12 @@ void OfflineRenderer::Impl::PreparePackEdges() {
             if (pack->textures[i].clamp) clampMask |= 1u << i;
             if (pack->textures[i].srgb) srgbMask |= 1u << i;
         }
-        const ShaderDefines defines = {{"MMDX_PACK", "\"" + inc + "\""},
-                                       {"PACK_TEX_COUNT", std::to_string(texCount)},
-                                       {"PACK_TEX_CLAMP_MASK", std::to_string(clampMask) + "u"},
-                                       {"PACK_TEX_SRGB_MASK", std::to_string(srgbMask) + "u"}};
+        ShaderDefines defines = {{"MMDX_PACK", "\"" + inc + "\""},
+                                 {"PACK_TEX_COUNT", std::to_string(texCount)},
+                                 {"PACK_TEX_CLAMP_MASK", std::to_string(clampMask) + "u"},
+                                 {"PACK_TEX_SRGB_MASK", std::to_string(srgbMask) + "u"}};
+        if (pack->HasCap("inputs.scene")) defines.push_back({"PACK_CAP_INPUTS_SCENE", "1"});
+        if (pack->HasCap("inputs.audio")) defines.push_back({"PACK_CAP_INPUTS_AUDIO", "1"});
         const std::filesystem::path file = shaderDir / L"offline_edge_pack.hlsl";
         std::string errors;
         ComPtr<ID3DBlob> vs = CompileShaderDxc(file, "VSEdgeOfflinePack", "vs_6_0", defines, &errors);

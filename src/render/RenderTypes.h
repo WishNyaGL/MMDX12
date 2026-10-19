@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include "render/ShaderInterop.h"
 
 namespace mmdx {
 
@@ -342,6 +343,7 @@ struct FrameView {
     std::vector<MmeEffectObject> mmeEffectObjects;
     bool studioFloor = false;       // draw the procedural studio floor at y = 0
     bool cameraCut = false;         // discard temporal history (seek, VMD camera cut)
+    float frame = 0.0f;             // current frame number / time base
     // This view may use DLSS Frame Generation (live play scene only; the lobby, studio, offline renders,
     // benchmarks and captures leave it false).
     bool frameGen = false;
@@ -374,6 +376,8 @@ struct FrameView {
     // Screen-video layers (screen == true) decode synchronously for the rendered time (offline renders): the frame
     // is exact instead of the async decode-ahead ring. Ignored without a screen layer.
     bool videoExact = false;
+    // Shader pack typed scene and audio inputs
+    GpuPackInputs packInputs{};
 };
 
 struct RenderStats {

@@ -204,4 +204,6 @@ struct PackEdgeResult {
 // PackEdge signature is unchanged, so packs written before v6 compile as they are.
 static float4 PackEdgeUv2 = float4(0, 0, 0, 0);
 
+#include "pack_inputs.hlsli"
+
 #endif

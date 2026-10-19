@@ -379,6 +379,8 @@ const PackEffectPass::EffectPipelines* PackEffectPass::Pipelines(Dx12Context& ct
         defines.push_back({"PACK_STATE_FLOATS", std::to_string(pack->stateFloats)});
     }
     if (!pack->passes.empty()) defines.push_back({"PACK_PASS_COUNT", std::to_string(pack->passes.size())});
+    if (pack->HasCap("inputs.scene")) defines.push_back({"PACK_CAP_INPUTS_SCENE", "1"});
+    if (pack->HasCap("inputs.audio")) defines.push_back({"PACK_CAP_INPUTS_AUDIO", "1"});
     std::string errors;
     auto pipe = std::make_unique<EffectPipeline>();
     if (!pipe->Create(ctx, file, preBloom, defines, &errors, pack->stateFloats, &pack->passes)) {

@@ -662,6 +662,8 @@ const ScenePass::PackPipelines* ScenePass::PackPsos(Dx12Context& ctx, const std:
                                  {"PACK_TEX_COUNT", std::to_string(texCount)},
                                  {"PACK_TEX_CLAMP_MASK", std::to_string(clampMask) + "u"},
                                  {"PACK_TEX_SRGB_MASK", std::to_string(srgbMask) + "u"}};
+    if (pack->HasCap("inputs.scene")) packDefines.push_back({"PACK_CAP_INPUTS_SCENE", "1"});
+    if (pack->HasCap("inputs.audio")) packDefines.push_back({"PACK_CAP_INPUTS_AUDIO", "1"});
     if (!p.back) {
         // DXC (FXC cannot #include a macro): shader model 6.0, so the VS is a DXC build of VSMain as well
         if (!vsDxc_) vsDxc_ = CompileShaderDxc(file, "VSMain", "vs_6_0");

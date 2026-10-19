@@ -14,6 +14,13 @@ float4 ApplyTexFactor(float4 c, float4 mulF, float4 addF) {
     return float4(ApplyTexFactor3(c.rgb, mulF, addF, 1.0), c.a);
 }
 
+struct GpuPackInputRoleHLSL {
+    float4 posValid; // xyz = world pos, w = valid (1 or 0)
+    float4 right;    // xyz = right
+    float4 up;       // xyz = up
+    float4 forward;  // xyz = forward
+};
+
 cbuffer SceneCB : register(b0) {
     float4x4 gView;
     float4x4 gProj;
@@ -51,6 +58,10 @@ cbuffer SceneCB : register(b0) {
     float4 gPointShadowParams;   // x = point lights shadowed this frame (0 = none), y = 1/pointMapSize
     float4 gAutoLumParams;       // x = AutoLuminous glow enabled (0/1), yzw unused
     float4 gBgOverride;          // xyz = transparent-export background colour (linear), w = enabled (offline GI)
+    // Shader pack typed inputs (PACK_CAP_INPUTS_SCENE / PACK_CAP_INPUTS_AUDIO)
+    GpuPackInputRoleHLSL gPackRoles[8];
+    float4 gPackAudio0;          // x: beat, y: downbeat, z: onset, w: energy
+    float4 gPackAudio1;          // x: section, y: bpm, z: valid, w: unused
 };
 
 static const float PI = 3.14159265;

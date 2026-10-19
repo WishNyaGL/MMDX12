@@ -18,7 +18,23 @@ inline constexpr uint32_t kPointShadowFaces = 6;
 inline constexpr uint32_t kPointShadowMapSize = 1024;
 inline constexpr uint32_t kPointShadowMinSize = 256;
 inline constexpr uint32_t kPointShadowFullResLights = 4;
-inline constexpr uint32_t kSceneCbSize = 2560;  // 256-aligned slot; 16 spot matrices need > 2048
+inline constexpr uint32_t kSceneCbSize = 3072;  // 256-aligned slot; supports spot matrices + pack inputs
+
+// Typed scene role for pack inputs (ShaderPack::PackInput order)
+struct GpuPackInputRole {
+    DirectX::XMFLOAT4 posValid; // xyz = world pos (MMD units), w = 1.0f (valid) or 0.0f
+    DirectX::XMFLOAT4 right;    // frame X axis (normalized)
+    DirectX::XMFLOAT4 up;       // frame Y axis (normalized)
+    DirectX::XMFLOAT4 forward;  // frame Z axis (normalized)
+};
+static_assert(sizeof(GpuPackInputRole) == 64, "GpuPackInputRole layout");
+
+struct GpuPackInputs {
+    GpuPackInputRole roles[8];  // PerformerHead..CameraFocus
+    DirectX::XMFLOAT4 audio0;   // x = beat, y = downbeat, z = onset, w = energy
+    DirectX::XMFLOAT4 audio1;   // x = section, y = bpm, z = valid, w = 0
+};
+static_assert(sizeof(GpuPackInputs) == 544, "GpuPackInputs layout");
 
 struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     DirectX::XMFLOAT4X4 view;
@@ -60,6 +76,8 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     // Transparent-background export (offline GI): primary camera-ray misses output xyz (linear); w = enabled (0/1).
     // Real-time renderers use RenderSettings::transparentBackground for the same effect. 0 = the real sky.
     DirectX::XMFLOAT4 bgOverride;
+    // Shader pack typed inputs (requires "inputs.scene" / "inputs.audio")
+    GpuPackInputs packInputs;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 

@@ -535,6 +535,7 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
     // Distance haze is a lighting-style contribution; Unlit/Wireframe scenes are drawn flat
     // (RecordScene turns the lighting-adjacent effects off for these frames).
     if (shading != 0u) sc.fog = 0.0f;
+    sc.packInputs = view.packInputs;
 }
 
 uint32_t Renderer::FillGpuLights(const LightParams& light, GpuLight* out, uint32_t pointCap) {

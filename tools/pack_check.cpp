@@ -496,6 +496,9 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (effect && !pack.passes.empty())
             defines.push_back({"PACK_PASS_COUNT", std::to_string(pack.passes.size())});
+        // capability macros, as the app's pack hosts define them
+        if (pack.HasCap("inputs.scene")) defines.push_back({"PACK_CAP_INPUTS_SCENE", "1"});
+        if (pack.HasCap("inputs.audio")) defines.push_back({"PACK_CAP_INPUTS_AUDIO", "1"});
         printf("compile: %s of %s (ps_6_0, MMDX_PACK = %s, %u textures)\n",
                effect ? "PSEffect" : "PSPack", mmdx::PathToUtf8(mmdHlsl.filename()).c_str(), incDefine.c_str(), texCount);
         std::string errors;
@@ -550,8 +553,9 @@ int wmain(int argc, wchar_t** argv) {
                 std::string ptInc = mmdx::PathToUtf8(ptRel);
                 std::replace(ptInc.begin(), ptInc.end(), '\\', '/');
                 const std::string ptIncDefine = "\"" + ptInc + "\"";
-                const std::vector<std::pair<std::string, std::string>> ptDefines = {
-                    {"MMDX_PT_PACK", ptIncDefine}};
+                std::vector<std::pair<std::string, std::string>> ptDefines = {{"MMDX_PT_PACK", ptIncDefine}};
+                if (pack.HasCap("inputs.scene")) ptDefines.push_back({"PACK_CAP_INPUTS_SCENE", "1"});
+                if (pack.HasCap("inputs.audio")) ptDefines.push_back({"PACK_CAP_INPUTS_AUDIO", "1"});
                 printf("compile: CSRender of %s (cs_6_5, MMDX_PT_PACK = %s)\n",
                        mmdx::PathToUtf8(giHlsl.filename()).c_str(), ptIncDefine.c_str());
                 std::string ptErrors;

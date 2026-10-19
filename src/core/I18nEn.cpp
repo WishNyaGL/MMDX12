@@ -1220,6 +1220,16 @@ const Entry kEnglish[] = {
     {"글로우 세기", "Glow intensity"},
     {"색 분산", "Dispersion"},
     {"기본값", "Defaults"},
+    {"셰이더 이펙트", "Shader effects"},
+    {"계단식 보간", "Stepped interpolation"},
+    {"계단식", "Stepped"},
+    {"선형", "Linear"},
+    {"다음 키까지 현재 값을 유지합니다", "Holds the current value until the next key"},
+    {"보간 변경", "Change interpolation"},
+    {"선형 보간으로 변경", "Change to linear interpolation"},
+    {"계단식 보간으로 변경", "Change to stepped interpolation"},
+    {"효과 키 등록", "Register effect key"},
+    {"효과 키 삭제", "Delete effect key"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

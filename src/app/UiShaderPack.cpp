@@ -731,6 +731,18 @@ std::vector<MmeEffectEntry> App::StudioMmeEntries() const {
     return out;
 }
 
+// Studio project effect stack: evaluated entries for the frame (empty outside the studio).
+std::vector<EffectStackEntry> App::StudioEvaluatedEffects(float frame) const {
+    std::vector<EffectStackEntry> out;
+    if (!studio_) return out;
+    out.reserve(studio_->effects.size());
+    for (const studio::StudioEffect& e : studio_->effects) {
+        if (!e.entry.enabled) continue;
+        out.push_back(studio::EvaluateEffect(e, frame));
+    }
+    return out;
+}
+
 // M6b: a studio MME stack edit (add / remove / toggle) marks the project dirty and pushes the stack to the renderer.
 void App::StudioMmeChanged() {
     if (studio_) ++studio_->projectVersion;

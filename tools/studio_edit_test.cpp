@@ -442,6 +442,70 @@ static void TestPerformance() {
     else Check(true, "Performance");
 }
 
+// 10. Effect stack and key editing: EffectsCommand, RowKind::EffectParam capture/restore, interpolation.
+static void TestStudioEffectEdit() {
+    StudioDoc doc;
+    StudioEffect eff1;
+    eff1.uid = 1;
+    eff1.entry.pack = "pack_bloom";
+    eff1.entry.enabled = true;
+    eff1.entry.params["intensity"] = 0.5f;
+
+    std::vector<StudioEffect> beforeEffects = doc.effects;
+    std::vector<StudioEffect> afterEffects = {eff1};
+    doc.history.Push(std::make_unique<EffectsCommand>(doc, "add effect", beforeEffects, afterEffects));
+
+    bool ok = doc.effects.size() == 1 && doc.effects[0].entry.pack == "pack_bloom";
+    const char* detail = "";
+    if (!ok) detail = "EffectsCommand Push failed";
+
+    doc.history.Undo();
+    if (ok && !doc.effects.empty()) { ok = false; detail = "EffectsCommand Undo failed"; }
+    doc.history.Redo();
+    if (ok && (doc.effects.size() != 1 || doc.effects[0].uid != 1)) { ok = false; detail = "EffectsCommand Redo failed"; }
+
+    // Key editing on an effect parameter
+    StudioEffect* eff = doc.FindEffect(1);
+    if (ok && !eff) { ok = false; detail = "FindEffect(1) failed"; }
+
+    const std::string trackName = EffectParamTrackName(1, "intensity");
+    std::vector<TrackState> beforeTrack = {CaptureTrack(doc, -1, RowKind::EffectParam, trackName)};
+
+    if (ok) {
+        eff->tracks.push_back({"intensity", {}});
+        UpsertParamKey(eff->tracks.back(), EffectParamKey{0, 0.2f, false});
+        UpsertParamKey(eff->tracks.back(), EffectParamKey{10, 0.8f, true});  // stepped at 10
+        UpsertParamKey(eff->tracks.back(), EffectParamKey{20, 1.0f, false});
+    }
+
+    std::vector<TrackState> afterTrack = {CaptureTrack(doc, -1, RowKind::EffectParam, trackName)};
+    doc.history.Push(std::make_unique<TrackEditCommand>(doc, "edit effect param", beforeTrack, afterTrack));
+
+    if (ok) {
+        // Test interpolation:
+        // at frame 5 (linear between 0 and 10): 0.2 + (0.8 - 0.2) * 0.5 = 0.5
+        float v5 = EvaluateParamTrack(eff->tracks[0], 5.0f, 0.0f);
+        if (std::fabs(v5 - 0.5f) > 1e-4f) { ok = false; detail = "EvaluateParamTrack frame 5 wrong"; }
+        // at frame 15 (stepped from frame 10): 0.8
+        float v15 = EvaluateParamTrack(eff->tracks[0], 15.0f, 0.0f);
+        if (std::fabs(v15 - 0.8f) > 1e-4f) { ok = false; detail = "EvaluateParamTrack frame 15 stepped wrong"; }
+    }
+
+    // Test undo of key edit:
+    doc.history.Undo();
+    eff = doc.FindEffect(1);
+    if (ok && (eff && !eff->tracks.empty())) { ok = false; detail = "Key edit Undo did not clear tracks"; }
+
+    doc.history.Redo();
+    eff = doc.FindEffect(1);
+    if (ok && (!eff || eff->tracks.empty() || eff->tracks[0].keys.size() != 3)) {
+        ok = false; detail = "Key edit Redo did not restore keys";
+    }
+
+    if (!ok) Check(false, "StudioEffectEdit", "%s", detail);
+    else Check(true, "StudioEffectEdit");
+}
+
 int main() {
     TestFindKey();
     TestMoveReplace();
@@ -457,6 +521,7 @@ int main() {
     TestVmdRoundTripLightShadow();
     TestLightShadowUndo();
     TestPerformance();
+    TestStudioEffectEdit();
     std::printf("studio_edit_test: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed > 0 ? 1 : 0;
 }

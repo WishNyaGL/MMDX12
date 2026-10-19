@@ -264,6 +264,23 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             for (size_t i = 0; i < d.mmePost.size(); ++i)
                 LOG_INFO("STUDIOMMEPOST %zu enabled=%d path=%s", i, (int)d.mmePost[i].enabled,
                          PathToUtf8(d.mmePost[i].path).c_str());
+            for (size_t i = 0; i < d.effects.size(); ++i) {
+                const studio::StudioEffect& e = d.effects[i];
+                size_t keyCount = 0;
+                for (const auto& t : e.tracks) keyCount += t.keys.size();
+                EffectStackEntry evaluated = studio::EvaluateEffect(e, (float)d.Frame());
+                std::string vals;
+                bool firstVal = true;
+                for (const auto& [k, v] : evaluated.params) {
+                    if (!firstVal) vals += ",";
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "%s=%.2f", k.c_str(), v);
+                    vals += buf;
+                    firstVal = false;
+                }
+                LOG_INFO("STUDIOEFFECT %zu pack=%s enabled=%d keys=%zu values=%s",
+                         i, e.entry.pack.c_str(), (int)e.entry.enabled, keyCount, vals.c_str());
+            }
         }
     } else if (cmd == "studiobone") {  // studiobone <name>: click the bone's joint in the viewport
         const studio::StudioModel* m = studio_ ? studio_->Selected() : nullptr;
@@ -697,6 +714,64 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 v.erase(std::remove_if(v.begin(), v.end(), [&](const studio::MmePostEntry& e) { return e.path == p; }),
                         v.end());
                 StudioMmeChanged();
+            }
+        }
+    } else if (cmd == "studioeffect") {  // studioeffect <add <pack id> | remove <index> | enable <index> <0|1>>
+        if (studio_ && !args.empty()) {
+            const std::string action = ToLowerAscii(args[0]);
+            if (action == "add" && args.size() >= 2) {
+                std::vector<studio::StudioEffect> before = studio_->effects;
+                studio::StudioEffect eff;
+                eff.uid = studio_->nextEffectUid++;
+                eff.entry.pack = args[1];
+                eff.entry.enabled = true;
+                studio_->effects.push_back(std::move(eff));
+                studio_->history.Push(std::make_unique<studio::EffectsCommand>(*studio_, Tr("효과 추가"), before, studio_->effects));
+                ++studio_->projectVersion;
+                studio_->rowsKey = ~0ull;
+            } else if (action == "remove" && args.size() >= 2) {
+                size_t idx = (size_t)std::atoi(args[1].c_str());
+                if (idx < studio_->effects.size()) {
+                    std::vector<studio::StudioEffect> before = studio_->effects;
+                    studio_->effects.erase(studio_->effects.begin() + (long)idx);
+                    studio_->history.Push(std::make_unique<studio::EffectsCommand>(*studio_, Tr("효과 삭제"), before, studio_->effects));
+                    ++studio_->projectVersion;
+                    studio_->rowsKey = ~0ull;
+                }
+            } else if (action == "enable" && args.size() >= 3) {
+                size_t idx = (size_t)std::atoi(args[1].c_str());
+                if (idx < studio_->effects.size()) {
+                    std::vector<studio::StudioEffect> before = studio_->effects;
+                    studio_->effects[idx].entry.enabled = std::atoi(args[2].c_str()) != 0;
+                    studio_->history.Push(std::make_unique<studio::EffectsCommand>(*studio_,
+                        studio_->effects[idx].entry.enabled ? Tr("효과 켜기") : Tr("효과 끄기"), before, studio_->effects));
+                    ++studio_->projectVersion;
+                    studio_->rowsKey = ~0ull;
+                }
+            }
+        }
+    } else if (cmd == "studioeffectkey") {  // studioeffectkey <index> <param key> <frame> <value> [stepped]
+        if (studio_ && args.size() >= 4) {
+            size_t idx = (size_t)std::atoi(args[0].c_str());
+            if (idx < studio_->effects.size()) {
+                studio::StudioEffect& eff = studio_->effects[idx];
+                const std::string& param = args[1];
+                int frame = std::atoi(args[2].c_str());
+                float val = (float)std::atof(args[3].c_str());
+                bool stepped = args.size() > 4 && (args[4] == "1" || ToLowerAscii(args[4]) == "stepped" || ToLowerAscii(args[4]) == "true");
+                std::vector<studio::TrackState> before = {studio::CaptureTrack(*studio_, -1, studio::RowKind::EffectParam,
+                                                                               studio::EffectParamTrackName(eff.uid, param))};
+                studio::EffectParamTrack* tr = nullptr;
+                for (auto& t : eff.tracks) {
+                    if (t.param == param) { tr = &t; break; }
+                }
+                if (!tr) {
+                    eff.tracks.push_back({param, {}});
+                    tr = &eff.tracks.back();
+                }
+                studio::UpsertParamKey(*tr, studio::EffectParamKey{frame, val, stepped});
+                StudioPushTrackEdit(Tr("효과 키 등록"), before);
+                studio_->rowsKey = ~0ull;
             }
         }
     } else if (cmd == "mmeglobal") {  // mmeglobal <0|1>: the saved global MME switch

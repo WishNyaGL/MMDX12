@@ -283,6 +283,7 @@ private:
         std::vector<StageMotionBinding> stageMotions;
         // M8b: the song's resolved video layers (background + overlay), from the song / the ini override.
         std::vector<VideoLayerDesc> videos;
+        std::filesystem::path audioPath;
         // M5c: MME effect objects (accessory `.x` + same-stem `.fx`). Each `mesh` is appended to `view.models` (so
         // the renderer draws it through the MME object path) and to `mmeEffectObjects`.
         struct EffectObject {
@@ -370,6 +371,10 @@ private:
     void UnloadScene();                          // WaitForGpu, release runtime + audio
     void UpdateScene(float frame);               // evaluate motion, update poses, upload to GPU
     void BuildFrameView(float frame, FrameView& view);
+    // M1a: typed scene roles and audio-reactive inputs for shader packs (PackInputs.cpp)
+    void FillPackInputs(FrameView& view, const ModelInstance* performer, double audioSeconds);
+    bool NeedsAudioInputs() const;
+    void EnsureAudioAnalysis(const std::filesystem::path& audioPath);
     // M5a: appends one MME scene object (CONTROLOBJECT / DefaultEffect matching) parallel to view.models. `inst`
     // may be null (no per-model data); `displayName` is the model's display name.
     void AppendMmeObject(FrameView& view, const GpuModel* gpu, const ModelInstance* inst, bool visible,
@@ -931,6 +936,8 @@ private:
     std::string mmeSuggestApply_;             // the character id the MME suggestion toast's apply button would set
     // M6b: the studio project's MME post stack as RenderSettings entries (empty outside the studio / without a project).
     std::vector<MmeEffectEntry> StudioMmeEntries() const;
+    // Studio project effect stack: evaluated entries for the frame (empty outside the studio).
+    std::vector<EffectStackEntry> StudioEvaluatedEffects(float frame) const;
     // M6b: applies a studio MME stack change (add / remove / toggle) to the project and the renderer.
     void StudioMmeChanged();
     // P5: the per-character PBR material source. The global Ray-MMD switch off forces Default; the Auto workflow picks
@@ -1245,6 +1252,8 @@ private:
     std::map<uint32_t, std::pair<DirectX::XMFLOAT3, DirectX::XMFLOAT3>> studioAabbCache_;
     std::shared_ptr<BeatAnalysis> studioBeats_;
     std::string studioBeatsKey_;
+    std::future<std::pair<std::string, BeatAnalysis>> audioFuture_;
+    std::string audioAnalysisPendingKey_;
     StudioAction studioPending_ = StudioAction::None;
     std::filesystem::path studioPendingFile_;
     // async model / song loads started inside the studio

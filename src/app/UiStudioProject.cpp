@@ -209,6 +209,7 @@ ProjectData App::StudioProjectData() const {
     pd.bgVideoOffset = d.bgVideoOffset;
     pd.bgVideoAsBackground = d.bgVideoAsBackground;
     pd.mmePost = d.mmePost;   // M6b: the project's own MME post stack
+    pd.effects = d.effects;   // Version 3: the project's own effect stack
     ProjectEditor& e = pd.editor;
     e.frame = d.Frame();
     e.selectedModel = d.selectedModel;

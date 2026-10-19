@@ -79,7 +79,7 @@ struct StudioModel {
 // Timeline row ids: kind in the top byte, then a 24-bit group and a 32-bit index. Light is the camera VMD's light
 // track; SceneLight is the keys of one scene light (SceneLight.h): MakeRowId(RowKind::SceneLight, 0, light uid).
 // Focus is the studio's depth-of-field focus track (camera MotionData::focus, saved in the project, not in VMD).
-enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9 };
+enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10 };
 inline uint64_t MakeRowId(RowKind k, uint32_t group, uint32_t index) {
     return ((uint64_t)k << 56) | ((uint64_t)(group & 0xFFFFFF) << 32) | index;
 }
@@ -94,6 +94,18 @@ inline bool IsCameraKind(RowKind k) {
 // The track name of a SceneLight row (StudioTrackOfRow, TrackState::name): the light's uid in decimal.
 inline std::string LightTrackName(uint32_t uid) { return std::to_string(uid); }
 inline uint32_t LightUidOfTrack(const std::string& name) { return (uint32_t)std::strtoul(name.c_str(), nullptr, 10); }
+
+// The track name of an EffectParam row: "<effect uid>:<param key>".
+inline std::string EffectParamTrackName(uint32_t uid, const std::string& param) {
+    return std::to_string(uid) + ":" + param;
+}
+inline bool ParseEffectParamTrackName(const std::string& name, uint32_t& uid, std::string& param) {
+    const size_t c = name.find(':');
+    if (c == std::string::npos) return false;
+    uid = (uint32_t)std::strtoul(name.substr(0, c).c_str(), nullptr, 10);
+    param = name.substr(c + 1);
+    return true;
+}
 
 // The row that represents a bone/morph track in the key selection: a bone listed in two display frames has two rows,
 // but its keys are selected through the first one only (CanonicalRow), so counts and edits see each key once.
@@ -113,7 +125,7 @@ struct ClipboardKey {
     uint64_t row = 0;
     int offset = 0;  // frame relative to the first copied key
     BoneKf bone; MorphKf morph; CameraKf camera; LightKf light; ShadowKf shadow; LightKey sceneLight; FocusKf focus;
-    AccessoryKf accessory;
+    AccessoryKf accessory; EffectParamKey effectParam;
 };
 
 struct StudioDoc {
@@ -147,6 +159,16 @@ struct StudioDoc {
     // M6b: the project's own MME post stack (docs/mme/mme_design.md §2.10); while the studio is open it replaces
     // the play-mode stack (RenderSettings::mmeEffects) and offline renders use it. Saved in the project.
     std::vector<MmePostEntry> mmePost;
+    // Version 3: the project's own effect stack (StudioEffects.h). While the studio is open it replaces
+    // the play-mode stack (RenderSettings::packEffects) and offline renders use it. Saved in the project.
+    std::vector<StudioEffect> effects;
+    uint32_t nextEffectUid = 1;
+    StudioEffect* FindEffect(uint32_t uid) {
+        for (StudioEffect& e : effects)
+            if (e.uid == uid) return &e;
+        return nullptr;
+    }
+    const StudioEffect* FindEffect(uint32_t uid) const { return const_cast<StudioDoc*>(this)->FindEffect(uid); }
     bool Dirty() const { return history.Version() != savedVersion || projectVersion != savedProjectVersion; }
     uint64_t ChangeStamp() const { return history.Version() + (projectVersion << 32); }
     void MarkSaved() { savedVersion = history.Version(); savedProjectVersion = projectVersion; }
@@ -245,9 +267,9 @@ struct StudioDoc {
 // every operation (move, delete, paste, curve, insert) trivially reversible.
 struct TrackState {
     int model = -1;                // -1 camera
-    RowKind kind = RowKind::Bone;  // Bone, Morph, Camera, Light, Shadow, Focus or SceneLight
-    std::string name;              // bone/morph name (scene light: LightTrackName); unused for the camera
-    uint32_t uid = 0;              // SceneLight: the light's uid (LightUidOfTrack(name))
+    RowKind kind = RowKind::Bone;  // Bone, Morph, Camera, Light, Shadow, Focus, SceneLight or EffectParam
+    std::string name;              // bone/morph name (scene light: LightTrackName, effect param: EffectParamTrackName); unused for the camera
+    uint32_t uid = 0;              // SceneLight: the light's uid; EffectParam: the effect's uid
     bool existed = false;          // the track existed (absent tracks are erased again)
     std::vector<BoneKf> bones;
     std::vector<MorphKf> morphs;
@@ -257,16 +279,19 @@ struct TrackState {
     std::vector<FocusKf> focuses;
     std::vector<LightKey> lightKeys;  // a scene light's keys
     std::vector<AccessoryKf> accessories;
+    std::vector<EffectParamKey> effectParamKeys;
 
     size_t Bytes() const {
         return sizeof(TrackState) + name.size() + bones.capacity() * sizeof(BoneKf) + morphs.capacity() * sizeof(MorphKf) +
                cameras.capacity() * sizeof(CameraKf) + lights.capacity() * sizeof(LightKf) +
                shadows.capacity() * sizeof(ShadowKf) + focuses.capacity() * sizeof(FocusKf) +
-               lightKeys.capacity() * sizeof(LightKey) + accessories.capacity() * sizeof(AccessoryKf);
+               lightKeys.capacity() * sizeof(LightKey) + accessories.capacity() * sizeof(AccessoryKf) +
+               effectParamKeys.capacity() * sizeof(EffectParamKey);
     }
 };
 // A SceneLight track is addressed by its uid (`name` = LightTrackName(uid)): restoring one whose light no longer
 // exists does nothing; an emptied key list keeps the light (its base values drive it again).
+// An EffectParam track is addressed by its uid and param key (`name` = EffectParamTrackName(uid, param)).
 TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::string& name);
 void RestoreTrack(StudioDoc& doc, const TrackState& s);
 
@@ -292,6 +317,30 @@ private:
     StudioDoc& doc_;
     std::string name_;
     std::vector<SceneLight> before_, after_;
+};
+
+// Adds, removes, reorders or edits effect entries (undoable): holds the whole list before and after.
+// Key edits of an effect go through TrackEditCommand instead.
+class EffectsCommand : public Command {
+public:
+    EffectsCommand(StudioDoc& doc, std::string name, std::vector<StudioEffect> before, std::vector<StudioEffect> after)
+        : doc_(doc), name_(std::move(name)), before_(std::move(before)), after_(std::move(after)) {}
+    void Do() override { doc_.effects = after_; doc_.rowsKey = ~0ull; }
+    void Undo() override { doc_.effects = before_; doc_.rowsKey = ~0ull; }
+    std::string Name() const override { return name_; }
+    size_t Bytes() const override {
+        const auto list = [](const std::vector<StudioEffect>& v) {
+            size_t n = 0;
+            for (const StudioEffect& e : v) n += e.ApproxBytes();
+            return n;
+        };
+        return sizeof(*this) + name_.size() + list(before_) + list(after_);
+    }
+
+private:
+    StudioDoc& doc_;
+    std::string name_;
+    std::vector<StudioEffect> before_, after_;
 };
 
 class TrackEditCommand : public Command {
@@ -450,6 +499,8 @@ struct StudioPackage {
     // M6b: the project's own MME post stack (StudioProject.h "mmeEffects"); while the studio is open it replaces
     // the play-mode stack (RenderSettings::mmeEffects).
     std::vector<MmePostEntry> mmePost;
+    // Version 3: the project's own effect stack (StudioEffects.h).
+    std::vector<StudioEffect> effects;
     PmmEffectSettings pmmEffects;            // .pmm import: MME controller mapping (App applies it)
     int pmmWidth = 0, pmmHeight = 0;         // .pmm import: output resolution (aspect preset)
     float pmmFps = 0.0f;                     // .pmm import: preferred fps (informational)

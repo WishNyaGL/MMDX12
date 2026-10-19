@@ -95,6 +95,24 @@ TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::stri
         if (light) s.lightKeys = light->keys;
         return s;
     }
+    if (kind == RowKind::EffectParam) {
+        uint32_t effectUid = 0;
+        std::string param;
+        if (ParseEffectParamTrackName(name, effectUid, param)) {
+            s.uid = effectUid;
+            const StudioEffect* eff = doc.FindEffect(effectUid);
+            if (eff) {
+                for (const EffectParamTrack& t : eff->tracks) {
+                    if (t.param == param) {
+                        s.existed = true;
+                        s.effectParamKeys = t.keys;
+                        break;
+                    }
+                }
+            }
+        }
+        return s;
+    }
     MotionData& m = doc.models[model]->motion;
     if (kind == RowKind::Bone) {
         auto it = m.bones.find(name);
@@ -124,6 +142,27 @@ void RestoreTrack(StudioDoc& doc, const TrackState& s) {
         if (SceneLight* light = doc.FindLight(s.uid)) {
             light->keys = s.lightKeys;  // an emptied track keeps the light (its base values drive it again)
             doc.rowsKey = ~0ull;
+        }
+        return;
+    }
+    if (s.kind == RowKind::EffectParam) {
+        uint32_t effectUid = 0;
+        std::string param;
+        if (ParseEffectParamTrackName(s.name, effectUid, param)) {
+            if (StudioEffect* eff = doc.FindEffect(effectUid)) {
+                auto it = std::find_if(eff->tracks.begin(), eff->tracks.end(),
+                                       [&](const EffectParamTrack& t) { return t.param == param; });
+                if (s.effectParamKeys.empty()) {
+                    if (it != eff->tracks.end()) eff->tracks.erase(it);
+                } else {
+                    if (it != eff->tracks.end()) {
+                        it->keys = s.effectParamKeys;
+                    } else {
+                        eff->tracks.push_back({param, s.effectParamKeys});
+                    }
+                }
+                doc.rowsKey = ~0ull;
+            }
         }
         return;
     }

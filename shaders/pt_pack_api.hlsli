@@ -82,4 +82,6 @@ float4 PtPackSampleSphereUv(float2 uv);
 bool PtPackHasToonMap();
 float4 PtPackSampleToonUv(float2 uv);
 
+#include "pack_inputs.hlsli"
+
 #endif // PT_PACK_API_HLSLI

@@ -203,6 +203,9 @@ bool App::FinishStudioLoad() {
         freeCam_.fovDeg = std::clamp(e.camFovDeg, 5.0f, 120.0f);
         doc->projectPath = pkg.projectPath;  // recovery: the project the autosave belongs to (may be empty)
         doc->mmePost = pkg.mmePost;          // M6b: the project's own MME post stack
+        doc->effects = pkg.effects;
+        doc->nextEffectUid = 1;
+        for (auto& eff : doc->effects) eff.uid = doc->nextEffectUid++;
     } else if (pkg.fromPmm) {
         // PMM import: a NEW unsaved project. Camera motion when the PMM had camera keys; the PMM has
         // no scene lights, so the Studio preset is the default (a PMM light track overrides it).
@@ -742,7 +745,57 @@ void App::BuildStudioFrameView(FrameView& view) {
     if (options_.quitAfterFrames > 0 || !options_.uiScript.empty() || options_.mcp == 1 || HeadlessRun()) {
         view.effectDt = 1.0f / 60.0f;
     }
+    // shader pack scene / audio inputs: the performer = the first visible character; audio time = timeline - offset
+    const ModelInstance* performer = nullptr;
+    for (const auto& m : d.models)
+        if (m->visible && m->kind == ModelKind::Character && m->inst) { performer = m->inst.get(); break; }
+    FillPackInputs(view, performer, d.time - d.audioOffset);
 }
+
+namespace {
+std::string EffectParamNameOfIndex(const StudioEffect& eff, uint32_t pidx) {
+    const ShaderPack* pk = ShaderPacks().Find(eff.entry.pack);
+    if (pk && pidx < pk->params.size()) return pk->params[pidx].key;
+    size_t offset = pk ? pk->params.size() : 0;
+    size_t extra = 0;
+    for (const auto& t : eff.tracks) {
+        if (pk) {
+            bool inPack = false;
+            for (const auto& sp : pk->params) {
+                if (sp.key == t.param) { inPack = true; break; }
+            }
+            if (inPack) continue;
+        }
+        if (offset + extra == pidx) return t.param;
+        ++extra;
+    }
+    if (!pk && pidx < eff.tracks.size()) return eff.tracks[pidx].param;
+    return {};
+}
+
+uint32_t EffectParamIndexOfName(const StudioEffect& eff, const std::string& paramName) {
+    const ShaderPack* pk = ShaderPacks().Find(eff.entry.pack);
+    if (pk) {
+        for (uint32_t i = 0; i < (uint32_t)pk->params.size(); ++i) {
+            if (pk->params[i].key == paramName) return i;
+        }
+    }
+    uint32_t offset = pk ? (uint32_t)pk->params.size() : 0;
+    uint32_t extra = 0;
+    for (const auto& t : eff.tracks) {
+        if (pk) {
+            bool inPack = false;
+            for (const auto& sp : pk->params) {
+                if (sp.key == t.param) { inPack = true; break; }
+            }
+            if (inPack) continue;
+        }
+        if (t.param == paramName) return offset + extra;
+        ++extra;
+    }
+    return UINT32_MAX;
+}
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Editing
@@ -758,6 +811,17 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
         const uint32_t uid = RowIndexOf(row);
         if (d.selectedModel >= 0 || !d.FindLight(uid)) return false;
         name = LightTrackName(uid);
+        return true;
+    }
+    if (kind == RowKind::EffectParam) {
+        if (d.selectedModel >= 0) return false;
+        const uint32_t uid = RowGroupOf(row);
+        const uint32_t pidx = RowIndexOf(row);
+        const StudioEffect* eff = d.FindEffect(uid);
+        if (!eff) return false;
+        const std::string param = EffectParamNameOfIndex(*eff, pidx);
+        if (param.empty()) return false;
+        name = EffectParamTrackName(uid, param);
         return true;
     }
     if (d.selectedModel < 0 || d.selectedModel >= (int)d.models.size()) return false;
@@ -894,6 +958,34 @@ void App::StudioInsertKeys(const std::vector<uint64_t>& rows, int frame) {
             // a new light key keeps the light's current value (sampled where keys exist)
             if (SceneLight* light = d.FindLight(LightUidOfTrack(name)))
                 UpsertKey(light->keys, LightKey{frame, SampleLightValues(*light, frame)});
+        } else if (kind == RowKind::EffectParam) {
+            uint32_t effectUid = 0;
+            std::string param;
+            if (ParseEffectParamTrackName(name, effectUid, param)) {
+                if (StudioEffect* eff = d.FindEffect(effectUid)) {
+                    EffectParamTrack* tr = nullptr;
+                    for (auto& t : eff->tracks) {
+                        if (t.param == param) { tr = &t; break; }
+                    }
+                    if (!tr) {
+                        eff->tracks.push_back({param, {}});
+                        tr = &eff->tracks.back();
+                    }
+                    float fallback = 0.0f;
+                    if (auto it = eff->entry.params.find(param); it != eff->entry.params.end())
+                        fallback = it->second;
+                    else {
+                        const ShaderPack* pk = ShaderPacks().Find(eff->entry.pack);
+                        if (pk) {
+                            for (const auto& sp : pk->params) {
+                                if (sp.key == param) { fallback = sp.def; break; }
+                            }
+                        }
+                    }
+                    float val = EvaluateParamTrack(*tr, (float)frame, fallback);
+                    UpsertParamKey(*tr, EffectParamKey{frame, val, false});
+                }
+            }
         } else if (kind == RowKind::Bone) {
             auto& track = d.models[d.selectedModel]->motion.bones[name];
             BoneKf k;
@@ -936,6 +1028,16 @@ std::vector<int> App::StudioRowFrames(uint64_t row) const {
         if (d.models[d.selectedModel]->IsProp()) add(d.models[d.selectedModel]->motion.accessory);
     } else if (kind == RowKind::SceneLight) {
         if (const SceneLight* light = d.FindLight(LightUidOfTrack(name))) add(light->keys);
+    } else if (kind == RowKind::EffectParam) {
+        uint32_t effectUid = 0;
+        std::string param;
+        if (ParseEffectParamTrackName(name, effectUid, param)) {
+            if (const StudioEffect* eff = d.FindEffect(effectUid)) {
+                for (const auto& t : eff->tracks) {
+                    if (t.param == param) { add(t.keys); break; }
+                }
+            }
+        }
     } else {
         const MotionData& m = d.models[d.selectedModel]->motion;
         if (kind == RowKind::Bone) {
@@ -983,6 +1085,14 @@ void App::StudioSelectAll() {
         all.insert(MakeRowId(RowKind::Focus, 0, 0));
         for (const SceneLight& l : d.lights)
             if (l.kind != LightKind::Ambient) all.insert(MakeRowId(RowKind::SceneLight, 0, l.uid));
+        for (const auto& eff : d.effects) {
+            for (const auto& tr : eff.tracks) {
+                if (!tr.keys.empty()) {
+                    uint32_t pidx = EffectParamIndexOfName(eff, tr.param);
+                    if (pidx != UINT32_MAX) all.insert(MakeRowId(RowKind::EffectParam, eff.uid, pidx));
+                }
+            }
+        }
     }
     for (const auto& [group, children] : d.groupChildren) all.insert(group);
     for (uint64_t row : StudioExpandRows(all))
@@ -1011,6 +1121,21 @@ void App::StudioDeleteSelected(const char* undoName) {
         }
         else if (kind == RowKind::SceneLight) {
             if (SceneLight* light = d.FindLight(LightUidOfTrack(track.second))) EraseKeyFrames(light->keys, fs);
+        }
+        else if (kind == RowKind::EffectParam) {
+            uint32_t effectUid = 0;
+            std::string param;
+            if (ParseEffectParamTrackName(track.second, effectUid, param)) {
+                if (StudioEffect* eff = d.FindEffect(effectUid)) {
+                    for (auto& t : eff->tracks) {
+                        if (t.param == param) {
+                            std::vector<int32_t> fvec(fs.begin(), fs.end());
+                            EraseParamKeys(t, fvec);
+                            break;
+                        }
+                    }
+                }
+            }
         }
         else if (kind == RowKind::Bone) EraseKeyFrames(d.models[d.selectedModel]->motion.bones[track.second], fs);
         else if (kind == RowKind::Morph) EraseKeyFrames(d.models[d.selectedModel]->motion.morphs[track.second], fs);
@@ -1047,6 +1172,25 @@ void App::StudioCopySelected() {
         } else if (kind == RowKind::SceneLight) {
             if (const SceneLight* light = d.FindLight(LightUidOfTrack(name)))
                 if (const LightKey* p = FindKey(light->keys, k.second)) { c.sceneLight = *p; found = true; }
+        } else if (kind == RowKind::EffectParam) {
+            uint32_t effectUid = 0;
+            std::string param;
+            if (ParseEffectParamTrackName(name, effectUid, param)) {
+                if (const StudioEffect* eff = d.FindEffect(effectUid)) {
+                    for (const auto& t : eff->tracks) {
+                        if (t.param == param) {
+                            for (const auto& pk : t.keys) {
+                                if (pk.frame == k.second) {
+                                    c.effectParam = pk;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
         } else if (kind == RowKind::Bone) {
             const auto& t = d.models[d.selectedModel]->motion.bones;
             if (auto it = t.find(name); it != t.end())
@@ -1138,6 +1282,25 @@ void App::StudioPaste(bool curvesOnly, bool mirrored) {
         else if (kind == RowKind::SceneLight) {
             if (SceneLight* light = d.FindLight(LightUidOfTrack(name))) { LightKey k = c.sceneLight; k.frame = f; UpsertKey(light->keys, k); }
         }
+        else if (kind == RowKind::EffectParam) {
+            uint32_t effectUid = 0;
+            std::string param;
+            if (ParseEffectParamTrackName(name, effectUid, param)) {
+                if (StudioEffect* eff = d.FindEffect(effectUid)) {
+                    EffectParamTrack* tr = nullptr;
+                    for (auto& t : eff->tracks) {
+                        if (t.param == param) { tr = &t; break; }
+                    }
+                    if (!tr) {
+                        eff->tracks.push_back({param, {}});
+                        tr = &eff->tracks.back();
+                    }
+                    EffectParamKey pk = c.effectParam;
+                    pk.frame = f;
+                    UpsertParamKey(*tr, pk);
+                }
+            }
+        }
         else if (kind == RowKind::Bone) { BoneKf k = c.bone; k.frame = f; UpsertKey(d.models[d.selectedModel]->motion.bones[name], k); }
         else { MorphKf k = c.morph; k.frame = f; UpsertKey(d.models[d.selectedModel]->motion.morphs[name], k); }
         pasted.insert({row, f});
@@ -1196,6 +1359,16 @@ void App::StudioShiftFrames(bool remove) {
                 if (d.models[d.selectedModel]->IsProp()) apply(d.models[d.selectedModel]->motion.accessory);
             } else if (kind == RowKind::SceneLight) {
                 if (SceneLight* light = d.FindLight(LightUidOfTrack(name))) apply(light->keys);
+            } else if (kind == RowKind::EffectParam) {
+                uint32_t effectUid = 0;
+                std::string param;
+                if (ParseEffectParamTrackName(name, effectUid, param)) {
+                    if (StudioEffect* eff = d.FindEffect(effectUid)) {
+                        for (auto& t : eff->tracks) {
+                            if (t.param == param) { apply(t.keys); break; }
+                        }
+                    }
+                }
             } else {
                 MotionData& m = d.models[d.selectedModel]->motion;
                 if (kind == RowKind::Bone) {
@@ -1323,7 +1496,7 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
             selectRowKeys(id, true);
             d.rowAnchor = id;
             if (RowKindOf(id) == RowKind::SceneLight) StudioSelectLight(RowIndexOf(id));
-            else if (IsCameraKind(RowKindOf(id))) d.selectedLightUid = 0;
+            else if (IsCameraKind(RowKindOf(id)) || RowKindOf(id) == RowKind::EffectParam) d.selectedLightUid = 0;
         }
         // bone rows also pick the bones for the viewport (the clicked one gets the gizmo)
         d.selectedBones.clear();
@@ -1384,6 +1557,20 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
                 if (SceneLight* light = d.FindLight(LightUidOfTrack(track.second)))
                     MoveKeyFrames(light->keys, fs, ev.moveDelta);
             }
+            else if (kind == RowKind::EffectParam) {
+                uint32_t effectUid = 0;
+                std::string param;
+                if (ParseEffectParamTrackName(track.second, effectUid, param)) {
+                    if (StudioEffect* eff = d.FindEffect(effectUid)) {
+                        for (auto& t : eff->tracks) {
+                            if (t.param == param) {
+                                MoveKeyFrames(t.keys, fs, ev.moveDelta);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             else if (kind == RowKind::Bone) MoveKeyFrames(d.models[d.selectedModel]->motion.bones[track.second], fs, ev.moveDelta);
             else MoveKeyFrames(d.models[d.selectedModel]->motion.morphs[track.second], fs, ev.moveDelta);
             for (uint64_t row : rowsOf[track])
@@ -1439,6 +1626,58 @@ void App::StudioRebuildRows() {
             r.selected = d.selectedRows.count(r.id) != 0;
             keysOf(r.id, light.keys, r.keys);
             d.rows.push_back(std::move(r));
+        }
+
+        // effect parameters: a row group "화면 효과" under the camera target
+        bool hasAnyEffectKeys = false;
+        for (const auto& eff : d.effects) {
+            for (const auto& tr : eff.tracks) {
+                if (!tr.keys.empty()) { hasAnyEffectKeys = true; break; }
+            }
+            if (hasAnyEffectKeys) break;
+        }
+        if (hasAnyEffectKeys) {
+            TimelineRow group;
+            group.id = MakeRowId(RowKind::Group, 0, 0);
+            group.label = Tr("화면 효과");
+            group.isGroup = true;
+            group.keysEditable = false;
+            group.expanded = !d.collapsed.count(group.id);
+            group.selected = d.selectedRows.count(group.id) != 0;
+            std::vector<uint64_t>& childIds = d.groupChildren[group.id];
+            std::set<int> summary;
+            std::vector<TimelineRow> children;
+            for (const auto& eff : d.effects) {
+                const ShaderPack* pk = ShaderPacks().Find(eff.entry.pack);
+                const std::string packName = pk ? pk->name.Get(PackLanguage()) : eff.entry.pack;
+                for (const auto& tr : eff.tracks) {
+                    if (tr.keys.empty()) continue;
+                    uint32_t pidx = EffectParamIndexOfName(eff, tr.param);
+                    if (pidx == UINT32_MAX) continue;
+                    TimelineRow r;
+                    r.depth = 1;
+                    r.id = MakeRowId(RowKind::EffectParam, eff.uid, pidx);
+                    std::string paramLabel = tr.param;
+                    if (pk) {
+                        for (const auto& sp : pk->params) {
+                            if (sp.key == tr.param) {
+                                if (!sp.label.Empty()) paramLabel = sp.label.Get(PackLanguage());
+                                break;
+                            }
+                        }
+                    }
+                    r.label = packName + " · " + paramLabel;
+                    r.selected = d.selectedRows.count(r.id) != 0;
+                    r.tint = IM_COL32(100, 210, 210, 255);
+                    keysOf(r.id, tr.keys, r.keys);
+                    for (const auto& k : tr.keys) summary.insert(k.frame);
+                    childIds.push_back(r.id);
+                    if (group.expanded) children.push_back(std::move(r));
+                }
+            }
+            for (int f : summary) group.keys.push_back({f, false});
+            d.rows.push_back(std::move(group));
+            for (auto& c : children) d.rows.push_back(std::move(c));
         }
         return;
     }
@@ -2211,6 +2450,74 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
         ImGui::EndChild();
         return;
     }
+    if (kind == RowKind::EffectParam) {
+        uint32_t effectUid = 0;
+        std::string param;
+        ParseEffectParamTrackName(name, effectUid, param);
+        StudioEffect* eff = d.FindEffect(effectUid);
+        const ShaderPack* pk = eff ? ShaderPacks().Find(eff->entry.pack) : nullptr;
+        const std::string packName = pk ? pk->name.Get(PackLanguage()) : (eff ? eff->entry.pack : std::string());
+        std::string paramLabel = param;
+        float pmin = 0.0f, pmax = 1.0f;
+        if (pk) {
+            for (const auto& sp : pk->params) {
+                if (sp.key == param) {
+                    if (!sp.label.Empty()) paramLabel = sp.label.Get(PackLanguage());
+                    pmin = sp.min;
+                    pmax = sp.max;
+                    break;
+                }
+            }
+        }
+        line(Tr("효과"), packName);
+        line(Tr("파라미터"), paramLabel);
+        EffectParamKey* pkKey = nullptr;
+        if (eff) {
+            for (auto& t : eff->tracks) {
+                if (t.param == param) {
+                    for (auto& k : t.keys) {
+                        if (k.frame == first->second) { pkKey = &k; break; }
+                    }
+                    break;
+                }
+            }
+        }
+        if (pkKey) {
+            float val = pkKey->value;
+            ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+            const auto row = [&](const char* lbl, auto&& widget) {
+                const ImVec2 c = ImGui::GetCursorScreenPos();
+                Text(cdl, Font::Regular, size::Small, ImVec2(c.x, c.y + Dp(5.0f)), p.ink3, lbl);
+                ImGui::SetCursorScreenPos(ImVec2(c.x + Dp(64.0f), c.y));
+                ImGui::SetNextItemWidth(w - Dp(64.0f));
+                PushFont(Font::Regular, size::Small);
+                bool ch = widget();
+                PopFont();
+                if (ImGui::IsItemActivated()) {
+                    studioKeyBefore_ = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(effectUid, param))};
+                    studioKeyEdit_ = true;
+                    studioKeyChanged_ = false;
+                }
+                if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
+                ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+                return ch;
+            };
+            if (row(Tr("값"), [&] { return ImGui::SliderFloat("##effparamval", &val, pmin, pmax, "%.2f"); })) {
+                pkKey->value = val;
+                studioKeyChanged_ = true;
+                d.rowsKey = ~0ull;
+            }
+            bool stepped = pkKey->stepped;
+            if (Switch("##effparamstepped", Tr("계단식 보간"), &stepped, Tr("다음 키까지 현재 값을 유지합니다"))) {
+                std::vector<TrackState> before = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(effectUid, param))};
+                pkKey->stepped = stepped;
+                StudioPushTrackEdit(Tr("보간 변경"), before);
+                d.rowsKey = ~0ull;
+            }
+        }
+        ImGui::EndChild();
+        return;
+    }
 
     StudioModel* m = d.Selected();
     if (kind == RowKind::Morph) {
@@ -2473,6 +2780,7 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
                 case RowKind::Shadow: r.tint = IM_COL32(150, 110, 220, 255); break;
                 case RowKind::Focus: r.tint = IM_COL32(232, 96, 150, 255); break;
                 case RowKind::Accessory: r.tint = IM_COL32(120, 200, 160, 255); break;
+                case RowKind::EffectParam: r.tint = IM_COL32(100, 210, 210, 255); break;
                 default: break;
             }
         }
@@ -2563,6 +2871,58 @@ void App::DrawStudioKeyMenu() {
         ImGui::BeginDisabled(!clip);
         if (MenuItem("##km_curve", Tr("곡선만 붙여넣기"), icon::Bezier, "Ctrl+Shift+V")) { seekHere(); StudioPaste(true); close = true; }
         ImGui::EndDisabled();
+        bool hasEffectKeys = false;
+        bool allStepped = true;
+        for (const KeyId& k : d.selection) {
+            if (RowKindOf(k.first) == RowKind::EffectParam) {
+                hasEffectKeys = true;
+                uint32_t uid = RowGroupOf(k.first);
+                uint32_t pidx = RowIndexOf(k.first);
+                if (const StudioEffect* eff = d.FindEffect(uid)) {
+                    std::string param = EffectParamNameOfIndex(*eff, pidx);
+                    for (const auto& t : eff->tracks) {
+                        if (t.param == param) {
+                            for (const auto& pk : t.keys) {
+                                if (pk.frame == k.second) {
+                                    if (!pk.stepped) allStepped = false;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (hasEffectKeys) {
+            const char* interpLabel = allStepped ? Tr("선형 보간으로 변경") : Tr("계단식 보간으로 변경");
+            if (MenuItem("##km_stepped", interpLabel, allStepped ? icon::Bezier : icon::Pause, nullptr)) {
+                std::vector<TrackState> before = StudioCaptureSelectedTracks();
+                const bool newStepped = !allStepped;
+                for (const KeyId& k : d.selection) {
+                    if (RowKindOf(k.first) != RowKind::EffectParam) continue;
+                    uint32_t uid = RowGroupOf(k.first);
+                    uint32_t pidx = RowIndexOf(k.first);
+                    if (StudioEffect* eff = d.FindEffect(uid)) {
+                        std::string param = EffectParamNameOfIndex(*eff, pidx);
+                        for (auto& t : eff->tracks) {
+                            if (t.param == param) {
+                                for (auto& pk : t.keys) {
+                                    if (pk.frame == k.second) {
+                                        pk.stepped = newStepped;
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                StudioPushTrackEdit(Tr("보간 변경"), before);
+                d.rowsKey = ~0ull;
+                close = true;
+            }
+        }
         ImGui::BeginDisabled(!keys);
         if (MenuItem("##km_del", Tr("삭제"), icon::Trash, "Del")) { StudioDeleteSelected(Tr("키 삭제")); close = true; }
         ImGui::EndDisabled();

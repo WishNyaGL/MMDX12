@@ -71,7 +71,9 @@ ComputePipeline* PtPackVariants::Resolve(Dx12Context& ctx,
     std::string inc = PathToUtf8(rel);
     std::replace(inc.begin(), inc.end(), '\\', '/');
     const std::string incDefine = "\"" + inc + "\"";
-    const ShaderDefines defs = {{"MMDX_PT_PACK", incDefine}};
+    ShaderDefines defs = {{"MMDX_PT_PACK", incDefine}};
+    if (chosenPack->HasCap("inputs.scene")) defs.push_back({"PACK_CAP_INPUTS_SCENE", "1"});
+    if (chosenPack->HasCap("inputs.audio")) defs.push_back({"PACK_CAP_INPUTS_AUDIO", "1"});
 
     ComputePipeline pipe;
     const std::filesystem::path f = shaderDir / Utf8ToWide(shaderFile);

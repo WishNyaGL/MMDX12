@@ -31,6 +31,18 @@ std::string StillName() {
                   lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
     return buf;
 }
+
+void Para(const std::string& text, ImU32 col, float sizePx = ui::size::Small, ui::Font font = ui::Font::Regular) {
+    using namespace ui;
+    if (text.empty()) return;
+    PushFont(font, sizePx);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(col));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+    PopFont();
+}
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -278,7 +290,182 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
         }
 
         Gap(12.0f);
-        changed |= DrawEffectStackEditor(settings_.effectStack, true);
+        {
+            StudioDoc& d = *studio_;
+            ShaderPackRegistry& reg = ShaderPacks();
+            const std::string lang = PackLanguage();
+
+            SectionLabel(Tr("셰이더 이펙트"));
+            Para(Tr("위에서 아래로 화면 효과를 차례로 적용합니다. 영상·스틸 렌더에도 같은 스택이 쓰입니다."), p.ink3, size::Caption);
+            Gap(6.0f);
+
+            bool effChanged = false;
+            size_t swapWith = SIZE_MAX, removeAt = SIZE_MAX, swapA = 0;
+            for (size_t i = 0; i < d.effects.size(); ++i) {
+                StudioEffect& eff = d.effects[i];
+                const ShaderPack* pk = reg.Find(eff.entry.pack);
+                const bool usable = pk && pk->Selectable() && pk->type == PackType::Effect;
+                const std::string name = pk ? pk->name.Get(lang) : eff.entry.pack;
+                const char* where = !pk ? Tr("설치되어 있지 않음")
+                                    : !usable ? Tr("사용할 수 없음 · 셰이더 탭에서 확인")
+                                    : pk->stage == PackEffectStage::PreBloom ? Tr("블룸 앞 (HDR)") : Tr("톤맵 뒤");
+                ImGui::PushID((int)i);
+                bool on = eff.entry.enabled;
+                if (Switch("##on", name.c_str(), &on, where)) {
+                    std::vector<StudioEffect> before = d.effects;
+                    eff.entry.enabled = on;
+                    d.history.Push(std::make_unique<EffectsCommand>(d, on ? Tr("효과 켜기") : Tr("효과 끄기"), before, d.effects));
+                    ++d.projectVersion;
+                    d.rowsKey = ~0ull;
+                    effChanged = true;
+                }
+                if (IconButton("##up", icon::CaretUp, Tr("위로"), false, 28.0f) && i > 0) {
+                    swapA = i - 1;
+                    swapWith = i;
+                }
+                ImGui::SameLine();
+                if (IconButton("##down", icon::CaretDown, Tr("아래로"), false, 28.0f) && i + 1 < d.effects.size()) {
+                    swapA = i;
+                    swapWith = i + 1;
+                }
+                ImGui::SameLine();
+                if (IconButton("##remove", icon::X, Tr("스택에서 제거"), false, 28.0f)) removeAt = i;
+
+                if (usable && eff.entry.enabled && !pk->params.empty()) {
+                    const PackParamValues values = pk->Resolve(eff.entry.params);
+                    for (size_t k = 0; k < pk->params.size(); ++k) {
+                        const ShaderPackParam& sp = pk->params[k];
+                        float staticVal = eff.entry.params.count(sp.key) ? eff.entry.params[sp.key] : values[k];
+                        EffectParamTrack* tr = nullptr;
+                        for (auto& t : eff.tracks) {
+                            if (t.param == sp.key) { tr = &t; break; }
+                        }
+                        const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
+                        float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
+
+                        ImGui::PushID((int)k);
+                        const float diaW = Dp(24.0f);
+                        const float availW = ImGui::GetContentRegionAvail().x;
+                        const ImVec2 curPos = ImGui::GetCursorScreenPos();
+
+                        const ImVec2 dc(curPos.x + Dp(10.0f), curPos.y + Dp(12.0f));
+                        const float dr = Dp(5.0f);
+                        const ImU32 kc = keyed ? p.accent : p.ink3;
+                        const ImVec2 pts[4] = {{dc.x, dc.y - dr}, {dc.x + dr, dc.y}, {dc.x, dc.y + dr}, {dc.x - dr, dc.y}};
+                        if (keyed) dl->AddConvexPolyFilled(pts, 4, kc);
+                        else dl->AddPolyline(pts, 4, kc, ImDrawFlags_Closed, 1.5f);
+
+                        ImGui::SetCursorScreenPos(curPos);
+                        if (ImGui::InvisibleButton("##keybtn", ImVec2(diaW, Dp(24.0f)))) {
+                            std::vector<TrackState> before = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, sp.key))};
+                            if (keyed) {
+                                EraseParamKeys(*tr, {(int32_t)d.Frame()});
+                                StudioPushTrackEdit(Tr("효과 키 삭제"), before);
+                            } else {
+                                if (!tr) {
+                                    eff.tracks.push_back({sp.key, {}});
+                                    tr = &eff.tracks.back();
+                                }
+                                UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, false});
+                                StudioPushTrackEdit(Tr("효과 키 등록"), before);
+                            }
+                            d.rowsKey = ~0ull;
+                            effChanged = true;
+                        }
+                        Tooltip(keyed ? Tr("현재 프레임의 키 삭제") : Tr("현재 값을 재생 헤드에 키로 등록"));
+
+                        ImGui::SameLine(diaW + Dp(4.0f));
+                        ImGui::SetNextItemWidth(availW - diaW - Dp(4.0f));
+                        const std::string sid = "##fx_" + sp.key;
+                        const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(lang);
+                        float v = curVal;
+                        if (SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, "%.2f")) {
+                            if (d.autoKey || keyed) {
+                                if (!tr) {
+                                    eff.tracks.push_back({sp.key, {}});
+                                    tr = &eff.tracks.back();
+                                }
+                                UpsertParamKey(*tr, EffectParamKey{d.Frame(), v, false});
+                                studioKeyChanged_ = true;
+                                d.rowsKey = ~0ull;
+                            } else {
+                                eff.entry.params[sp.key] = v;
+                                ++d.projectVersion;
+                            }
+                            effChanged = true;
+                        }
+                        if (ImGui::IsItemActivated()) {
+                            studioKeyBefore_ = {CaptureTrack(d, -1, RowKind::EffectParam, EffectParamTrackName(eff.uid, sp.key))};
+                            studioKeyEdit_ = true;
+                            studioKeyChanged_ = false;
+                        }
+                        if (ImGui::IsItemDeactivated()) {
+                            StudioEndKeyEdit();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::PopID();
+                Gap(8.0f);
+            }
+
+            if (removeAt != SIZE_MAX) {
+                std::vector<StudioEffect> before = d.effects;
+                d.effects.erase(d.effects.begin() + (long)removeAt);
+                d.history.Push(std::make_unique<EffectsCommand>(d, Tr("효과 삭제"), before, d.effects));
+                ++d.projectVersion;
+                d.rowsKey = ~0ull;
+                effChanged = true;
+            } else if (swapWith != SIZE_MAX) {
+                std::vector<StudioEffect> before = d.effects;
+                std::swap(d.effects[swapA], d.effects[swapWith]);
+                d.history.Push(std::make_unique<EffectsCommand>(d, Tr("효과 순서 변경"), before, d.effects));
+                ++d.projectVersion;
+                d.rowsKey = ~0ull;
+                effChanged = true;
+            }
+
+            std::vector<const ShaderPack*> addable;
+            for (const ShaderPack& pk : reg.Packs()) {
+                if (pk.type != PackType::Effect || !pk.Selectable()) continue;
+                bool in = false;
+                for (const StudioEffect& e : d.effects) in |= e.entry.pack == pk.id;
+                if (!in) addable.push_back(&pk);
+            }
+            if (!addable.empty()) {
+                if (Button("##studiofxadd", Tr("효과 추가"), icon::Plus, ButtonKind::Secondary)) ImGui::OpenPopup("##studiofxaddpopup");
+                ImGui::SetNextWindowSize(ImVec2(Dp(300.0f), 0));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(12.0f), Dp(12.0f)));
+                if (ImGui::BeginPopup("##studiofxaddpopup")) {
+                    for (const ShaderPack* pk : addable) {
+                        const std::string rid = "##sfxadd_" + pk->id;
+                        if (MenuItem(rid.c_str(), pk->name.Get(lang).c_str())) {
+                            std::vector<StudioEffect> before = d.effects;
+                            StudioEffect newEff;
+                            newEff.uid = d.nextEffectUid++;
+                            newEff.entry.pack = pk->id;
+                            newEff.entry.enabled = true;
+                            d.effects.push_back(std::move(newEff));
+                            d.history.Push(std::make_unique<EffectsCommand>(d, Tr("효과 추가"), before, d.effects));
+                            ++d.projectVersion;
+                            d.rowsKey = ~0ull;
+                            effChanged = true;
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::PopStyleVar();
+            }
+            if (d.effects.empty()) {
+                Para(Tr("효과가 없습니다. 효과 팩을 추가하면 위에서 아래로 차례로 적용됩니다."), p.ink3, size::Caption);
+                if (addable.empty()) {
+                    Gap(6.0f);
+                    Para(Tr("효과 팩은 라이브러리 화면의 셰이더 탭 > 온라인에서 받을 수 있습니다."), p.ink3, size::Caption);
+                }
+            }
+            if (effChanged) ++d.projectVersion;
+        }
 
         // M6b: the project's own MME post stack (replaces the play-mode stack while the studio is open).
         Gap(12.0f);

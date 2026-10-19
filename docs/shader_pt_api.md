@@ -120,3 +120,49 @@ Note: `ScenePass` (raster/RT) and the ray-tracing / path-tracer scene cache (`re
 
 - `tools/pack_check <pack>` reports `pt_surface: yes/no` and compiles `CSRender` and `CSPathTrace` with DXC when `--compile` is passed.
 - Template: `shaders/pack_template/pt_surface.hlsl`.
+
+## Capabilities, scene and audio inputs
+
+Packs declare capabilities in `"requires": [...]` and requested typed inputs in `"inputs": [...]`.
+
+### Manifest (`pack.json`)
+
+```json
+{
+  "requires": ["inputs.scene", "inputs.audio"],
+  "inputs": ["performer.head", "performer.center", "light.key", "camera.focus", "audio"]
+}
+```
+
+- `"inputs.scene"`: exposes typed scene and skeleton inputs (`PackInputValid`, `PackInputPos`, `PackInputFrame`).
+- `"inputs.audio"`: exposes music analysis inputs (`PackAudioBeat`, `PackAudioDownbeat`, `PackAudioOnset`, `PackAudioEnergy`, `PackAudioSection`, `PackAudioBpm`).
+
+### Scene role table
+
+| Role Constant | `inputs` string | Description |
+| --- | --- | --- |
+| `PACK_IN_PERFORMER_HEAD` | `"performer.head"` | Center performer's head bone (頭) |
+| `PACK_IN_PERFORMER_CENTER` | `"performer.center"` | Center performer's center bone (センター) |
+| `PACK_IN_PERFORMER_HAND_L` | `"performer.hand_l"` | Center performer's left wrist bone (左手首) |
+| `PACK_IN_PERFORMER_HAND_R` | `"performer.hand_r"` | Center performer's right wrist bone (右手首) |
+| `PACK_IN_PERFORMER_FOOT_L` | `"performer.foot_l"` | Center performer's left ankle bone (左足首) |
+| `PACK_IN_PERFORMER_FOOT_R` | `"performer.foot_r"` | Center performer's right ankle bone (右足首) |
+| `PACK_IN_LIGHT_KEY` | `"light.key"` | Key light (direction as z axis) |
+| `PACK_IN_CAMERA_FOCUS` | `"camera.focus"` | DoF focus point in world space, camera orientation axes |
+| `PACK_IN_AUDIO` | `"audio"` | Music audio reactivity |
+
+### Helpers
+
+When `"inputs.scene"` is declared:
+- `bool PackInputValid(uint role)`: true if the requested bone or scene role exists and is valid.
+- `float3 PackInputPos(uint role)`: world-space position in MMD units.
+- `float3x3 PackInputFrame(uint role)`: world orientation matrix (row 0 = right, row 1 = up, row 2 = forward).
+
+When `"inputs.audio"` is declared:
+- `float PackAudioBeat()`: 0..1 phase within the current beat.
+- `float PackAudioDownbeat()`: 0..1 phase within the bar.
+- `float PackAudioOnset()`: onset envelope, decaying with a ~0.25 s time constant.
+- `float PackAudioEnergy()`: normalized RMS energy of the current beat (0..1).
+- `float PackAudioSection()`: coarse song energy section (0.0 low / 0.5 mid / 1.0 high).
+- `float PackAudioBpm()`: song tempo in BPM. All audio inputs return 0 when no audio is loaded or analysis is not ready.
+

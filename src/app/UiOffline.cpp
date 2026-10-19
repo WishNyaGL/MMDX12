@@ -508,6 +508,11 @@ void App::RecordRealtimeVideoFrame(ID3D12GraphicsCommandList* cmd) {
     view.ptFirstPass = (offline_.iter == 0) && cfg.Renderer() == VideoRenderer::PathTraced;
     view.ptStaticPass = (offline_.iter > 0) && cfg.Renderer() == VideoRenderer::PathTraced;
     view.ptPassIndex = offline_.iter;
+    if (offline_.studio && studio_) {
+        RenderSettings rs = renderer_.Settings();
+        rs.packEffects = StudioEvaluatedEffects(offline_.frameMmd);
+        renderer_.SetSettings(rs);
+    }
     renderer_.Render(cmd, view);
     // The last pass of this video frame is recorded: queue its copy into the readback ring inside this command
     // list, so the frame can be encoded later without a GPU wait. A full ring falls back to a synchronous read
@@ -586,6 +591,7 @@ void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
     // M6b: while the studio is open its own MME post stack replaces the play-mode one (unless --mme overrides);
     // a project's stack is what offline renders from the studio use.
     if (offline_.studio && studio_ && !options_.mmeSet) jd.mmeEffects = StudioMmeEntries();
+    if (offline_.studio && studio_) jd.effects = StudioEvaluatedEffects((float)view.frame);
     if (video) {
         jd.effectReset = (offline_.frame == 0) || jumpCut || view.cameraCut;   // GI images count in frame (renderedFrame is the real-time renderers')
     }
@@ -1052,7 +1058,7 @@ RenderSettings App::VideoRealtimeSettings(const VideoRenderConfig& cfg) const {
     rs.dof = cfg.dof;
     rs.dofAperture = cfg.dofAperture;
     rs.exportAlpha = cfg.alpha;   // transparent export: sky writes alpha 0 and the frame is read as straight RGBA
-    rs.packEffects = settings_.effectStack;   // effect packs apply to the real-time renderers' frames
+    rs.packEffects = (offline_.studio && studio_) ? StudioEvaluatedEffects(offline_.frameMmd) : settings_.effectStack;
     return rs;
 }
 
