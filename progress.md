@@ -2138,3 +2138,29 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   0 `[E]`/`[W]`, SR / RR / FG available; cache / shader_cache / ini / log removed, stage file list identical to before),
   delta manifest 2.3.0 = 14 new objects (113 reused), uploaded (only the objects missing on the server), live manifest
   sha 3b3a4867... and exe / dlssg object hashes match.
+
+## 2026-10-19 / 20 - MMDX Effects (native effect ecosystem), world effects + Snow, open gallery, release 2.4.0
+- Direction + decisions: `docs/effect_ecosystem.md` (now "shipped in 2.4.0"). Built through delegated workers (Gemini /
+  opencode), reviewed and fixed here: capabilities / `requires` + scene / audio inputs, studio effect stack with keyable
+  params (project format 3), look packs, multi-source open gallery (verified badge, revocation, pinned updates, crash guard),
+  surface output (normal / emission / tag), object / class ID image, pass history + mips, params.ext (128 typed params in
+  groups; b6 surface ring, b4 effect ring, PT / GI `gPackExtSlots`), world effects (`WorldPass`, docs/shader_world_api.md)
+  and the built-in Snow (`shaders/packs/snow`: snowfall, 200-unit cover with footprints + print colour params, landing
+  particles that thin out on trodden snow), MME porting guide + agent skill.
+- Review fixes worth remembering: `RtPtPackRecord` must stay a multiple of 16 bytes (raw SRV offsets; 152 bytes removed the
+  device); world re-simulation needs per-frame growing upload chunks + persistent field descriptors (a wrapping ring /
+  transient tables corrupted steps); persistent fields step on a fixed k / rate grid in both re-sim and playback; world
+  particles are drawn after the composite (no SSR); play-mode collider track is built once per scene.
+- UI naming "MMDX 이펙트" (top tab 이펙트; 표면 셰이더 / 화면 효과 / 월드 이펙트 / 룩). Website: gallery backend + publish /
+  admin pages deployed; docs rewritten for the current system in 4 languages (Korean polished with the im-not-ai
+  humanize-korean skill on gemini-4-argon-high - gemini-3.8-flash made the prose worse and once faked the skill run);
+  world effects page; the 16 official gallery packs moved to params.ext (need 2.4.0).
+- Studio (another session's work, committed here): per-property stopwatch animation + key navigation, timeline range menu /
+  auto-scroll / static tracks, OKLab colour picker, pose / light panel improvements. Fixed after the user's test: sliders
+  kept shrinking by the stopwatch + key-nav width (`SliderRow` now sizes the slider line from the row start), OKLab picker
+  sliders grew the auto-resizing popup (fixed width). Open (user will do it): world entity gizmo + transform keys.
+- Before the push, the unpushed history was rewritten (filter-branch over origin/master..HEAD) to drop server / OAuth
+  operation details from docs/effect_ecosystem.md's decision table.
+- Release 2.4.0: cover `docs/media/snow-2.4.0.jpg` (Sour Miku, Snow on the theater stage), notes `dist/notes_2.4.0.md`
+  (4 languages), `package_release.ps1` (full 195.3 MB, lite 15.5 MB), packaged smoke (select screen, v2.4.0, 0 `[E]`/`[W]`,
+  SR / RR / FG available; leftovers removed, stage file list identical to before).
