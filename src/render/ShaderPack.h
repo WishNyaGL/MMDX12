@@ -147,7 +147,8 @@ struct PackCapability {
 inline constexpr PackCapability kPackCapabilities[] = {
     {"adduv", 6},      {"pt.lighting", 6}, {"state", 4},        {"passes", 5},
     {"replaces.dof", 5}, {"textures", 2},  {"effect", 3},       {"inputs.scene", 0},
-    {"inputs.audio", 0},
+    {"inputs.audio", 0}, {"surface.output", 0}, {"inputs.id", 0}, {"passes.history", 0},
+    {"passes.mips", 0},
 };
 
 struct ShaderPackParam {
@@ -217,6 +218,9 @@ struct ShaderPack {
     struct Pass {
         std::string entry;    // HLSL identifier
         float scale = 1.0f;   // 1/64 .. 1 of the output size
+        bool history = false; // "history": true = its previous-frame result stays readable (PackPassSampleHistory);
+                              // needs the "passes.history" capability
+        bool mips = false;    // "mips": true = a mip chain is built after the pass (PackPassSampleLevel); "passes.mips"
     };
     std::vector<Pass> passes;   // at most kPackMaxPasses
     bool replacesDof = false;   // "replaces": ["dof"]: while enabled, the engine's depth of field (DofPass, the GI

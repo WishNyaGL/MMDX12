@@ -777,10 +777,28 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                     }
                     pass.scale = sit->get<float>();
                 }
+                bool passOk = true;
+                for (const char* flag : {"history", "mips"}) {
+                    auto fit = pj.find(flag);
+                    if (fit == pj.end()) continue;
+                    if (!fit->is_boolean()) {
+                        problems.push_back("pass '" + pass.entry + "': " + flag + " must be true or false");
+                        passOk = false;
+                        continue;
+                    }
+                    (std::string(flag) == "history" ? pass.history : pass.mips) = fit->get<bool>();
+                }
+                if (!passOk) continue;
                 out.passes.push_back(std::move(pass));
             }
         }
         if (!out.HasCap("passes")) problems.push_back("packs with 'passes' must declare \"apiVersion\": 5 or newer");
+        for (const ShaderPack::Pass& pass : out.passes) {
+            if (pass.history && !out.HasCap("passes.history"))
+                problems.push_back("pass '" + pass.entry + "': history needs the \"passes.history\" capability in requires");
+            if (pass.mips && !out.HasCap("passes.mips"))
+                problems.push_back("pass '" + pass.entry + "': mips needs the \"passes.mips\" capability in requires");
+        }
         if (out.type != PackType::Effect) problems.push_back("passes are only supported for effect packs");
     }
 
