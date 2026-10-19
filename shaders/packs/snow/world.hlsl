@@ -78,14 +78,14 @@ PackSurfaceOut SnowShade(PackSurfaceShadeIn i) {
     PackSurfaceOut o;
     float4 f = PackFieldSample(0, i.posLocal.xz);
     float carved = saturate(f.x);
-    // Pristine snow color and deep compressed footprint color
-    float3 baseColor = PackParamColor(11); // default [0.96, 0.97, 1.0]
-    float3 deepPrintColor = float3(0.35, 0.50, 0.72);
+    // Pristine snow color and customizable footprint shade
+    float3 baseColor = PackParamColor(11);  // default [0.96, 0.97, 1.0]
+    float3 printColor = PackParamColor(13); // default [0.70, 0.75, 0.82] (soft, slightly cool grey-blue)
+    float printTint = PackParam(14);        // default 0.45 (modest tint)
 
-    // Dark compacted edge at the steep walls of the footprint
-    float darkEdge = smoothstep(0.015, 0.12, carved) * smoothstep(0.70, 0.20, carved) * 0.45;
-    float printWeight = smoothstep(0.015, 0.40, carved);
-    float3 snowCol = lerp(baseColor, deepPrintColor, printWeight * 0.9) * (1.0 - darkEdge);
+    float printWeight = smoothstep(0.02, 0.45, carved);
+    float3 targetCol = lerp(baseColor, printColor, printTint);
+    float3 snowCol = lerp(baseColor, targetCol, printWeight);
     float2 microGrid = i.posLocal.xz * 45.0;
     uint2 cell = uint2((int2)floor(microGrid) + 32768);
     uint cellHash = PackHash(cell.x ^ PackHash(cell.y * 1999u + 17u));
@@ -271,9 +271,9 @@ float4 ShadeFlakes(PackParticleShadeIn i) {
 // ============================================================================
 void SimulateKick(inout PackParticle p, PackSimInput s) {
     float depth = PackParam(7);
-    float kickAmount = PackParam(13);
-    float kickHeight = PackParam(14);
-    float minFootSpeed = PackParam(15);
+    float kickAmount = PackParam(15);
+    float kickHeight = PackParam(16);
+    float minFootSpeed = PackParam(17);
 
     // Active particle simulation
     if (p.age >= 0.0) {
@@ -333,8 +333,13 @@ void SimulateKick(inout PackParticle p, PackSimInput s) {
     float snowTop = max(0.002, depth * (1.0 - saturate(cov.x)) + cov.y);
 
     if (colLoc.y - col.radius <= snowTop + 0.45 && colLoc.y >= snowTop - 0.7) {
-        // High spawn probability on fast steps
-        float prob = saturate((speed - minFootSpeed) * kickAmount * s.dt * 6.0);
+        // Snow still present under the foot: fresh snow = 1.0, fully carved print = ~0.0
+        float snowAvailable = saturate(1.0 - cov.x);
+        float snowFactor = smoothstep(0.05, 0.85, snowAvailable);
+        float effectiveKick = kickAmount * snowFactor;
+
+        // Scale spawn probability on fast steps by remaining snow
+        float prob = saturate((speed - minFootSpeed) * effectiveKick * s.dt * 6.0);
         float rndRoll = PackRandom(s.id, (uint)(s.time * 60.0) ^ 0x7b29u);
         if (rndRoll < prob) {
             // Clump (~35%) vs fine powder (~65%)
@@ -346,13 +351,13 @@ void SimulateKick(inout PackParticle p, PackSimInput s) {
 
             float3 upwardKick = float3(0.0, kickHeight * (isClump ? 3.0 : 2.2), 0.0);
             float3 randomSpread = rndSpread * (kickHeight * 1.2);
-            p.vel = col.vel * 0.6 + upwardKick + randomSpread;
+            p.vel = (col.vel * 0.6 + upwardKick + randomSpread) * lerp(0.5, 1.0, snowFactor);
             p.age = 0.0;
 
             float baseSize = isClump ? lerp(0.07, 0.15, PackRandom(s.id, 0x1234u))
                                      : lerp(0.04, 0.08, PackRandom(s.id, 0x1234u));
-            p.size = baseSize;
-            p.color = float4(1.0, 1.0, 1.0, 0.9);
+            p.size = baseSize * lerp(0.4, 1.0, snowFactor);
+            p.color = float4(1.0, 1.0, 1.0, 0.9 * lerp(0.3, 1.0, snowFactor));
             p.data = float4(baseSize, isClump ? 1.0 : 0.0, 0.0, 0.0);
         }
     }
