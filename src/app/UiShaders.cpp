@@ -815,9 +815,24 @@ void App::DrawShaderPackDetail(float x0, float y0, float x1, float y1) {
             Caption(Tr("조절할 수 있는 값"));
             for (const ShaderPackParam& sp : pk->params) {
                 const ImVec2 c = ImGui::GetCursorScreenPos();
-                const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(lang);
+                std::string label = sp.label.Empty() ? sp.key : sp.label.Get(lang);
+                if (!sp.group.empty()) label = "[" + sp.group + "] " + label;
                 char range[64];
-                std::snprintf(range, sizeof(range), "%.2f  (%.2f – %.2f)", sp.def, sp.min, sp.max);
+                if (sp.type == ShaderPackParamType::Float) {
+                    std::snprintf(range, sizeof(range), "%.2f  (%.2f – %.2f)", sp.def, sp.min, sp.max);
+                } else if (sp.type == ShaderPackParamType::Int) {
+                    std::snprintf(range, sizeof(range), "%.0f  (%.0f – %.0f)", sp.def, sp.min, sp.max);
+                } else if (sp.type == ShaderPackParamType::Bool) {
+                    std::snprintf(range, sizeof(range), "%s", sp.defBool ? "true" : "false");
+                } else if (sp.type == ShaderPackParamType::Color) {
+                    if (sp.alpha) {
+                        std::snprintf(range, sizeof(range), "[%.2f, %.2f, %.2f, %.2f]", sp.defVec[0], sp.defVec[1], sp.defVec[2], sp.defVec[3]);
+                    } else {
+                        std::snprintf(range, sizeof(range), "[%.2f, %.2f, %.2f]", sp.defVec[0], sp.defVec[1], sp.defVec[2]);
+                    }
+                } else if (sp.type == ShaderPackParamType::Vec3) {
+                    std::snprintf(range, sizeof(range), "[%.2f, %.2f, %.2f]", sp.defVec[0], sp.defVec[1], sp.defVec[2]);
+                }
                 TextEllipsis(dl, Font::Regular, size::Small, c, c.x + w * 0.6f, p.ink2, label.c_str());
                 const ImVec2 rs = TextSize(Font::Regular, size::Caption, range);
                 Text(dl, Font::Regular, size::Caption, ImVec2(c.x + w - rs.x, c.y + Dp(1.0f)), p.ink3, range);
@@ -1121,17 +1136,7 @@ bool App::DrawEffectStackEditor(std::vector<EffectStackEntry>& stack, bool heade
         ImGui::SameLine();
         if (IconButton("##remove", icon::X, Tr("스택에서 제거"), false, 28.0f)) removeAt = i;
         if (usable && e.enabled && !pk->params.empty()) {
-            const PackParamValues values = pk->Resolve(e.params);
-            for (size_t k = 0; k < pk->params.size(); ++k) {
-                const ShaderPackParam& sp = pk->params[k];
-                float v = values[k];
-                const std::string sid = "##fx_" + sp.key;
-                const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(lang);
-                if (SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, "%.2f")) {
-                    e.params[sp.key] = v;
-                    changed = true;
-                }
-            }
+            changed |= DrawShaderPackParameters(*pk, e.params, "##fx");
         }
         ImGui::PopID();
         Gap(8.0f);

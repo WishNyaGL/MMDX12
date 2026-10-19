@@ -65,8 +65,24 @@ struct PackResult {
 #endif
 };
 
+#if defined(PACK_CAP_PARAMS_EXT) && PACK_CAP_PARAMS_EXT
+#ifndef PACK_PARAM_COUNT
+#define PACK_PARAM_COUNT 128u
+#endif
+cbuffer PackParamsExt : register(b6) {
+    float4 gPackParamSlots[128];
+};
+float PackParam(uint i) { return gPackParamSlots[i & 127u].x; }
+inline int PackParamInt(uint i) { return (int)round(gPackParamSlots[i & 127u].x); }
+inline bool PackParamBool(uint i) { return (gPackParamSlots[i & 127u].x > 0.5); }
+inline float3 PackParamColor(uint i) { return gPackParamSlots[i & 127u].rgb; }
+inline float4 PackParamColor4(uint i) { return gPackParamSlots[i & 127u]; }
+inline float3 PackParamVec3(uint i) { return gPackParamSlots[i & 127u].xyz; }
+inline uint PackParamCount() { return (uint)PACK_PARAM_COUNT; }
+#else
 // Pack parameter i (0..15), in pack.json order; the user's slider value or the manifest default.
 float PackParam(uint i) { return gPackParams[i >> 2][i & 3]; }
+#endif
 
 // MMD material values (gamma space, after material morphs).
 float4 PackDiffuse() { return gDiffuse; }

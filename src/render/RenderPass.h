@@ -208,6 +208,7 @@ private:
 //   6: root SRV t2 space1 StructuredBuffer<GpuLight> (pc.lights)
 //   7: table, unbounded Texture2D t0 space2 starting at SrvHeap index 0
 //   8: table, unbounded ByteAddressBuffer t0 space3 starting at SrvHeap index 0
+//   9: root SRV t3 space1 StructuredBuffer<float4> gPackExtSlots (pc.rt ? pc.rt->PackExtSlots() : 0)
 //   static samplers s0 point clamp, s1 linear clamp, s2 linear wrap, s4 linear wrap.
 // Shaders are compiled with CompileShaderDxc as cs_6_5. Root parameters 4/5 are bound to
 // pc.rt (0 when null; shaders must not touch the TLAS then).

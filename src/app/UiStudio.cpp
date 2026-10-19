@@ -1089,7 +1089,16 @@ void App::StudioInsertKeys(const std::vector<uint64_t>& rows, int frame) {
                         const ShaderPack* pk = ShaderPacks().Find(eff->entry.pack);
                         if (pk) {
                             for (const auto& sp : pk->params) {
-                                if (sp.key == param) { fallback = sp.def; break; }
+                                if (sp.key == param) {
+                                    fallback = (sp.type == ShaderPackParamType::Bool ? (sp.defBool ? 1.0f : 0.0f) : sp.def);
+                                    break;
+                                }
+                                for (int c = 0; c < 4; ++c) {
+                                    if (param == sp.key + "#" + std::to_string(c)) {
+                                        fallback = sp.defVec[c];
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1117,7 +1126,16 @@ void App::StudioInsertKeys(const std::vector<uint64_t>& rows, int frame) {
                         const ShaderPack* pk = ShaderPacks().Find(world->fx.entry.pack);
                         if (pk) {
                             for (const auto& sp : pk->params) {
-                                if (sp.key == param) { fallback = sp.def; break; }
+                                if (sp.key == param) {
+                                    fallback = (sp.type == ShaderPackParamType::Bool ? (sp.defBool ? 1.0f : 0.0f) : sp.def);
+                                    break;
+                                }
+                                for (int c = 0; c < 4; ++c) {
+                                    if (param == sp.key + "#" + std::to_string(c)) {
+                                        fallback = sp.defVec[c];
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1894,9 +1912,26 @@ void App::StudioRebuildRows() {
                     r.id = MakeRowId(RowKind::EffectParam, eff.uid, pidx);
                     std::string paramLabel = tr.param;
                     if (pk) {
+                        std::string baseKey = tr.param;
+                        std::string compSuffix;
+                        size_t hashPos = tr.param.find('#');
+                        if (hashPos != std::string::npos) {
+                            baseKey = tr.param.substr(0, hashPos);
+                            compSuffix = tr.param.substr(hashPos);
+                        }
                         for (const auto& sp : pk->params) {
-                            if (sp.key == tr.param) {
+                            if (sp.key == baseKey) {
                                 if (!sp.label.Empty()) paramLabel = sp.label.Get(PackLanguage());
+                                if (compSuffix.size() > 1) {
+                                    int c = compSuffix[1] - '0';
+                                    if (sp.type == ShaderPackParamType::Color) {
+                                        static const char* kCol[4] = {" · R", " · G", " · B", " · A"};
+                                        if (c >= 0 && c < 4) paramLabel += kCol[c];
+                                    } else {
+                                        static const char* kVec[3] = {" · X", " · Y", " · Z"};
+                                        if (c >= 0 && c < 3) paramLabel += kVec[c];
+                                    }
+                                }
                                 break;
                             }
                         }
@@ -1946,9 +1981,26 @@ void App::StudioRebuildRows() {
                     r.id = MakeRowId(RowKind::WorldParam, world.uid, pidx);
                     std::string paramLabel = tr.param;
                     if (pk) {
+                        std::string baseKey = tr.param;
+                        std::string compSuffix;
+                        size_t hashPos = tr.param.find('#');
+                        if (hashPos != std::string::npos) {
+                            baseKey = tr.param.substr(0, hashPos);
+                            compSuffix = tr.param.substr(hashPos);
+                        }
                         for (const auto& sp : pk->params) {
-                            if (sp.key == tr.param) {
+                            if (sp.key == baseKey) {
                                 if (!sp.label.Empty()) paramLabel = sp.label.Get(PackLanguage());
+                                if (compSuffix.size() > 1) {
+                                    int c = compSuffix[1] - '0';
+                                    if (sp.type == ShaderPackParamType::Color) {
+                                        static const char* kCol[4] = {" · R", " · G", " · B", " · A"};
+                                        if (c >= 0 && c < 4) paramLabel += kCol[c];
+                                    } else {
+                                        static const char* kVec[3] = {" · X", " · Y", " · Z"};
+                                        if (c >= 0 && c < 3) paramLabel += kVec[c];
+                                    }
+                                }
                                 break;
                             }
                         }
@@ -2748,12 +2800,33 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
         const std::string packName = pk ? pk->name.Get(PackLanguage()) : (eff ? eff->entry.pack : std::string());
         std::string paramLabel = param;
         float pmin = 0.0f, pmax = 1.0f;
+        float pstep = 0.0f;
+        ShaderPackParamType ptype = ShaderPackParamType::Float;
         if (pk) {
+            std::string baseKey = param;
+            std::string compSuffix;
+            size_t hashPos = param.find('#');
+            if (hashPos != std::string::npos) {
+                baseKey = param.substr(0, hashPos);
+                compSuffix = param.substr(hashPos);
+            }
             for (const auto& sp : pk->params) {
-                if (sp.key == param) {
+                if (sp.key == baseKey) {
+                    ptype = sp.type;
                     if (!sp.label.Empty()) paramLabel = sp.label.Get(PackLanguage());
+                    if (compSuffix.size() > 1) {
+                        int c = compSuffix[1] - '0';
+                        if (sp.type == ShaderPackParamType::Color) {
+                            static const char* kCol[4] = {" · R", " · G", " · B", " · A"};
+                            if (c >= 0 && c < 4) paramLabel += kCol[c];
+                        } else {
+                            static const char* kVec[3] = {" · X", " · Y", " · Z"};
+                            if (c >= 0 && c < 3) paramLabel += kVec[c];
+                        }
+                    }
                     pmin = sp.min;
                     pmax = sp.max;
+                    pstep = sp.step;
                     break;
                 }
             }
@@ -2792,7 +2865,26 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
                 ImGui::Dummy(ImVec2(w, Dp(4.0f)));
                 return ch;
             };
-            if (row(Tr("값"), [&] { return ImGui::SliderFloat("##effparamval", &val, pmin, pmax, "%.2f"); })) {
+            bool valChanged = false;
+            if (ptype == ShaderPackParamType::Bool) {
+                bool b = (val > 0.5f);
+                if (row(Tr("값"), [&] { return Switch("##effparambool", Tr("켬"), &b); })) {
+                    val = b ? 1.0f : 0.0f;
+                    valChanged = true;
+                }
+            } else if (ptype == ShaderPackParamType::Int) {
+                if (row(Tr("값"), [&] { return ImGui::SliderFloat("##effparamval", &val, pmin, pmax, "%.0f"); })) {
+                    val = std::round(val);
+                    valChanged = true;
+                }
+            } else {
+                const char* fmt = pstep > 0.0f ? (pstep >= 1.0f ? "%.0f" : "%.2f") : "%.2f";
+                if (row(Tr("값"), [&] { return ImGui::SliderFloat("##effparamval", &val, pmin, pmax, fmt); })) {
+                    if (pstep > 0.0f) val = pmin + std::round((val - pmin) / pstep) * pstep;
+                    valChanged = true;
+                }
+            }
+            if (valChanged) {
                 pkKey->value = val;
                 studioKeyChanged_ = true;
                 d.rowsKey = ~0ull;

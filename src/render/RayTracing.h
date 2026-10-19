@@ -49,6 +49,7 @@ public:
     bool Ready() const { return ready_; }
     D3D12_GPU_VIRTUAL_ADDRESS Tlas() const;        // RaytracingAccelerationStructure (t0 space1)
     D3D12_GPU_VIRTUAL_ADDRESS Geometries() const;  // StructuredBuffer<RtGeometry> of the last Build (t1 space1)
+    D3D12_GPU_VIRTUAL_ADDRESS PackExtSlots() const;// StructuredBuffer<float4> (t3 space1)
 
 private:
     bool EnsureModelResources(GpuModel& model);
@@ -71,6 +72,10 @@ private:
     uint8_t* packRecordsMapped_ = nullptr;
     uint32_t packRecordCapacity_ = 0;                       // per slot
     uint32_t packSrvBase_ = DescriptorHeap::kInvalid;       // kSlots * packRecordCapacity_ descriptors
+    // PT pack ext slots upload ring (persistently mapped), kSlots entries each, grown on demand
+    ComPtr<ID3D12Resource> packExtSlots_;
+    uint8_t* packExtSlotsMapped_ = nullptr;
+    uint32_t packExtSlotCapacity_ = 0;                       // float4 count per slot
     uint32_t lastSlot_ = 0;
     PackTextures* packTextures_ = nullptr;
     bool ready_ = false;

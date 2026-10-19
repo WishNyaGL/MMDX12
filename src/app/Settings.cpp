@@ -372,6 +372,16 @@ bool AppSettings::Load(const std::filesystem::path& file) {
             // characterMaterialSuggested=<character id>: Ray-MMD material data was already suggested
             if (!value.empty()) characterMaterialSuggested.insert(value);
         }
+        else if (key == "paramGroupOpen") {
+            // paramGroupOpen=<pack>|<group>|0|1
+            const size_t a = value.find('|');
+            const size_t b = a == std::string::npos ? std::string::npos : value.find('|', a + 1);
+            if (a != std::string::npos && b != std::string::npos && a > 0 && b > a + 1 && b + 1 < value.size()) {
+                const std::string stateStr = value.substr(b + 1);
+                bool open = (stateStr == "1" || stateStr == "true");
+                paramGroupOpen[value.substr(0, b)] = open;
+            }
+        }
         else if (key == "characterShaderAuto") {
             // retired (the app no longer auto-applies packs): ignored
         }
@@ -696,6 +706,8 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     }
     for (const MmeEffectEntry& e : mmeEffects)
         std::fprintf(f, "mmeEffect=%d|%s\n", e.enabled ? 1 : 0, PathToUtf8(e.file).c_str());
+    for (const auto& [k, v] : paramGroupOpen)
+        std::fprintf(f, "paramGroupOpen=%s|%d\n", k.c_str(), v ? 1 : 0);
     std::fprintf(f, "shaderSort=%d,%d\n", shaderSort[0], shaderSort[1]);
     std::fprintf(f, "shaderType=%d,%d\n", shaderType[0], shaderType[1]);
     std::fprintf(f, "playPanelTab=%d\n", playPanelTab);

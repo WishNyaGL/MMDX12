@@ -409,6 +409,10 @@ void OfflineRenderer::Impl::PreparePackEdges() {
         if (pack->HasCap("inputs.id")) defines.push_back({"PACK_CAP_INPUTS_ID", "1"});
         if (pack->HasCap("passes.history")) defines.push_back({"PACK_CAP_PASSES_HISTORY", "1"});
         if (pack->HasCap("passes.mips")) defines.push_back({"PACK_CAP_PASSES_MIPS", "1"});
+        if (pack->HasCap("params.ext")) {
+            defines.push_back({"PACK_CAP_PARAMS_EXT", "1"});
+            defines.push_back({"PACK_PARAM_COUNT", std::to_string(pack->params.size())});
+        }
         const std::filesystem::path file = shaderDir / L"offline_edge_pack.hlsl";
         std::string errors;
         ComPtr<ID3DBlob> vs = CompileShaderDxc(file, "VSEdgeOfflinePack", "vs_6_0", defines, &errors);
@@ -489,6 +493,8 @@ void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, TransientD
             cmd->IASetIndexBuffer(&model->IndexBufferView());
             cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(frame));
             cmd->SetGraphicsRootShaderResourceView(5, model->PrevBoneBuffer(frame));
+            if (model->HasPackParamsExt())   // params.ext packs: pack_api.hlsli gPackParamSlots (b6)
+                cmd->SetGraphicsRootConstantBufferView(7, model->PackParamsExtBuffer(frame));
             ID3D12PipelineState* curPso = nullptr;
             for (const GpuModel::Material& mat : model->Materials()) {
                 if (p == 0) {
@@ -1029,7 +1035,7 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
 
     // Outline layer: raster inverted hull at the offline image size (4x MSAA).
     ID3D12Device* device = ctx.Device();
-    CD3DX12_ROOT_PARAMETER params[7];
+    CD3DX12_ROOT_PARAMETER params[8];
     params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
     params[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);
     params[2].InitAsShaderResourceView(0, 0, D3D12_SHADER_VISIBILITY_VERTEX);
@@ -1041,13 +1047,14 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
     CD3DX12_DESCRIPTOR_RANGE packTable;   // pack outlines: pack_api.hlsli gPackTex (t0, space5)
     packTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kPackMaxTextures, 0, 5);
     params[6].InitAsDescriptorTable(1, &packTable, D3D12_SHADER_VISIBILITY_ALL);
+    params[7].InitAsConstantBufferView(6, 0, D3D12_SHADER_VISIBILITY_ALL);   // params.ext slots (b6)
     CD3DX12_STATIC_SAMPLER_DESC samplers[2];
     samplers[0].Init(0, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_WRAP,
                      D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP, 0, 8);
     samplers[1].Init(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,   // gClamp (pack API)
                      D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
     CD3DX12_ROOT_SIGNATURE_DESC rs;
-    rs.Init(7, params, 2, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    rs.Init(8, params, 2, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
     if (!CreateRootSignature(device, rs, m.edgeRootSig, "OfflineRenderer: edge root signature")) return false;
 
     const std::filesystem::path edge = shaderDir / L"offline_edge.hlsl";

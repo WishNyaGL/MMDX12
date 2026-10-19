@@ -126,18 +126,20 @@ void RtScene::Shutdown() {
     if (instances_ && instancesMapped_) instances_->Unmap(0, nullptr);
     if (geometries_ && geometriesMapped_) geometries_->Unmap(0, nullptr);
     if (packRecords_ && packRecordsMapped_) packRecords_->Unmap(0, nullptr);
+    if (packExtSlots_ && packExtSlotsMapped_) packExtSlots_->Unmap(0, nullptr);
     if (packSrvBase_ != DescriptorHeap::kInvalid && ctx_) {
         ctx_->SrvHeap().Free(packSrvBase_, kSlots * packRecordCapacity_);
         packSrvBase_ = DescriptorHeap::kInvalid;
     }
-    instancesMapped_ = geometriesMapped_ = packRecordsMapped_ = nullptr;
+    instancesMapped_ = geometriesMapped_ = packRecordsMapped_ = packExtSlotsMapped_ = nullptr;
     instances_.Reset();
     geometries_.Reset();
     packRecords_.Reset();
+    packExtSlots_.Reset();
     tlas_.Reset();
     tlasScratch_.Reset();
     tlasBytes_ = tlasScratchBytes_ = 0;
-    tlasCapacity_ = instanceCapacity_ = geometryCapacity_ = packRecordCapacity_ = 0;
+    tlasCapacity_ = instanceCapacity_ = geometryCapacity_ = packRecordCapacity_ = packExtSlotCapacity_ = 0;
     lastSlot_ = 0;
     skinPso_.Reset();
     skinRootSig_.Reset();
@@ -335,12 +337,16 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
     }
 
     uint32_t packGeomCount = 0;
+    uint32_t packExtSlotCount = 0;
     for (GpuModel* m : models) {
         if (!usable(m) || m->Role() != ModelRole::Character || m->ShaderPackId().empty()) continue;
         if (!m->PackActive()) continue;   // every material switched off
         const ShaderPack* sp = ShaderPacks().Find(m->ShaderPackId());
         if (sp && sp->hasPtSurface) {
             packGeomCount += (uint32_t)m->Rt().geometryMaterials.size();
+            if (m->HasPackParamsExt()) {
+                packExtSlotCount += (uint32_t)m->PackParamSlots().size();
+            }
         }
     }
     if (packGeomCount > packRecordCapacity_) {
@@ -383,8 +389,25 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
         packRecordCapacity_ = newPackCapacity;
     }
 
+    if (packExtSlotCount > packExtSlotCapacity_) {
+        const uint32_t newExtCapacity = std::max(std::max(packExtSlotCount, 2 * packExtSlotCapacity_), 128u);
+        auto newExtBuf = CreateBuffer(device,
+                                      (uint64_t)kSlots * newExtCapacity * sizeof(DirectX::XMFLOAT4),
+                                      D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE,
+                                      D3D12_RESOURCE_STATE_GENERIC_READ, L"rt.packExtSlots");
+        if (!newExtBuf) return false;
+        void* pem = nullptr;
+        if (FAILED(newExtBuf->Map(0, nullptr, &pem))) return false;
+        if (packExtSlots_) ctx_->DeferRelease(packExtSlots_);
+        packExtSlots_ = newExtBuf;
+        packExtSlotsMapped_ = (uint8_t*)pem;
+        packExtSlotCapacity_ = newExtCapacity;
+    }
+
     uint32_t curPackRecord = 0;
+    uint32_t curExtSlot = 0;
     const size_t slotPackBase = (size_t)slot * packRecordCapacity_;
+    const size_t slotExtBase = (size_t)slot * packExtSlotCapacity_;
 
     // One ring entry per frame slot.
     auto* inst = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(
@@ -418,6 +441,19 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
             if (m->PackActive()) {
                 sp = ShaderPacks().Find(m->ShaderPackId());
                 if (sp && sp->hasPtSurface) isPtPack = true;
+            }
+        }
+
+        uint32_t modelExtBase = 0;
+        uint32_t modelExtCount = 0;
+        if (isPtPack && m->HasPackParamsExt() && !m->PackParamSlots().empty()) {
+            modelExtCount = (uint32_t)m->PackParamSlots().size();
+            if (curExtSlot + modelExtCount <= packExtSlotCapacity_) {
+                modelExtBase = curExtSlot;
+                std::memcpy(packExtSlotsMapped_ + (slotExtBase + modelExtBase) * sizeof(DirectX::XMFLOAT4),
+                            m->PackParamSlots().data(),
+                            modelExtCount * sizeof(DirectX::XMFLOAT4));
+                curExtSlot += modelExtCount;
             }
         }
 
@@ -523,6 +559,8 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
                 rec->headUp = {headUp.x, headUp.y, headUp.z, 0.0f};
                 rec->headForward = {headForward.x, headForward.y, headForward.z, 0.0f};
                 std::memcpy(rec->params, c.packParams, 16 * sizeof(float));
+                rec->extSlotBase = modelExtBase;
+                rec->extSlotCount = modelExtCount;
 
                 e.packSrv = packSrvBase_ + recordIdx;
                 e.flags |= RtGeom_PtPack;
@@ -592,6 +630,12 @@ D3D12_GPU_VIRTUAL_ADDRESS RtScene::Tlas() const {
 D3D12_GPU_VIRTUAL_ADDRESS RtScene::Geometries() const {
     return geometries_
                ? geometries_->GetGPUVirtualAddress() + (uint64_t)lastSlot_ * geometryCapacity_ * sizeof(RtGeometry)
+               : 0;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS RtScene::PackExtSlots() const {
+    return packExtSlots_
+               ? packExtSlots_->GetGPUVirtualAddress() + (uint64_t)lastSlot_ * packExtSlotCapacity_ * sizeof(DirectX::XMFLOAT4)
                : 0;
 }
 

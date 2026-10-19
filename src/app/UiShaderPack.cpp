@@ -171,7 +171,7 @@ void App::ApplyShaderChoice(GpuModel& gpu, const ShaderChoice& choice) {
         !choice.textureFolder.empty()        ? Utf8ToPath(choice.textureFolder)
         : !gpu.DefaultPackTextureFolder().empty() ? gpu.DefaultPackTextureFolder()
                                              : ShaderPacks().TextureFolder(choice.pack);
-    gpu.SetShaderPack(pack, pack->Resolve(choice.params), folder, choice.materials);
+    gpu.SetShaderPack(pack, choice.params, folder, choice.materials);
 }
 
 namespace {
@@ -1143,43 +1143,7 @@ bool App::DrawShaderPackParams(ShaderChoice& choice) {
         Gap(4.0f);
     }
     if (pack->params.empty()) return changed;
-    const PackParamValues values = pack->Resolve(choice.params);
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const int cols = std::clamp(std::min((int)(avail / Dp(240.0f)), (int)pack->params.size()), 1, 3);
-    if (cols > 1) {
-        const size_t n = pack->params.size();
-        const int rows = (int)((n + (size_t)cols - 1) / (size_t)cols);   // column-major: ceil(n/cols)
-        if (ImGui::BeginTable("##spp_grid", cols, ImGuiTableFlags_SizingStretchSame)) {
-            for (int row = 0; row < rows; ++row) {
-                ImGui::TableNextRow();
-                for (int col = 0; col < cols; ++col) {
-                    const size_t i = (size_t)col * (size_t)rows + (size_t)row;   // fill column-major
-                    if (i >= n) continue;
-                    ImGui::TableSetColumnIndex(col);
-                    const ShaderPackParam& sp = pack->params[i];
-                    float v = values[i];
-                    const std::string id = "##spp_" + sp.key;
-                    const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(lang);
-                    if (SliderRow(id.c_str(), label.c_str(), &v, sp.min, sp.max, "%.2f")) {
-                        choice.params[sp.key] = v;
-                        changed = true;
-                    }
-                }
-            }
-            ImGui::EndTable();
-        }
-    } else {
-        for (size_t i = 0; i < pack->params.size(); ++i) {
-            const ShaderPackParam& sp = pack->params[i];
-            float v = values[i];
-            const std::string id = "##spp_" + sp.key;
-            const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(lang);
-            if (SliderRow(id.c_str(), label.c_str(), &v, sp.min, sp.max, "%.2f")) {
-                choice.params[sp.key] = v;
-                changed = true;
-            }
-        }
-    }
+    changed |= DrawShaderPackParameters(*pack, choice.params, "##spp", true);
     Gap(6.0f);
     ImGui::BeginDisabled(choice.params.empty());
     if (Button("##sp_reset", Tr("기본값으로"), icon::ArrowCcw, ButtonKind::Ghost)) {
@@ -1187,6 +1151,173 @@ bool App::DrawShaderPackParams(ShaderChoice& choice) {
         changed = true;
     }
     ImGui::EndDisabled();
+    return changed;
+}
+
+// A collapsible params.ext group header (full-width row, caret + label); returns whether the group is open.
+// The open state is per pack + group in AppSettings::paramGroupOpen (default: the manifest's "collapsed").
+bool App::DrawParamGroupHeader(const ShaderPack& pack, const ShaderPackGroup& g, const char* idPrefix) {
+    const Palette& p = P();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    bool open = settings_.ParamGroupOpen(pack.id, g.id, !g.collapsed);
+    const std::string label = g.label.Empty() ? g.id : g.label.Get(PackLanguage());
+    const std::string hit = std::string(idPrefix) + "_grp_" + g.id;
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    const ImVec2 b(a.x + ImGui::GetContentRegionAvail().x, a.y + Dp(28.0f));
+    bool hovered = false;
+    if (CardItem(hit.c_str(), a, b, &hovered, label.c_str())) {   // advances the cursor past the row
+        open = !open;
+        settings_.SetParamGroupOpen(pack.id, g.id, open);
+    }
+    dl->AddRectFilled(a, b, hovered ? WithAlpha(p.ink, 0.05f) : p.sunken, Dp(4.0f));
+    Icon(dl, open ? icon::CaretDown : icon::CaretRight, Dp(14.0f), ImVec2(a.x + Dp(12.0f), (a.y + b.y) * 0.5f), p.ink2);
+    Text(dl, Font::Semibold, size::Small, ImVec2(a.x + Dp(26.0f), a.y + Dp(6.0f)), p.ink, label.c_str());
+    return open;
+}
+
+bool App::DrawShaderPackParameters(const ShaderPack& pack, std::map<std::string, float>& params,
+                                   const char* idPrefix, bool grid) {
+    if (pack.params.empty()) return false;
+    bool changed = false;
+    const std::string lang = PackLanguage();
+    const Palette& p = P();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    auto drawParamWidget = [&](const ShaderPackParam& sp, const std::string& prefix) {
+        bool itemChanged = false;
+        const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(lang);
+        const std::string sid = prefix + "_" + sp.key;
+
+        switch (sp.type) {
+        case ShaderPackParamType::Float: {
+            float v = params.count(sp.key) ? params[sp.key] : sp.def;
+            if (SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, "%.2f")) {
+                if (sp.step > 0.0f) v = sp.min + std::round((v - sp.min) / sp.step) * sp.step;
+                params[sp.key] = v;
+                itemChanged = true;
+            }
+            break;
+        }
+        case ShaderPackParamType::Int: {
+            float v = params.count(sp.key) ? params[sp.key] : sp.def;
+            if (SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, "%.0f")) {
+                v = std::round(v);
+                params[sp.key] = v;
+                itemChanged = true;
+            }
+            break;
+        }
+        case ShaderPackParamType::Bool: {
+            float raw = params.count(sp.key) ? params[sp.key] : (sp.defBool ? 1.0f : 0.0f);
+            bool b = (raw > 0.5f);
+            if (Switch(sid.c_str(), label.c_str(), &b)) {
+                params[sp.key] = b ? 1.0f : 0.0f;
+                itemChanged = true;
+            }
+            break;
+        }
+        case ShaderPackParamType::Color: {
+            float rgb[3] = {
+                params.count(sp.key + "#0") ? params[sp.key + "#0"] : sp.defVec[0],
+                params.count(sp.key + "#1") ? params[sp.key + "#1"] : sp.defVec[1],
+                params.count(sp.key + "#2") ? params[sp.key + "#2"] : sp.defVec[2]
+            };
+            const ImVec2 c = ImGui::GetCursorScreenPos();
+            const float w = ImGui::GetContentRegionAvail().x;
+            TextEllipsis(dl, Font::Regular, size::Small, ImVec2(c.x, c.y + Dp(4.0f)), c.x + w * 0.4f, p.ink2, label.c_str());
+            ImGui::SetCursorScreenPos(ImVec2(c.x + w * 0.4f, c.y));
+            if (ColorField(sid.c_str(), rgb)) {
+                params[sp.key + "#0"] = rgb[0];
+                params[sp.key + "#1"] = rgb[1];
+                params[sp.key + "#2"] = rgb[2];
+                itemChanged = true;
+            }
+            if (sp.alpha) {
+                float a = params.count(sp.key + "#3") ? params[sp.key + "#3"] : sp.defVec[3];
+                std::string alphaLabel = label + " " + Tr("불투명도");
+                if (SliderRow((sid + "_a").c_str(), alphaLabel.c_str(), &a, 0.0f, 1.0f, "%.2f")) {
+                    params[sp.key + "#3"] = a;
+                    itemChanged = true;
+                }
+            }
+            break;
+        }
+        case ShaderPackParamType::Vec3: {
+            float xyz[3] = {
+                params.count(sp.key + "#0") ? params[sp.key + "#0"] : sp.defVec[0],
+                params.count(sp.key + "#1") ? params[sp.key + "#1"] : sp.defVec[1],
+                params.count(sp.key + "#2") ? params[sp.key + "#2"] : sp.defVec[2]
+            };
+            static const char* kAxes[3] = {" X", " Y", " Z"};
+            for (int c = 0; c < 3; ++c) {
+                std::string cid = sid + "_" + std::to_string(c);
+                std::string clabel = label + kAxes[c];
+                if (SliderRow(cid.c_str(), clabel.c_str(), &xyz[c], sp.min, sp.max, "%.2f")) {
+                    if (sp.step > 0.0f) xyz[c] = sp.min + std::round((xyz[c] - sp.min) / sp.step) * sp.step;
+                    params[sp.key + "#" + std::to_string(c)] = xyz[c];
+                    itemChanged = true;
+                }
+            }
+            break;
+        }
+        }
+        return itemChanged;
+    };
+
+    // A run of params: up to 3 columns (column-major) when `grid` and the panel is wide enough, else one column.
+    int gridIndex = 0;
+    auto drawList = [&](const std::vector<const ShaderPackParam*>& list) {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        const int cols = grid ? std::clamp(std::min((int)(avail / Dp(240.0f)), (int)list.size()), 1, 3) : 1;
+        const std::string tableId = std::string(idPrefix) + "_grid" + std::to_string(gridIndex++);
+        if (cols > 1 && ImGui::BeginTable(tableId.c_str(), cols, ImGuiTableFlags_SizingStretchSame)) {
+            const size_t n = list.size();
+            const int rows = (int)((n + (size_t)cols - 1) / (size_t)cols);   // column-major: ceil(n/cols)
+            for (int row = 0; row < rows; ++row) {
+                ImGui::TableNextRow();
+                for (int col = 0; col < cols; ++col) {
+                    const size_t i = (size_t)col * (size_t)rows + (size_t)row;
+                    if (i >= n) continue;
+                    ImGui::TableSetColumnIndex(col);
+                    changed |= drawParamWidget(*list[i], idPrefix);
+                }
+            }
+            ImGui::EndTable();
+        } else {
+            for (const ShaderPackParam* sp : list) changed |= drawParamWidget(*sp, idPrefix);
+        }
+    };
+
+    if (pack.groups.empty()) {
+        std::vector<const ShaderPackParam*> all;
+        for (const ShaderPackParam& sp : pack.params) all.push_back(&sp);
+        drawList(all);
+    } else {
+        std::vector<const ShaderPackParam*> ungrouped;
+        std::map<std::string, std::vector<const ShaderPackParam*>> grouped;
+        for (const ShaderPackParam& sp : pack.params) {
+            if (sp.group.empty()) ungrouped.push_back(&sp);
+            else grouped[sp.group].push_back(&sp);
+        }
+
+        if (!ungrouped.empty()) drawList(ungrouped);
+
+        for (const ShaderPackGroup& g : pack.groups) {
+            auto it = grouped.find(g.id);
+            if (it == grouped.end() || it->second.empty()) continue;
+
+            const bool open = DrawParamGroupHeader(pack, g, idPrefix);
+
+            if (open) {
+                ImGui::Indent(Dp(12.0f));
+                Gap(4.0f);
+                drawList(it->second);
+                Gap(4.0f);
+                ImGui::Unindent(Dp(12.0f));
+            }
+            Gap(4.0f);
+        }
+    }
     return changed;
 }
 

@@ -22,9 +22,26 @@
 #define gEffectTime gTime
 #define gEffectFrameIndex gFrameIndex
 
+#if defined(PACK_CAP_PARAMS_EXT) && PACK_CAP_PARAMS_EXT
+#ifndef PACK_PARAM_COUNT
+#define PACK_PARAM_COUNT 128u
+#endif
+cbuffer PackParamsExt : register(b4) {
+    float4 gPackParamSlots[128];
+};
+#define PackParam(i) (gPackParamSlots[(i) & 127u].x)
+inline int PackParamInt(uint i) { return (int)round(gPackParamSlots[i & 127u].x); }
+inline bool PackParamBool(uint i) { return (gPackParamSlots[i & 127u].x > 0.5); }
+inline float3 PackParamColor(uint i) { return gPackParamSlots[i & 127u].rgb; }
+inline float4 PackParamColor4(uint i) { return gPackParamSlots[i & 127u]; }
+inline float3 PackParamVec3(uint i) { return gPackParamSlots[i & 127u].xyz; }
+inline uint PackParamCount() { return (uint)PACK_PARAM_COUNT; }
+#else
 // The pack's 16 parameters (b2, 16 root constants), pack.json order; the user's slider value or the
 // manifest default.
+cbuffer EffectParams : register(b2) { float4 gPackEffectParams[4]; }
 #define PackParam(i) gPackEffectParams[i >> 2][i & 3]
+#endif
 
 #ifndef PACK_STATE
 #define PACK_STATE 0
@@ -84,8 +101,6 @@ uint PackIdClass(uint id) { return (id >> 4u) & 0x7u; }
 uint PackIdTag(uint id) { return id & 0xFu; }
 bool PackIdIsCharacter(uint id) { return ((id >> 7u) & 1u) != 0; }
 #endif
-
-cbuffer EffectParams : register(b2) { float4 gPackEffectParams[4]; }
 
 // ---- camera focus (API v5): the engine's depth-of-field focus, shared with DofPass and the offline GI lens --
 // View-space z of the focus plane this frame (MMD units): the studio focus track / play mode's character head,

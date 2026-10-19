@@ -43,6 +43,31 @@ float Num(const nlohmann::json& j, const char* key, float def) {
     return it != j.end() && it->is_number() ? it->get<float>() : def;
 }
 
+bool ParseHexColor(const std::string& hex, float outRgba[4]) {
+    std::string s = hex;
+    if (!s.empty() && s[0] == '#') s = s.substr(1);
+    if (s.size() == 6) {
+        unsigned int val = 0;
+        if (sscanf(s.c_str(), "%x", &val) == 1) {
+            outRgba[0] = ((val >> 16) & 0xFF) / 255.0f;
+            outRgba[1] = ((val >> 8) & 0xFF) / 255.0f;
+            outRgba[2] = (val & 0xFF) / 255.0f;
+            outRgba[3] = 1.0f;
+            return true;
+        }
+    } else if (s.size() == 8) {
+        unsigned int r = 0, g = 0, b = 0, a = 0;
+        if (sscanf(s.c_str(), "%02x%02x%02x%02x", &r, &g, &b, &a) == 4) {
+            outRgba[0] = r / 255.0f;
+            outRgba[1] = g / 255.0f;
+            outRgba[2] = b / 255.0f;
+            outRgba[3] = a / 255.0f;
+            return true;
+        }
+    }
+    return false;
+}
+
 // A plain JSON string (stored under "") or an object of language -> string.
 LocalizedText Text(const nlohmann::json& j, const char* key) {
     LocalizedText t;
@@ -361,13 +386,76 @@ PackClass ShaderPack::Classify(const std::string& name, const std::string& nameE
     return PackClass::Body;
 }
 
+static float SrgbTransferToLinear(float c) {
+    c = std::clamp(c, 0.0f, 1.0f);
+    return c <= 0.04045f ? (c / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+void BuildPackParamSlots(const ShaderPack& pack, const std::map<std::string, float>& values,
+                         std::vector<DirectX::XMFLOAT4>& slots) {
+    slots.assign(pack.params.size(), DirectX::XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f));
+    for (size_t i = 0; i < pack.params.size(); ++i) {
+        const ShaderPackParam& p = pack.params[i];
+        switch (p.type) {
+        case ShaderPackParamType::Float: {
+            auto it = values.find(p.key);
+            float v = it != values.end() ? std::clamp(it->second, p.min, p.max) : p.def;
+            slots[i] = DirectX::XMFLOAT4(v, 0.0f, 0.0f, 0.0f);
+            break;
+        }
+        case ShaderPackParamType::Int: {
+            auto it = values.find(p.key);
+            float raw = it != values.end() ? it->second : p.def;
+            float v = std::round(std::clamp(raw, p.min, p.max));
+            slots[i] = DirectX::XMFLOAT4(v, 0.0f, 0.0f, 0.0f);
+            break;
+        }
+        case ShaderPackParamType::Bool: {
+            auto it = values.find(p.key);
+            float raw = it != values.end() ? it->second : p.def;
+            float v = (raw > 0.5f) ? 1.0f : 0.0f;
+            slots[i] = DirectX::XMFLOAT4(v, 0.0f, 0.0f, 0.0f);
+            break;
+        }
+        case ShaderPackParamType::Color: {
+            float srgb[4] = {p.defVec[0], p.defVec[1], p.defVec[2], p.alpha ? p.defVec[3] : 1.0f};
+            for (int c = 0; c < (p.alpha ? 4 : 3); ++c) {
+                std::string compKey = p.key + "#" + std::to_string(c);
+                auto it = values.find(compKey);
+                if (it != values.end()) srgb[c] = std::clamp(it->second, 0.0f, 1.0f);
+            }
+            float r = SrgbTransferToLinear(srgb[0]);
+            float g = SrgbTransferToLinear(srgb[1]);
+            float b = SrgbTransferToLinear(srgb[2]);
+            float a = p.alpha ? srgb[3] : 1.0f;
+            slots[i] = DirectX::XMFLOAT4(r, g, b, a);
+            break;
+        }
+        case ShaderPackParamType::Vec3: {
+            float vec[3] = {p.defVec[0], p.defVec[1], p.defVec[2]};
+            for (int c = 0; c < 3; ++c) {
+                std::string compKey = p.key + "#" + std::to_string(c);
+                auto it = values.find(compKey);
+                if (it != values.end()) vec[c] = std::clamp(it->second, p.min, p.max);
+            }
+            slots[i] = DirectX::XMFLOAT4(vec[0], vec[1], vec[2], 0.0f);
+            break;
+        }
+        }
+    }
+}
+
+void ShaderPack::ResolveSlots(const std::map<std::string, float>& values,
+                              std::vector<DirectX::XMFLOAT4>& slots) const {
+    BuildPackParamSlots(*this, values, slots);
+}
+
 PackParamValues ShaderPack::Resolve(const std::map<std::string, float>& values) const {
     PackParamValues out{};
-    for (size_t i = 0; i < params.size(); ++i) {
-        const ShaderPackParam& p = params[i];
-        auto it = values.find(p.key);
-        out[i] = it == values.end() ? p.def : std::clamp(it->second, p.min, p.max);
-    }
+    std::vector<DirectX::XMFLOAT4> slots;
+    BuildPackParamSlots(*this, values, slots);
+    const size_t n = std::min<size_t>(slots.size(), (size_t)kPackMaxParams);
+    for (size_t i = 0; i < n; ++i) out[i] = slots[i].x;
     return out;
 }
 
@@ -395,6 +483,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     out.tags.clear();
     out.rules.clear();
     for (float& k : out.alphaKey) k = 0.0f;
+    out.groups.clear();
     out.params.clear();
     out.textures.clear();
     out.hasEdge = false;
@@ -598,18 +687,84 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
         }
     }
 
-    // params: at most kPackMaxParams, unique non-empty keys, label string or localized object
+    // requires: optional array of capability names (kPackCapabilities). Unknown = Incompatible: an app that lacks a
+    // feature refuses the pack cleanly instead of calling the manifest invalid.
+    std::vector<std::string> unknownCaps;
+    if (auto it = j.find("requires"); it != j.end()) {
+        if (!it->is_array()) {
+            problems.push_back("requires must be an array of capability names");
+        } else {
+            for (const auto& r : *it) {
+                if (!r.is_string()) {
+                    problems.push_back("requires entries must be strings");
+                    continue;
+                }
+                const std::string cap = r.get<std::string>();
+                bool known = false;
+                for (const PackCapability& c : kPackCapabilities) known |= c.name == cap;
+                if (!known) {
+                    unknownCaps.push_back(cap);
+                    continue;
+                }
+                out.requiresCaps.push_back(cap);
+            }
+        }
+    }
+
+    // groups: optional array of { "id": "...", "label": "...", "collapsed": bool }
+    if (auto it = j.find("groups"); it != j.end()) {
+        if (!out.HasCap("params.ext")) {
+            problems.push_back("groups require \"params.ext\" in requires");
+        }
+        if (!it->is_array()) {
+            problems.push_back("groups must be an array");
+        } else {
+            for (const auto& g : *it) {
+                if (!g.is_object()) {
+                    problems.push_back("groups entries must be objects");
+                    continue;
+                }
+                ShaderPackGroup grp;
+                grp.id = Str(g, "id");
+                if (grp.id.empty()) {
+                    problems.push_back("a group id is empty");
+                    continue;
+                }
+                bool dup = false;
+                for (const auto& existing : out.groups) {
+                    if (existing.id == grp.id) { dup = true; break; }
+                }
+                if (dup) {
+                    problems.push_back("duplicate group id '" + grp.id + "'");
+                    continue;
+                }
+                grp.label = Text(g, "label");
+                if (grp.label.Empty()) grp.label.byLang[""] = grp.id;
+                if (auto c = g.find("collapsed"); c != g.end() && c->is_boolean())
+                    grp.collapsed = c->get<bool>();
+                out.groups.push_back(std::move(grp));
+            }
+        }
+    }
+
+    // params: at most kPackMaxParams (or kPackMaxParamsExt with params.ext)
+    const bool extParams = out.HasCap("params.ext");
+    const uint32_t maxParams = extParams ? kPackMaxParamsExt : kPackMaxParams;
     if (auto it = j.find("params"); it != j.end()) {
         if (out.type == PackType::Look) problems.push_back("params are not supported for look packs");
     }
     if (auto it = j.find("params"); it != j.end() && it->is_array()) {
+        if (!extParams && it->size() > kPackMaxParams) {
+            problems.push_back("more than 16 params (" + std::to_string(it->size()) + ") requires \"params.ext\" in requires");
+        } else if (extParams && it->size() > kPackMaxParamsExt) {
+            problems.push_back("more than 128 params (" + std::to_string(it->size()) + ")");
+        }
         for (const auto& p : *it) {
             if (!p.is_object()) {
                 problems.push_back("params entries must be objects");
                 continue;
             }
-            if (out.params.size() == kPackMaxParams) {
-                LOG_WARN("shader pack %s: more than %u params, the rest are ignored", out.id.c_str(), kPackMaxParams);
+            if (out.params.size() >= maxParams) {
                 break;
             }
             ShaderPackParam sp;
@@ -620,10 +775,107 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
             }
             sp.label = Text(p, "label");
             if (sp.label.Empty()) sp.label.byLang[""] = sp.key;
-            sp.min = Num(p, "min", 0.0f);
-            sp.max = Num(p, "max", 1.0f);
-            if (sp.max < sp.min) std::swap(sp.min, sp.max);
-            sp.def = std::clamp(Num(p, "default", sp.min), sp.min, sp.max);
+
+            // type: "float" (default), "int", "bool", "color", "vec3"
+            const std::string typeStr = ToLowerAscii(Str(p, "type"));
+            if (typeStr.empty() || typeStr == "float") {
+                sp.type = ShaderPackParamType::Float;
+            } else if (typeStr == "int") {
+                sp.type = ShaderPackParamType::Int;
+            } else if (typeStr == "bool") {
+                sp.type = ShaderPackParamType::Bool;
+            } else if (typeStr == "color") {
+                sp.type = ShaderPackParamType::Color;
+            } else if (typeStr == "vec3") {
+                sp.type = ShaderPackParamType::Vec3;
+            } else {
+                problems.push_back("param '" + sp.key + "': unknown type '" + Str(p, "type") + "'");
+            }
+            if (!extParams && sp.type != ShaderPackParamType::Float) {
+                problems.push_back("param '" + sp.key + "': non-float type requires \"params.ext\" in requires");
+            }
+
+            // group
+            if (auto git = p.find("group"); git != p.end()) {
+                if (git->is_string()) sp.group = git->get<std::string>();
+                else problems.push_back("param '" + sp.key + "': group must be a string");
+            }
+            if (!extParams) {
+                if (!sp.group.empty())
+                    problems.push_back("param '" + sp.key + "': group requires \"params.ext\" in requires");
+            } else if (!out.groups.empty()) {
+                bool found = false;
+                for (const auto& g : out.groups) {
+                    if (g.id == sp.group) { found = true; break; }
+                }
+                if (!found) {
+                    problems.push_back("param '" + sp.key + "': group '" + sp.group + "' not declared in groups");
+                }
+            }
+
+            // alpha flag for color
+            if (sp.type == ShaderPackParamType::Color) {
+                if (auto ait = p.find("alpha"); ait != p.end()) {
+                    if (ait->is_boolean()) sp.alpha = ait->get<bool>();
+                    else problems.push_back("param '" + sp.key + "': alpha must be true or false");
+                }
+            }
+
+            // min / max / step
+            if (sp.type == ShaderPackParamType::Int) {
+                sp.min = Num(p, "min", 0.0f);
+                sp.max = Num(p, "max", 100.0f);
+                if (sp.max < sp.min) std::swap(sp.min, sp.max);
+                sp.step = Num(p, "step", 1.0f);
+            } else if (sp.type == ShaderPackParamType::Vec3) {
+                sp.min = Num(p, "min", 0.0f);
+                sp.max = Num(p, "max", 1.0f);
+                if (sp.max < sp.min) std::swap(sp.min, sp.max);
+                sp.step = Num(p, "step", 0.01f);
+            } else {
+                sp.min = Num(p, "min", 0.0f);
+                sp.max = Num(p, "max", 1.0f);
+                if (sp.max < sp.min) std::swap(sp.min, sp.max);
+                sp.step = Num(p, "step", 0.0f);
+            }
+
+            // default
+            auto dit = p.find("default");
+            if (sp.type == ShaderPackParamType::Float) {
+                sp.def = std::clamp(Num(p, "default", sp.min), sp.min, sp.max);
+                sp.defVec[0] = sp.def;
+            } else if (sp.type == ShaderPackParamType::Int) {
+                sp.def = std::round(std::clamp(Num(p, "default", sp.min), sp.min, sp.max));
+                sp.defVec[0] = sp.def;
+            } else if (sp.type == ShaderPackParamType::Bool) {
+                if (dit != p.end() && dit->is_boolean()) sp.defBool = dit->get<bool>();
+                else if (dit != p.end() && dit->is_number()) sp.defBool = (dit->get<float>() > 0.5f);
+                sp.def = sp.defBool ? 1.0f : 0.0f;
+                sp.defVec[0] = sp.def;
+            } else if (sp.type == ShaderPackParamType::Color) {
+                sp.defVec[0] = 1.0f; sp.defVec[1] = 1.0f; sp.defVec[2] = 1.0f; sp.defVec[3] = 1.0f;
+                if (dit != p.end()) {
+                    if (dit->is_string()) {
+                        if (!ParseHexColor(dit->get<std::string>(), sp.defVec)) {
+                            problems.push_back("param '" + sp.key + "': invalid color hex string '" + dit->get<std::string>() + "'");
+                        }
+                    } else if (dit->is_array()) {
+                        for (size_t c = 0; c < dit->size() && c < 4; ++c) {
+                            if ((*dit)[c].is_number()) sp.defVec[c] = std::clamp((*dit)[c].get<float>(), 0.0f, 1.0f);
+                        }
+                    }
+                }
+                sp.def = sp.defVec[0];
+            } else if (sp.type == ShaderPackParamType::Vec3) {
+                sp.defVec[0] = sp.min; sp.defVec[1] = sp.min; sp.defVec[2] = sp.min; sp.defVec[3] = 0.0f;
+                if (dit != p.end() && dit->is_array()) {
+                    for (size_t c = 0; c < dit->size() && c < 3; ++c) {
+                        if ((*dit)[c].is_number()) sp.defVec[c] = std::clamp((*dit)[c].get<float>(), sp.min, sp.max);
+                    }
+                }
+                sp.def = sp.defVec[0];
+            }
+
             bool duplicate = false;
             for (const ShaderPackParam& q : out.params) duplicate |= q.key == sp.key;
             if (duplicate) {
@@ -689,30 +941,6 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                 }
                 out.textures.push_back(std::move(t));
             }
-    }
-
-    // requires: optional array of capability names (kPackCapabilities). Unknown = Incompatible: an app that lacks a
-    // feature refuses the pack cleanly instead of calling the manifest invalid.
-    std::vector<std::string> unknownCaps;
-    if (auto it = j.find("requires"); it != j.end()) {
-        if (!it->is_array()) {
-            problems.push_back("requires must be an array of capability names");
-        } else {
-            for (const auto& r : *it) {
-                if (!r.is_string()) {
-                    problems.push_back("requires entries must be strings");
-                    continue;
-                }
-                const std::string cap = r.get<std::string>();
-                bool known = false;
-                for (const PackCapability& c : kPackCapabilities) known |= c.name == cap;
-                if (!known) {
-                    unknownCaps.push_back(cap);
-                    continue;
-                }
-                out.requiresCaps.push_back(cap);
-            }
-        }
     }
 
     // inputs: optional array of PackInput names (surface and effect packs). performer.* / light.key / camera.focus need

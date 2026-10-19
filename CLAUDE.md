@@ -309,7 +309,10 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     mouse (`studioActiveView_`).
 - Shader packs (an ecosystem: anyone can make one; docs + gallery on mmdx.codingbot.kr `/<lang>/docs/shader-packs/`, sources
   in the website repo; direction + decisions for the native effect ecosystem vs MME: docs/effect_ecosystem.md): opt-in per-character replacements of the scene pass's material shading. A pack = `pack.json`
-  (metadata, localized names, authors, license, tags, `apiVersion`, material class rules, <= 16 params) + `surface.hlsl`
+  (metadata, localized names, authors, license, tags, `apiVersion`, material class rules, <= 16 float params; `"requires": ["params.ext"]` = <= 128 typed params float / int / bool /
+  color / vec3 in collapsible `"groups"`, one float4 slot each: surface b6 (`GpuModel` ring), effect b4 (`PackEffectPass`
+  ring), PT / GI `gPackExtSlots` t3 space1 via `RtPtPackRecord::extSlotBase`; values `key#0..2` per component; UI
+  `App::DrawShaderPackParameters`) + `surface.hlsl`
   implementing `PackShade` (contract: `shaders/pack_api.hlsli`, `kPackApiVersion`) + optional `preview.png|jpg` (AFTER) and
   `preview_before.png|jpg` (same frame without the pack; index.json `previewBefore`); with both, the manager's detail panes
   draw a draggable split (`App::DrawPackCompare`, Drag mode, uiprobe id `compare:<id>`; cards scrub on hover). Built-in in

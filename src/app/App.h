@@ -1019,6 +1019,11 @@ private:
     // `traits` = the shown model's data traits (null = unknown, e.g. the lobby): packs that Suggest them get a "추천" tag.
     bool DrawShaderSelector(const char* id, ShaderChoice& choice, float width, const ModelTraits* traits = nullptr);
     bool DrawShaderPackParams(ShaderChoice& choice);                     // the chosen pack's sliders + reset
+    // typed param widgets (float / int / bool / color / vec3; color + vec3 as key#0..2 entries) under collapsible
+    // pack.json groups (open state in AppSettings::paramGroupOpen); `grid` = up to 3 columns in wide panels
+    bool DrawParamGroupHeader(const ShaderPack& pack, const ShaderPackGroup& g, const char* idPrefix);
+    bool DrawShaderPackParameters(const ShaderPack& pack, std::map<std::string, float>& params,
+                                  const char* idPrefix = "##spp", bool grid = false);
     // per-material class / default-shading list of a pack model (`maxHeight` caps the scrolling list)
     bool DrawMaterialShaderList(const char* id, ShaderChoice& choice, const PmxModel& pmx, float width, float maxHeight);
     static int MaterialOverrideCount(const ShaderChoice& choice);

@@ -293,4 +293,49 @@ When an effect declares `"requires": ["passes.mips"]`, any pass entry can specif
 - Helpers:
   - `float4 PackPassSampleLevel(uint passIndex, float2 uv, float lod)`: samples pass `passIndex`'s target at explicit mip level `lod`.
 
+## Extended Parameters (`params.ext`)
+
+Packs declaring `"requires": ["params.ext"]` in `pack.json` can declare up to 128 parameters (`kPackMaxParamsExt = 128`), organized in collapsible UI groups and supporting multiple types beyond scalar floats.
+
+### Manifest
+
+```json
+{
+  "requires": ["params.ext"],
+  "groups": [
+    { "id": "general", "label": { "ko": "일반", "en": "General" }, "collapsed": false },
+    { "id": "color_adj", "label": { "ko": "색상 조정", "en": "Color Adjustments" }, "collapsed": true }
+  ],
+  "params": [
+    { "key": "strength", "type": "float", "group": "general", "label": { "ko": "강도", "en": "Strength" }, "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01 },
+    { "key": "iterations", "type": "int", "group": "general", "label": { "ko": "반복 횟수", "en": "Iterations" }, "default": 4, "min": 1, "max": 16, "step": 1 },
+    { "key": "invert", "type": "bool", "group": "general", "label": { "ko": "반전", "en": "Invert" }, "default": false },
+    { "key": "tint", "type": "color", "group": "color_adj", "label": { "ko": "색조", "en": "Tint" }, "default": [1.0, 0.8, 0.6] },
+    { "key": "overlay", "type": "color", "group": "color_adj", "alpha": true, "label": { "ko": "오버레이", "en": "Overlay" }, "default": [1.0, 1.0, 1.0, 0.5] },
+    { "key": "offset", "type": "vec3", "group": "color_adj", "label": { "ko": "오프셋", "en": "Offset" }, "default": [0.0, 0.0, 0.0], "min": -1.0, "max": 1.0, "step": 0.05 }
+  ]
+}
+```
+
+- **Types**:
+  - `float` (default): single scalar float slider.
+  - `int`: integer slider with discrete stepping.
+  - `bool`: toggle switch.
+  - `color`: RGB color picker button with popup (sRGB on UI and JSON, automatically converted to linear color in shaders). Set `"alpha": true` for an additional alpha opacity component.
+  - `vec3`: 3-component float vector with independent axis sliders.
+- **Groups**: collapsible sections in the UI. Collapsed state is remembered per pack and group in settings.
+- **Limits**: legacy packs support up to 16 float parameters. Packs with `"params.ext"` support up to 128 parameters.
+
+### HLSL Helpers
+
+When `params.ext` is declared, the macro `PACK_CAP_PARAMS_EXT` is defined during compilation, and parameters are backed by a float4 constant buffer (`gPackParamSlots[128]`):
+
+- `float PackParam(uint index)`: returns slot `index.x` (compatible with legacy float indexing).
+- `int PackParamInt(uint index)`: returns integer value from slot `index.x`.
+- `bool PackParamBool(uint index)`: returns boolean flag (`> 0.5`) from slot `index.x`.
+- `float3 PackParamColor(uint index)`: returns linear RGB color from slot `index.rgb`.
+- `float4 PackParamColor4(uint index)`: returns linear RGBA color from slot `index.rgba`.
+- `float3 PackParamVec3(uint index)`: returns 3D vector from slot `index.xyz`.
+- `uint PackParamCount()`: total declared parameter count.
+
 

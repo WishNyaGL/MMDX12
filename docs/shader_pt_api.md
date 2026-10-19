@@ -192,4 +192,21 @@ The output structures gain fields for overriding normal, adding emission, and wr
 - `float3 emission`: additive linear emission added along the ray throughput.
 - `uint tag`: 4-bit integer tag (0..15) recorded for the primary ray hit and written into bits 0–3 of the ID buffer.
 
+## Extended Parameters (`params.ext`)
+
+Surface and path-traced packs can declare `"requires": ["params.ext"]` to support up to 128 typed parameters organized in collapsible groups.
+
+In Path Tracing / Offline GI shaders (`pt_surface.hlsl`), extended parameters are provided through `StructuredBuffer<float4> gPackExtSlots : register(t3, space1)` and indexed via per-geometry record offsets.
+
+### HLSL Helpers
+
+Under `#ifdef PACK_CAP_PARAMS_EXT`:
+- `float PtPackParam(uint index)` / `PackParam(uint index)`: returns slot `index.x`.
+- `int PtPackParamInt(uint index)` / `PackParamInt(uint index)`: returns integer value from slot `index.x`.
+- `bool PtPackParamBool(uint index)` / `PackParamBool(uint index)`: returns boolean flag from slot `index.x`.
+- `float3 PtPackParamColor(uint index)` / `PackParamColor(uint index)`: returns linear RGB from slot `index.rgb`.
+- `float4 PtPackParamColor4(uint index)` / `PackParamColor4(uint index)`: returns linear RGBA from slot `index.rgba`.
+- `float3 PtPackParamVec3(uint index)` / `PackParamVec3(uint index)`: returns vector from slot `index.xyz`.
+- `uint PtPackParamCount()` / `PackParamCount()`: returns parameter count.
+
 

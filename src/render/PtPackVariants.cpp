@@ -78,6 +78,10 @@ ComputePipeline* PtPackVariants::Resolve(Dx12Context& ctx,
     if (chosenPack->HasCap("inputs.id")) defs.push_back({"PACK_CAP_INPUTS_ID", "1"});
     if (chosenPack->HasCap("passes.history")) defs.push_back({"PACK_CAP_PASSES_HISTORY", "1"});
     if (chosenPack->HasCap("passes.mips")) defs.push_back({"PACK_CAP_PASSES_MIPS", "1"});
+    if (chosenPack->HasCap("params.ext")) {
+        defs.push_back({"PACK_CAP_PARAMS_EXT", "1"});
+        defs.push_back({"PACK_PARAM_COUNT", std::to_string(chosenPack->params.size())});
+    }
 
     ComputePipeline pipe;
     const std::filesystem::path f = shaderDir / Utf8ToWide(shaderFile);

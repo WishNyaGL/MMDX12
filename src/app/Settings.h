@@ -132,6 +132,16 @@ struct AppSettings {
     // M6b: the play-mode MME post stack (RenderSettings::mmeEffects). Persisted as
     // "mmeEffect=<enabled 0|1>|<path>" ini lines, oldest first; --mme overrides it for one run.
     std::vector<MmeEffectEntry> mmeEffects;
+    // params.ext: collapsible group open state per pack + group id. Persisted as
+    // "paramGroupOpen=<pack>|<group>|0|1" ini lines.
+    std::map<std::string, bool> paramGroupOpen;   // "<pack id>|<group id>" -> open
+    bool ParamGroupOpen(const std::string& packId, const std::string& groupId, bool defaultOpen = true) const {
+        auto it = paramGroupOpen.find(packId + "|" + groupId);
+        return it != paramGroupOpen.end() ? it->second : defaultOpen;
+    }
+    void SetParamGroupOpen(const std::string& packId, const std::string& groupId, bool open) {
+        paramGroupOpen[packId + "|" + groupId] = open;
+    }
     int shaderSort[2] = {0, 0};   // 0 recommended, 1 name, 2 updated, 3 params
     int shaderType[2] = {0, 0};   // 0 all, 1 surface, 2 effect
     int playPanelTab = 0;         // play-mode 화면 효과 panel: last open tab (0 효과, 1 셰이더, 2 MME · Ray-MMD)

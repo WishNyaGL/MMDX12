@@ -718,23 +718,44 @@ void GpuModel::UpdateMaterials(uint64_t frame, const std::vector<PmxMorph::Mater
     }
     const D3D12_GPU_VIRTUAL_ADDRESS base = materialCb_->GetGPUVirtualAddress() + r * stride;
     for (size_t i = 0; i < n; ++i) materials_[i].constants = base + i * sizeof(MaterialConstants);
+    if (hasPackParamsExt_ && packParamsExtMapped_ && packExtEntryVersion_[r] != packParamsExtVersion_) {
+        uint8_t* dst = packParamsExtMapped_ + r * kPackExtCbBytes;
+        const size_t bytes = std::min(packParamsExtSlots_.size() * sizeof(DirectX::XMFLOAT4), kPackExtCbBytes);
+        if (bytes) memcpy(dst, packParamsExtSlots_.data(), bytes);
+        memset(dst + bytes, 0, kPackExtCbBytes - bytes);
+        packExtEntryVersion_[r] = packParamsExtVersion_;
+    }
 }
 
 void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& params,
                              const std::filesystem::path& textureFolder,
-                             const MaterialClassOverrides& materials) {
+                             const MaterialClassOverrides& materials,
+                             const std::map<std::string, float>& rawParams) {
     if (role_ == ModelRole::Stage) pack = nullptr;   // packs shade characters only
     const std::string id = pack ? pack->id : std::string();
     const uint32_t generation = ShaderPacks().Generation();
+    // params.ext packs: one float4 per declared param (typed values); uploaded per frame slot in UpdateMaterials
+    std::vector<DirectX::XMFLOAT4> extSlots;
+    if (pack && pack->HasCap("params.ext")) BuildPackParamSlots(*pack, rawParams, extSlots);
+    const bool sameExt = extSlots.size() == packParamsExtSlots_.size() &&
+                         (extSlots.empty() ||
+                          std::memcmp(extSlots.data(), packParamsExtSlots_.data(), extSlots.size() * sizeof(extSlots[0])) == 0);
     if (id == packId_ && (!pack || (generation == packGeneration_ && params == packParams_ &&
-                                    textureFolder == packTextureFolder_ &&
-                                    packOverrides_ == materials)))
+                                    textureFolder == packTextureFolder_ && packOverrides_ == materials && sameExt)))
         return;
     packId_ = id;
     packGeneration_ = generation;
     packTextureFolder_ = pack ? textureFolder : std::filesystem::path();
     packParams_ = params;
     packOverrides_ = pack ? materials : MaterialClassOverrides{};
+    packParamsExtSlots_ = std::move(extSlots);
+    hasPackParamsExt_ = pack && pack->HasCap("params.ext");
+    if (hasPackParamsExt_ && !packParamsExtCb_ && ctx_) {
+        packParamsExtCb_ = CreateUploadBuffer(ctx_->Device(), (uint32_t)(kPackExtCbBytes * kRing), L"model.packParamsExt");
+        if (packParamsExtCb_ && FAILED(packParamsExtCb_->Map(0, nullptr, (void**)&packParamsExtMapped_)))
+            packParamsExtMapped_ = nullptr;
+    }
+    ++packParamsExtVersion_;   // every ring slot re-uploads on its next UpdateMaterials (in-flight slots stay intact)
     if (!pack) {
         for (auto& m : materials_) m.packOff = false;
         // no pack = no class and no alpha key (clears the encoding of a pack switched off). A material the pack had
@@ -909,7 +930,12 @@ void GpuModel::Destroy() {
     hasSdef_ = false;
     addUv_.Reset();
     addUvVbv_ = {};
+    if (packParamsExtCb_ && packParamsExtMapped_) packParamsExtCb_->Unmap(0, nullptr);
+    packParamsExtMapped_ = nullptr;
+    packParamsExtCb_.Reset();
+    hasPackParamsExt_ = false;
     hasAdditionalUv_ = false;
+    packParamsExtSlots_.clear();
     materialCb_.Reset();
     textures_.clear();
     materials_.clear();
@@ -917,6 +943,11 @@ void GpuModel::Destroy() {
     screenOrigTex_.clear();
     screenOrigHasTex_.clear();
     ctx_ = nullptr;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS GpuModel::PackParamsExtBuffer(uint64_t frame) const {
+    if (!packParamsExtCb_ || !hasPackParamsExt_) return 0;
+    return packParamsExtCb_->GetGPUVirtualAddress() + (frame % kRing) * kPackExtCbBytes;
 }
 
 GpuModel::~GpuModel() {

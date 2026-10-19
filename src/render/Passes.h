@@ -425,7 +425,7 @@ private:
         uint32_t stateSteps = 0;      // state updates this run (0 = none, unless the slot has no valid state yet)
         float focus[4] = {};          // gP1: focus z, focus aperture, user DoF aperture, max CoC px
     };
-    void RunEntry(PassContext& pc, const EntryRun& run);
+    bool RunEntry(PassContext& pc, const EntryRun& run);   // false = skipped (dst untouched)
     void DropStaleStateSlots(Dx12Context& ctx, const std::vector<EffectStackEntry>& stack);
     // API v5 intermediate-pass targets (RGBA16F), pooled by size and mips
     Texture* PassTarget(Dx12Context& ctx, uint32_t w, uint32_t h, uint32_t n, bool mips = false);
@@ -468,6 +468,9 @@ private:
     std::map<StateKey, HistorySlot> historySlots_;
     uint64_t passExecutionCount_ = 0;
     bool resetRequested_ = false;
+    ComPtr<ID3D12Resource> extParamsRing_;
+    uint8_t* extParamsMapped_ = nullptr;
+    size_t extParamsOffset_ = 0;
 };
 
 // M5a: the MME technique selection of M4b (first technique whose MMDPass / Subset / use-flags match; object_ss

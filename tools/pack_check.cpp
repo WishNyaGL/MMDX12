@@ -209,13 +209,39 @@ bool PrintManifest(const ShaderPack& pack, const std::string& error) {
             if (pack.inputMask & (1u << i)) printf(" %s", mmdx::PackInputName((mmdx::PackInput)i));
         printf("\n");
     }
+    if (pack.groups.empty()) {
+        printf("  groups: (none)\n");
+    } else {
+        for (const mmdx::ShaderPackGroup& g : pack.groups) {
+            const std::string label = g.label.Get(mmdx::PackLanguage());
+            printf("  group %s: \"%s\"%s\n", g.id.c_str(), label.c_str(), g.collapsed ? " (collapsed)" : "");
+        }
+    }
     if (pack.params.empty()) {
         printf("  params: (none)\n");
     } else {
-        for (const ShaderPackParam& p : pack.params) {
+        for (const mmdx::ShaderPackParam& p : pack.params) {
             const std::string label = p.label.Get(mmdx::PackLanguage());
-            printf("  param %s: \"%s\" default %.3f min %.3f max %.3f\n", p.key.c_str(), label.c_str(), p.def, p.min,
-                   p.max);
+            static const char* kTypes[] = {"float", "int", "bool", "color", "vec3"};
+            const char* typeStr = kTypes[(size_t)p.type];
+            printf("  param %s (%s): \"%s\"", p.key.c_str(), typeStr, label.c_str());
+            if (!p.group.empty()) printf(" group \"%s\"", p.group.c_str());
+            if (p.type == mmdx::ShaderPackParamType::Float || p.type == mmdx::ShaderPackParamType::Int) {
+                printf(" default %.3f min %.3f max %.3f", p.def, p.min, p.max);
+                if (p.step > 0.0f) printf(" step %.3f", p.step);
+            } else if (p.type == mmdx::ShaderPackParamType::Bool) {
+                printf(" default %s", p.defBool ? "true" : "false");
+            } else if (p.type == mmdx::ShaderPackParamType::Color) {
+                if (p.alpha) {
+                    printf(" default [%.3f, %.3f, %.3f, %.3f] alpha", p.defVec[0], p.defVec[1], p.defVec[2], p.defVec[3]);
+                } else {
+                    printf(" default [%.3f, %.3f, %.3f]", p.defVec[0], p.defVec[1], p.defVec[2]);
+                }
+            } else if (p.type == mmdx::ShaderPackParamType::Vec3) {
+                printf(" default [%.3f, %.3f, %.3f] min %.3f max %.3f", p.defVec[0], p.defVec[1], p.defVec[2], p.min, p.max);
+                if (p.step > 0.0f) printf(" step %.3f", p.step);
+            }
+            printf("\n");
         }
     }
     printf("  preview: %s\n", pack.preview.empty() ? "(none)"
@@ -530,6 +556,7 @@ int wmain(int argc, wchar_t** argv) {
         if (pack.HasCap("inputs.id")) defines.push_back({"PACK_CAP_INPUTS_ID", "1"});
         if (pack.HasCap("passes.history")) defines.push_back({"PACK_CAP_PASSES_HISTORY", "1"});
         if (pack.HasCap("passes.mips")) defines.push_back({"PACK_CAP_PASSES_MIPS", "1"});
+        if (pack.HasCap("params.ext")) defines.push_back({"PACK_CAP_PARAMS_EXT", "1"});
         printf("compile: %s of %s (ps_6_0, MMDX_PACK = %s, %u textures)\n",
                effect ? "PSEffect" : "PSPack", mmdx::PathToUtf8(mmdHlsl.filename()).c_str(), incDefine.c_str(), texCount);
         std::string errors;
@@ -591,6 +618,7 @@ int wmain(int argc, wchar_t** argv) {
                 if (pack.HasCap("inputs.id")) ptDefines.push_back({"PACK_CAP_INPUTS_ID", "1"});
                 if (pack.HasCap("passes.history")) ptDefines.push_back({"PACK_CAP_PASSES_HISTORY", "1"});
                 if (pack.HasCap("passes.mips")) ptDefines.push_back({"PACK_CAP_PASSES_MIPS", "1"});
+                if (pack.HasCap("params.ext")) ptDefines.push_back({"PACK_CAP_PARAMS_EXT", "1"});
                 printf("compile: CSRender of %s (cs_6_5, MMDX_PT_PACK = %s)\n",
                        mmdx::PathToUtf8(giHlsl.filename()).c_str(), ptIncDefine.c_str());
                 std::string ptErrors;

@@ -10,6 +10,7 @@
 // (PackEffectPass); a model opts in with GpuModel::SetShaderPack, the effect stack is RenderSettings::packEffects.
 // The registry is used from the main thread only.
 #include "asset/ModelTraits.h"
+#include <DirectXMath.h>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -27,6 +28,7 @@ struct LookData;
 // the version it was written for; packs with a higher version are listed as incompatible and never compiled.
 inline constexpr int kPackApiVersion = 6;
 inline constexpr uint32_t kPackMaxParams = 16;
+inline constexpr uint32_t kPackMaxParamsExt = 128;
 inline constexpr uint32_t kPackMaxTextures = 16;   // pack.json "textures" entries (one SRV each)
 inline constexpr uint32_t kPackMaxTextureSize = 4096;   // per-texture width / height cap
 inline constexpr uint32_t kPackMaxPasses = 8;           // effect packs: pack.json "passes" (API v5)
@@ -151,13 +153,33 @@ inline constexpr PackCapability kPackCapabilities[] = {
     {"adduv", 6},      {"pt.lighting", 6}, {"state", 4},        {"passes", 5},
     {"replaces.dof", 5}, {"textures", 2},  {"effect", 3},       {"inputs.scene", 0},
     {"inputs.audio", 0}, {"surface.output", 0}, {"inputs.id", 0}, {"passes.history", 0},
-    {"passes.mips", 0},
+    {"passes.mips", 0}, {"params.ext", 0},
+};
+
+enum class ShaderPackParamType : uint8_t {
+    Float = 0,
+    Int,
+    Bool,
+    Color,
+    Vec3
+};
+
+struct ShaderPackGroup {
+    std::string id;
+    LocalizedText label;          // localized like param labels
+    bool collapsed = false;
 };
 
 struct ShaderPackParam {
     std::string key;
     LocalizedText label;          // "label": string or localized object; empty -> key
-    float def = 0.0f, min = 0.0f, max = 1.0f;
+    ShaderPackParamType type = ShaderPackParamType::Float;
+    std::string group;            // group id from pack.json "groups"
+    bool alpha = false;           // color only: 4 components if true (alpha included)
+    float def = 0.0f;             // float default, or x component
+    float defVec[4] = {0, 0, 0, 0}; // default values for color (sRGB 0..1), vec3, or float/int/bool in [0]
+    bool defBool = false;
+    float min = 0.0f, max = 1.0f, step = 0.0f;
 };
 
 // A pack.json "textures" entry: an extra texture the pack's shading samples (light maps, ramps,
@@ -241,7 +263,8 @@ struct ShaderPack {
     // A rule's key belongs to the CLASS it assigns; when several rules of one class give different keys the FIRST
     // rule's value wins (a later rule of the same class does not overwrite it).
     float alphaKey[6] = {0, 0, 0, 0, 0, 0};
-    std::vector<ShaderPackParam> params;  // at most kPackMaxParams
+    std::vector<ShaderPackGroup> groups;  // pack.json "groups" (params.ext)
+    std::vector<ShaderPackParam> params;  // at most kPackMaxParams (or kPackMaxParamsExt with params.ext)
     std::vector<PackTexture> textures;    // at most kPackMaxTextures; optional extra textures (PackSampleTex)
     bool hasEdge = false;                 // surface.hlsl sets PACK_HAS_EDGE: the pack draws the outlines too (PackEdge)
     bool hasPtSurface = false;            // pt_surface.hlsl exists next to surface.hlsl (offline GI stills)
@@ -264,7 +287,12 @@ struct ShaderPack {
     PackClass Classify(const std::string& name, const std::string& nameEn, const std::string& texture) const;
     // Parameter values in manifest order: `values` (key -> value) over the defaults, clamped to the ranges.
     PackParamValues Resolve(const std::map<std::string, float>& values) const;
+    void ResolveSlots(const std::map<std::string, float>& values, std::vector<DirectX::XMFLOAT4>& slots) const;
 };
+
+// Builds GPU float4 slots for declared parameters (float/int/bool in .x, color in .rgba converted sRGB -> linear, vec3 in .xyz).
+void BuildPackParamSlots(const ShaderPack& pack, const std::map<std::string, float>& values,
+                         std::vector<DirectX::XMFLOAT4>& slots);
 
 // Parses a manifest. `dir` is the pack folder (for preview / surface checks). Never throws. On failure returns false
 // with `error` set, and `out` still holds whatever could be read (at least id from the folder name) so the UI can list it.

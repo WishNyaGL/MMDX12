@@ -207,7 +207,8 @@ enum RtGeometryFlags : uint32_t {
     RtGeom_PtPack     = 1u << 19,
 };
 
-// Pack record read by offline GI path tracer for geometries with RtGeom_PtPack. 144 bytes.
+// Pack record read by offline GI path tracer for geometries with RtGeom_PtPack. 160 bytes: a multiple of 16, because
+// each record is a raw SRV (RtScene) whose byte offset must be 16-byte aligned.
 struct RtPtPackRecord {
     uint32_t materialClass;
     uint32_t headValid;
@@ -218,8 +219,11 @@ struct RtPtPackRecord {
     DirectX::XMFLOAT4 headForward; // xyz, w unused
     float params[16];
     DirectX::XMFLOAT4 headPos;     // xyz = head bone world position, w = headScale (world units per model unit)
+    uint32_t extSlotBase;          // params.ext: first float4 of this model's slots in gPackExtSlots (t3 space1)
+    uint32_t extSlotCount;
+    uint32_t pad[2];
 };
-static_assert(sizeof(RtPtPackRecord) == 144, "RtPtPackRecord layout");
+static_assert(sizeof(RtPtPackRecord) == 160 && sizeof(RtPtPackRecord) % 16 == 0, "RtPtPackRecord layout");
 
 // One entry per BLAS geometry. TLAS InstanceID = index of the model's first entry, so a hit's
 // entry is gGeometries[CommittedInstanceID() + CommittedGeometryIndex()]. 192 bytes.

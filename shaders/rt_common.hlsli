@@ -49,6 +49,8 @@ struct RtPtPackRecord {
     float4 headForward;
     float4 params[4];
     float4 headPos;   // xyz world head bone position, w = headScale
+    uint extSlotBase;   // params.ext slots in gPackExtSlots (pt_pack_glue.hlsli)
+    uint extSlotCount;
 };
 
 struct RtGeometry {

@@ -7,6 +7,10 @@
 static uint s_PtPackTexBase = 0;
 static uint s_PtPackTexCount = 0;
 static uint s_PtPackClampMask = 0;
+static uint s_PtPackExtBase = 0;
+static uint s_PtPackExtCount = 0;
+StructuredBuffer<float4> gPackExtSlots : register(t3, space1);
+
 // Hit geometry of the current pack surface (set by PtPackBindRecord), for the sphere / toon helpers.
 static RtGeometry s_PtPackGeom;
 static bool s_PtPackGeomValid = false;
@@ -15,7 +19,30 @@ void PtPackBindRecord(RtPtPackRecord rec) {
     s_PtPackTexBase = rec.texBase;
     s_PtPackTexCount = rec.texInfo & 0xFFu;
     s_PtPackClampMask = (rec.texInfo >> 8) & 0xFFFFu;
+    s_PtPackExtBase = rec.extSlotBase;
+    s_PtPackExtCount = rec.extSlotCount;
 }
+
+#if defined(PACK_CAP_PARAMS_EXT) && PACK_CAP_PARAMS_EXT
+#ifndef PACK_PARAM_COUNT
+#define PACK_PARAM_COUNT 128u
+#endif
+float PtPackParam(uint i) { return gPackExtSlots[s_PtPackExtBase + (i & 127u)].x; }
+inline int PtPackParamInt(uint i) { return (int)round(gPackExtSlots[s_PtPackExtBase + (i & 127u)].x); }
+inline bool PtPackParamBool(uint i) { return (gPackExtSlots[s_PtPackExtBase + (i & 127u)].x > 0.5); }
+inline float3 PtPackParamColor(uint i) { return gPackExtSlots[s_PtPackExtBase + (i & 127u)].rgb; }
+inline float4 PtPackParamColor4(uint i) { return gPackExtSlots[s_PtPackExtBase + (i & 127u)]; }
+inline float3 PtPackParamVec3(uint i) { return gPackExtSlots[s_PtPackExtBase + (i & 127u)].xyz; }
+inline uint PtPackParamCount() { return (uint)PACK_PARAM_COUNT; }
+
+#define PackParam(i) PtPackParam(i)
+#define PackParamInt(i) PtPackParamInt(i)
+#define PackParamBool(i) PtPackParamBool(i)
+#define PackParamColor(i) PtPackParamColor(i)
+#define PackParamColor4(i) PtPackParamColor4(i)
+#define PackParamVec3(i) PtPackParamVec3(i)
+#define PackParamCount() PtPackParamCount()
+#endif
 
 void PtPackBindGeometry(RtGeometry g) {
     s_PtPackGeom = g;
@@ -81,6 +108,9 @@ RtPtPackRecord LoadPtPackRecord(uint packSrv) {
     rec.params[2] = asfloat(buf.Load4(96));
     rec.params[3] = asfloat(buf.Load4(112));
     rec.headPos = asfloat(buf.Load4(128));
+    uint2 ext = buf.Load2(144);
+    rec.extSlotBase = ext.x;
+    rec.extSlotCount = ext.y;
     return rec;
 }
 

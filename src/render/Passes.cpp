@@ -312,7 +312,7 @@ static bool MakeBlendVariant(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE
 
 bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) {
     ID3D12Device* device = ctx.Device();
-    CD3DX12_ROOT_PARAMETER params[15];
+    CD3DX12_ROOT_PARAMETER params[16];
     params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);   // SceneConstants
     params[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);   // MaterialConstants
     params[2].InitAsShaderResourceView(0, 0, D3D12_SHADER_VISIBILITY_ALL);    // bones (shader packs read the head)
@@ -345,6 +345,8 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     // Per-material PBR record selection (work unit P2): model record-buffer SRV index + material index +
     // --pbr-debug channel + active flag, as root constants (b3).
     params[14].InitAsConstants(8, 3, 0, D3D12_SHADER_VISIBILITY_ALL);
+    // params.ext: constant buffer for extended pack parameter slots (b6).
+    params[15].InitAsConstantBufferView(6, 0, D3D12_SHADER_VISIBILITY_ALL);
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[4];
     samplers[0].Init(0, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_WRAP,
@@ -366,7 +368,7 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
                      D3D12_FLOAT32_MAX, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_ROOT_SIGNATURE_DESC rs;
-    rs.Init(15, params, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    rs.Init(16, params, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
     if (!CreateRootSignature(device, rs, rootSig_, "ScenePass: CreateRootSignature")) return false;
 
     const std::filesystem::path file = shaderDir / L"mmd.hlsl";
@@ -702,6 +704,10 @@ const ScenePass::PackPipelines* ScenePass::PackPsos(Dx12Context& ctx, const std:
     if (pack->HasCap("inputs.id")) packDefines.push_back({"PACK_CAP_INPUTS_ID", "1"});
     if (pack->HasCap("passes.history")) packDefines.push_back({"PACK_CAP_PASSES_HISTORY", "1"});
     if (pack->HasCap("passes.mips")) packDefines.push_back({"PACK_CAP_PASSES_MIPS", "1"});
+    if (pack->HasCap("params.ext")) {
+        packDefines.push_back({"PACK_CAP_PARAMS_EXT", "1"});
+        packDefines.push_back({"PACK_PARAM_COUNT", std::to_string(pack->params.size())});
+    }
     if (!p.back) {
         // DXC (FXC cannot #include a macro): shader model 6.0, so the VS is a DXC build of VSMain as well
         if (!vsDxc_) vsDxc_ = CompileShaderDxc(file, "VSMain", "vs_6_0");
@@ -910,6 +916,8 @@ void ScenePass::DrawPtEdges(PassContext& pc) {
             BindModelBuffers(cmd, *model, pc.frame);
             cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
             cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
+            if (model->HasPackParamsExt())
+                cmd->SetGraphicsRootConstantBufferView(15, model->PackParamsExtBuffer(pc.frame));
             ID3D12PipelineState* defaultEdge = psoEdge_.Get();
             ID3D12PipelineState* packEdge = defaultEdge;
             if (!model->ShaderPackId().empty() && pc.settings.shading == ViewShading::Lit) {
@@ -2145,6 +2153,8 @@ void ScenePass::Execute(PassContext& pc) {
             BindModelBuffers(cmd, *model, pc.frame);
             cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
             cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
+            if (model->HasPackParamsExt())
+                cmd->SetGraphicsRootConstantBufferView(15, model->PackParamsExtBuffer(pc.frame));
 
             // shader pack: lit camera view only (unlit / wireframe / the flat ortho views keep the default shading)
             const PackPipelines* pack = nullptr;
@@ -2180,6 +2190,8 @@ void ScenePass::Execute(PassContext& pc) {
                 BindModelBuffers(cmd, *model, pc.frame);
                 cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
                 cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
+                if (model->HasPackParamsExt())
+                    cmd->SetGraphicsRootConstantBufferView(15, model->PackParamsExtBuffer(pc.frame));
             }
             for (const GpuModel::Material& m : model->Materials()) {
                 if (m.indexCount == 0 || !m.visible) continue;   // MMD skips materials with alpha 0
@@ -2242,6 +2254,8 @@ void ScenePass::Execute(PassContext& pc) {
                     BindModelBuffers(cmd, *model, pc.frame);
                     cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
                     cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
+                    if (model->HasPackParamsExt())
+                        cmd->SetGraphicsRootConstantBufferView(15, model->PackParamsExtBuffer(pc.frame));
                     if (drewEdge) continue;   // skip the native edge loop for this model
                 }
                 ID3D12PipelineState* curEdgePso = nullptr;

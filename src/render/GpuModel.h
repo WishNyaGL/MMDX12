@@ -88,13 +88,21 @@ public:
     // Shader pack (render/ShaderPack.h): nullptr = the default shading. Writes the material class, head bone and
     // parameters into the material constants; a no-op when nothing changed, so call it every frame before
     // UpdateMaterials. The scene pass draws the model with the pack's PSOs while ShaderPackId() is not empty.
-    // `textureFolder` is the model's resolved per-character texture folder (empty = the pack folder only).
+    // `textureFolder` is the model's resolved per-character texture folder (empty = the pack folder only); `rawParams`
+    // (key -> value, typed components as key#0..2) feed the params.ext slots.
     void SetShaderPack(const ShaderPack* pack, const PackParamValues& params, const std::filesystem::path& textureFolder,
-                       const MaterialClassOverrides& materials = {});
+                       const MaterialClassOverrides& materials = {}, const std::map<std::string, float>& rawParams = {});
+    void SetShaderPack(const ShaderPack* pack, const std::map<std::string, float>& rawParams,
+                       const std::filesystem::path& textureFolder, const MaterialClassOverrides& materials = {}) {
+        SetShaderPack(pack, pack ? pack->Resolve(rawParams) : PackParamValues{}, textureFolder, materials, rawParams);
+    }
     const std::string& ShaderPackId() const { return packId_; }
     // the pack shades at least one material (false without a pack, or with every material switched off)
     bool PackActive() const;
     const std::filesystem::path& ShaderTextureFolder() const { return packTextureFolder_; }
+    bool HasPackParamsExt() const { return hasPackParamsExt_; }
+    D3D12_GPU_VIRTUAL_ADDRESS PackParamsExtBuffer(uint64_t frame) const;
+    const std::vector<DirectX::XMFLOAT4>& PackParamSlots() const { return packParamsExtSlots_; }
 
     // Background AVI (背景AVI): materials whose diffuse texture file name is screen.bmp show the current video
     // frame. True when the model has any (render/ScreenVideo.h binds the texture; the renderer keys bind state by
@@ -284,6 +292,13 @@ private:
     std::vector<ComPtr<ID3D12Resource>> screenOrigTex_;
     std::vector<char> screenOrigHasTex_;   // the material's MatFlag_HasTexture before a video was bound
     std::vector<uint32_t> screenMaterials_;
+    ComPtr<ID3D12Resource> packParamsExtCb_;
+    uint8_t* packParamsExtMapped_ = nullptr;
+    std::vector<DirectX::XMFLOAT4> packParamsExtSlots_;
+    bool hasPackParamsExt_ = false;
+    static constexpr size_t kPackExtCbBytes = 128 * sizeof(DirectX::XMFLOAT4);   // pack_api.hlsli gPackParamSlots
+    uint64_t packParamsExtVersion_ = 0;
+    uint64_t packExtEntryVersion_[kRing] = {};
 };
 
 } // namespace mmdx
