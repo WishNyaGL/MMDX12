@@ -304,7 +304,7 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
             for (size_t i = 0; i < d.effects.size(); ++i) {
                 StudioEffect& eff = d.effects[i];
                 const ShaderPack* pk = reg.Find(eff.entry.pack);
-                const bool usable = pk && pk->Selectable() && pk->type == PackType::Effect;
+                const bool usable = pk && PackUsable(pk) && pk->type == PackType::Effect;
                 const std::string name = pk ? pk->name.Get(lang) : eff.entry.pack;
                 const char* where = !pk ? Tr("설치되어 있지 않음")
                                     : !usable ? Tr("사용할 수 없음 · 셰이더 탭에서 확인")
@@ -427,7 +427,7 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
 
             std::vector<const ShaderPack*> addable;
             for (const ShaderPack& pk : reg.Packs()) {
-                if (pk.type != PackType::Effect || !pk.Selectable()) continue;
+                if (pk.type != PackType::Effect || !PackUsable(&pk)) continue;
                 bool in = false;
                 for (const StudioEffect& e : d.effects) in |= e.entry.pack == pk.id;
                 if (!in) addable.push_back(&pk);

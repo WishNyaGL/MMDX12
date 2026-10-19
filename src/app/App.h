@@ -15,6 +15,7 @@
 #include "app/Updater.h"
 #include "app/VideoEncoder.h"
 #include "app/WorldColliders.h"
+#include "core/TextUtil.h"
 #include "asset/AssetLibrary.h"
 #include "asset/MaterialChoice.h"
 #include "asset/RayMaterial.h"
@@ -24,6 +25,7 @@
 #include "render/Dx12Context.h"
 #include "render/MmeDiagnostics.h"
 #include "render/LookPreset.h"
+#include "render/PackCrashGuard.h"
 #include "render/Renderer.h"
 #include "studio/AutoIk.h"
 #include "studio/Gizmo.h"
@@ -1065,6 +1067,11 @@ private:
     void DrawMmeDetail(float x0, float y0, float x1, float y1);
     void DrawRemotePackDetail(float x0, float y0, float x1, float y1);
     void DrawNewPackDialog();
+    void DrawGallerySourcesDialog();
+    void DrawUnverifiedInstallDialog();
+    void RefreshGallery();
+    std::vector<std::string> GalleryIndexUrls() const;
+    bool PackUsable(const ShaderPack* pack) const;   // Selectable() and not crash-guard quarantined
     void InstallPackPath(const std::filesystem::path& path);             // .zip or a pack folder (drop / dialog)
     void PollShaderPacks();                                              // every frame: hot reload, store, drops
     // The effect stack editor (UiShaders.cpp): add / remove / reorder (up/down) / enable + per-effect
@@ -1085,6 +1092,16 @@ private:
     bool effectStackOpen_ = false;                                       // select screen: effect stack disclosure
     int shaderDetailTab_ = 0;                                            // shader detail: 0 info, 1 settings, 2 manage
     ShaderPackStore shaderStore_;
+    bool gallerySourcesOpen_ = false;
+    char galleryUrl_[512] = {};
+    std::string galleryUrlError_;
+    std::string pendingUnverifiedInstall_;   // remote pack id waiting in the unverified install modal
+    PackCrashGuard packGuard_{ExecutableDir() / L"pack_guard.json"};
+    std::set<std::string> frameActivePacks_;   // non-BuiltIn packs active in the previous frame
+    std::vector<std::string> frameBeganPacks_; // Begin(id) issued this frame (Clear after Present)
+    void CollectFrameActivePacks(std::set<std::string>& out) const;
+    std::string pendingGuardToast_;   // startup crash-guard report, shown once the clock is running
+
     int shaderTab_ = 0;                                                  // 0 installed, 1 online, 2 MME effects
     char shaderFilter_[128] = {};
     uint32_t shaderPackWriteTimesGen_ = 0;

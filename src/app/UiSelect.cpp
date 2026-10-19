@@ -853,7 +853,7 @@ void App::DrawSelect() {
                 ShaderChoice choice = settings_.CharacterShader(ch->id);
                 bool shaderChanged = DrawShaderSelector("##lobbyshader", choice, colW);
                 const ShaderPack* pack = choice.pack.empty() ? nullptr : ShaderPacks().Find(choice.pack);
-                if (pack && pack->Selectable() && !pack->params.empty()) {
+                if (pack && PackUsable(pack) && !pack->params.empty()) {
                     Gap(4.0f);
                     ImGuiWindow* w = ImGui::GetCurrentWindow();
                     const ImVec2 da = w->DC.CursorPos;
@@ -867,7 +867,7 @@ void App::DrawSelect() {
                          ImVec2(da.x + colW - Dp(10.0f), da.y + Dp(15.0f)), p.ink2);
                     if (shaderParamsOpen_) shaderChanged |= DrawShaderPackParams(choice);
                 }
-                if (pack && pack->Selectable()) {
+                if (pack && PackUsable(pack)) {
                     // per-material classes: folded; opening it reads the model (no textures) in the background
                     Gap(4.0f);
                     ImGuiWindow* w = ImGui::GetCurrentWindow();

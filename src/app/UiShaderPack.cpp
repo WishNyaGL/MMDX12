@@ -118,7 +118,7 @@ bool PackMatches(const std::string& needle, const std::string& id, const Localiz
 
 bool App::ApplyLookById(const std::string& id, bool persist) {
     const ShaderPack* pack = ShaderPacks().Find(id);
-    if (!pack || pack->type != PackType::Look || !pack->look || !pack->Selectable()) {
+    if (!pack || pack->type != PackType::Look || !pack->look || !PackUsable(pack)) {
         LOG_WARN("look: no usable look pack '%s'", id.c_str());
         return false;
     }
@@ -154,9 +154,13 @@ bool App::ExportLook(const std::string& id, const std::string& displayName) {
     return true;
 }
 
+bool App::PackUsable(const ShaderPack* pack) const {
+    return pack && pack->Selectable() && !packGuard_.Quarantined(pack->id);
+}
+
 void App::ApplyShaderChoice(GpuModel& gpu, const ShaderChoice& choice) {
     const ShaderPack* pack = choice.pack.empty() ? nullptr : ShaderPacks().Find(choice.pack);
-    if (pack && !pack->Selectable()) pack = nullptr;
+    if (pack && !PackUsable(pack)) pack = nullptr;
     if (!pack) {
         gpu.SetShaderPack(nullptr, PackParamValues{}, {});
         return;
@@ -535,7 +539,7 @@ void App::SuggestShaderPack(const GpuModel& gpu, const std::string& characterId)
     if (!suggestChecked_.insert(characterId).second) return;
     const ModelTraits traits = gpu.Traits();
     for (const ShaderPack& p : ShaderPacks().Packs()) {
-        if (p.type != PackType::Surface || !p.Selectable() || !p.Suggests(traits)) continue;
+        if (p.type != PackType::Surface || !PackUsable(&p) || !p.Suggests(traits)) continue;
         if (settings_.ShaderSuggested(p.id, characterId)) continue;
         settings_.SetShaderSuggested(p.id, characterId);
         settings_.Save(settingsPath_);
@@ -986,8 +990,8 @@ bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width, 
     const std::string title = cur ? cur->name.Get(lang) : (choice.pack.empty() ? std::string(Tr("MMD 기본")) : choice.pack);
     std::string sub = cur ? "v" + cur->version + (cur->authors.empty() ? "" : "  ·  " + PackAuthorLine(cur->authors))
                           : (choice.pack.empty() ? std::string(Tr("앱 기본 셰이딩")) : std::string(Tr("설치되어 있지 않음")));
-    const bool problem = (cur && !cur->Selectable()) || (!cur && !choice.pack.empty());
-    if (cur && !cur->Selectable()) sub = Tr("사용할 수 없음 · 셰이더 탭에서 확인");
+    const bool problem = (cur && !PackUsable(cur)) || (!cur && !choice.pack.empty());
+    if (cur && !PackUsable(cur)) sub = Tr("사용할 수 없음 · 셰이더 탭에서 확인");
     TextEllipsis(dl, Font::Semibold, size::Body, ImVec2(tx, a.y + Dp(9.0f)), tr, p.ink, title.c_str());
     TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(tx, a.y + Dp(30.0f)), tr, problem ? p.warn : p.ink3, sub.c_str());
     Icon(dl, icon::CaretDown, 14.0f, ImVec2(b.x - Dp(16.0f), (a.y + b.y) * 0.5f), p.ink2);
@@ -1012,7 +1016,7 @@ bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width, 
         const auto row = [&](const char* rid, const ShaderPack* pk, bool selected) -> bool {
             const ImVec2 ra = ImGui::GetCursorScreenPos(), rb(ra.x + lw, ra.y + Dp(56.0f));
             bool h = false;
-            const bool selectable = !pk || pk->Selectable();
+            const bool selectable = !pk || PackUsable(pk);
             const bool clicked = CardItem(rid, ra, rb, &h, pk ? pk->name.Get(lang).c_str() : Tr("MMD 기본"));
             const float t = Anim(ImGui::GetID(rid), h && selectable);
             if (selected) ldl->AddRectFilled(ra, rb, p.accentSoft, Dp(10.0f));

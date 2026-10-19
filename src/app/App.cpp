@@ -478,6 +478,15 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     LOG_INFO("MMDX12 %s", MMDX12_VERSION);
     settingsPath_ = ExecutableDir() / L"mmdx12.ini";
     settings_.Load(settingsPath_);
+    // M5-U: crash guard suspects from the previous run. A marker left by a crashed run names the non-built-in packs
+    // that were compiling / drawn; quarantine them and report once.
+    for (const std::string& suspect : packGuard_.TakeSuspects()) {
+        const ShaderPack* pk = ShaderPacks().Find(suspect);
+        if (pk && pk->source == PackSource::BuiltIn) continue;
+        packGuard_.Quarantine(suspect);
+        LOG_WARN("pack crash guard: '%s' was active when the previous run exited; disabled", suspect.c_str());
+        pendingGuardToast_ = std::string(Tr("이전 실행이 '")) + suspect + Tr("' 팩 사용 중 종료되어 비활성화했습니다");
+    }
     for (const auto& [id, dir] : settings_.packTextureFolders)   // shader packs' user texture folders
         ShaderPacks().SetTextureFolder(id, Utf8ToPath(dir));
     SetLanguage((Language)(options_.language >= 0 ? options_.language : settings_.language));
@@ -508,10 +517,22 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.autoLuminous >= 0) settings_.autoLuminous = options_.autoLuminous != 0;
     if (options_.motionLighting >= 0) settings_.motionLighting = options_.motionLighting != 0;
     if (options_.effectSet) settings_.effectStack = options_.effectStack;   // --effect, this run only
+    if (options_.effectSet)
+        for (const EffectStackEntry& e : options_.effectStack) {
+            const ShaderPack* pk = ShaderPacks().Find(e.pack);
+            if (!pk || !PackUsable(pk))
+                LOG_WARN("--effect: pack '%s' is not usable (missing, revoked or disabled)", e.pack.c_str());
+        }
+    if (options_.shaderPackSet && !options_.shaderPack.empty()) {
+        const ShaderPack* pk = ShaderPacks().Find(options_.shaderPack);
+        if (!pk || !PackUsable(pk))
+            LOG_WARN("--shader-pack: pack '%s' is not usable (missing, revoked or disabled)",
+                     options_.shaderPack.c_str());
+    }
     if (options_.worldSet) settings_.worldStack = options_.worldStack;      // --world, this run only
     if (options_.lookSet && !options_.look.empty()) {   // --look: apply the look's groups for this run only
         const ShaderPack* pack = ShaderPacks().Find(options_.look);
-        if (!pack || pack->type != PackType::Look || !pack->look || !pack->Selectable()) {
+        if (!pack || pack->type != PackType::Look || !pack->look || !PackUsable(pack)) {
             LOG_WARN("--look: no usable look pack '%s'", options_.look.c_str());
         } else {
             cliLook_ = *pack->look;
@@ -1029,6 +1050,10 @@ void App::RenderFrame() {
     double dt = nowSec - timeSeconds_;
     dt = std::clamp(dt, 0.0, 0.25);
     timeSeconds_ = nowSec;
+    if (!pendingGuardToast_.empty()) {
+        toast_ = Toast{pendingGuardToast_, {}, {}, false, timeSeconds_ + 8.0};
+        pendingGuardToast_.clear();
+    }
 
     if (screen_ == Screen::BenchRun) UpdateBenchRun(); // frame timing first thing in the frame
 
@@ -1135,6 +1160,20 @@ void App::RenderFrame() {
         }
         renderer_.Render(cmd, view);
     }
+    // M5-U crash guard: packs active in this frame that were not active in the previous one get a marker before the
+    // frame is presented; the marker is cleared after the Present succeeded. A crash during the next frames leaves the
+    // pack as a suspect for the next start.
+    {
+        std::set<std::string> active;
+        CollectFrameActivePacks(active);
+        frameBeganPacks_.clear();
+        for (const std::string& id : active)
+            if (!frameActivePacks_.count(id)) {
+                packGuard_.Begin(id);
+                frameBeganPacks_.push_back(id);
+            }
+        frameActivePacks_ = std::move(active);
+    }
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmd);
 
     // DLSS Frame Generation: copy the final (with UI) frame and generate the intermediate frames; EndFrame then
@@ -1183,6 +1222,11 @@ void App::RenderFrame() {
     } else {
         ctx_.EndFrame(renderer_.Settings().vsync);
     }
+    // The frame is on screen: its pack markers are no longer crash suspects. On a device loss the markers stay, so
+    // the next start quarantines the pack (the guard's whole point).
+    if (!ctx_.DeviceLost())
+        for (const std::string& id : frameBeganPacks_) packGuard_.Clear(id);
+    frameBeganPacks_.clear();
     if (sceneCapture) {
         ImageRGBA8 img;
         if (renderer_.ReadFinalImage(img) && !img.mips.empty() && !img.mips[0].pixels.empty() &&
@@ -1630,6 +1674,13 @@ void App::ApplyRenderSettings() {
     // effect packs (the shader screens edit them); while the studio is open, the project's own stack evaluated at the
     // playhead (keyed parameters, docs/effect_ecosystem.md), as the MME post stack below
     rs.packEffects = studio_ ? StudioEvaluatedEffects((float)(studio_->time * kMmdFps)) : settings_.effectStack;
+    // M5-U: quarantined (crash guard) effect packs never run. The stack entry stays so the manager can offer "다시 사용".
+    rs.packEffects.erase(std::remove_if(rs.packEffects.begin(), rs.packEffects.end(),
+                                        [this](const EffectStackEntry& e) {
+                                            const ShaderPack* pk = ShaderPacks().Find(e.pack);
+                                            return !pk || !PackUsable(pk);
+                                        }),
+                         rs.packEffects.end());
     // M6b: the MME post stack. --mme overrides for one run; while the studio is open the project's own stack
     // replaces the play-mode one (docs/mme/mme_design.md §2.10). The global MME switch off disables it everywhere.
     rs.mmeEffects = !MmeGlobalEnabled() ? std::vector<MmeEffectEntry>{}

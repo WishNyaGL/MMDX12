@@ -70,6 +70,9 @@ struct AppSettings {
     std::vector<VideoProbe> videoProbes;  // measured sample renders, oldest first
     std::string leaderboardUrl = "https://home.codingbot.kr/api/benchmark";
     std::string updateFeedUrl;               // auto-update feed (empty: the built-in default)
+    // Open gallery (docs/effect_ecosystem.md §3): additional index URLs, kept in ini "galleryIndex=<url>" lines.
+    // The official index (ShaderPackStore::kDefaultIndexUrl) is implicit and always fetched first, never stored.
+    std::vector<std::string> galleryIndexes;
     std::string lastCharacter, lastStage, lastSong;  // asset ids
     std::map<std::string, float> characterScales;    // character id -> display scale (absent = 1)
     float CharacterScale(const std::string& id) const;

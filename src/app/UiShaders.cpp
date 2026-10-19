@@ -28,6 +28,13 @@ namespace mmdx {
 using namespace ui;
 
 namespace {
+// The gallery's verified badge (official index only): a blue disc with a white check, the same in both themes.
+constexpr ImU32 kVerifiedBlue = IM_COL32(29, 155, 240, 255);
+void VerifiedBadge(ImDrawList* dl, ImVec2 centre, float sizeDp) {
+    dl->AddCircleFilled(centre, ui::Dp(sizeDp * 0.5f), kVerifiedBlue, 20);
+    ui::Icon(dl, icon::Check, sizeDp * 0.7f, centre, IM_COL32(255, 255, 255, 255));
+}
+
 
 constexpr float kAppBarH = 64.0f;   // as UiSelect.cpp
 constexpr float kPad = 28.0f;
@@ -42,6 +49,26 @@ void OpenFolder(const std::filesystem::path& dir) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// The host shown for a third-party gallery source ("example.com" for https://example.com/x.json; a local path
+// stays as it is).
+std::string SourceHost(const std::string& url) {
+    std::string s = url;
+    const size_t scheme = s.find("://");
+    if (scheme != std::string::npos) s = s.substr(scheme + 3);
+    else return s;
+    size_t end = s.find_first_of("/?#");
+    if (end == std::string::npos) end = s.size();
+    return s.substr(0, end);
+}
+
+// Trims spaces / tabs (the gallery URL field).
+std::string TrimUrl(const std::string& s) {
+    const size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return {};
+    const size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
 }
 
 const char* SourceLabel(PackSource s) {
@@ -180,7 +207,7 @@ void App::DrawShaders() {
     const float top = Dp(kAppBarH) + pad;
     const float panelX = ds.x - pad - Dp(kPanelW);
     const float leftX = pad, leftR = panelX - gap;
-    if (shaderTab_ == 1 && shaderStore_.State() == ShaderPackStore::IndexState::Idle) shaderStore_.Refresh(options_.packIndex.empty() ? ShaderPackStore::kDefaultIndexUrl : options_.packIndex);
+    if (shaderTab_ == 1 && shaderStore_.State() == ShaderPackStore::IndexState::Idle) RefreshGallery();
 
     // ---- header: tabs, search, actions
     {
@@ -240,8 +267,15 @@ void App::DrawShaders() {
         } else {
             ImGui::SetCursorScreenPos(ImVec2(x - Dp(36.0f), top + Dp(2.0f)));
             ImGui::BeginDisabled(shaderStore_.State() == ShaderPackStore::IndexState::Loading);
-            if (IconButton("##storerefresh", icon::Refresh, Tr("목록 새로 고침"))) shaderStore_.Refresh(options_.packIndex.empty() ? ShaderPackStore::kDefaultIndexUrl : options_.packIndex);
+            if (IconButton("##storerefresh", icon::Refresh, Tr("목록 새로 고침"))) RefreshGallery();
             ImGui::EndDisabled();
+            x -= Dp(44.0f);
+            ImGui::SetCursorScreenPos(ImVec2(x - Dp(36.0f), top + Dp(2.0f)));
+            if (IconButton("##gallerysources", icon::Stack, Tr("갤러리 출처: 공식 갤러리 외에 다른 팩 목록(index.json) 추가"))) {
+                gallerySourcesOpen_ = true;
+                galleryUrl_[0] = 0;
+                galleryUrlError_.clear();
+            }
             x -= Dp(44.0f);
             if (rightButton("##storesite", Tr("갤러리 웹사이트"), icon::Globe, ButtonKind::Ghost))
                 OpenUrl("https://mmdx.codingbot.kr/" + lang + "/shader-packs/");
@@ -358,7 +392,7 @@ void App::DrawShaders() {
         const auto card = [&](const char* id, bool selected, uint64_t beforeTex, const std::string& beforeKey,
                               uint64_t tex, const std::string& key, const std::string& name,
                               const std::string& sub, const std::vector<std::pair<std::string, std::pair<ImU32, ImU32>>>& badges,
-                              float progress) {
+                              float progress, bool verified = false) {
             const int col = n % cols, row = n / cols;
             ++n;
             const ImVec2 ca(origin.x + col * (cw + cgap), origin.y + row * (chH + cgap));
@@ -381,6 +415,11 @@ void App::DrawShaders() {
             const float tx = a0.x + Dp(14.0f), tr = b0.x - Dp(14.0f);
             float ty = a0.y + imgH + Dp(12.0f);
             TextEllipsis(dl, Font::Semibold, size::Body, ImVec2(tx, ty), tr, p.ink, name.c_str());
+            if (verified) {
+                const float nx = std::min(tx + TextSize(Font::Semibold, size::Body, name.c_str()).x + Dp(6.0f), tr - Dp(14.0f));
+                VerifiedBadge(dl, ImVec2(nx + Dp(8.0f), ty + Dp(9.0f)), 15.0f);
+                if (hovered) Tooltip(Tr("검수된 팩"));
+            }
             ty += Dp(22.0f);
             TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(tx, ty), tr, p.ink3, sub.c_str());
             ty += Dp(24.0f);
@@ -394,6 +433,12 @@ void App::DrawShaders() {
             return clicked;
         };
 
+        // verified / community information comes from the online entry of the same id (when listed)
+        const auto remoteOf = [&](const std::string& id) -> const RemotePack* {
+            for (const RemotePack& r : shaderStore_.Packs())
+                if (r.id == id) return &r;
+            return nullptr;
+        };
         if (shaderTab_ == 0) {
             std::vector<const ShaderPack*> installedList;
             for (const ShaderPack& pk : reg.Packs()) {
@@ -440,15 +485,19 @@ void App::DrawShaders() {
                                                                  : std::make_pair(WithAlpha(p.ink, 0.05f), p.ink2);
                 badges.push_back({typeText, typeCol});
                 badges.push_back({SourceLabel(pk->source), {WithAlpha(p.ink, 0.06f), p.ink2}});
+                const RemotePack* rp = remoteOf(pk->id);
+                else if (rp && !rp->verified) badges.push_back({Tr("미검수"), {WithAlpha(p.ink, 0.06f), p.ink3}});
                 ImU32 bg = 0, fg = 0;
                 if (const char* st = StatusLabel(pk->status, bg, fg)) badges.push_back({st, {bg, fg}});
+                if (packGuard_.Quarantined(pk->id)) badges.push_back({Tr("충돌로 비활성화됨"), {p.dangerSoft, p.danger}});
                 if (!pk->previewBefore.empty())
                     badges.push_back({Tr("전/후 비교"), {WithAlpha(p.ink, 0.06f), p.ink2}});
                 const std::string sub = "v" + pk->version + (pk->authors.empty() ? "" : "  ·  " + PackAuthorLine(pk->authors));
                 ImGui::PushID(PathToUtf8(pk->dir).c_str());
                 if (card("##pc", shaderSelInstalled_ == pk->id, PackThumbBefore(*pk),
                          "pb:" + pk->id + ":" + std::to_string(reg.Generation()), PackThumb(*pk),
-                         "p:" + pk->id + ":" + std::to_string(reg.Generation()), pk->name.Get(lang), sub, badges, -1.0f))
+                         "p:" + pk->id + ":" + std::to_string(reg.Generation()), pk->name.Get(lang), sub, badges, -1.0f,
+                         rp && rp->verified))
                     shaderSelInstalled_ = pk->id;
                 ImGui::PopID();
             }
@@ -475,7 +524,7 @@ void App::DrawShaders() {
             } else if (st == ShaderPackStore::IndexState::Failed) {
                 Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.warn, shaderStore_.Error().c_str());
                 ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + Dp(40.0f)));
-                if (Button("##storeretry", Tr("다시 시도"), icon::Refresh)) shaderStore_.Refresh(options_.packIndex.empty() ? ShaderPackStore::kDefaultIndexUrl : options_.packIndex);
+                if (Button("##storeretry", Tr("다시 시도"), icon::Refresh)) RefreshGallery();
             } else {
                 std::vector<const RemotePack*> onlineList;
                 for (const RemotePack& rp : shaderStore_.Packs()) {
@@ -517,18 +566,24 @@ void App::DrawShaders() {
                                                                      : std::make_pair(WithAlpha(p.ink, 0.05f), p.ink2);
                     badges.push_back({typeText, typeCol});
                     const ShaderPack* inst = InstalledVersionOf(rp->id);
+                    else badges.push_back({Tr("미검수"), {WithAlpha(p.ink, 0.06f), p.ink3}});
                     if (!rp->Compatible()) badges.push_back({Tr("호환되지 않음"), {p.warnSoft, p.warn}});
-                    else if (inst && net::CompareVersions(rp->version, inst->version) > 0)
+                    else if (inst && UpdateAllowed(*inst, *rp))
                         badges.push_back({Tr("업데이트 있음"), {p.accentSoft, p.accentInk}});
                     else if (inst) badges.push_back({Tr("설치됨"), {WithAlpha(p.ink, 0.06f), p.ink2}});
                     if (rp->builtIn) badges.push_back({Tr("앱에 포함"), {WithAlpha(p.ink, 0.06f), p.ink2}});
                     if (!rp->previewBeforeUrl.empty())
                         badges.push_back({Tr("전/후 비교"), {WithAlpha(p.ink, 0.06f), p.ink2}});
-                    const std::string sub = "v" + rp->version + (rp->authors.empty() ? "" : "  ·  " + PackAuthorLine(rp->authors));
+                    std::string sub = "v" + rp->version + (rp->authors.empty() ? "" : "  ·  " + PackAuthorLine(rp->authors));
+                    if (!rp->verified) {
+                        if (!rp->owner.empty()) sub += "  ·  " + rp->owner;
+                        if (!IsOfficialIndexUrl(rp->source)) sub += "  ·  " + SourceHost(rp->source);
+                    }
                     ImGui::PushID(rp->id.c_str());
                     if (card("##rc", shaderSelRemote_ == rp->id, RemotePackThumbBefore(*rp),
                              "rb:" + rp->id + ":" + rp->version, RemotePackThumb(*rp), "r:" + rp->id + ":" + rp->version,
-                             rp->name.Get(lang), sub, badges, shaderStore_.Installing(rp->id) ? shaderStore_.Progress(rp->id) : -1.0f))
+                             rp->name.Get(lang), sub, badges, shaderStore_.Installing(rp->id) ? shaderStore_.Progress(rp->id) : -1.0f,
+                             rp->verified))
                         shaderSelRemote_ = rp->id;
                     ImGui::PopID();
                 }
@@ -598,6 +653,8 @@ void App::DrawShaders() {
         else DrawMmeDetail(pa.x, pa.y, pb.x, pb.y);
     }
     DrawNewPackDialog();
+    DrawGallerySourcesDialog();
+    DrawUnverifiedInstallDialog();
     DrawToast();
     EndScreen();
 }
@@ -646,9 +703,36 @@ void App::DrawShaderPackDetail(float x0, float y0, float x1, float y1) {
     Para("v" + pk->version + "  ·  " + pk->id + "  ·  " + SourceLabel(pk->source) +
              (pk->stateFloats > 0 ? "  ·  " + std::to_string(pk->stateFloats) + " floats" : ""),
          p.ink3, size::Caption);
+    {
+        const RemotePack* listing = nullptr;
+        for (const RemotePack& r : shaderStore_.Packs())
+            if (r.id == pk->id) listing = &r;
+        if (listing) {
+            if (listing->verified) {
+                const ImVec2 at = ImGui::GetCursorScreenPos();
+                VerifiedBadge(dl, ImVec2(at.x + Dp(8.0f), at.y + Dp(9.0f)), 15.0f);
+                Text(dl, Font::Semibold, size::Caption, ImVec2(at.x + Dp(22.0f), at.y), p.ink, Tr("검수된 팩"));
+                ImGui::Dummy(ImVec2(w, Dp(18.0f)));
+            } else {
+                std::string line = std::string(Tr("미검수"));
+                if (!listing->owner.empty()) line += "  ·  " + listing->owner;
+                if (!IsOfficialIndexUrl(listing->source)) line += "  ·  " + SourceHost(listing->source);
+                Para(line, p.ink3, size::Caption);
+            }
+        }
+    }
 
     // problems first: authors need them, users need to know why it is not selectable
-    if (!pk->Selectable() || pk->status == PackStatus::CompileError) {
+    if (packGuard_.Quarantined(pk->id)) {
+        Gap(12.0f);
+        Para(Tr("충돌로 비활성화됨"), p.danger, size::Small, Font::Semibold);
+        Para(Tr("이 팩을 쓰는 동안 앱이 비정상 종료되어 다음 실행부터 꺼 두었습니다."), p.ink2, size::Caption);
+        if (Button("##packrelease", Tr("다시 사용"), icon::Refresh, ButtonKind::Secondary)) {
+            packGuard_.Release(pk->id);
+            ApplyRenderSettings();
+        }
+    }
+    if (!pk->Selectable() || pk->status == PackStatus::CompileError || packGuard_.Quarantined(pk->id)) {
         Gap(12.0f);
         ImU32 bg = 0, fg = 0;
         const char* st = StatusLabel(pk->status, bg, fg);
@@ -742,17 +826,27 @@ void App::DrawShaderPackDetail(float x0, float y0, float x1, float y1) {
         }
         if (!pk->textures.empty()) {
             Caption(Tr("팩 텍스처"));
-            std::string list;
-            for (size_t i = 0; i < pk->textures.size(); ++i) {
-                if (i) list += ",  ";
-                list += pk->textures[i].file + (pk->textures[i].clamp ? " (clamp)" : "");
+            uint32_t missingUser = 0, missingBundled = 0;
+            std::filesystem::path probe;
+            for (const PackTexture& t : pk->textures)
+                if (!ResolvePackTextureFile(*pk, t.file, reg.TextureFolder(pk->id), probe)) {
+                    if (t.origin == PackTexture::Origin::User) ++missingUser;
+                    else ++missingBundled;
+                }
+            for (const PackTexture& t : pk->textures) {
+                const ImVec2 c = ImGui::GetCursorScreenPos();
+                const std::string origin = t.origin == PackTexture::Origin::User ? Tr("사용자") : Tr("팩 포함");
+                std::string line = t.file + (t.clamp ? " (clamp)" : "") + "  ·  " + origin;
+                TextEllipsis(dl, Font::Regular, size::Caption, c, c.x + w, p.ink3, line.c_str());
+                ImGui::Dummy(ImVec2(w, Dp(16.0f)));
             }
-            Para(list, p.ink3, size::Caption);
             const uint32_t missing = reg.MissingTextures(pk->id, reg.TextureFolder(pk->id));
             if (missing)
                 Para(std::to_string(missing) +
                          Tr("개의 팩 텍스처가 없어 흰색으로 표시됩니다 - 텍스처 폴더를 지정하세요"),
                      p.warn, size::Caption);
+            if (missingBundled)
+                Para(std::string(Tr("팩 파일 누락")) + " (" + std::to_string(missingBundled) + ")", p.danger, size::Caption);
             // the user texture folder: game textures that can't be redistributed (picker + clear)
             const std::filesystem::path folder = reg.TextureFolder(pk->id);
             ImGui::PushID("##packtexfolder");
@@ -779,7 +873,10 @@ void App::DrawShaderPackDetail(float x0, float y0, float x1, float y1) {
                     settings_.Save(settingsPath_);
                 }
                 ImGui::EndDisabled();
-                ImGui::SetCursorScreenPos(ImVec2(c.x, c.y + Dp(30.0f)));
+                if (missingUser)
+                    Text(dl, Font::Regular, size::Caption, ImVec2(c.x, c.y + Dp(34.0f)), p.warn,
+                         (std::string(Tr("사용자 텍스처 폴더 연결 필요")) + " (" + std::to_string(missingUser) + ")").c_str());
+                ImGui::SetCursorScreenPos(ImVec2(c.x, c.y + Dp(missingUser ? 54.0f : 30.0f)));
                 ImGui::Dummy(ImVec2(w, 0));
             }
             ImGui::PopID();
@@ -1001,7 +1098,7 @@ bool App::DrawEffectStackEditor(std::vector<EffectStackEntry>& stack, bool heade
     for (size_t i = 0; i < stack.size(); ++i) {
         EffectStackEntry& e = stack[i];
         const ShaderPack* pk = reg.Find(e.pack);
-        const bool usable = pk && pk->Selectable() && pk->type == PackType::Effect;
+        const bool usable = pk && PackUsable(pk) && pk->type == PackType::Effect;
         const std::string name = pk ? pk->name.Get(lang) : e.pack;
         const char* where = !pk ? Tr("설치되어 있지 않음")
                             : !usable ? Tr("사용할 수 없음 · 셰이더 탭에서 확인")
@@ -1049,7 +1146,7 @@ bool App::DrawEffectStackEditor(std::vector<EffectStackEntry>& stack, bool heade
 
     std::vector<const ShaderPack*> addable;
     for (const ShaderPack& pk : reg.Packs()) {
-        if (pk.type != PackType::Effect || !pk.Selectable()) continue;
+        if (pk.type != PackType::Effect || !PackUsable(&pk)) continue;
         bool in = false;
         for (const EffectStackEntry& e : stack) in |= e.pack == pk.id;
         if (!in) addable.push_back(&pk);
@@ -1130,6 +1227,18 @@ void App::DrawRemotePackDetail(float x0, float y0, float x1, float y1) {
     char meta[160];
     std::snprintf(meta, sizeof(meta), "v%s  ·  %s  ·  %.1f KB", rp->version.c_str(), rp->id.c_str(), rp->size / 1024.0);
     Para(meta, p.ink3, size::Caption);
+    if (rp->verified) {
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        VerifiedBadge(ImGui::GetWindowDrawList(), ImVec2(at.x + Dp(8.0f), at.y + Dp(9.0f)), 15.0f);
+        Text(ImGui::GetWindowDrawList(), Font::Semibold, size::Caption, ImVec2(at.x + Dp(22.0f), at.y), p.ink,
+             Tr("검수된 팩"));
+        ImGui::Dummy(ImVec2(1.0f, Dp(20.0f)));
+    } else {
+        std::string line = std::string(Tr("미검수"));
+        if (!rp->owner.empty()) line += "  ·  " + rp->owner;
+        if (!IsOfficialIndexUrl(rp->source)) line += "  ·  " + SourceHost(rp->source);
+        Para(line, p.ink3, size::Caption);
+    }
 
     // install / update
     Gap(14.0f);
@@ -1143,14 +1252,16 @@ void App::DrawRemotePackDetail(float x0, float y0, float x1, float y1) {
         Para(Tr("이 버전의 MMDX12 에서는 쓸 수 없는 팩입니다. 앱을 업데이트하세요."), p.warn);
     } else if (inst && inst->source == PackSource::BuiltIn && net::CompareVersions(rp->version, inst->version) <= 0) {
         Para(Tr("앱에 이미 포함되어 있습니다."), p.ink3);
+    } else if (inst && !UpdateAllowed(*inst, *rp)) {
+        Para(Tr("최신 버전이 설치되어 있음"), p.ink3);
+        Para(Tr("설치된 버전: v") + inst->version, p.ink3, size::Caption);
     } else {
-        const bool newer = inst && net::CompareVersions(rp->version, inst->version) > 0;
-        ImGui::BeginDisabled(inst && !newer);
-        const char* label = !inst ? Tr("설치") : (newer ? Tr("업데이트") : Tr("최신 버전이 설치되어 있음"));
-        if (Button("##storeinstall", label, inst && !newer ? icon::Check : icon::DownloadSimple, ButtonKind::Primary,
-                   ImVec2(w / Dpi(), 44.0f)))
-            shaderStore_.Install(*rp);
-        ImGui::EndDisabled();
+        const bool newer = inst != nullptr;
+        const char* label = !inst ? Tr("설치") : Tr("업데이트");
+        if (Button("##storeinstall", label, icon::DownloadSimple, ButtonKind::Primary, ImVec2(w / Dpi(), 44.0f))) {
+            if (!rp->verified) pendingUnverifiedInstall_ = rp->id;
+            else shaderStore_.Install(*rp);
+        }
         if (newer) Para(Tr("설치된 버전: v") + inst->version, p.ink3, size::Caption);
     }
 
@@ -1259,6 +1370,195 @@ void App::DrawNewPackDialog() {
         ImGui::SameLine();
         if (Button("##npcancel", Tr("취소"), nullptr, ButtonKind::Ghost)) {
             newPackOpen_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
+}
+
+void App::CollectFrameActivePacks(std::set<std::string>& out) const {
+    out.clear();
+    const auto add = [&](const std::string& id) {
+        if (id.empty()) return;
+        const ShaderPack* pk = ShaderPacks().Find(id);
+        if (pk && pk->source == PackSource::BuiltIn) return;   // built-ins are known good
+        out.insert(id);
+    };
+    // enabled effect-stack entries for this frame (studio: the project's stack is what the renderer holds)
+    for (const EffectStackEntry& e : renderer_.Settings().packEffects)
+        if (e.enabled) add(e.pack);
+    // surface packs of drawn models
+    if (studio_ && (screen_ == Screen::Studio || screen_ == Screen::Offline)) {
+        for (const auto& m : studio_->models)
+            if (m && m->gpu && m->visible) add(m->gpu->ShaderPackId());
+    } else if (scene_) {
+        if (scene_->characterGpu) add(scene_->characterGpu->ShaderPackId());
+        for (const auto& g : scene_->stageGpu)
+            if (g) add(g->ShaderPackId());
+        for (const auto& e : scene_->extras)
+            if (e.gpu) add(e.gpu->ShaderPackId());
+    }
+}
+
+// ---- gallery sources -------------------------------------------------------------------------------------------------
+
+// Official first (implicit), then the user's galleryIndex URLs in saved order.
+std::vector<std::string> App::GalleryIndexUrls() const {
+    // --pack-index is the testing override for the official index (the store still puts official-URL sources first)
+    std::vector<std::string> urls{options_.packIndex.empty() ? ShaderPackStore::kDefaultIndexUrl : options_.packIndex};
+    for (const std::string& u : settings_.galleryIndexes)
+        if (!IsOfficialIndexUrl(u)) urls.push_back(u);
+    return urls;
+}
+
+void App::RefreshGallery() {
+    shaderStore_.Refresh(GalleryIndexUrls());
+}
+
+void App::DrawGallerySourcesDialog() {
+    if (!gallerySourcesOpen_) return;
+    const Palette& p = P();
+    ImGui::OpenPopup("##gallerysourcesdlg");
+    const ImVec2 ds = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(Dp(560.0f), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(24.0f), Dp(22.0f)));
+    bool close = false;
+    if (ImGui::BeginPopupModal("##gallerysourcesdlg", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize)) {
+        const float w = ImGui::GetContentRegionAvail().x;
+        Para(Tr("갤러리 출처"), p.ink, size::Title, Font::Bold);
+        Gap(4.0f);
+        Para(Tr("공식 갤러리는 항상 먼저 불러옵니다. 추가한 출처의 팩은 검수되지 않은 것으로 표시됩니다."), p.ink2,
+             size::Caption);
+
+        Gap(12.0f);
+        // official source: fixed row with its state
+        {
+            const auto state = shaderStore_.SourceState(ShaderPackStore::kDefaultIndexUrl);
+            const char* stateText = state == ShaderPackStore::IndexState::Loading ? Tr("불러오는 중...")
+                                    : state == ShaderPackStore::IndexState::Failed ? Tr("불러오지 못했습니다")
+                                    : state == ShaderPackStore::IndexState::Ready ? Tr("준비됨")
+                                                                                  : Tr("대기 중");
+            const ImVec2 c = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(c, ImVec2(c.x + w, c.y + Dp(52.0f)), p.sunken, Dp(10.0f));
+            Text(dl, Font::Semibold, size::Small, ImVec2(c.x + Dp(12.0f), c.y + Dp(9.0f)), p.ink, Tr("공식 갤러리"));
+            TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(c.x + Dp(12.0f), c.y + Dp(29.0f)), c.x + w - Dp(110.0f),
+                         p.ink3, ShaderPackStore::kDefaultIndexUrl);
+            Text(dl, Font::Regular, size::Caption, ImVec2(c.x + w - Dp(100.0f), c.y + Dp(9.0f)),
+                 state == ShaderPackStore::IndexState::Failed ? p.danger : p.ink2, stateText);
+            if (state == ShaderPackStore::IndexState::Failed) {
+                TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(c.x + w - Dp(100.0f), c.y + Dp(29.0f)),
+                             c.x + w - Dp(10.0f), p.ink3, shaderStore_.SourceError(ShaderPackStore::kDefaultIndexUrl).c_str());
+            }
+            ImGui::SetCursorScreenPos(ImVec2(c.x, c.y + Dp(60.0f)));
+        }
+        // the user's sources
+        for (size_t i = 0; i < settings_.galleryIndexes.size(); ++i) {
+            const std::string url = settings_.galleryIndexes[i];
+            if (IsOfficialIndexUrl(url)) continue;   // never stored, never listed twice
+            const auto state = shaderStore_.SourceState(url);
+            const char* stateText = state == ShaderPackStore::IndexState::Loading ? Tr("불러오는 중...")
+                                    : state == ShaderPackStore::IndexState::Failed ? Tr("불러오지 못했습니다")
+                                    : state == ShaderPackStore::IndexState::Ready ? Tr("준비됨")
+                                                                                  : Tr("대기 중");
+            const ImVec2 c = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(c, ImVec2(c.x + w, c.y + Dp(52.0f)), p.sunken, Dp(10.0f));
+            TextEllipsis(dl, Font::Regular, size::Small, ImVec2(c.x + Dp(12.0f), c.y + Dp(9.0f)), c.x + w - Dp(150.0f), p.ink,
+                         url.c_str());
+            TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(c.x + Dp(12.0f), c.y + Dp(29.0f)), c.x + w - Dp(150.0f),
+                         p.ink3, state == ShaderPackStore::IndexState::Failed
+                                     ? shaderStore_.SourceError(url).c_str()
+                                     : SourceHost(url).c_str());
+            Text(dl, Font::Regular, size::Caption, ImVec2(c.x + w - Dp(140.0f), c.y + Dp(9.0f)),
+                 state == ShaderPackStore::IndexState::Failed ? p.danger : p.ink2, stateText);
+            ImGui::SetCursorScreenPos(ImVec2(c.x + w - Dp(36.0f), c.y + Dp(8.0f)));
+            ImGui::PushID((int)i);
+            if (IconButton("##removesource", icon::X, Tr("출처 제거"))) {
+                settings_.galleryIndexes.erase(settings_.galleryIndexes.begin() + (long)i);
+                settings_.Save(settingsPath_);
+                RefreshGallery();
+                ImGui::PopID();
+                break;   // the list changed: the loop's indices are stale
+            }
+            ImGui::PopID();
+            ImGui::SetCursorScreenPos(ImVec2(c.x, c.y + Dp(60.0f)));
+        }
+
+        Gap(4.0f);
+        TextField("##galleryurl", Tr("출처 주소 (http(s) 또는 로컬 경로)"), galleryUrl_, sizeof(galleryUrl_),
+                  std::max(120.0f, (w - Dp(80.0f)) / Dpi()), "https://example.com/shader-packs/index.json");
+        if (!galleryUrlError_.empty()) Para(galleryUrlError_, p.danger, size::Caption);
+        Gap(8.0f);
+        ImGui::BeginDisabled(galleryUrl_[0] == '\0');
+        if (Button("##galleryadd", Tr("추가"), icon::Plus, ButtonKind::Primary)) {
+            std::string url = TrimUrl(galleryUrl_);
+            galleryUrlError_.clear();
+            const bool http = url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+            if (url.empty()) {
+                galleryUrlError_ = Tr("주소를 입력하세요");
+            } else if (!http && url.find("file:") != 0 && url.find("://") != std::string::npos) {
+                galleryUrlError_ = Tr("http(s) 주소 또는 로컬 경로만 쓸 수 있습니다");
+            } else if (IsOfficialIndexUrl(url) ||
+                       std::find(settings_.galleryIndexes.begin(), settings_.galleryIndexes.end(), url) !=
+                           settings_.galleryIndexes.end()) {
+                galleryUrlError_ = Tr("이미 있는 출처입니다");
+            } else {
+                settings_.galleryIndexes.push_back(url);
+                settings_.Save(settingsPath_);
+                galleryUrl_[0] = 0;
+                RefreshGallery();
+            }
+        }
+        ImGui::EndDisabled();
+        Gap(16.0f);
+        if (Button("##gallerysourcesclose", Tr("닫기"), nullptr, ButtonKind::Ghost)) close = true;
+        if (close) {
+            gallerySourcesOpen_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
+    if (close && !ImGui::IsPopupOpen("##gallerysourcesdlg")) gallerySourcesOpen_ = false;
+}
+
+// An unverified (community / third-party) entry asks once before installing (docs/effect_ecosystem.md §3).
+void App::DrawUnverifiedInstallDialog() {
+    if (pendingUnverifiedInstall_.empty()) return;
+    const Palette& p = P();
+    const RemotePack* rp = nullptr;
+    for (const RemotePack& r : shaderStore_.Packs())
+        if (r.id == pendingUnverifiedInstall_) rp = &r;
+    if (!rp) {
+        pendingUnverifiedInstall_.clear();
+        return;
+    }
+    const std::string lang = PackLanguage();
+    if (!ImGui::IsPopupOpen("##unverifiedinstall")) ImGui::OpenPopup("##unverifiedinstall");
+    ImGui::SetNextWindowSize(ImVec2(Dp(440.0f), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(24.0f), Dp(22.0f)));
+    if (ImGui::BeginPopupModal("##unverifiedinstall", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize)) {
+        const float w = ImGui::GetContentRegionAvail().x;
+        Para(rp->name.Get(lang), p.ink, size::Title, Font::Bold);
+        Gap(4.0f);
+        Para(rp->owner.empty() ? Tr("미검수") : rp->owner, p.ink3, size::Caption);
+        if (!IsOfficialIndexUrl(rp->source)) Para(SourceHost(rp->source), p.ink3, size::Caption);
+        Gap(10.0f);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+        Para(Tr("검수되지 않은 팩은 앱이 직접 확인하지 않았습니다. 설치할까요?"), p.ink2);
+        ImGui::PopTextWrapPos();
+        Gap(16.0f);
+        if (Button("##unverifiedyes", Tr("설치"), icon::DownloadSimple, ButtonKind::Primary)) {
+            shaderStore_.Install(*rp);
+            pendingUnverifiedInstall_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (Button("##unverifiedno", Tr("취소"), nullptr, ButtonKind::Ghost)) {
+            pendingUnverifiedInstall_.clear();
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
