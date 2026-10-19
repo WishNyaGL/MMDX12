@@ -1,0 +1,1348 @@
+// PassWorld.cpp: M3-W1 World pack simulation and rendering.
+// Manages GPU simulation (particle buffers, field ping-pong textures) and rendering (surfaces, particles)
+// for world packs across raster, ray-traced, path-traced, and offline GI render paths.
+#include "render/Passes.h"
+#include "render/PassCommon.h"
+#include "render/Renderer.h"
+#include "render/ShaderInterop.h"
+#include "render/ShaderPack.h"
+#include "render/WorldTypes.h"
+#include "core/Log.h"
+#include "core/TextUtil.h"
+#include <directx/d3dx12.h>
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace mmdx {
+
+namespace {
+
+using namespace DirectX;
+
+struct GpuWorldColliderData {
+    XMFLOAT3 pos{0, 0, 0};
+    float radius = 0.0f;
+    XMFLOAT3 vel{0, 0, 0};
+    uint32_t flags = 0;
+};
+static_assert(sizeof(GpuWorldColliderData) == 32);
+
+struct GpuPackParticle {
+    XMFLOAT3 pos{0, 0, 0};
+    float size = 0.0f;
+    XMFLOAT3 vel{0, 0, 0};
+    float age = -1.0f;
+    XMFLOAT4 color{0, 0, 0, 0};
+    XMFLOAT4 data{0, 0, 0, 0};
+};
+static_assert(sizeof(GpuPackParticle) == 64);
+
+struct WorldCbData {
+    XMFLOAT4X4 worldToLocal;
+    XMFLOAT4X4 localToWorld;
+    XMFLOAT4 worldTime;     // x: time, y: dt, z: simTime, w: stepIndex
+    XMFLOAT4 worldParams;   // x: colliderCount, y: fieldCount, z: particleSystemIndex, w: countOrGrid
+    XMFLOAT4 sunDir;        // xyz: sunDir, w: hasSun
+    XMFLOAT4 sunColor;      // rgb: sunColor, w: shadowDistance
+    XMFLOAT4 ambient;       // rgb: ambientColor, w: 0
+    XMFLOAT4 fieldExtent[4];// xy: size, z: extent, w: 1/extent
+};
+static_assert(sizeof(WorldCbData) == 272);
+
+DXGI_FORMAT ParseFieldDxgiFormat(PackWorldField::Format fmt) {
+    switch (fmt) {
+        case PackWorldField::Format::R16F: return DXGI_FORMAT_R16_FLOAT;
+        case PackWorldField::Format::RG16F: return DXGI_FORMAT_R16G16_FLOAT;
+        case PackWorldField::Format::RGBA16F: default: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    }
+}
+
+} // namespace
+
+struct WorldPass::Impl {
+    std::filesystem::path shaderDir;
+    uint32_t msaa = 1;
+
+    // Root Signatures
+    ComPtr<ID3D12RootSignature> particleComputeRootSig;
+    ComPtr<ID3D12RootSignature> fieldComputeRootSig;
+    ComPtr<ID3D12RootSignature> graphicsRootSig;
+
+    // Default descriptors / fallbacks
+    Texture defaultWhiteTex;
+    uint32_t defaultPackTexSrv = DescriptorHeap::kInvalid; // 32 consecutive descriptors in SrvHeap
+    Texture defaultBlackFieldTex;
+    ComPtr<ID3D12Resource> defaultColliderBuffer;
+
+    // Per-frame upload memory (UPLOAD heap, persistently mapped). A re-simulation records hundreds of steps in one
+    // command list, each with its own constants / colliders, so a wrapping ring would overwrite steps the GPU has not
+    // run yet: every frame slot owns a list of chunks that only grows, rewound when the slot comes round again.
+    struct UploadChunk {
+        ComPtr<ID3D12Resource> res;
+        uint8_t* mapped = nullptr;
+        size_t size = 0;
+    };
+    struct UploadSegment {
+        std::vector<UploadChunk> chunks;
+        size_t chunk = 0, offset = 0;
+    };
+    static constexpr uint32_t kUploadSegments = Dx12Context::kFramesInFlight + 1;
+    static constexpr size_t kUploadChunkSize = 4u << 20;
+    UploadSegment uploads[kUploadSegments];
+    uint64_t uploadFrame = ~0ull;
+    Dx12Context* ctxp = nullptr;
+    static constexpr size_t kExtBlockSize = 128 * sizeof(XMFLOAT4);
+
+    // Pack Textures
+    PackTextures packTextures;
+
+    // Pipeline cache per pack
+    struct PackPipelines {
+        std::string packId;
+        uint32_t generation = 0;
+
+        ComPtr<ID3D12PipelineState> psoClear;
+        struct ParticlePso {
+            ComPtr<ID3D12PipelineState> psoSimulate;
+            ComPtr<ID3D12PipelineState> psoSpawn;
+            ComPtr<ID3D12PipelineState> psoDraw;
+            ComPtr<ID3D12PipelineState> psoDrawOffline;
+        };
+        std::vector<ParticlePso> particles;
+
+        struct FieldPso {
+            ComPtr<ID3D12PipelineState> psoUpdate;
+        };
+        std::vector<FieldPso> fields;
+
+        struct SurfacePso {
+            ComPtr<ID3D12PipelineState> psoDraw;
+            ComPtr<ID3D12PipelineState> psoDrawOffline;
+        };
+        std::vector<SurfacePso> surfaces;
+    };
+    std::map<std::string, PackPipelines> packPipelines;
+
+    // GPU state per instance
+    struct InstanceState {
+        uint32_t uid = 0;
+        std::string packId;
+        uint64_t colliderVersion = 0;
+        double simTime = 0.0;
+        bool initialized = false;
+
+        struct ParticleBuf {
+            ComPtr<ID3D12Resource> buffer;  // RWStructuredBuffer<PackParticle>
+            ComPtr<ID3D12Resource> prevPos; // RWStructuredBuffer<float4>
+            uint32_t count = 0;
+            D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;   // both buffers move together
+        };
+        std::vector<ParticleBuf> particles;
+
+        struct FieldTex {
+            Texture texA;
+            Texture texB;
+            bool currentIsB = false;
+            uint32_t size = 0;
+            DXGI_FORMAT format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            bool persistent = false;
+            float rate = 10.0f;
+            double persistentSimTime = 0.0;
+
+            Texture& Current() { return currentIsB ? texB : texA; }
+            Texture& Previous() { return currentIsB ? texA : texB; }
+            void Swap() { currentIsB = !currentIsB; }
+        };
+        std::vector<FieldTex> fields;
+        // Persistent shader-visible descriptors (no per-step transient tables: a re-simulation records hundreds of
+        // steps): per field i, [i*4 + 0/1] = SRV of texA / texB, [i*4 + 2/3] = UAV of texA / texB; then 16 tables of 4
+        // SRVs at [16 + mask*4], bit i of mask = field i's latest result is texB (unused slots: a black texture).
+        uint32_t fieldDesc = DescriptorHeap::kInvalid;
+        static constexpr uint32_t kFieldDescCount = 16 + 16 * 4;
+        uint32_t LatestMask() const {
+            uint32_t m = 0;
+            for (size_t i = 0; i < fields.size(); ++i)
+                if (!fields[i].currentIsB) m |= 1u << i;   // Previous() = the latest result
+            return m;
+        }
+    };
+    D3D12_GPU_DESCRIPTOR_HANDLE FieldTable(Dx12Context& ctx, const InstanceState& st) const {
+        return ctx.SrvHeap().Gpu(st.fieldDesc + 16 + st.LatestMask() * 4);
+    }
+    // Moves a particle system's two buffers to `to` (UAV for the compute steps, SRV for drawing).
+    static void TransitionParticles(ID3D12GraphicsCommandList* cmd, InstanceState::ParticleBuf& b,
+                                    D3D12_RESOURCE_STATES to) {
+        if (b.state == to) {
+            if (to == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+                D3D12_RESOURCE_BARRIER u[2] = {CD3DX12_RESOURCE_BARRIER::UAV(b.buffer.Get()),
+                                               CD3DX12_RESOURCE_BARRIER::UAV(b.prevPos.Get())};
+                cmd->ResourceBarrier(2, u);
+            }
+            return;
+        }
+        D3D12_RESOURCE_BARRIER t[2] = {CD3DX12_RESOURCE_BARRIER::Transition(b.buffer.Get(), b.state, to),
+                                       CD3DX12_RESOURCE_BARRIER::Transition(b.prevPos.Get(), b.state, to)};
+        cmd->ResourceBarrier(2, t);
+        b.state = to;
+    }
+    std::map<std::pair<uint32_t, std::string>, InstanceState> instances;
+
+    ~Impl() {
+        for (UploadSegment& seg : uploads)
+            for (UploadChunk& c : seg.chunks)
+                if (c.res && c.mapped) c.res->Unmap(0, nullptr);
+    }
+
+    bool Init(Dx12Context& ctx, const std::filesystem::path& dir, uint32_t msaaSamples);
+    void EnsureRings(Dx12Context& ctx);
+    void CreateDefaultResources(Dx12Context& ctx);
+    PackPipelines* GetOrCompilePipelines(Dx12Context& ctx, const ShaderPack& pack);
+    InstanceState& GetOrCreateInstanceState(Dx12Context& ctx, const WorldInstance& inst, const ShaderPack& pack);
+
+    D3D12_GPU_VIRTUAL_ADDRESS Upload(const void* data, size_t bytes, size_t align);
+    D3D12_GPU_VIRTUAL_ADDRESS AllocParamsExt(const ShaderPack& pack, const std::map<std::string, float>& params);
+    D3D12_GPU_VIRTUAL_ADDRESS AllocColliders(const std::vector<WorldCollider>& colliders);
+    D3D12_GPU_VIRTUAL_ADDRESS AllocWorldCb(const WorldCbData& cb);
+
+    void SimulateInstance(PassContext& pc, const WorldInstance& inst, const ShaderPack& pack,
+                          PackPipelines& pipes, InstanceState& state);
+    void DrawInstance(PassContext& pc, const WorldInstance& inst, const ShaderPack& pack,
+                      PackPipelines& pipes, InstanceState& state, bool offline);
+};
+
+bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, uint32_t msaaSamples) {
+    shaderDir = dir;
+    msaa = msaaSamples;
+    ID3D12Device* device = ctx.Device();
+
+    // Static samplers: s0 Point, s1 Linear Clamp, s2 Linear Wrap, s3 Comparison Clamp
+    CD3DX12_STATIC_SAMPLER_DESC samplers[4];
+    samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                     D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    samplers[1].Init(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                     D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    samplers[2].Init(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                     D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+    samplers[3].Init(3, D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                     D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                     0.0f, 16, D3D12_COMPARISON_FUNC_LESS_EQUAL);
+
+    // Common descriptor ranges
+    CD3DX12_DESCRIPTOR_RANGE fieldRange;
+    fieldRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kPackWorldMaxFields, 0, 4); // t0..t3 space4
+
+    CD3DX12_DESCRIPTOR_RANGE packTexRange;
+    packTexRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kPackMaxTexturesWorld, 0, 5); // t0..t31 space5
+
+    // 1. Particle Compute Root Signature
+    {
+        CD3DX12_ROOT_PARAMETER p[8];
+        p[0].InitAsConstantBufferView(0);                 // b0 SceneConstants
+        p[1].InitAsConstantBufferView(1);                 // b1 WorldCB
+        p[2].InitAsConstantBufferView(4);                 // b4 PackParamsExt
+        p[3].InitAsShaderResourceView(10, 0);             // t10 space0 Colliders
+        p[4].InitAsDescriptorTable(1, &fieldRange);       // t0..t3 space4 Fields
+        p[5].InitAsDescriptorTable(1, &packTexRange);     // t0..t31 space5 PackTex
+        p[6].InitAsUnorderedAccessView(0, 0);             // u0 space0 gParticles
+        p[7].InitAsUnorderedAccessView(1, 0);             // u1 space0 gPrevPos
+
+        CD3DX12_ROOT_SIGNATURE_DESC rs;
+        rs.Init(8, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        ComPtr<ID3DBlob> blob, err;
+        if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
+            LOG_ERROR("WorldPass: failed to serialize particleComputeRootSig: %s",
+                      err ? (const char*)err->GetBufferPointer() : "unknown");
+            return false;
+        }
+        if (!CheckHr(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                 IID_PPV_ARGS(&particleComputeRootSig)),
+                     "WorldPass: CreateRootSignature particleCompute"))
+            return false;
+    }
+
+    // 2. Field Compute Root Signature
+    {
+        CD3DX12_DESCRIPTOR_RANGE prevRange;
+        prevRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 1); // t0 space1 gFieldPrev
+        CD3DX12_DESCRIPTOR_RANGE nextRange;
+        nextRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 space0 gFieldNext
+
+        CD3DX12_ROOT_PARAMETER p[8];
+        p[0].InitAsConstantBufferView(0);                 // b0 SceneConstants
+        p[1].InitAsConstantBufferView(1);                 // b1 WorldCB
+        p[2].InitAsConstantBufferView(4);                 // b4 PackParamsExt
+        p[3].InitAsShaderResourceView(10, 0);             // t10 space0 Colliders
+        p[4].InitAsDescriptorTable(1, &fieldRange);       // t0..t3 space4 Fields
+        p[5].InitAsDescriptorTable(1, &packTexRange);     // t0..t31 space5 PackTex
+        p[6].InitAsDescriptorTable(1, &prevRange);        // t0 space1 FieldPrev
+        p[7].InitAsDescriptorTable(1, &nextRange);        // u0 space0 FieldNext
+
+        CD3DX12_ROOT_SIGNATURE_DESC rs;
+        rs.Init(8, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        ComPtr<ID3DBlob> blob, err;
+        if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
+            LOG_ERROR("WorldPass: failed to serialize fieldComputeRootSig: %s",
+                      err ? (const char*)err->GetBufferPointer() : "unknown");
+            return false;
+        }
+        if (!CheckHr(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                 IID_PPV_ARGS(&fieldComputeRootSig)),
+                     "WorldPass: CreateRootSignature fieldCompute"))
+            return false;
+    }
+
+    // 3. Graphics Root Signature
+    {
+        CD3DX12_DESCRIPTOR_RANGE shadowRange;
+        shadowRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 15, 0); // t15 space0 ShadowMap
+
+        CD3DX12_ROOT_PARAMETER p[9];
+        p[0].InitAsConstantBufferView(0);                 // b0 SceneConstants
+        p[1].InitAsConstantBufferView(1);                 // b1 WorldCB
+        p[2].InitAsConstantBufferView(4);                 // b4 PackParamsExt
+        p[3].InitAsShaderResourceView(10, 0);             // t10 space0 Colliders
+        p[4].InitAsDescriptorTable(1, &fieldRange);       // t0..t3 space4 Fields
+        p[5].InitAsDescriptorTable(1, &packTexRange);     // t0..t31 space5 PackTex
+        p[6].InitAsShaderResourceView(0, 2);              // t0 space2 gParticles
+        p[7].InitAsShaderResourceView(1, 2);              // t1 space2 gPrevPos
+        p[8].InitAsDescriptorTable(1, &shadowRange);      // t15 space0 ShadowMap
+
+        CD3DX12_ROOT_SIGNATURE_DESC rs;
+        rs.Init(9, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        ComPtr<ID3DBlob> blob, err;
+        if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
+            LOG_ERROR("WorldPass: failed to serialize graphicsRootSig: %s",
+                      err ? (const char*)err->GetBufferPointer() : "unknown");
+            return false;
+        }
+        if (!CheckHr(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                 IID_PPV_ARGS(&graphicsRootSig)),
+                     "WorldPass: CreateRootSignature graphics"))
+            return false;
+    }
+
+    EnsureRings(ctx);
+    CreateDefaultResources(ctx);
+    return true;
+}
+
+void WorldPass::Impl::EnsureRings(Dx12Context& ctx) { ctxp = &ctx; }
+
+D3D12_GPU_VIRTUAL_ADDRESS WorldPass::Impl::Upload(const void* data, size_t bytes, size_t align) {
+    if (!ctxp) return 0;
+    const uint64_t frame = ctxp->FrameNumber();
+    UploadSegment& seg = uploads[frame % kUploadSegments];
+    if (frame != uploadFrame) {   // first upload of this frame: the slot's previous use has finished on the GPU
+        uploadFrame = frame;
+        seg.chunk = 0;
+        seg.offset = 0;
+    }
+    for (;;) {
+        if (seg.chunk < seg.chunks.size()) {
+            UploadChunk& c = seg.chunks[seg.chunk];
+            const size_t at = (seg.offset + align - 1) / align * align;
+            if (at + bytes <= c.size) {
+                if (data) std::memcpy(c.mapped + at, data, bytes);
+                seg.offset = at + bytes;
+                return c.res->GetGPUVirtualAddress() + at;
+            }
+            ++seg.chunk;
+            seg.offset = 0;
+            continue;
+        }
+        UploadChunk c;
+        c.size = std::max(kUploadChunkSize, bytes + align);
+        const CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_UPLOAD);
+        const auto desc = CD3DX12_RESOURCE_DESC::Buffer(c.size);
+        if (FAILED(ctxp->Device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                           D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                           IID_PPV_ARGS(&c.res))) ||
+            FAILED(c.res->Map(0, nullptr, reinterpret_cast<void**>(&c.mapped)))) {
+            LOG_ERROR("WorldPass: upload chunk allocation failed");
+            return 0;
+        }
+        c.res->SetName(L"world.upload");
+        seg.chunks.push_back(std::move(c));
+    }
+}
+
+void WorldPass::Impl::CreateDefaultResources(Dx12Context& ctx) {
+    ID3D12Device* device = ctx.Device();
+    UploadBatch batch(ctx);
+
+    // 1x1 white texture
+    ImageRGBA8 whiteImg;
+    whiteImg.mips.push_back({1, 1, {255, 255, 255, 255}});
+    defaultWhiteTex.res = batch.CreateTexture(whiteImg, L"world.defaultWhite");
+    defaultWhiteTex.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    defaultWhiteTex.srvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    defaultWhiteTex.width = defaultWhiteTex.height = 1;
+
+    // 1x1 black/transparent field texture
+    ImageRGBA8 blackImg;
+    blackImg.mips.push_back({1, 1, {0, 0, 0, 0}});
+    defaultBlackFieldTex.res = batch.CreateTexture(blackImg, L"world.defaultBlackField");
+    defaultBlackFieldTex.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    defaultBlackFieldTex.srvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    defaultBlackFieldTex.width = defaultBlackFieldTex.height = 1;
+
+    // Default dummy collider buffer (1 entry)
+    const CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    const auto colDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(GpuWorldColliderData));
+    device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &colDesc,
+                                    D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                    IID_PPV_ARGS(&defaultColliderBuffer));
+
+    batch.Submit();
+
+    // Allocate 32 descriptors in SrvHeap pointing to defaultWhiteTex
+    if (defaultPackTexSrv == DescriptorHeap::kInvalid) {
+        defaultPackTexSrv = ctx.SrvHeap().Allocate(kPackMaxTexturesWorld);
+        if (defaultPackTexSrv != DescriptorHeap::kInvalid && defaultWhiteTex.res) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            srv.Texture2D.MipLevels = 1;
+            for (uint32_t i = 0; i < kPackMaxTexturesWorld; ++i) {
+                device->CreateShaderResourceView(defaultWhiteTex.res.Get(), &srv,
+                                                 ctx.SrvHeap().Cpu(defaultPackTexSrv + i));
+            }
+        }
+    }
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS WorldPass::Impl::AllocParamsExt(const ShaderPack& pack,
+                                                          const std::map<std::string, float>& params) {
+    XMFLOAT4 slots[128] = {};
+    std::vector<XMFLOAT4> built;
+    BuildPackParamSlots(pack, params, built);
+    std::memcpy(slots, built.data(), std::min(built.size(), (size_t)128) * sizeof(XMFLOAT4));
+    return Upload(slots, kExtBlockSize, 256);
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS WorldPass::Impl::AllocColliders(const std::vector<WorldCollider>& colliders) {
+    const uint32_t count = std::min<uint32_t>((uint32_t)colliders.size(), kWorldMaxColliders);
+    GpuWorldColliderData gpu[kWorldMaxColliders] = {};
+    for (uint32_t i = 0; i < count; ++i) {
+        gpu[i].pos = colliders[i].pos;
+        gpu[i].radius = colliders[i].radius;
+        gpu[i].vel = colliders[i].vel;
+        gpu[i].flags = colliders[i].flags;
+    }
+    const D3D12_GPU_VIRTUAL_ADDRESS va = Upload(gpu, std::max(count, 1u) * sizeof(GpuWorldColliderData), 16);
+    return va ? va : (defaultColliderBuffer ? defaultColliderBuffer->GetGPUVirtualAddress() : 0);
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS WorldPass::Impl::AllocWorldCb(const WorldCbData& cb) {
+    return Upload(&cb, sizeof(WorldCbData), 256);
+}
+
+WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Context& ctx, const ShaderPack& pack) {
+    if (pack.type != PackType::World || !pack.world) return nullptr;
+    ID3D12Device* device = ctx.Device();
+
+    auto it = packPipelines.find(pack.id);
+    if (it != packPipelines.end()) {
+        if (it->second.generation == ShaderPacks().Generation()) return &it->second;
+    }
+
+    PackPipelines pipes;
+    pipes.packId = pack.id;
+    pipes.generation = ShaderPacks().Generation();
+
+    const std::filesystem::path hostShader = shaderDir / L"world.hlsl";
+    std::filesystem::path hlslPath = pack.dir / L"world.hlsl";
+    std::string inc = PathToUtf8(hlslPath);
+    std::replace(inc.begin(), inc.end(), '\\', '/');
+    const uint32_t texCount = (uint32_t)std::min<size_t>(pack.textures.size(), kPackMaxTexturesWorld);
+    uint32_t clampMask = 0, srgbMask = 0;
+    for (uint32_t i = 0; i < texCount; ++i) {
+        if (pack.textures[i].clamp) clampMask |= (1u << i);
+        if (pack.textures[i].srgb) srgbMask |= (1u << i);
+    }
+
+    ShaderDefines baseDefines = {
+        {"MMDX_PACK", "\"" + inc + "\""},
+        {"PACK_TEX_CLAMP_MASK", std::to_string(clampMask) + "u"},
+        {"PACK_TEX_SRGB_MASK", std::to_string(srgbMask) + "u"},
+        {"PACK_TEX_COUNT", std::to_string(texCount)}
+    };
+
+    // 1. CSWorldClear
+    {
+        ShaderDefines d = baseDefines;
+        d.push_back({"WORLD_CLEAR", "1"});
+        std::string err;
+        ComPtr<ID3DBlob> cs = CompileShaderDxc(hostShader, "CSWorldClear", "cs_6_0", d, &err);
+        if (cs) {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};
+            pso.pRootSignature = particleComputeRootSig.Get();
+            pso.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+            CheckHr(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&pipes.psoClear)), "WorldPass: pipes.psoClear");
+        } else {
+            LOG_ERROR("WorldPack '%s': CSWorldClear failed: %s", pack.id.c_str(), err.c_str());
+        }
+    }
+
+    // 2. Particle systems
+    pipes.particles.resize(pack.world->particles.size());
+    for (size_t i = 0; i < pack.world->particles.size(); ++i) {
+        const auto& p = pack.world->particles[i];
+        auto& pPipe = pipes.particles[i];
+
+        if (!p.simulate.empty()) {
+            ShaderDefines d = baseDefines;
+            d.push_back({"WORLD_SIMULATE", "1"});
+            d.push_back({"WORLD_SIMULATE_FN", p.simulate});
+            std::string err;
+            ComPtr<ID3DBlob> cs = CompileShaderDxc(hostShader, "CSWorldSimulate", "cs_6_0", d, &err);
+            if (cs) {
+                D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};
+                pso.pRootSignature = particleComputeRootSig.Get();
+                pso.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+                CheckHr(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&pPipe.psoSimulate)), "WorldPass: pPipe.psoSimulate");
+            } else {
+                LOG_ERROR("WorldPack '%s' particle '%s': CSWorldSimulate failed: %s",
+                          pack.id.c_str(), p.name.c_str(), err.c_str());
+            }
+        } else if (!p.spawn.empty()) {
+            ShaderDefines d = baseDefines;
+            d.push_back({"WORLD_SPAWN", "1"});
+            d.push_back({"WORLD_SPAWN_FN", p.spawn});
+            std::string err;
+            ComPtr<ID3DBlob> cs = CompileShaderDxc(hostShader, "CSWorldSpawn", "cs_6_0", d, &err);
+            if (cs) {
+                D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};
+                pso.pRootSignature = particleComputeRootSig.Get();
+                pso.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+                CheckHr(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&pPipe.psoSpawn)), "WorldPass: pPipe.psoSpawn");
+            }
+        }
+
+        // Draw particle
+        if (!p.shade.empty()) {
+            ShaderDefines d = baseDefines;
+            d.push_back({"WORLD_PARTICLE", "1"});
+            d.push_back({"WORLD_PARTICLE_SHADE_FN", p.shade});
+            if (p.simulate.empty() && !p.spawn.empty()) {
+                d.push_back({"WORLD_STATELESS", "1"});
+                d.push_back({"WORLD_SPAWN_FN", p.spawn});
+            }
+            std::string err;
+            ComPtr<ID3DBlob> vs = CompileShaderDxc(hostShader, "VSWorldParticle", "vs_6_0", d, &err);
+            ComPtr<ID3DBlob> ps = CompileShaderDxc(hostShader, "PSWorldParticle", "ps_6_0", d, &err);
+            if (vs && ps) {
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+                pso.pRootSignature = graphicsRootSig.Get();
+                pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+                pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+                pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+                pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+                pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO; // no depth write for particles
+                pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+
+                D3D12_RENDER_TARGET_BLEND_DESC rtBlend{};
+                rtBlend.BlendEnable = TRUE;
+                rtBlend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                if (p.blend == PackWorldParticleSystem::Blend::Add) {
+                    rtBlend.SrcBlend = D3D12_BLEND_ONE;
+                    rtBlend.DestBlend = D3D12_BLEND_ONE;
+                    rtBlend.BlendOp = D3D12_BLEND_OP_ADD;
+                    rtBlend.SrcBlendAlpha = D3D12_BLEND_ZERO;
+                    rtBlend.DestBlendAlpha = D3D12_BLEND_ONE;
+                    rtBlend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                } else { // alpha
+                    rtBlend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+                    rtBlend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                    rtBlend.BlendOp = D3D12_BLEND_OP_ADD;
+                    rtBlend.SrcBlendAlpha = D3D12_BLEND_ONE;
+                    rtBlend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                    rtBlend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                }
+                pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+                pso.BlendState.RenderTarget[0] = rtBlend;
+                pso.BlendState.RenderTarget[1].BlendEnable = FALSE;
+                pso.BlendState.RenderTarget[1].RenderTargetWriteMask = 0; // normal untouched
+                pso.BlendState.RenderTarget[2].BlendEnable = FALSE;
+                pso.BlendState.RenderTarget[2].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL; // velocity
+
+                pso.SampleMask = UINT_MAX;
+                pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                pso.NumRenderTargets = 3;
+                pso.RTVFormats[0] = RenderTargets::kColorFormat;
+                pso.RTVFormats[1] = RenderTargets::kNormalFormat;
+                pso.RTVFormats[2] = RenderTargets::kVelocityFormat;
+                pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+                pso.SampleDesc.Count = msaa;
+                CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pPipe.psoDraw)), "WorldPass: pPipe.psoDraw");
+
+                // Offline GI variant (1 RTV, 4 MSAA)
+                pso.NumRenderTargets = 1;
+                pso.RTVFormats[0] = RenderTargets::kColorFormat;
+                pso.RTVFormats[1] = DXGI_FORMAT_UNKNOWN;
+                pso.RTVFormats[2] = DXGI_FORMAT_UNKNOWN;
+                pso.SampleDesc.Count = 4;
+                CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pPipe.psoDrawOffline)), "WorldPass: pPipe.psoDrawOffline");
+            } else {
+                LOG_ERROR("WorldPack '%s' particle '%s': Draw PSO failed: %s",
+                          pack.id.c_str(), p.name.c_str(), err.c_str());
+            }
+        }
+    }
+
+    // 3. Fields
+    pipes.fields.resize(pack.world->fields.size());
+    for (size_t i = 0; i < pack.world->fields.size(); ++i) {
+        const auto& f = pack.world->fields[i];
+        auto& fPipe = pipes.fields[i];
+        if (!f.update.empty()) {
+            ShaderDefines d = baseDefines;
+            d.push_back({"WORLD_FIELD_UPDATE", "1"});
+            d.push_back({"WORLD_FIELD_UPDATE_FN", f.update});
+            std::string err;
+            ComPtr<ID3DBlob> cs = CompileShaderDxc(hostShader, "CSWorldFieldUpdate", "cs_6_0", d, &err);
+            if (cs) {
+                D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};
+                pso.pRootSignature = fieldComputeRootSig.Get();
+                pso.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+                CheckHr(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&fPipe.psoUpdate)), "WorldPass: fPipe.psoUpdate");
+            } else {
+                LOG_ERROR("WorldPack '%s' field '%s': CSWorldFieldUpdate failed: %s",
+                          pack.id.c_str(), f.name.c_str(), err.c_str());
+            }
+        }
+    }
+
+    // 4. Surfaces
+    pipes.surfaces.resize(pack.world->surfaces.size());
+    for (size_t i = 0; i < pack.world->surfaces.size(); ++i) {
+        const auto& s = pack.world->surfaces[i];
+        auto& sPipe = pipes.surfaces[i];
+        if (!s.height.empty() && !s.shade.empty()) {
+            ShaderDefines d = baseDefines;
+            d.push_back({"WORLD_SURFACE", "1"});
+            d.push_back({"WORLD_SURFACE_HEIGHT_FN", s.height});
+            d.push_back({"WORLD_SURFACE_SHADE_FN", s.shade});
+            std::string err;
+            ComPtr<ID3DBlob> vs = CompileShaderDxc(hostShader, "VSWorldSurface", "vs_6_0", d, &err);
+            ComPtr<ID3DBlob> ps = CompileShaderDxc(hostShader, "PSWorldSurface", "ps_6_0", d, &err);
+            if (vs && ps) {
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+                pso.pRootSignature = graphicsRootSig.Get();
+                pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+                pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+                pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+                pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+                pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+                pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+                pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT); // opaque
+
+                pso.SampleMask = UINT_MAX;
+                pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                pso.NumRenderTargets = 3;
+                pso.RTVFormats[0] = RenderTargets::kColorFormat;
+                pso.RTVFormats[1] = RenderTargets::kNormalFormat;
+                pso.RTVFormats[2] = RenderTargets::kVelocityFormat;
+                pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+                pso.SampleDesc.Count = msaa;
+                CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDraw)), "WorldPass: sPipe.psoDraw");
+
+                // Offline GI variant (1 RTV, 4 MSAA)
+                pso.NumRenderTargets = 1;
+                pso.RTVFormats[0] = RenderTargets::kColorFormat;
+                pso.RTVFormats[1] = DXGI_FORMAT_UNKNOWN;
+                pso.RTVFormats[2] = DXGI_FORMAT_UNKNOWN;
+                pso.SampleDesc.Count = 4;
+                CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDrawOffline)), "WorldPass: sPipe.psoDrawOffline");
+            } else {
+                LOG_ERROR("WorldPack '%s' surface: Draw PSO failed: %s", pack.id.c_str(), err.c_str());
+            }
+        }
+    }
+
+    packPipelines[pack.id] = std::move(pipes);
+    return &packPipelines[pack.id];
+}
+
+WorldPass::Impl::InstanceState& WorldPass::Impl::GetOrCreateInstanceState(Dx12Context& ctx,
+                                                                          const WorldInstance& inst,
+                                                                          const ShaderPack& pack) {
+    const auto key = std::make_pair(inst.uid, pack.id);
+    auto it = instances.find(key);
+    if (it != instances.end()) return it->second;
+
+    ID3D12Device* device = ctx.Device();
+    const CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+
+    InstanceState state;
+    state.uid = inst.uid;
+    state.packId = pack.id;
+    state.colliderVersion = inst.colliders ? inst.colliders->version : 0;
+    state.simTime = 0.0;
+    state.initialized = false;
+
+    // Allocate particle buffers
+    state.particles.resize(pack.world->particles.size());
+    for (size_t i = 0; i < pack.world->particles.size(); ++i) {
+        const auto& p = pack.world->particles[i];
+        auto& pBuf = state.particles[i];
+        pBuf.count = p.count;
+
+        const auto bufDesc = CD3DX12_RESOURCE_DESC::Buffer(
+            p.count * sizeof(GpuPackParticle), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &bufDesc,
+                                        D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                        IID_PPV_ARGS(&pBuf.buffer));
+
+        const auto prevDesc = CD3DX12_RESOURCE_DESC::Buffer(
+            p.count * sizeof(XMFLOAT4), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &prevDesc,
+                                        D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                        IID_PPV_ARGS(&pBuf.prevPos));
+    }
+
+    // Allocate field textures
+    state.fields.resize(pack.world->fields.size());
+    for (size_t i = 0; i < pack.world->fields.size(); ++i) {
+        const auto& f = pack.world->fields[i];
+        auto& fTex = state.fields[i];
+        fTex.size = f.size;
+        fTex.format = ParseFieldDxgiFormat(f.format);
+        fTex.persistent = f.persistent;
+        fTex.rate = f.rate > 0.0f ? f.rate : 10.0f;
+        fTex.persistentSimTime = 0.0;
+
+        const auto flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        fTex.texA.Create(ctx, f.size, f.size, fTex.format, flags, D3D12_RESOURCE_STATE_COMMON, L"world.fieldA");
+        fTex.texB.Create(ctx, f.size, f.size, fTex.format, flags, D3D12_RESOURCE_STATE_COMMON, L"world.fieldB");
+    }
+    state.fieldDesc = ctx.SrvHeap().Allocate(InstanceState::kFieldDescCount);
+    if (state.fieldDesc != DescriptorHeap::kInvalid) {
+        DescriptorHeap& heap = ctx.SrvHeap();
+        for (size_t i = 0; i < state.fields.size(); ++i) {
+            auto& fTex = state.fields[i];
+            fTex.texA.WriteSrv(device, heap.Cpu(state.fieldDesc + (uint32_t)i * 4 + 0));
+            fTex.texB.WriteSrv(device, heap.Cpu(state.fieldDesc + (uint32_t)i * 4 + 1));
+            fTex.texA.WriteUav(device, heap.Cpu(state.fieldDesc + (uint32_t)i * 4 + 2));
+            fTex.texB.WriteUav(device, heap.Cpu(state.fieldDesc + (uint32_t)i * 4 + 3));
+        }
+        for (uint32_t mask = 0; mask < 16; ++mask)
+            for (uint32_t k = 0; k < 4; ++k) {
+                const D3D12_CPU_DESCRIPTOR_HANDLE dst = heap.Cpu(state.fieldDesc + 16 + mask * 4 + k);
+                if (k < state.fields.size())
+                    ((mask >> k) & 1 ? state.fields[k].texB : state.fields[k].texA).WriteSrv(device, dst);
+                else
+                    defaultBlackFieldTex.WriteSrv(device, dst);
+            }
+    }
+
+    instances[key] = std::move(state);
+    return instances[key];
+}
+
+void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& inst, const ShaderPack& pack,
+                                       PackPipelines& pipes, InstanceState& state) {
+    if (!pack.world) return;
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    Dx12Context& ctx = pc.ctx;
+
+    const float stepDt = pack.world->step > 0.0f ? pack.world->step : (1.0f / 60.0f);
+    const float rewindSec = pack.world->rewind >= 0.0f ? pack.world->rewind : 4.0f;
+    const uint64_t curColliderVer = inst.colliders ? inst.colliders->version : 0;
+
+    bool needResim = !state.initialized || (state.colliderVersion != curColliderVer);
+    if (!needResim) {
+        if (inst.exact && inst.time < state.simTime) needResim = true;
+        else if (inst.time < state.simTime) needResim = true;
+        else if (inst.time - state.simTime > 0.25) needResim = true;
+    }
+
+    // Helper: Build WorldCbData for a step
+    auto makeWorldCb = [&](float timeVal, float dtVal, float simVal, uint32_t stepIdx,
+                           uint32_t colCount, uint32_t fieldCount, uint32_t partIdx, uint32_t countOrGrid) {
+        WorldCbData cb{};
+        XMMATRIX mWorld = XMLoadFloat4x4(&inst.transform);
+        XMMATRIX mInvWorld = XMMatrixInverse(nullptr, mWorld);
+        XMStoreFloat4x4(&cb.localToWorld, mWorld);
+        XMStoreFloat4x4(&cb.worldToLocal, mInvWorld);
+        cb.worldTime = XMFLOAT4(timeVal, dtVal, simVal, (float)stepIdx);
+        cb.worldParams = XMFLOAT4((float)colCount, (float)fieldCount, (float)partIdx, (float)countOrGrid);
+
+        const LightParams& lp = pc.view.light;
+        XMVECTOR L = XMVector3Normalize(XMLoadFloat3(&lp.direction));
+        XMFLOAT3 lNorm;
+        XMStoreFloat3(&lNorm, L);
+        const float hasSun = (lp.sunIntensity > 0.0f) ? 1.0f : 0.0f;
+        cb.sunDir = XMFLOAT4(-lNorm.x, -lNorm.y, -lNorm.z, hasSun);
+        cb.sunColor = XMFLOAT4(lp.color.x * lp.sunIntensity, lp.color.y * lp.sunIntensity, lp.color.z * lp.sunIntensity, pc.view.shadowDistance);
+        cb.ambient = XMFLOAT4(lp.groundColor.x, lp.groundColor.y, lp.groundColor.z, 0.0f);
+
+        for (size_t fi = 0; fi < std::min<size_t>(pack.world->fields.size(), 4); ++fi) {
+            const auto& f = pack.world->fields[fi];
+            cb.fieldExtent[fi] = XMFLOAT4((float)f.size, (float)f.size, f.extent, f.extent > 0 ? (1.0f / f.extent) : 0);
+        }
+        return cb;
+    };
+
+    // Helper: Pack texture descriptor table
+    D3D12_GPU_DESCRIPTOR_HANDLE packTexTable{};
+    const PackTextures::Set* ptSet = packTextures.Acquire(ctx, pack, pack.dir);
+    if (ptSet && ptSet->srv != DescriptorHeap::kInvalid) {
+        packTexTable = ctx.SrvHeap().Gpu(ptSet->srv);
+    } else if (defaultPackTexSrv != DescriptorHeap::kInvalid) {
+        packTexTable = ctx.SrvHeap().Gpu(defaultPackTexSrv);
+    }
+
+    // Field tables: the persistent per-instance descriptors (see InstanceState::fieldDesc)
+    if (state.fieldDesc == DescriptorHeap::kInvalid) return;
+    auto makeFieldTable = [&]() { return FieldTable(ctx, state); };
+    // One field step's prev (SRV) / next (UAV) single-descriptor tables
+    auto bindFieldPrevNext = [&](size_t fi) {
+        auto& fTex = state.fields[fi];
+        const uint32_t base = state.fieldDesc + (uint32_t)fi * 4;
+        cmd->SetComputeRootDescriptorTable(6, ctx.SrvHeap().Gpu(base + (fTex.currentIsB ? 0 : 1)));
+        cmd->SetComputeRootDescriptorTable(7, ctx.SrvHeap().Gpu(base + 2 + (fTex.currentIsB ? 1 : 0)));
+    };
+    for (auto& fTex : state.fields) fTex.Previous().Transition(cmd, kSrv);
+
+    const D3D12_GPU_VIRTUAL_ADDRESS paramsExtVa = AllocParamsExt(pack, inst.params);
+    std::vector<WorldCollider> sampledColliders;
+
+    // One persistent-field step to grid time k / rate (reset = the field starts from zero)
+    auto stepPersistent = [&](size_t fi, uint64_t k, bool reset) {
+        auto& fTex = state.fields[fi];
+        const double pDt = 1.0 / fTex.rate;
+        const double t = (double)k * pDt;
+        if (inst.colliders) inst.colliders->Sample(t, sampledColliders);
+        else sampledColliders.clear();
+        const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
+        const auto cb = makeWorldCb((float)t, k ? (float)pDt : 0.0f, (float)(t - pDt), (uint32_t)k,
+                                    (uint32_t)sampledColliders.size(), (uint32_t)state.fields.size(),
+                                    (uint32_t)fi + (reset ? 16u : 0u), fTex.size);
+        cmd->SetComputeRootSignature(fieldComputeRootSig.Get());
+        cmd->SetPipelineState(pipes.fields[fi].psoUpdate.Get());
+        cmd->SetComputeRootConstantBufferView(0, pc.sceneConstants);
+        cmd->SetComputeRootConstantBufferView(1, AllocWorldCb(cb));
+        cmd->SetComputeRootConstantBufferView(2, paramsExtVa);
+        cmd->SetComputeRootShaderResourceView(3, colVa);
+        cmd->SetComputeRootDescriptorTable(4, makeFieldTable());
+        cmd->SetComputeRootDescriptorTable(5, packTexTable);
+        fTex.Current().Transition(cmd, kUav);
+        bindFieldPrevNext(fi);
+        const uint32_t gx = (fTex.size + 7) / 8;
+        cmd->Dispatch(gx, gx, 1);
+        D3D12_RESOURCE_BARRIER uav = CD3DX12_RESOURCE_BARRIER::UAV(fTex.Current().res.Get());
+        cmd->ResourceBarrier(1, &uav);
+        fTex.Swap();
+        fTex.Previous().Transition(cmd, kSrv);
+    };
+
+    if (needResim) {
+        state.colliderVersion = curColliderVer;
+        state.initialized = true;
+
+        // 1. Persistent fields: re-simulate from 0 on their own grid (step k at time k / rate), the same grid live
+        // playback follows below, so a seek and continuous playback reach the same field at the same time
+        for (size_t fi = 0; fi < state.fields.size(); ++fi) {
+            auto& fTex = state.fields[fi];
+            if (!fTex.persistent || pipes.fields[fi].psoUpdate == nullptr) continue;
+            const double pDt = 1.0 / fTex.rate;
+            const uint64_t pSteps = (uint64_t)std::floor(inst.time / pDt + 1e-6);
+            if (pSteps == 0) stepPersistent(fi, 0, true);   // no step yet: still start from a zero field
+            for (uint64_t k = 1; k <= pSteps; ++k) stepPersistent(fi, k, k == 1);
+            fTex.persistentSimTime = (double)pSteps * pDt;
+        }
+
+        // 2. Clear stateful particles
+        if (pipes.psoClear) {
+            cmd->SetComputeRootSignature(particleComputeRootSig.Get());
+            cmd->SetPipelineState(pipes.psoClear.Get());
+            for (size_t pi = 0; pi < state.particles.size(); ++pi) {
+                const auto& p = pack.world->particles[pi];
+                if (p.simulate.empty()) continue; // stateless particles don't clear/simulate
+                auto& pBuf = state.particles[pi];
+
+                const auto cb = makeWorldCb((float)inst.time, stepDt, 0.0f, 0,
+                                            0, (uint32_t)state.fields.size(), (uint32_t)pi, pBuf.count);
+                const D3D12_GPU_VIRTUAL_ADDRESS cbVa = AllocWorldCb(cb);
+
+                cmd->SetComputeRootConstantBufferView(0, pc.sceneConstants);
+                cmd->SetComputeRootConstantBufferView(1, cbVa);
+                cmd->SetComputeRootConstantBufferView(2, paramsExtVa);
+                cmd->SetComputeRootShaderResourceView(3, defaultColliderBuffer->GetGPUVirtualAddress());
+                cmd->SetComputeRootDescriptorTable(4, makeFieldTable());
+                cmd->SetComputeRootDescriptorTable(5, packTexTable);
+                TransitionParticles(cmd, pBuf, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cmd->SetComputeRootUnorderedAccessView(6, pBuf.buffer->GetGPUVirtualAddress());
+                cmd->SetComputeRootUnorderedAccessView(7, pBuf.prevPos->GetGPUVirtualAddress());
+
+                const uint32_t gx = (pBuf.count + 63) / 64;
+                cmd->Dispatch(gx, 1, 1);
+
+                D3D12_RESOURCE_BARRIER b[2] = {
+                    CD3DX12_RESOURCE_BARRIER::UAV(pBuf.buffer.Get()),
+                    CD3DX12_RESOURCE_BARRIER::UAV(pBuf.prevPos.Get())
+                };
+                cmd->ResourceBarrier(2, b);
+            }
+        }
+
+        // 3. Re-simulate particles + transient fields over rewind window
+        const double tStart = std::max(0.0, inst.time - (double)rewindSec);
+        uint32_t steps = (uint32_t)std::ceil((inst.time - tStart) / (double)stepDt);
+        if (!pc.offscreen && steps > 4000) steps = 4000;
+
+        LOG_INFO("WORLD resim uid=%u pack='%s': %u steps (%.2f s -> %.2f s)",
+                 inst.uid, pack.id.c_str(), steps, (float)tStart, (float)inst.time);
+
+        double tCur = tStart;
+        for (uint32_t s = 0; s < steps; ++s) {
+            const double tNext = std::min(tStart + (double)(s + 1) * (double)stepDt, inst.time);
+            if (inst.colliders) inst.colliders->Sample(tNext, sampledColliders);
+            const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
+
+            // Step transient fields
+            for (size_t fi = 0; fi < state.fields.size(); ++fi) {
+                auto& fTex = state.fields[fi];
+                if (fTex.persistent || pipes.fields[fi].psoUpdate == nullptr) continue;
+
+                cmd->SetComputeRootSignature(fieldComputeRootSig.Get());
+                cmd->SetPipelineState(pipes.fields[fi].psoUpdate.Get());
+                cmd->SetComputeRootConstantBufferView(0, pc.sceneConstants);
+                cmd->SetComputeRootConstantBufferView(2, paramsExtVa);
+                cmd->SetComputeRootDescriptorTable(5, packTexTable);
+
+                const auto cb = makeWorldCb((float)tNext, stepDt, (float)tCur, s, (uint32_t)sampledColliders.size(),
+                                            (uint32_t)state.fields.size(), (uint32_t)fi + (s == 0 ? 16u : 0u), fTex.size);
+                const D3D12_GPU_VIRTUAL_ADDRESS cbVa = AllocWorldCb(cb);
+
+                cmd->SetComputeRootConstantBufferView(1, cbVa);
+                cmd->SetComputeRootShaderResourceView(3, colVa);
+                cmd->SetComputeRootDescriptorTable(4, makeFieldTable());
+
+                fTex.Previous().Transition(cmd, kSrv);
+                fTex.Current().Transition(cmd, kUav);
+                bindFieldPrevNext(fi);
+
+                const uint32_t gx = (fTex.size + 7) / 8;
+                cmd->Dispatch(gx, gx, 1);
+
+                D3D12_RESOURCE_BARRIER uav = CD3DX12_RESOURCE_BARRIER::UAV(fTex.Current().res.Get());
+                cmd->ResourceBarrier(1, &uav);
+                fTex.Swap();
+                fTex.Previous().Transition(cmd, kSrv);   // the result just written: readable by the next steps
+            }
+
+            // Step stateful particles
+            for (size_t pi = 0; pi < state.particles.size(); ++pi) {
+                const auto& p = pack.world->particles[pi];
+                if (p.simulate.empty() || pipes.particles[pi].psoSimulate == nullptr) continue;
+                auto& pBuf = state.particles[pi];
+
+                cmd->SetComputeRootSignature(particleComputeRootSig.Get());
+                cmd->SetPipelineState(pipes.particles[pi].psoSimulate.Get());
+                cmd->SetComputeRootConstantBufferView(0, pc.sceneConstants);
+                cmd->SetComputeRootConstantBufferView(2, paramsExtVa);
+                cmd->SetComputeRootDescriptorTable(5, packTexTable);
+
+                const auto cb = makeWorldCb((float)tNext, stepDt, (float)tCur, s,
+                                            (uint32_t)sampledColliders.size(), (uint32_t)state.fields.size(),
+                                            (uint32_t)pi, pBuf.count);
+                const D3D12_GPU_VIRTUAL_ADDRESS cbVa = AllocWorldCb(cb);
+
+                cmd->SetComputeRootConstantBufferView(1, cbVa);
+                cmd->SetComputeRootShaderResourceView(3, colVa);
+                cmd->SetComputeRootDescriptorTable(4, makeFieldTable());
+                TransitionParticles(cmd, pBuf, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cmd->SetComputeRootUnorderedAccessView(6, pBuf.buffer->GetGPUVirtualAddress());
+                cmd->SetComputeRootUnorderedAccessView(7, pBuf.prevPos->GetGPUVirtualAddress());
+
+                const uint32_t gx = (pBuf.count + 63) / 64;
+                cmd->Dispatch(gx, 1, 1);
+
+                D3D12_RESOURCE_BARRIER b[2] = {
+                    CD3DX12_RESOURCE_BARRIER::UAV(pBuf.buffer.Get()),
+                    CD3DX12_RESOURCE_BARRIER::UAV(pBuf.prevPos.Get())
+                };
+                cmd->ResourceBarrier(2, b);
+            }
+            tCur = tNext;
+        }
+        state.simTime = inst.time;
+    } else {
+        // Normal live playback forward steps
+        while (state.simTime + (double)stepDt * 0.5 < inst.time) {
+            const double tNext = std::min(state.simTime + (double)stepDt, inst.time);
+            if (inst.colliders) inst.colliders->Sample(tNext, sampledColliders);
+            const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
+
+            // Step transient fields (persistent ones follow their own grid below)
+            for (size_t fi = 0; fi < state.fields.size(); ++fi) {
+                auto& fTex = state.fields[fi];
+                if (fTex.persistent || pipes.fields[fi].psoUpdate == nullptr) continue;
+
+                cmd->SetComputeRootSignature(fieldComputeRootSig.Get());
+                cmd->SetPipelineState(pipes.fields[fi].psoUpdate.Get());
+                cmd->SetComputeRootConstantBufferView(0, pc.sceneConstants);
+                cmd->SetComputeRootConstantBufferView(2, paramsExtVa);
+                cmd->SetComputeRootDescriptorTable(5, packTexTable);
+
+                const auto cb = makeWorldCb((float)tNext, stepDt, (float)state.simTime, 0,
+                                            (uint32_t)sampledColliders.size(), (uint32_t)state.fields.size(),
+                                            (uint32_t)fi, fTex.size);
+                const D3D12_GPU_VIRTUAL_ADDRESS cbVa = AllocWorldCb(cb);
+
+                cmd->SetComputeRootConstantBufferView(1, cbVa);
+                cmd->SetComputeRootShaderResourceView(3, colVa);
+                cmd->SetComputeRootDescriptorTable(4, makeFieldTable());
+
+                fTex.Previous().Transition(cmd, kSrv);
+                fTex.Current().Transition(cmd, kUav);
+                bindFieldPrevNext(fi);
+
+                const uint32_t gx = (fTex.size + 7) / 8;
+                cmd->Dispatch(gx, gx, 1);
+
+                D3D12_RESOURCE_BARRIER uav = CD3DX12_RESOURCE_BARRIER::UAV(fTex.Current().res.Get());
+                cmd->ResourceBarrier(1, &uav);
+                fTex.Swap();
+                fTex.Previous().Transition(cmd, kSrv);   // the result just written: readable by the next steps
+            }
+
+            // Step particles
+            for (size_t pi = 0; pi < state.particles.size(); ++pi) {
+                const auto& p = pack.world->particles[pi];
+                if (p.simulate.empty() || pipes.particles[pi].psoSimulate == nullptr) continue;
+                auto& pBuf = state.particles[pi];
+
+                cmd->SetComputeRootSignature(particleComputeRootSig.Get());
+                cmd->SetPipelineState(pipes.particles[pi].psoSimulate.Get());
+                cmd->SetComputeRootConstantBufferView(0, pc.sceneConstants);
+                cmd->SetComputeRootConstantBufferView(2, paramsExtVa);
+                cmd->SetComputeRootDescriptorTable(5, packTexTable);
+
+                const auto cb = makeWorldCb((float)tNext, stepDt, (float)state.simTime, 0,
+                                            (uint32_t)sampledColliders.size(), (uint32_t)state.fields.size(),
+                                            (uint32_t)pi, pBuf.count);
+                const D3D12_GPU_VIRTUAL_ADDRESS cbVa = AllocWorldCb(cb);
+
+                cmd->SetComputeRootConstantBufferView(1, cbVa);
+                cmd->SetComputeRootShaderResourceView(3, colVa);
+                cmd->SetComputeRootDescriptorTable(4, makeFieldTable());
+                TransitionParticles(cmd, pBuf, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cmd->SetComputeRootUnorderedAccessView(6, pBuf.buffer->GetGPUVirtualAddress());
+                cmd->SetComputeRootUnorderedAccessView(7, pBuf.prevPos->GetGPUVirtualAddress());
+
+                const uint32_t gx = (pBuf.count + 63) / 64;
+                cmd->Dispatch(gx, 1, 1);
+
+                D3D12_RESOURCE_BARRIER b[2] = {
+                    CD3DX12_RESOURCE_BARRIER::UAV(pBuf.buffer.Get()),
+                    CD3DX12_RESOURCE_BARRIER::UAV(pBuf.prevPos.Get())
+                };
+                cmd->ResourceBarrier(2, b);
+            }
+            state.simTime = tNext;
+        }
+        for (size_t fi = 0; fi < state.fields.size(); ++fi) {
+            auto& fTex = state.fields[fi];
+            if (!fTex.persistent || pipes.fields[fi].psoUpdate == nullptr) continue;
+            const double pDt = 1.0 / fTex.rate;
+            uint64_t k = (uint64_t)std::floor(fTex.persistentSimTime / pDt + 1e-6);
+            while ((double)(k + 1) * pDt <= inst.time + 1e-6) stepPersistent(fi, ++k, false);
+            fTex.persistentSimTime = (double)k * pDt;
+        }
+    }
+}
+
+void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, const ShaderPack& pack,
+                                   PackPipelines& pipes, InstanceState& state, bool offline) {
+    if (!pack.world) return;
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    Dx12Context& ctx = pc.ctx;
+
+    cmd->SetGraphicsRootSignature(graphicsRootSig.Get());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    const D3D12_GPU_VIRTUAL_ADDRESS paramsExtVa = AllocParamsExt(pack, inst.params);
+
+    // Pack texture table
+    D3D12_GPU_DESCRIPTOR_HANDLE packTexTable{};
+    const PackTextures::Set* ptSet = packTextures.Acquire(ctx, pack, pack.dir);
+    if (ptSet && ptSet->srv != DescriptorHeap::kInvalid) {
+        packTexTable = ctx.SrvHeap().Gpu(ptSet->srv);
+    } else if (defaultPackTexSrv != DescriptorHeap::kInvalid) {
+        packTexTable = ctx.SrvHeap().Gpu(defaultPackTexSrv);
+    }
+
+    // Field table: every field's latest result
+    if (state.fieldDesc == DescriptorHeap::kInvalid) return;
+    const D3D12_GPU_DESCRIPTOR_HANDLE fieldTable = FieldTable(ctx, state);
+
+    // Shadow table
+    D3D12_GPU_DESCRIPTOR_HANDLE shadowTable = pc.transient.SrvTable(
+        ctx, {pc.targets.shadowMap.res ? &pc.targets.shadowMap : nullptr});
+
+    std::vector<WorldCollider> sampledColliders;
+    if (inst.colliders) inst.colliders->Sample(inst.time, sampledColliders);
+    const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
+
+    const float stepDt = pack.world->step > 0.0f ? pack.world->step : (1.0f / 60.0f);
+
+    auto makeWorldCb = [&](uint32_t partIdx, uint32_t countOrGrid) {
+        WorldCbData cb{};
+        XMMATRIX mWorld = XMLoadFloat4x4(&inst.transform);
+        XMMATRIX mInvWorld = XMMatrixInverse(nullptr, mWorld);
+        XMStoreFloat4x4(&cb.localToWorld, mWorld);
+        XMStoreFloat4x4(&cb.worldToLocal, mInvWorld);
+        cb.worldTime = XMFLOAT4((float)inst.time, stepDt, (float)state.simTime, 0.0f);
+        cb.worldParams = XMFLOAT4((float)sampledColliders.size(), (float)state.fields.size(),
+                                  (float)partIdx, (float)countOrGrid);
+
+        const LightParams& lp = pc.view.light;
+        XMVECTOR L = XMVector3Normalize(XMLoadFloat3(&lp.direction));
+        XMFLOAT3 lNorm;
+        XMStoreFloat3(&lNorm, L);
+        const float hasSun = (lp.sunIntensity > 0.0f) ? 1.0f : 0.0f;
+        cb.sunDir = XMFLOAT4(-lNorm.x, -lNorm.y, -lNorm.z, hasSun);
+        cb.sunColor = XMFLOAT4(lp.color.x * lp.sunIntensity, lp.color.y * lp.sunIntensity, lp.color.z * lp.sunIntensity, pc.view.shadowDistance);
+        cb.ambient = XMFLOAT4(lp.groundColor.x, lp.groundColor.y, lp.groundColor.z, 0.0f);
+
+        for (size_t fi = 0; fi < std::min<size_t>(pack.world->fields.size(), 4); ++fi) {
+            const auto& f = pack.world->fields[fi];
+            cb.fieldExtent[fi] = XMFLOAT4((float)f.size, (float)f.size, f.extent, f.extent > 0 ? (1.0f / f.extent) : 0);
+        }
+        return cb;
+    };
+
+    // Transition fields / particle buffers to shader-resource
+    for (auto& f : state.fields) f.Previous().Transition(cmd, kSrv);
+    for (size_t pi = 0; pi < state.particles.size(); ++pi)
+        if (!pack.world->particles[pi].simulate.empty())
+            TransitionParticles(cmd, state.particles[pi], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                                              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    cmd->SetGraphicsRootConstantBufferView(0, pc.sceneConstants);
+    cmd->SetGraphicsRootConstantBufferView(2, paramsExtVa);
+    cmd->SetGraphicsRootShaderResourceView(3, colVa);
+    cmd->SetGraphicsRootDescriptorTable(4, fieldTable);
+    cmd->SetGraphicsRootDescriptorTable(5, packTexTable);
+    cmd->SetGraphicsRootDescriptorTable(8, shadowTable);
+
+    // 1. Draw Surfaces (opaque, depth write)
+    for (size_t si = 0; si < pack.world->surfaces.size(); ++si) {
+        const auto& s = pack.world->surfaces[si];
+        auto& sPipe = pipes.surfaces[si];
+        ID3D12PipelineState* pso = offline ? sPipe.psoDrawOffline.Get() : sPipe.psoDraw.Get();
+        if (!pso) continue;
+
+        uint32_t fieldIndex = 0;   // the surface's "field" by name (worldParams.z)
+        for (size_t fi = 0; fi < pack.world->fields.size(); ++fi)
+            if (pack.world->fields[fi].name == s.field) fieldIndex = (uint32_t)fi;
+        const auto cb = makeWorldCb(fieldIndex, s.grid);
+        cmd->SetGraphicsRootConstantBufferView(1, AllocWorldCb(cb));
+        cmd->SetPipelineState(pso);
+
+        const uint32_t vertexCount = s.grid * s.grid * 6;
+        cmd->DrawInstanced(vertexCount, 1, 0, 0);
+        pc.stats.drawCalls++;
+    }
+
+    // 2. Draw Particles (alpha / add, no depth write)
+    for (size_t pi = 0; pi < pack.world->particles.size(); ++pi) {
+        const auto& p = pack.world->particles[pi];
+        auto& pPipe = pipes.particles[pi];
+        auto& pBuf = state.particles[pi];
+        ID3D12PipelineState* pso = offline ? pPipe.psoDrawOffline.Get() : pPipe.psoDraw.Get();
+        if (!pso) continue;
+
+        const auto cb = makeWorldCb((uint32_t)pi, p.count);
+        cmd->SetGraphicsRootConstantBufferView(1, AllocWorldCb(cb));
+        cmd->SetPipelineState(pso);
+
+        if (!p.simulate.empty()) {
+            cmd->SetGraphicsRootShaderResourceView(6, pBuf.buffer->GetGPUVirtualAddress());
+            cmd->SetGraphicsRootShaderResourceView(7, pBuf.prevPos->GetGPUVirtualAddress());
+        }
+
+        const uint32_t vertexCount = p.count * 6;
+        cmd->DrawInstanced(vertexCount, 1, 0, 0);
+        pc.stats.drawCalls++;
+    }
+}
+
+// ---- WorldPass public interface -------------------------------------------------------------
+
+WorldPass::WorldPass() : impl_(std::make_unique<Impl>()) {}
+WorldPass::~WorldPass() = default;
+
+bool WorldPass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) {
+    return impl_->Init(ctx, shaderDir, msaa);
+}
+
+void WorldPass::OnResize(Dx12Context& ctx, RenderTargets& targets) {
+    impl_->EnsureRings(ctx);
+}
+
+void WorldPass::ReleaseTargets(Dx12Context& ctx) {
+    impl_->packTextures.Clear(ctx);
+    for (auto& [k, inst] : impl_->instances) {
+        for (auto& f : inst.fields) {
+            f.texA.Release(ctx);
+            f.texB.Release(ctx);
+        }
+        for (auto& b : inst.particles) {
+            if (b.buffer) ctx.DeferRelease(b.buffer);
+            if (b.prevPos) ctx.DeferRelease(b.prevPos);
+        }
+        if (inst.fieldDesc != DescriptorHeap::kInvalid)
+            ctx.SrvHeap().Free(inst.fieldDesc, Impl::InstanceState::kFieldDescCount);
+    }
+    impl_->instances.clear();
+}
+
+void WorldPass::Execute(PassContext& pc) {
+    // Zero-cost rule: when no world instances exist, return immediately with zero GPU work
+    if (pc.view.worlds.empty()) return;
+
+    // View shading: unlit / wireframe / quad views skip world drawing per spec
+    if (pc.settings.shading == ViewShading::Wireframe || pc.settings.shading == ViewShading::Unlit ||
+        !pc.view.extraViews.empty()) {
+        return;
+    }
+
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    Dx12Context& ctx = pc.ctx;
+    RenderTargets& t = pc.targets;
+
+    // 1. Simulation Phase (Compute)
+    for (const WorldInstance& inst : pc.view.worlds) {
+        const ShaderPack* pack = ShaderPacks().Find(inst.pack);
+        if (!pack || pack->type != PackType::World || !pack->world) continue;
+
+        auto* pipes = impl_->GetOrCompilePipelines(ctx, *pack);
+        if (!pipes) continue;
+
+        auto& state = impl_->GetOrCreateInstanceState(ctx, inst, *pack);
+        impl_->SimulateInstance(pc, inst, *pack, *pipes, state);
+    }
+
+    // 2. Render Phase (Graphics)
+    // Setup Render Targets
+    if (pc.path == RenderPath::Raster || pc.path == RenderPath::RayTraced) {
+        t.colorMsaa.Transition(cmd, kRt);
+        t.normalMsaa.Transition(cmd, kRt);
+        t.velocityMsaa.Transition(cmd, kRt);
+        t.depthMsaa.Transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] = {
+            ctx.RtvHeap().Cpu(t.colorMsaa.rtv),
+            ctx.RtvHeap().Cpu(t.normalMsaa.rtv),
+            ctx.RtvHeap().Cpu(t.velocityMsaa.rtv)
+        };
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.DsvHeap().Cpu(t.depthMsaa.dsv);
+        cmd->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
+
+        const float* r = pc.view.mainRect;
+        const float px = std::floor(r[0] * (float)t.width), py = std::floor(r[1] * (float)t.height);
+        const float pw = std::floor((r[0] + r[2]) * (float)t.width) - px;
+        const float ph = std::floor((r[1] + r[3]) * (float)t.height) - py;
+        D3D12_VIEWPORT viewport{px, py, pw, ph, 0.0f, 1.0f};
+        D3D12_RECT scissor{(LONG)px, (LONG)py, (LONG)(px + pw), (LONG)(py + ph)};
+        cmd->RSSetViewports(1, &viewport);
+        cmd->RSSetScissorRects(1, &scissor);
+
+        for (const WorldInstance& inst : pc.view.worlds) {
+            const ShaderPack* pack = ShaderPacks().Find(inst.pack);
+            if (!pack || pack->type != PackType::World || !pack->world) continue;
+
+            auto* pipes = impl_->GetOrCompilePipelines(ctx, *pack);
+            if (!pipes) continue;
+
+            auto& state = impl_->GetOrCreateInstanceState(ctx, inst, *pack);
+            impl_->DrawInstance(pc, inst, *pack, *pipes, state, false);
+        }
+    } else if (pc.path == RenderPath::PathTraced && t.ptEdges) {
+        // In PathTraced mode, ScenePass::DrawPtEdges prepared colorMsaa, normalMsaa, velocityMsaa, depthMsaa
+        t.colorMsaa.Transition(cmd, kRt);
+        t.normalMsaa.Transition(cmd, kRt);
+        t.velocityMsaa.Transition(cmd, kRt);
+        t.depthMsaa.Transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] = {
+            ctx.RtvHeap().Cpu(t.colorMsaa.rtv),
+            ctx.RtvHeap().Cpu(t.normalMsaa.rtv),
+            ctx.RtvHeap().Cpu(t.velocityMsaa.rtv)
+        };
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.DsvHeap().Cpu(t.depthMsaa.dsv);
+        cmd->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
+
+        const float* r = pc.view.mainRect;
+        const float px = std::floor(r[0] * (float)t.width), py = std::floor(r[1] * (float)t.height);
+        const float pw = std::floor((r[0] + r[2]) * (float)t.width) - px;
+        const float ph = std::floor((r[1] + r[3]) * (float)t.height) - py;
+        D3D12_VIEWPORT viewport{px, py, pw, ph, 0.0f, 1.0f};
+        D3D12_RECT scissor{(LONG)px, (LONG)py, (LONG)(px + pw), (LONG)(py + ph)};
+        cmd->RSSetViewports(1, &viewport);
+        cmd->RSSetScissorRects(1, &scissor);
+
+        for (const WorldInstance& inst : pc.view.worlds) {
+            const ShaderPack* pack = ShaderPacks().Find(inst.pack);
+            if (!pack || pack->type != PackType::World || !pack->world) continue;
+
+            auto* pipes = impl_->GetOrCompilePipelines(ctx, *pack);
+            if (!pipes) continue;
+
+            auto& state = impl_->GetOrCreateInstanceState(ctx, inst, *pack);
+            impl_->DrawInstance(pc, inst, *pack, *pipes, state, false);
+        }
+    }
+}
+
+void WorldPass::DrawOffline(PassContext& pc, const Texture& edgeColorMsaa, const Texture& edgeDepthMsaa) {
+    if (pc.view.worlds.empty()) return;
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    Dx12Context& ctx = pc.ctx;
+
+    // Simulate instances
+    for (const WorldInstance& inst : pc.view.worlds) {
+        const ShaderPack* pack = ShaderPacks().Find(inst.pack);
+        if (!pack || pack->type != PackType::World || !pack->world) continue;
+
+        auto* pipes = impl_->GetOrCompilePipelines(ctx, *pack);
+        if (!pipes) continue;
+
+        auto& state = impl_->GetOrCreateInstanceState(ctx, inst, *pack);
+        impl_->SimulateInstance(pc, inst, *pack, *pipes, state);
+    }
+
+    // Set render targets for offline edge layer (1 RTV, 4 MSAA)
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = ctx.RtvHeap().Cpu(edgeColorMsaa.rtv);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.DsvHeap().Cpu(edgeDepthMsaa.dsv);
+    cmd->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+
+    D3D12_VIEWPORT vp{0.0f, 0.0f, (float)edgeColorMsaa.width, (float)edgeColorMsaa.height, 0.0f, 1.0f};
+    D3D12_RECT sc{0, 0, (LONG)edgeColorMsaa.width, (LONG)edgeColorMsaa.height};
+    cmd->RSSetViewports(1, &vp);
+    cmd->RSSetScissorRects(1, &sc);
+
+    for (const WorldInstance& inst : pc.view.worlds) {
+        const ShaderPack* pack = ShaderPacks().Find(inst.pack);
+        if (!pack || pack->type != PackType::World || !pack->world) continue;
+
+        auto* pipes = impl_->GetOrCompilePipelines(ctx, *pack);
+        if (!pipes) continue;
+
+        auto& state = impl_->GetOrCreateInstanceState(ctx, inst, *pack);
+        impl_->DrawInstance(pc, inst, *pack, *pipes, state, true);
+    }
+}
+
+} // namespace mmdx

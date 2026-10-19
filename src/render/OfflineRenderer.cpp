@@ -229,6 +229,7 @@ struct OfflineRenderer::Impl {
               OfflineProgress& pg);
     void Finish(PassContext& pc);
     void Prepass(PassContext& pc, OfflineProgress& pg);
+    WorldPass worldPass;
 };
 
 D3D12_GPU_DESCRIPTOR_HANDLE OfflineRenderer::Impl::GiTable(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t) {
@@ -533,6 +534,10 @@ void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, TransientD
             cmd->SetGraphicsRoot32BitConstants(4, 4, edgeCb, 0);
             cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         }
+    }
+    if (!view.worlds.empty()) {
+        PassContext spc = Pc(cmd, t, b, rt);
+        worldPass.DrawOffline(spc, edgeColorMsaa, edgeDepthMsaa);
     }
     edgeColorMsaa.Transition(cmd, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
     edgeLayer.Transition(cmd, D3D12_RESOURCE_STATE_RESOLVE_DEST);
@@ -1175,6 +1180,7 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
     if (!m.counter.Create(ctx, 1, 1, DXGI_FORMAT_R32_UINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, kUav,
                           L"offline.counter"))
         return false;
+    m.worldPass.CreatePipelines(ctx, shaderDir, 4);
     return true;
 }
 
@@ -1207,6 +1213,7 @@ void OfflineRenderer::Shutdown() {
     m.packEdgePsos.clear();
     m.presentRootSig.Reset();
     m.presentPso.Reset();
+    m.worldPass.ReleaseTargets(ctx);
     m.list.Reset();
     m.alloc.Reset();
     m.ptVariants.Clear(m.ctx);

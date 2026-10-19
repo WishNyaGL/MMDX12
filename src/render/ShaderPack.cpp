@@ -33,6 +33,16 @@ bool ParseClass(const std::string& s, PackClass& out) {
     return false;
 }
 
+bool IsValidHlslIdentifier(const std::string& s) {
+    if (s.empty() || s.size() > 64) return false;
+    if (s[0] >= '0' && s[0] <= '9') return false;
+    for (char c : s) {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+            return false;
+    }
+    return true;
+}
+
 std::string Str(const nlohmann::json& j, const char* key) {
     auto it = j.find(key);
     return it != j.end() && it->is_string() ? it->get<std::string>() : std::string();
@@ -369,6 +379,7 @@ const char* PackInputName(PackInput input) {
 }
 
 bool ShaderPack::HasCap(std::string_view cap) const {
+    if (type == PackType::World && cap == "params.ext") return true;
     for (const std::string& r : requiresCaps)
         if (r == cap) return true;
     for (const PackCapability& c : kPackCapabilities)
@@ -490,6 +501,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     out.hasPtSurface = false;
     out.type = PackType::Surface;
     out.look.reset();
+    out.world.reset();
     out.stage = PackEffectStage::Post;
     out.stateFloats = 0;
     out.passes.clear();
@@ -536,7 +548,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     if (auto it = j.find("format"); it != j.end() && !it->is_number())
         problems.push_back("format must be a number");
 
-    // type: "surface" (default), "effect" or "look"; effect / look packs pick their content with "stage" / "look"
+    // type: "surface" (default), "effect", "look" or "world"
     const std::string type = ToLowerAscii(Str(j, "type"));
     if (type.empty() || type == "surface") {
         out.type = PackType::Surface;
@@ -551,8 +563,10 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
             problems.push_back("stage '" + Str(j, "stage") + "' must be \"post\" or \"pre-bloom\"");
     } else if (type == "look") {
         out.type = PackType::Look;
+    } else if (type == "world") {
+        out.type = PackType::World;
     } else {
-        problems.push_back("type '" + Str(j, "type") + "' must be \"surface\", \"effect\" or \"look\"");
+        problems.push_back("type '" + Str(j, "type") + "' must be \"surface\", \"effect\", \"look\" or \"world\"");
     }
 
     // look: the LookData block of a look pack (render/LookPreset.h); a "look" key on any other pack is a problem
@@ -568,6 +582,170 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
         }
     } else if (out.type == PackType::Look) {
         problems.push_back("look packs need a \"look\" object");
+    }
+
+    // world: the PackWorldData block of a world pack
+    if (auto it = j.find("world"); it != j.end() && !it->is_null()) {
+        if (out.type != PackType::World) {
+            problems.push_back("world is only supported for world packs");
+        } else if (!it->is_object()) {
+            problems.push_back("world must be an object");
+        } else {
+            auto data = std::make_shared<PackWorldData>();
+            if (auto s = it->find("step"); s != it->end() && s->is_number()) {
+                float st = s->get<float>();
+                if (st < 1.0f / 240.0f - 1e-6f || st > 1.0f / 15.0f + 1e-6f)
+                    problems.push_back("world.step must be between 1/240 and 1/15 (" + std::to_string(st) + ")");
+                else
+                    data->step = st;
+            }
+            if (auto r = it->find("rewind"); r != it->end() && r->is_number()) {
+                float rw = r->get<float>();
+                if (rw < 0.0f || rw > 20.0f)
+                    problems.push_back("world.rewind must be between 0 and 20 (" + std::to_string(rw) + ")");
+                else
+                    data->rewind = rw;
+            }
+            if (auto p = it->find("particles"); p != it->end()) {
+                if (!p->is_array()) {
+                    problems.push_back("world.particles must be an array");
+                } else if (p->size() > kPackWorldMaxParticles) {
+                    problems.push_back("world.particles cannot exceed " + std::to_string(kPackWorldMaxParticles) + " systems");
+                } else {
+                    for (size_t pi = 0; pi < p->size(); ++pi) {
+                        const auto& pj = (*p)[pi];
+                        if (!pj.is_object()) {
+                            problems.push_back("world.particles[" + std::to_string(pi) + "] must be an object");
+                            continue;
+                        }
+                        PackWorldParticleSystem ps;
+                        ps.name = Str(pj, "name");
+                        if (ps.name.empty()) problems.push_back("world.particles[" + std::to_string(pi) + "].name is required");
+                        if (auto c = pj.find("count"); c != pj.end() && c->is_number_integer()) {
+                            int64_t cnt = c->get<int64_t>();
+                            if (cnt < 1 || cnt > (int64_t)kPackWorldMaxParticleCount)
+                                problems.push_back("particle count must be 1.." + std::to_string(kPackWorldMaxParticleCount));
+                            else
+                                ps.count = (uint32_t)cnt;
+                        } else {
+                            problems.push_back("particle count is required (1.." + std::to_string(kPackWorldMaxParticleCount) + ")");
+                        }
+                        std::string blendStr = ToLowerAscii(Str(pj, "blend"));
+                        if (blendStr == "add") ps.blend = PackWorldParticleSystem::Blend::Add;
+                        else if (blendStr == "alpha" || blendStr.empty()) ps.blend = PackWorldParticleSystem::Blend::Alpha;
+                        else problems.push_back("particle blend must be 'alpha' or 'add'");
+
+                        ps.simulate = Str(pj, "simulate");
+                        ps.spawn = Str(pj, "spawn");
+                        if (ps.simulate.empty() && ps.spawn.empty())
+                            problems.push_back("particle system '" + ps.name + "' must declare 'simulate' or 'spawn'");
+                        if (!ps.simulate.empty() && !ps.spawn.empty())
+                            problems.push_back("particle system '" + ps.name + "' cannot declare both 'simulate' and 'spawn'");
+                        if (!ps.simulate.empty() && !IsValidHlslIdentifier(ps.simulate))
+                            problems.push_back("particle simulate function '" + ps.simulate + "' must be an HLSL identifier");
+                        if (!ps.spawn.empty() && !IsValidHlslIdentifier(ps.spawn))
+                            problems.push_back("particle spawn function '" + ps.spawn + "' must be an HLSL identifier");
+
+                        ps.shade = Str(pj, "shade");
+                        if (ps.shade.empty())
+                            problems.push_back("particle system '" + ps.name + "' must declare 'shade'");
+                        else if (!IsValidHlslIdentifier(ps.shade))
+                            problems.push_back("particle shade function '" + ps.shade + "' must be an HLSL identifier");
+
+                        if (auto sz = pj.find("size"); sz != pj.end() && sz->is_array() && sz->size() >= 2) {
+                            ps.sizeMin = (*sz)[0].is_number() ? (*sz)[0].get<float>() : 0.0f;
+                            ps.sizeMax = (*sz)[1].is_number() ? (*sz)[1].get<float>() : 1.0f;
+                        }
+                        data->particles.push_back(std::move(ps));
+                    }
+                }
+            }
+            if (auto f = it->find("fields"); f != it->end()) {
+                if (!f->is_array()) {
+                    problems.push_back("world.fields must be an array");
+                } else if (f->size() > kPackWorldMaxFields) {
+                    problems.push_back("world.fields cannot exceed " + std::to_string(kPackWorldMaxFields) + " grids");
+                } else {
+                    for (size_t fi = 0; fi < f->size(); ++fi) {
+                        const auto& fj = (*f)[fi];
+                        if (!fj.is_object()) {
+                            problems.push_back("world.fields[" + std::to_string(fi) + "] must be an object");
+                            continue;
+                        }
+                        PackWorldField fld;
+                        fld.name = Str(fj, "name");
+                        if (fld.name.empty()) problems.push_back("world.fields[" + std::to_string(fi) + "].name is required");
+                        if (auto sz = fj.find("size"); sz != fj.end() && sz->is_number_integer()) {
+                            int64_t s = sz->get<int64_t>();
+                            if (s < 64 || s > 2048)
+                                problems.push_back("field size must be 64..2048 (" + std::to_string(s) + ")");
+                            else
+                                fld.size = (uint32_t)s;
+                        }
+                        if (auto ex = fj.find("extent"); ex != fj.end() && ex->is_number())
+                            fld.extent = std::max(0.01f, ex->get<float>());
+                        std::string fmtStr = ToLowerAscii(Str(fj, "format"));
+                        if (fmtStr == "r16f") fld.format = PackWorldField::Format::R16F;
+                        else if (fmtStr == "rg16f") fld.format = PackWorldField::Format::RG16F;
+                        else if (fmtStr == "rgba16f" || fmtStr.empty()) fld.format = PackWorldField::Format::RGBA16F;
+                        else problems.push_back("field format must be 'r16f', 'rg16f', or 'rgba16f'");
+
+                        if (auto p = fj.find("persistent"); p != fj.end() && p->is_boolean())
+                            fld.persistent = p->get<bool>();
+                        if (auto rt = fj.find("rate"); rt != fj.end() && rt->is_number())
+                            fld.rate = std::max(0.1f, rt->get<float>());
+                        fld.update = Str(fj, "update");
+                        if (fld.update.empty())
+                            problems.push_back("field '" + fld.name + "' must declare 'update'");
+                        else if (!IsValidHlslIdentifier(fld.update))
+                            problems.push_back("field update function '" + fld.update + "' must be an HLSL identifier");
+
+                        data->fields.push_back(std::move(fld));
+                    }
+                }
+            }
+            if (auto s = it->find("surfaces"); s != it->end()) {
+                if (!s->is_array()) {
+                    problems.push_back("world.surfaces must be an array");
+                } else if (s->size() > kPackWorldMaxSurfaces) {
+                    problems.push_back("world.surfaces cannot exceed " + std::to_string(kPackWorldMaxSurfaces) + " surfaces");
+                } else {
+                    for (size_t si = 0; si < s->size(); ++si) {
+                        const auto& sj = (*s)[si];
+                        if (!sj.is_object()) {
+                            problems.push_back("world.surfaces[" + std::to_string(si) + "] must be an object");
+                            continue;
+                        }
+                        PackWorldSurface srf;
+                        srf.field = Str(sj, "field");
+                        if (srf.field.empty()) problems.push_back("world.surfaces[" + std::to_string(si) + "].field is required");
+                        if (auto g = sj.find("grid"); g != sj.end() && g->is_number_integer()) {
+                            int64_t grid = g->get<int64_t>();
+                            if (grid < 16 || grid > 512)
+                                problems.push_back("surface grid must be 16..512 (" + std::to_string(grid) + ")");
+                            else
+                                srf.grid = (uint32_t)grid;
+                        }
+                        srf.height = Str(sj, "height");
+                        if (srf.height.empty())
+                            problems.push_back("surface must declare 'height'");
+                        else if (!IsValidHlslIdentifier(srf.height))
+                            problems.push_back("surface height function '" + srf.height + "' must be an HLSL identifier");
+
+                        srf.shade = Str(sj, "shade");
+                        if (srf.shade.empty())
+                            problems.push_back("surface must declare 'shade'");
+                        else if (!IsValidHlslIdentifier(srf.shade))
+                            problems.push_back("surface shade function '" + srf.shade + "' must be an HLSL identifier");
+
+                        data->surfaces.push_back(std::move(srf));
+                    }
+                }
+            }
+            out.world = std::move(data);
+        }
+    } else if (out.type == PackType::World) {
+        problems.push_back("world packs need a \"world\" object");
     }
 
     out.name = Text(j, "name");
@@ -651,7 +829,7 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
 
     // classes: class body/skin/face/eye/hair with a match array; unknown classes are a problem
     if (auto it = j.find("classes"); it != j.end()) {
-        if (out.type == PackType::Look) problems.push_back("classes are not supported for look packs");
+        if (out.type == PackType::Look || out.type == PackType::World) problems.push_back("classes are not supported for this pack type");
     }
     if (auto it = j.find("classes"); it != j.end() && it->is_array()) {
         for (const auto& r : *it) {
@@ -886,7 +1064,8 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
         }
     }
 
-    // textures: at most kPackMaxTextures, optional extra textures the pack's shading samples
+    // textures: at most kPackMaxTextures (or kPackMaxTexturesWorld for world packs)
+    const uint32_t maxTextures = (out.type == PackType::World) ? kPackMaxTexturesWorld : kPackMaxTextures;
     if (auto it = j.find("textures"); it != j.end()) {
         if (!it->is_array())
             problems.push_back("textures must be an array");
@@ -896,9 +1075,9 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                     problems.push_back("textures entries must be objects");
                     continue;
                 }
-                if (out.textures.size() == kPackMaxTextures) {
+                if (out.textures.size() == maxTextures) {
                     LOG_WARN("shader pack %s: more than %u textures, the rest are ignored", out.id.c_str(),
-                             kPackMaxTextures);
+                             maxTextures);
                     break;
                 }
                 PackTexture t;
@@ -1085,10 +1264,12 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     out.preview = pickPreview(L"preview");
     out.previewBefore = pickPreview(L"preview_before");
 
-    // the pack's shader file must match its type (an effect pack implements PackEffect in effect.hlsl; a look pack
-    // needs no shader and is never compiled)
+    // the pack's shader file must match its type (an effect pack implements PackEffect in effect.hlsl; a world pack
+    // implements world functions in world.hlsl; a look pack needs no shader and is never compiled)
     if (out.type == PackType::Effect) {
         if (!fs::is_regular_file(dir / L"effect.hlsl", ec)) problems.push_back("effect packs need effect.hlsl");
+    } else if (out.type == PackType::World) {
+        if (!fs::is_regular_file(dir / L"world.hlsl", ec)) problems.push_back("world packs need world.hlsl");
     } else if (out.type == PackType::Surface) {
         if (!fs::is_regular_file(dir / L"surface.hlsl", ec)) {
             problems.push_back("surface.hlsl is missing");

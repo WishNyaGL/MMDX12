@@ -14,7 +14,8 @@ class PackTextures {
 public:
     struct Set {
         bool loaded = false;
-        uint32_t srv = DescriptorHeap::kInvalid;   // kPackMaxTextures consecutive SRVs in ctx.SrvHeap()
+        uint32_t capacity = kPackMaxTextures;
+        uint32_t srv = DescriptorHeap::kInvalid;   // capacity consecutive SRVs in ctx.SrvHeap()
         ComPtr<ID3D12Resource> white;              // 1x1 neutral fallback (kept alive with the SRVs)
         std::vector<ComPtr<ID3D12Resource>> tex;
     };

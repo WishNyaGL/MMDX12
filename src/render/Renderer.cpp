@@ -174,6 +174,7 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     passes_.push_back(std::make_unique<MmeShadowPass>());
     passes_.push_back(std::make_unique<MmeOffscreenPass>());
     passes_.push_back(std::make_unique<ScenePass>());
+    passes_.push_back(std::make_unique<WorldPass>());
     passes_.push_back(std::make_unique<ResolvePass>());
     passes_.push_back(std::make_unique<PathTracePass>());
     passes_.push_back(std::make_unique<SsaoPass>());

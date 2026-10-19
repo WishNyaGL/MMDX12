@@ -823,7 +823,7 @@ void ScenePass::DrawPtEdges(PassContext& pc) {
     if (pc.mme && pc.mmeSkin)
         for (GpuModel* model : pc.view.models)
             if (model && model->HasMmeEffects()) { mmeAny = true; break; }
-    if (!pc.settings.drawEdges && !mmeAny) return;
+    if (!pc.settings.drawEdges && !mmeAny && pc.view.worlds.empty()) return;
 
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     Dx12Context& ctx = pc.ctx;

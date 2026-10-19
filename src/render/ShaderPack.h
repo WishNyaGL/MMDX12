@@ -36,7 +36,52 @@ using PackParamValues = std::array<float, kPackMaxParams>;
 
 // What a pack does: replace the character material shading (surface.hlsl, default; every v1/v2 pack) or a whole-screen
 // effect (effect.hlsl, PackEffect in effect_api.hlsli, one entry of the user's effect stack).
-enum class PackType : uint8_t { Surface = 0, Effect, Look };
+enum class PackType : uint8_t { Surface = 0, Effect, Look, World };
+
+inline constexpr uint32_t kPackMaxTexturesWorld = 32;
+inline constexpr uint32_t kPackWorldMaxParticles = 8;
+inline constexpr uint32_t kPackWorldMaxFields = 4;
+inline constexpr uint32_t kPackWorldMaxSurfaces = 2;
+inline constexpr uint32_t kPackWorldMaxParticleCount = 262144;
+
+struct PackWorldParticleSystem {
+    std::string name;
+    uint32_t count = 0;   // 1 .. 262144
+    enum class Blend : uint8_t { Alpha = 0, Add };
+    Blend blend = Blend::Alpha;
+    std::string simulate; // stateful: void <fn>(inout PackParticle p, PackSimInput s)
+    std::string spawn;    // stateless: PackParticle <fn>(uint id, float t)
+    std::string shade;    // float4 <fn>(PackParticleShadeIn i)
+    float sizeMin = 0.0f;
+    float sizeMax = 1.0f;
+};
+
+struct PackWorldField {
+    std::string name;
+    uint32_t size = 256;  // 64 .. 2048 texels
+    float extent = 10.0f; // world units, centred on entity origin
+    enum class Format : uint8_t { R16F = 0, RG16F, RGBA16F };
+    Format format = Format::RGBA16F;
+    bool persistent = false;
+    float rate = 10.0f;   // steps per second (default 10 for persistent)
+    std::string update;   // float4 <fn>(PackFieldInput f)
+};
+
+struct PackWorldSurface {
+    std::string field;    // name of field
+    uint32_t grid = 64;   // 16 .. 512 quads per side
+    std::string height;   // float <fn>(PackSurfaceIn i)
+    std::string shade;    // PackSurfaceOut <fn>(PackSurfaceShadeIn i)
+};
+
+struct PackWorldData {
+    float step = 1.0f / 60.0f; // 1/240 .. 1/15, default 1/60
+    float rewind = 4.0f;       // 0 .. 20, default 4
+    std::vector<PackWorldParticleSystem> particles; // up to 8
+    std::vector<PackWorldField> fields;             // up to 4
+    std::vector<PackWorldSurface> surfaces;         // up to 2
+};
+
 // Where an effect pack injects ("stage"): "pre-bloom" (linear HDR before BloomPass) or "post" (default; after
 // PostPass / tonemap, display-referred sRGB into the LDR target).
 enum class PackEffectStage : uint8_t { Post = 0, PreBloom };
@@ -236,6 +281,7 @@ struct ShaderPack {
     // "type": "surface" (default; material shading) or "effect" (PackEffect; pack.json "stage" = pre-bloom / post)
     PackType type = PackType::Surface;
     std::shared_ptr<const LookData> look;            // look packs: the parsed "look" block
+    std::shared_ptr<const PackWorldData> world;      // world packs: the parsed "world" block
     PackEffectStage stage = PackEffectStage::Post;   // effect packs only
     uint32_t stateFloats = 0;                        // effect packs only: "state": { "floats": N } (1..16)
     // effect packs only (API v5): "passes" = intermediate passes that run before PackEffect, in order. Each draws

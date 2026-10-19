@@ -622,4 +622,23 @@ private:
     ComPtr<ID3D12RootSignature> rootSig_;
 };
 
+class WorldPass final : public IRenderPass {
+public:
+    WorldPass();
+    ~WorldPass() override;
+    const char* Name() const override { return "World"; }
+    bool CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) override;
+    void OnResize(Dx12Context& ctx, RenderTargets& targets) override;
+    void ReleaseTargets(Dx12Context& ctx) override;
+    void Execute(PassContext& pc) override;
+
+    // Offline GI renderer draws world surfaces and particles into edgeColorMsaa / edgeDepthMsaa
+    void DrawOffline(PassContext& pc, const Texture& edgeColorMsaa, const Texture& edgeDepthMsaa);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 } // namespace mmdx
+

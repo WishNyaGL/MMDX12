@@ -55,7 +55,7 @@ bool HasReparsePoint(const fs::path& dir) {
 }
 
 // The pack folder's files with the install limits. Prints every problem; false on any.
-bool CheckFiles(const fs::path& root) {
+bool CheckFiles(const fs::path& root, const ShaderPack& pack) {
     std::vector<fs::path> files;
     uint64_t total = 0;
     bool ok = true;
@@ -80,8 +80,9 @@ bool CheckFiles(const fs::path& root) {
         }
         total += size;
     }
-    if (total > 32ull << 20) {
-        printf("  [problem] pack larger than 32 MB (%.1f MB)\n", (double)total / (1024.0 * 1024.0));
+    const uint64_t maxTotal = (pack.type == mmdx::PackType::World) ? (64ull << 20) : (32ull << 20);
+    if (total > maxTotal) {
+        printf("  [problem] pack larger than %u MB (%.1f MB)\n", (uint32_t)(maxTotal >> 20), (double)total / (1024.0 * 1024.0));
         ok = false;
     }
     printf("  files: %zu (%.2f MB)\n", files.size(), (double)total / (1024.0 * 1024.0));
@@ -188,6 +189,31 @@ bool PrintManifest(const ShaderPack& pack, const std::string& error) {
             for (const mmdx::LookPackRef& ref : look.packs)
                 printf("  look pack: %s%s%s\n", ref.id.c_str(), ref.minVersion.empty() ? "" : " min ",
                        ref.minVersion.empty() ? "" : ref.minVersion.c_str());
+        }
+    } else if (pack.type == mmdx::PackType::World) {
+        printf("  type: world\n");
+        if (pack.world) {
+            printf("  world.step: %.4f s\n", pack.world->step);
+            printf("  world.rewind: %.1f s\n", pack.world->rewind);
+            for (size_t pi = 0; pi < pack.world->particles.size(); ++pi) {
+                const auto& ps = pack.world->particles[pi];
+                printf("  particle %zu: %s (count %u, %s, %s, shade %s, size [%.2f, %.2f])\n",
+                       pi, ps.name.c_str(), ps.count, ps.blend == mmdx::PackWorldParticleSystem::Blend::Add ? "add" : "alpha",
+                       ps.simulate.empty() ? ("spawn " + ps.spawn).c_str() : ("simulate " + ps.simulate).c_str(),
+                       ps.shade.c_str(), ps.sizeMin, ps.sizeMax);
+            }
+            for (size_t fi = 0; fi < pack.world->fields.size(); ++fi) {
+                const auto& fld = pack.world->fields[fi];
+                printf("  field %zu: %s (size %u, extent %.1f, %s, %s, update %s)\n",
+                       fi, fld.name.c_str(), fld.size, fld.extent,
+                       fld.format == mmdx::PackWorldField::Format::R16F ? "r16f" : fld.format == mmdx::PackWorldField::Format::RG16F ? "rg16f" : "rgba16f",
+                       fld.persistent ? "persistent" : "transient", fld.update.c_str());
+            }
+            for (size_t si = 0; si < pack.world->surfaces.size(); ++si) {
+                const auto& srf = pack.world->surfaces[si];
+                printf("  surface %zu: field %s (grid %u, height %s, shade %s)\n",
+                       si, srf.field.c_str(), srf.grid, srf.height.c_str(), srf.shade.c_str());
+            }
         }
     } else {
         printf("  type: surface\n");
@@ -310,8 +336,9 @@ bool CheckTextures(const ShaderPack& pack, const fs::path& dir) {
         }
     }
     printf("  textures: %zu, %.2f MB total\n", pack.textures.size(), (double)total / (1024.0 * 1024.0));
-    if (total > 32ull << 20) {
-        printf("  [problem] textures larger than 32 MB (%.1f MB)\n", (double)total / (1024.0 * 1024.0));
+    const uint64_t maxTotal = (pack.type == mmdx::PackType::World) ? (64ull << 20) : (32ull << 20);
+    if (total > maxTotal) {
+        printf("  [problem] textures larger than %u MB (%.1f MB)\n", (uint32_t)(maxTotal >> 20), (double)total / (1024.0 * 1024.0));
         ok = false;
     }
     return ok;
@@ -322,7 +349,9 @@ bool CheckTextures(const ShaderPack& pack, const fs::path& dir) {
 void CheckTextureIndices(const ShaderPack& pack, const fs::path& dir, bool& ok) {
     std::error_code ec;
     const uint32_t count = (uint32_t)pack.textures.size();
-    const wchar_t* shaderFile = pack.type == mmdx::PackType::Effect ? L"effect.hlsl" : L"surface.hlsl";
+    const wchar_t* shaderFile = pack.type == mmdx::PackType::Effect ? L"effect.hlsl"
+                              : pack.type == mmdx::PackType::World  ? L"world.hlsl"
+                                                                    : L"surface.hlsl";
     if (fs::is_regular_file(dir / shaderFile, ec)) {
         FILE* f = _wfopen((dir / shaderFile).c_str(), L"rb");
         if (f) {
@@ -510,7 +539,7 @@ int wmain(int argc, wchar_t** argv) {
         } catch (...) {}
     }
     ok = PrintManifest(pack, error) && ok;
-    ok = CheckFiles(dir) && ok;
+    ok = CheckFiles(dir, pack) && ok;
     ok = CheckTextures(pack, dir) && ok;
     CheckTextureIndices(pack, dir, ok);
 
@@ -519,6 +548,99 @@ int wmain(int argc, wchar_t** argv) {
         const wchar_t* packFile = effect ? L"effect.hlsl" : L"surface.hlsl";
         if (pack.type == mmdx::PackType::Look) {
             printf("compile: skipped (look packs have no shader)\n");
+        } else if (pack.type == mmdx::PackType::World) {
+            const fs::path worldHlsl = mmdx::ExecutableDir() / L"shaders" / L"world.hlsl";
+            if (!fs::is_regular_file(worldHlsl, ec)) {
+                printf("[problem] %s not found\n", mmdx::PathToUtf8(worldHlsl).c_str());
+                return 1;
+            }
+            fs::path rel = fs::relative(pack.dir / L"world.hlsl", worldHlsl.parent_path(), ec);
+            if (ec || rel.empty()) rel = pack.dir / L"world.hlsl";
+            std::string inc = mmdx::PathToUtf8(rel);
+            std::replace(inc.begin(), inc.end(), '\\', '/');
+            const std::string incDefine = "\"" + inc + "\"";
+
+            uint32_t clampMask = 0, srgbMask = 0;
+            const uint32_t texCount = (uint32_t)std::min<size_t>(pack.textures.size(), 32u);
+            for (uint32_t i = 0; i < texCount; ++i) {
+                if (pack.textures[i].clamp) clampMask |= 1u << i;
+                if (pack.textures[i].srgb) srgbMask |= 1u << i;
+            }
+            std::vector<std::pair<std::string, std::string>> baseDefines = {
+                {"MMDX_PACK", incDefine},
+                {"PACK_TEX_COUNT", std::to_string(texCount)},
+                {"PACK_TEX_CLAMP_MASK", std::to_string(clampMask) + "u"},
+                {"PACK_TEX_SRGB_MASK", std::to_string(srgbMask) + "u"},
+                {"PACK_CAP_PARAMS_EXT", "1"}
+            };
+            if (pack.world) {
+                for (const auto& ps : pack.world->particles) {
+                    if (!ps.simulate.empty()) {
+                        auto defs = baseDefines;
+                        defs.push_back({"WORLD_SIMULATE", "1"});
+                        defs.push_back({"WORLD_SIMULATE_FN", ps.simulate});
+                        printf("compile: particle %s simulate %s (cs_6_0)\n", ps.name.c_str(), ps.simulate.c_str());
+                        std::string errs;
+                        const mmdx::ComPtr blob = mmdx::CompileShaderDxc(worldHlsl, "CSWorldSimulate", "cs_6_0", defs, &errs);
+                        if (!errs.empty()) printf("%s\n", errs.c_str());
+                        if (!blob) { printf("[problem] simulate compile failed\n"); ok = false; }
+                        else { printf("compile ok (%zu bytes)\n", blob->GetBufferSize()); }
+                    }
+                    if (!ps.spawn.empty()) {
+                        auto defs = baseDefines;
+                        defs.push_back({"WORLD_SPAWN", "1"});
+                        defs.push_back({"WORLD_SPAWN_FN", ps.spawn});
+                        printf("compile: particle %s spawn %s (cs_6_0)\n", ps.name.c_str(), ps.spawn.c_str());
+                        std::string errs;
+                        const mmdx::ComPtr blob = mmdx::CompileShaderDxc(worldHlsl, "CSWorldSpawn", "cs_6_0", defs, &errs);
+                        if (!errs.empty()) printf("%s\n", errs.c_str());
+                        if (!blob) { printf("[problem] spawn compile failed\n"); ok = false; }
+                        else { printf("compile ok (%zu bytes)\n", blob->GetBufferSize()); }
+                    }
+                    if (!ps.shade.empty()) {
+                        auto defs = baseDefines;
+                        defs.push_back({"WORLD_PARTICLE", "1"});
+                        defs.push_back({"WORLD_PARTICLE_SHADE_FN", ps.shade});
+                        if (!ps.spawn.empty()) {
+                            defs.push_back({"WORLD_STATELESS", "1"});
+                            defs.push_back({"WORLD_SPAWN_FN", ps.spawn});
+                        }
+                        printf("compile: particle %s shade %s (vs_6_0 / ps_6_0)\n", ps.name.c_str(), ps.shade.c_str());
+                        std::string errs;
+                        const mmdx::ComPtr vsBlob = mmdx::CompileShaderDxc(worldHlsl, "VSWorldParticle", "vs_6_0", defs, &errs);
+                        const mmdx::ComPtr psBlob = mmdx::CompileShaderDxc(worldHlsl, "PSWorldParticle", "ps_6_0", defs, &errs);
+                        if (!errs.empty()) printf("%s\n", errs.c_str());
+                        if (!vsBlob || !psBlob) { printf("[problem] particle shade compile failed\n"); ok = false; }
+                        else { printf("compile ok (vs: %zu, ps: %zu bytes)\n", vsBlob->GetBufferSize(), psBlob->GetBufferSize()); }
+                    }
+                }
+                for (const auto& fld : pack.world->fields) {
+                    if (!fld.update.empty()) {
+                        auto defs = baseDefines;
+                        defs.push_back({"WORLD_FIELD_UPDATE", "1"});
+                        defs.push_back({"WORLD_FIELD_UPDATE_FN", fld.update});
+                        printf("compile: field %s update %s (cs_6_0)\n", fld.name.c_str(), fld.update.c_str());
+                        std::string errs;
+                        const mmdx::ComPtr blob = mmdx::CompileShaderDxc(worldHlsl, "CSWorldFieldUpdate", "cs_6_0", defs, &errs);
+                        if (!errs.empty()) printf("%s\n", errs.c_str());
+                        if (!blob) { printf("[problem] field update compile failed\n"); ok = false; }
+                        else { printf("compile ok (%zu bytes)\n", blob->GetBufferSize()); }
+                    }
+                }
+                for (const auto& srf : pack.world->surfaces) {
+                    auto defs = baseDefines;
+                    defs.push_back({"WORLD_SURFACE", "1"});
+                    defs.push_back({"WORLD_SURFACE_HEIGHT_FN", srf.height});
+                    defs.push_back({"WORLD_SURFACE_SHADE_FN", srf.shade});
+                    printf("compile: surface height %s / shade %s (vs_6_0 / ps_6_0)\n", srf.height.c_str(), srf.shade.c_str());
+                    std::string errs;
+                    const mmdx::ComPtr vsBlob = mmdx::CompileShaderDxc(worldHlsl, "VSWorldSurface", "vs_6_0", defs, &errs);
+                    const mmdx::ComPtr psBlob = mmdx::CompileShaderDxc(worldHlsl, "PSWorldSurface", "ps_6_0", defs, &errs);
+                    if (!errs.empty()) printf("%s\n", errs.c_str());
+                    if (!vsBlob || !psBlob) { printf("[problem] surface compile failed\n"); ok = false; }
+                    else { printf("compile ok (vs: %zu, ps: %zu bytes)\n", vsBlob->GetBufferSize(), psBlob->GetBufferSize()); }
+                }
+            }
         } else {
         const fs::path mmdHlsl = mmdx::ExecutableDir() / L"shaders" / (effect ? L"effect.hlsl" : L"mmd.hlsl");
         if (!fs::is_regular_file(mmdHlsl, ec)) {
