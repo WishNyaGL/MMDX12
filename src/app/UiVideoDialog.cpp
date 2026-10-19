@@ -340,7 +340,7 @@ void App::DrawVideoRenderDialog() {
                 Gap(6.0f);
                 PushFont(Font::Regular, size::Caption);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.warn));
-                ImGui::TextWrapped("%s", Tr("이 셰이더 팩은 패스 트레이싱용 셰이더가 없어 이 렌더러에서는 기본 셰이딩으로 그립니다."));
+                ImGui::TextWrapped("%s", Tr("이 표면 셰이더는 패스 트레이싱용 셰이더가 없어 이 렌더러에서는 기본 셰이딩으로 그립니다."));
                 ImGui::PopStyleColor();
                 PopFont();
             }

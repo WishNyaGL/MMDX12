@@ -104,7 +104,7 @@ void App::DrawAppBar(int activeNav) {
 
     // Primary navigation.
     ImGui::SetCursorScreenPos(ImVec2(navX, (h - Dp(38.0f)) * 0.5f));
-    const char* nav[] = {Tr("라이브러리"), Tr("셰이더"), Tr("MME"), Tr("벤치마크")};
+    const char* nav[] = {Tr("라이브러리"), Tr("이펙트"), Tr("MME"), Tr("벤치마크")};
     const char* navIcons[] = {icon::Stack, icon::Diamond, icon::Sparkle, icon::Gauge};
     int sel = activeNav;
     const bool navChanged = Segmented("##nav", nav, 4, &sel, 0.0f, 38.0f, navIcons);
@@ -848,7 +848,7 @@ void App::DrawSelect() {
             }
             if (lobbyTab_ == 1) {
             // shader pack of the selected character (saved per character; play, stills and videos use it)
-            SectionLabel(Tr("셰이더"));
+            SectionLabel(Tr("표면 셰이더"));
             if (ch) {
                 ShaderChoice choice = settings_.CharacterShader(ch->id);
                 bool shaderChanged = DrawShaderSelector("##lobbyshader", choice, colW);

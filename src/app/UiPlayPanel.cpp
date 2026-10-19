@@ -207,7 +207,7 @@ void App::DrawPlayShaderTab(float width) {
     }
     const PlayPerformerRef perf = PlayPerformerAt(playEditPerformer_);
     ShaderChoice choice = settings_.CharacterShader(perf.id);
-    SectionLabel(Tr("셰이더"));
+    SectionLabel(Tr("표면 셰이더"));
     const ModelTraits playTraits = perf.gpu ? perf.gpu->Traits() : ModelTraits{};
     bool changed = DrawShaderSelector("##playshader", choice, width, perf.gpu ? &playTraits : nullptr);
     Gap(8.0f);

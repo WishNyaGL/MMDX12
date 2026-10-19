@@ -295,7 +295,7 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
             ShaderPackRegistry& reg = ShaderPacks();
             const std::string lang = PackLanguage();
 
-            SectionLabel(Tr("셰이더 이펙트"));
+            SectionLabel(Tr("화면 효과"));
             Para(Tr("위에서 아래로 화면 효과를 차례로 적용합니다. 영상·스틸 렌더에도 같은 스택이 쓰입니다."), p.ink3, size::Caption);
             Gap(6.0f);
 
@@ -307,7 +307,7 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
                 const bool usable = pk && PackUsable(pk) && pk->type == PackType::Effect;
                 const std::string name = pk ? pk->name.Get(lang) : eff.entry.pack;
                 const char* where = !pk ? Tr("설치되어 있지 않음")
-                                    : !usable ? Tr("사용할 수 없음 · 셰이더 탭에서 확인")
+                                    : !usable ? Tr("사용할 수 없음 · 이펙트 탭에서 확인")
                                     : pk->stage == PackEffectStage::PreBloom ? Tr("블룸 앞 (HDR)") : Tr("톤맵 뒤");
                 ImGui::PushID((int)i);
                 bool on = eff.entry.enabled;
@@ -726,10 +726,10 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
                 ImGui::PopStyleVar();
             }
             if (d.effects.empty()) {
-                Para(Tr("효과가 없습니다. 효과 팩을 추가하면 위에서 아래로 차례로 적용됩니다."), p.ink3, size::Caption);
+                Para(Tr("효과가 없습니다. 화면 효과를 추가하면 위에서 아래로 차례로 적용됩니다."), p.ink3, size::Caption);
                 if (addable.empty()) {
                     Gap(6.0f);
-                    Para(Tr("효과 팩은 라이브러리 화면의 셰이더 탭 > 온라인에서 받을 수 있습니다."), p.ink3, size::Caption);
+                    Para(Tr("화면 효과는 라이브러리 화면의 이펙트 탭 > 온라인에서 받을 수 있습니다."), p.ink3, size::Caption);
                 }
             }
             if (effChanged) ++d.projectVersion;

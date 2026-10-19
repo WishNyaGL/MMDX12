@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Interactive helper over mcp_pipe for exploring the UI: a sequence of short commands in one call.
 
-    python mcp_x.py "click 플레이" "wait 30" "shot out.png" "items 셰이더" "key Escape"
+    python mcp_x.py "click 플레이" "wait 30" "shot out.png" "items 이펙트" "key Escape"
 
 Commands: click <target>[@index] | rclick <target> | hover <target> | items [query] | shot <png> [x y w h]
           | wait <frames> | key <name> | move <x> <y> | state | sleep <s> | call <tool> <json>

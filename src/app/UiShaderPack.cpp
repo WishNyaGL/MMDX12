@@ -543,8 +543,8 @@ void App::SuggestShaderPack(const GpuModel& gpu, const std::string& characterId)
         if (settings_.ShaderSuggested(p.id, characterId)) continue;
         settings_.SetShaderSuggested(p.id, characterId);
         settings_.Save(settingsPath_);
-        toast_ = {Tr("셰이더 팩 추천"),
-                  "'" + p.name.Get(PackLanguage()) + "' " + Tr("셰이더가 이 모델에 잘 맞아 보여요 · 셰이더 메뉴에서 켜 보세요"),
+        toast_ = {Tr("표면 셰이더 추천"),
+                  "'" + p.name.Get(PackLanguage()) + "' " + Tr("표면 셰이더가 이 모델에 잘 맞아 보여요 · 이펙트 메뉴에서 켜 보세요"),
                   {}, false, timeSeconds_ + 6.0};
         return;
     }
@@ -556,9 +556,9 @@ void App::CheckShaderPackErrors() {
     shaderPackErrorsSeen_ = reg.ErrorCount();
     const ShaderPack* bad = reg.Find(reg.LastErrorPack());
     toast_ = Toast{};
-    toast_.title = Tr("셰이더 팩을 적용하지 못했습니다");
+    toast_.title = Tr("표면 셰이더를 적용하지 못했습니다");
     toast_.detail = (bad ? bad->name.Get(PackLanguage()) : reg.LastErrorPack()) +
-                    Tr(" · 기본 셰이딩으로 표시합니다. 셰이더 탭에서 오류를 볼 수 있습니다");
+                    Tr(" · 기본 셰이딩으로 표시합니다. 이펙트 탭에서 오류를 볼 수 있습니다");
     toast_.error = true;
     toast_.until = timeSeconds_ + 8.0;
 }
@@ -991,7 +991,7 @@ bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width, 
     std::string sub = cur ? "v" + cur->version + (cur->authors.empty() ? "" : "  ·  " + PackAuthorLine(cur->authors))
                           : (choice.pack.empty() ? std::string(Tr("앱 기본 셰이딩")) : std::string(Tr("설치되어 있지 않음")));
     const bool problem = (cur && !PackUsable(cur)) || (!cur && !choice.pack.empty());
-    if (cur && !PackUsable(cur)) sub = Tr("사용할 수 없음 · 셰이더 탭에서 확인");
+    if (cur && !PackUsable(cur)) sub = Tr("사용할 수 없음 · 이펙트 탭에서 확인");
     TextEllipsis(dl, Font::Semibold, size::Body, ImVec2(tx, a.y + Dp(9.0f)), tr, p.ink, title.c_str());
     TextEllipsis(dl, Font::Regular, size::Caption, ImVec2(tx, a.y + Dp(30.0f)), tr, problem ? p.warn : p.ink3, sub.c_str());
     Icon(dl, icon::CaretDown, 14.0f, ImVec2(b.x - Dp(16.0f), (a.y + b.y) * 0.5f), p.ink2);
@@ -1032,7 +1032,7 @@ bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width, 
             const std::string nm = pk ? pk->name.Get(lang) : std::string(Tr("MMD 기본"));
             std::string sb = pk ? "v" + pk->version + (pk->authors.empty() ? "" : "  ·  " + PackAuthorLine(pk->authors))
                                 : std::string(Tr("앱 기본 셰이딩"));
-            if (pk && !selectable) sb = Tr("사용할 수 없음 · 셰이더 탭에서 확인");
+            if (pk && !selectable) sb = Tr("사용할 수 없음 · 이펙트 탭에서 확인");
             float nameR = r;
             if (pk && selectable && traits && pk->Suggests(*traits)) {   // pack.json "suggest" fits this model
                 const char* tag = Tr("추천");
@@ -1072,7 +1072,7 @@ bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width, 
         if (!needle.empty() && shown == 0) ImGui::TextDisabled("%s", Tr("검색 결과가 없습니다"));
         ImGui::EndChild();
         Gap(6.0f);
-        if (Button("##packmanage", Tr("셰이더 관리 · 온라인에서 받기"), icon::Diamond, ButtonKind::Ghost)) {
+        if (Button("##packmanage", Tr("이펙트 관리 · 온라인에서 받기"), icon::Diamond, ButtonKind::Ghost)) {
             ImGui::CloseCurrentPopup();
             if (!choice.pack.empty()) shaderSelInstalled_ = choice.pack;
             shaderTab_ = 0;
@@ -1514,7 +1514,7 @@ void App::DrawStudioShaderRow(float w) {
     ImGui::Dummy(ImVec2(w, Dp(10.0f)));
     {
         const ImVec2 c = ImGui::GetCursorScreenPos();
-        Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("셰이더"));
+        Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("표면 셰이더"));
         ImGui::Dummy(ImVec2(w, Dp(20.0f)));
     }
     ShaderChoice choice = m->shader;

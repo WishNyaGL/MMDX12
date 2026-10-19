@@ -1,4 +1,4 @@
-// Shader pack manager (Screen::Shaders, the "셰이더" tab): installed packs and the online gallery, pack details,
+// Effect pack manager (Screen::Shaders, the "이펙트" tab): installed packs and the online gallery, pack details,
 // installing (zip / folder / drop / download), removing, creating a pack from the template.
 #include "app/App.h"
 #include "ui_probe/UiProbe.h"
@@ -137,9 +137,9 @@ const ShaderPack* InstalledVersionOf(const std::string& id) {
     return p && p->status != PackStatus::Duplicate ? p : nullptr;
 }
 
-// "효과" / "표면" type badge text for a card.
+// "화면 효과" / "표면 셰이더" / "룩" type badge text for a card.
 const char* TypeLabel(PackType t) {
-    return t == PackType::Effect ? Tr("효과") : t == PackType::Look ? Tr("룩") : Tr("표면");
+    return t == PackType::Effect ? Tr("화면 효과") : t == PackType::Look ? Tr("룩") : Tr("표면 셰이더");
 }
 
 } // namespace
@@ -151,7 +151,7 @@ void App::PollShaderPacks() {
     reg.PollChanges(timeSeconds_);   // hot reload: edited packs recompile on their next draw
     for (const ShaderPackStore::Event& e : shaderStore_.Poll(reg)) {
         toast_ = Toast{};
-        toast_.title = e.ok ? Tr("셰이더 팩") : Tr("셰이더 팩을 설치하지 못했습니다");
+        toast_.title = e.ok ? Tr("이펙트 팩") : Tr("이펙트 팩을 설치하지 못했습니다");
         toast_.detail = e.text;
         toast_.error = !e.ok;
         toast_.until = timeSeconds_ + (e.ok ? 4.0 : 8.0);
@@ -179,14 +179,14 @@ void App::InstallPackPath(const std::filesystem::path& path) {
     toast_ = Toast{};
     if (ok) {
         const ShaderPack* p = ShaderPacks().Find(id);
-        toast_.title = Tr("셰이더 팩을 설치했습니다");
+        toast_.title = Tr("이펙트 팩을 설치했습니다");
         toast_.detail = p ? p->name.Get(PackLanguage()) + " v" + p->version : id;
         shaderSelInstalled_ = id;
         shaderTab_ = 0;
         screen_ = Screen::Shaders;
         LOG_INFO("shader pack installed from %s: %s", PathToUtf8(path).c_str(), id.c_str());
     } else {
-        toast_.title = Tr("셰이더 팩을 설치하지 못했습니다");
+        toast_.title = Tr("이펙트 팩을 설치하지 못했습니다");
         toast_.detail = err;
         toast_.error = true;
         LOG_WARN("shader pack install from %s failed: %s", PathToUtf8(path).c_str(), err.c_str());
@@ -283,9 +283,9 @@ void App::DrawShaders() {
 
         float curX = tabsR + Dp(12.0f);
 
-        // type filter: Segmented (전체 / 셰이더 / 효과 / 룩) — the installed / online tabs only
+        // type filter: Segmented (전체 / 표면 셰이더 / 화면 효과 / 룩) — the installed / online tabs only
         if (shaderTab_ < 2) {
-            const char* typeLabels[] = {Tr("전체"), Tr("셰이더"), Tr("효과"), Tr("룩")};
+            const char* typeLabels[] = {Tr("전체"), Tr("표면 셰이더"), Tr("화면 효과"), Tr("룩")};
             int curType = std::clamp(settings_.shaderType[shaderTab_], 0, 3);
             ImGui::SetCursorScreenPos(ImVec2(curX, top + Dp(2.0f)));
             if (Segmented("##packtype", typeLabels, 4, &curType, 0.0f, 36.0f)) {
@@ -480,7 +480,7 @@ void App::DrawShaders() {
             for (const ShaderPack* pk : installedList) {
                 std::vector<std::pair<std::string, std::pair<ImU32, ImU32>>> badges;
                 const bool isEffect = pk->type == PackType::Effect;
-                const char* typeText = isEffect ? Tr("효과") : Tr("셰이더");
+                const char* typeText = isEffect ? Tr("화면 효과") : Tr("표면 셰이더");
                 const std::pair<ImU32, ImU32> typeCol = isEffect ? std::make_pair(WithAlpha(p.ink, 0.12f), p.ink)
                                                                  : std::make_pair(WithAlpha(p.ink, 0.05f), p.ink2);
                 badges.push_back({typeText, typeCol});
@@ -504,7 +504,7 @@ void App::DrawShaders() {
             if (n == 0) {
                 if (reg.Packs().empty()) {
                     Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3,
-                         Tr("설치된 셰이더 팩이 없습니다. 온라인 탭에서 받거나 zip을 창에 끌어 놓으세요"));
+                         Tr("설치된 이펙트 팩이 없습니다. 온라인 탭에서 받거나 zip을 창에 끌어 놓으세요"));
                 } else {
                     Text(dl, Font::Regular, size::Body, ImVec2(origin.x, origin.y + Dp(8.0f)), p.ink3,
                          Tr("조건에 맞는 팩이 없습니다"));
@@ -561,7 +561,10 @@ void App::DrawShaders() {
                 for (const RemotePack* rp : onlineList) {
                     std::vector<std::pair<std::string, std::pair<ImU32, ImU32>>> badges;
                     const bool isEffect = rp->type == "effect";
-                    const char* typeText = isEffect ? Tr("효과") : Tr("셰이더");
+                    const char* typeText = isEffect              ? Tr("화면 효과")
+                                         : rp->type == "world"   ? Tr("월드 이펙트")
+                                         : rp->type == "look"    ? Tr("룩")
+                                                                 : Tr("표면 셰이더");
                     const std::pair<ImU32, ImU32> typeCol = isEffect ? std::make_pair(WithAlpha(p.ink, 0.12f), p.ink)
                                                                      : std::make_pair(WithAlpha(p.ink, 0.05f), p.ink2);
                     badges.push_back({typeText, typeCol});
@@ -675,7 +678,7 @@ void App::DrawShaderPackDetail(float x0, float y0, float x1, float y1) {
     const float w = x1 - x0 - ip * 2.0f;
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
     if (!pk) {
-        Para(Tr("셰이더 팩은 캐릭터의 재질 셰이딩을 바꿔 끼우는 확장입니다. 누구나 만들어 공유할 수 있습니다."), p.ink2);
+        Para(Tr("MMDX 이펙트는 표면 셰이더 · 화면 효과 · 월드 이펙트 · 룩으로 장면을 꾸미는 확장입니다. 누구나 만들어 공유할 수 있습니다."), p.ink2);
         Gap(10.0f);
         if (Button("##docs0", Tr("만드는 법 보기"), icon::Info, ButtonKind::Ghost))
             OpenUrl("https://mmdx.codingbot.kr/" + lang + "/docs/shader-packs/");
@@ -914,7 +917,7 @@ void App::DrawShaderPackDetail(float x0, float y0, float x1, float y1) {
                 ApplyRenderSettings();
             }
             Gap(8.0f);
-            Para(Tr("켠 효과는 로비의 셰이더 탭(\"화면 효과\")과 재생 바의 화면 효과 버튼에서 끄거나 순서를 바꿀 수 있습니다."), p.ink3,
+            Para(Tr("켠 효과는 로비의 이펙트 탭(\"화면 효과\")과 재생 바의 화면 효과 버튼에서 끄거나 순서를 바꿀 수 있습니다."), p.ink3,
                  size::Caption);
         }
     } else if (shaderDetailTab_ == 2) {
@@ -925,7 +928,7 @@ void App::DrawShaderPackDetail(float x0, float y0, float x1, float y1) {
             if (Button("##removepack", Tr("삭제"), icon::Trash, ButtonKind::Danger)) ImGui::OpenPopup("##removeconfirm");
         }
         Gap(8.0f);
-        if (Button("##packdocs", Tr("셰이더 팩 만드는 법"), icon::Info, ButtonKind::Ghost))
+        if (Button("##packdocs", Tr("이펙트 팩 만드는 법"), icon::Info, ButtonKind::Ghost))
             OpenUrl("https://mmdx.codingbot.kr/" + lang + "/docs/shader-packs/");
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(18.0f), Dp(16.0f)));
         // Para wraps at the window edge, so the auto-sized popup needs a width (else one word per line).
@@ -1116,7 +1119,7 @@ bool App::DrawEffectStackEditor(std::vector<EffectStackEntry>& stack, bool heade
         const bool usable = pk && PackUsable(pk) && pk->type == PackType::Effect;
         const std::string name = pk ? pk->name.Get(lang) : e.pack;
         const char* where = !pk ? Tr("설치되어 있지 않음")
-                            : !usable ? Tr("사용할 수 없음 · 셰이더 탭에서 확인")
+                            : !usable ? Tr("사용할 수 없음 · 이펙트 탭에서 확인")
                             : pk->stage == PackEffectStage::PreBloom ? Tr("블룸 앞 (HDR)") : Tr("톤맵 뒤");
         ImGui::PushID((int)i);
         bool on = e.enabled;
@@ -1174,7 +1177,7 @@ bool App::DrawEffectStackEditor(std::vector<EffectStackEntry>& stack, bool heade
         ImGui::PopStyleVar();
     }
     if (stack.empty()) {
-        Para(Tr("효과가 없습니다. 효과 팩을 추가하면 위에서 아래로 차례로 적용됩니다."), p.ink3, size::Caption);
+        Para(Tr("효과가 없습니다. 화면 효과를 추가하면 위에서 아래로 차례로 적용됩니다."), p.ink3, size::Caption);
         if (addable.empty()) {   // nothing installed yet: say where effects come from
             Gap(6.0f);
             if (screen_ == Screen::Select) {   // the lobby can switch screens; play / studio would lose the scene
@@ -1183,7 +1186,7 @@ bool App::DrawEffectStackEditor(std::vector<EffectStackEntry>& stack, bool heade
                     screen_ = Screen::Shaders;
                 }
             } else {
-                Para(Tr("효과 팩은 라이브러리 화면의 셰이더 탭 > 온라인에서 받을 수 있습니다."), p.ink3, size::Caption);
+                Para(Tr("화면 효과는 라이브러리 화면의 이펙트 탭 > 온라인에서 받을 수 있습니다."), p.ink3, size::Caption);
             }
         }
     }
@@ -1329,20 +1332,20 @@ void App::DrawNewPackDialog() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(24.0f), Dp(22.0f)));
     if (ImGui::BeginPopupModal("##newpackdlg", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize)) {
         const float w = ImGui::GetContentRegionAvail().x;
-        Para(Tr("새 셰이더 팩"), p.ink, size::Title, Font::Bold);
+        Para(Tr("새 이펙트 팩"), p.ink, size::Title, Font::Bold);
         Gap(4.0f);
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
         Para(Tr("주석이 달린 템플릿으로 shader_packs 폴더에 팩을 만듭니다. 앱을 켜 둔 채로 surface.hlsl 을 고치면 저장할 때마다 바로 반영됩니다."),
              p.ink2);
         ImGui::PopTextWrapPos();
         Gap(10.0f);
-        if (Chip("##npsurface", Tr("표면"), nullptr, !newPackEffect_)) newPackEffect_ = false;
+        if (Chip("##npsurface", Tr("표면 셰이더"), nullptr, !newPackEffect_)) newPackEffect_ = false;
         ImGui::SameLine();
-        if (Chip("##npeffect", Tr("효과"), nullptr, newPackEffect_)) newPackEffect_ = true;
+        if (Chip("##npeffect", Tr("화면 효과"), nullptr, newPackEffect_)) newPackEffect_ = true;
         Gap(10.0f);
         TextField("##npid", Tr("id (영문 소문자, 숫자, _ -)"), newPackId_, sizeof(newPackId_), w / Dpi(), "my_toon");
         Gap(8.0f);
-        TextField("##npname", Tr("이름"), newPackName_, sizeof(newPackName_), w / Dpi(), Tr("내 툰 셰이더"));
+        TextField("##npname", Tr("이름"), newPackName_, sizeof(newPackName_), w / Dpi(), Tr("내 툰 표면 셰이더"));
         Gap(8.0f);
         TextField("##npauthor", Tr("만든 사람"), newPackAuthor_, sizeof(newPackAuthor_), w / Dpi());
         const std::string id = newPackId_;
