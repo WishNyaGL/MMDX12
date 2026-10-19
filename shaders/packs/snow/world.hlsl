@@ -55,19 +55,19 @@ float SnowHeight(PackSurfaceIn i) {
     float rim = f.y;
 
     // Low-frequency wind drifts + subtle surface undulation
-    float drift = sin(i.posLocal.x * 0.16 + i.posLocal.y * 0.11) * 0.045 +
-                  cos(i.posLocal.x * 0.09 - i.posLocal.y * 0.21) * 0.035;
+    float drift = sin(i.posLocal.x * 0.045 + i.posLocal.y * 0.035) * 0.055 +
+                  cos(i.posLocal.x * 0.028 - i.posLocal.y * 0.058) * 0.042;
     float micro = (sin(i.posLocal.x * 0.75 + i.posLocal.y * 0.50) +
                    cos(i.posLocal.x * 0.40 - i.posLocal.y * 0.90)) * 0.007;
 
     // Base snow height carved down by footsteps with raised rim and natural drifts
     float baseH = depth * (1.0 - carved * footprintDepth) + rim + drift + micro;
 
-    // Irregular organic perimeter (never a straight square silhouette)
+    // Irregular organic perimeter spanning ~180 units across the 200 unit field
     float angle = atan2(i.posLocal.y, i.posLocal.x);
     float radius = length(i.posLocal);
-    float maxRadius = 24.5 + sin(angle * 5.0) * 2.2 + cos(angle * 8.0) * 1.6 + sin(angle * 13.0) * 0.8;
-    float edgeFade = smoothstep(maxRadius, maxRadius - 5.5, radius);
+    float maxRadius = 88.0 + sin(angle * 5.0) * 5.5 + cos(angle * 8.0) * 4.0 + sin(angle * 13.0) * 2.0;
+    float edgeFade = smoothstep(maxRadius, maxRadius - 16.0, radius);
 
     // Thin out height towards the edge and strictly keep above y = 0
     float h = lerp(0.002, max(0.002, baseH), edgeFade);
@@ -95,8 +95,8 @@ PackSurfaceOut SnowShade(PackSurfaceShadeIn i) {
     // Irregular perimeter: blend color towards dark ground floor, clip outside
     float angle = atan2(i.posLocal.z, i.posLocal.x);
     float radius = length(i.posLocal.xz);
-    float maxRadius = 24.5 + sin(angle * 5.0) * 2.2 + cos(angle * 8.0) * 1.6 + sin(angle * 13.0) * 0.8;
-    float edgeFade = smoothstep(maxRadius, maxRadius - 5.5, radius);
+    float maxRadius = 88.0 + sin(angle * 5.0) * 5.5 + cos(angle * 8.0) * 4.0 + sin(angle * 13.0) * 2.0;
+    float edgeFade = smoothstep(maxRadius, maxRadius - 16.0, radius);
     clip(edgeFade - 0.001);
     float3 groundColor = float3(0.08, 0.09, 0.11);
     o.albedo = lerp(groundColor, snowCol, edgeFade);
@@ -151,15 +151,15 @@ void SimulateFlakes(inout PackParticle p, PackSimInput s) {
         p.pos = PackLocalToWorld(float3(r * cos(theta), localY, r * sin(theta)));
         p.age = rnd.z * 10.0;
 
-        // Rich depth variation: small flakes, fluffy flakes, and occasional large hero flakes
+        // Calmer snowfall: fine delicate flakes (90%), medium (8%), rare soft flakes (2%)
         float rSize = PackRandom(s.id, 777u);
         float sizeScale = 1.0;
-        if (rSize < 0.78) {
-            sizeScale = lerp(0.45, 1.0, rSize / 0.78);
-        } else if (rSize < 0.94) {
-            sizeScale = lerp(1.1, 1.8, (rSize - 0.78) / 0.16);
+        if (rSize < 0.90) {
+            sizeScale = lerp(0.20, 0.55, rSize / 0.90);
+        } else if (rSize < 0.98) {
+            sizeScale = lerp(0.55, 0.85, (rSize - 0.90) / 0.08);
         } else {
-            sizeScale = lerp(2.2, 3.5, (rSize - 0.94) / 0.06);
+            sizeScale = lerp(0.85, 1.15, (rSize - 0.98) / 0.02);
         }
         p.size = flakeSize * sizeScale;
         p.vel = wind + float3(0.0, -fallSpeed, 0.0);
@@ -214,12 +214,12 @@ void SimulateFlakes(inout PackParticle p, PackSimInput s) {
 
         float rSize = PackRandom(s.id, 777u);
         float sizeScale = 1.0;
-        if (rSize < 0.78) {
-            sizeScale = lerp(0.45, 1.0, rSize / 0.78);
-        } else if (rSize < 0.94) {
-            sizeScale = lerp(1.1, 1.8, (rSize - 0.78) / 0.16);
+        if (rSize < 0.90) {
+            sizeScale = lerp(0.20, 0.55, rSize / 0.90);
+        } else if (rSize < 0.98) {
+            sizeScale = lerp(0.55, 0.85, (rSize - 0.90) / 0.08);
         } else {
-            sizeScale = lerp(2.2, 3.5, (rSize - 0.94) / 0.06);
+            sizeScale = lerp(0.85, 1.15, (rSize - 0.98) / 0.02);
         }
         p.size = flakeSize * sizeScale;
         p.vel = wind + float3(0.0, -fallSpeed, 0.0);
@@ -244,20 +244,24 @@ void SimulateFlakes(inout PackParticle p, PackSimInput s) {
 
 float4 ShadeFlakes(PackParticleShadeIn i) {
     float d = length(i.uv - 0.5);
+    if (d > 0.5) return 0.0;
 
-    // Soft feathered edge, with extra bokeh softness for larger flakes
-    float feather = lerp(0.06, 0.35, saturate((i.particle.size - 0.1) / 0.25));
-    float alpha = smoothstep(0.5, feather, d) * i.particle.color.a;
+    // Smooth feathering: soft falloff, no hard sphere boundary
+    float falloff = saturate(1.0 - d * 2.0);
+    float feather = falloff * falloff * (3.0 - 2.0 * falloff);
+    // Delicate transparency (max alpha ~0.50)
+    float alpha = feather * 0.50 * i.particle.color.a;
 
-    // Lighting with sun and ambient
+    // Lighting strictly from scene light (sun + ambient) - matches theater stage lighting
     float3 sunColor = PackSunColor();
     float3 ambient = PackAmbient();
     float3 L = PackSunDir();
     float3 V = i.viewDir;
 
-    // Forward scattering for translucent ice crystals
+    // Translucent forward scattering
     float forward = saturate(dot(L, -V) * 0.5 + 0.5);
-    float3 lit = lerp(ambient * 1.15, sunColor * 0.95 + ambient, forward * 0.6 + 0.4);
+    float3 lit = ambient * 0.65 + sunColor * (0.28 * forward + 0.15);
+    lit = min(lit, float3(0.72, 0.74, 0.78));
     return float4(lit, alpha);
 }
 

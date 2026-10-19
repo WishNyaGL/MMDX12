@@ -26,8 +26,8 @@
     "fields": [
       {
         "name": "cover",
-        "size": 1024,
-        "extent": 60.0,
+        "size": 2048,
+        "extent": 200.0,
         "format": "rg16f",
         "persistent": true,
         "rate": 20.0,
@@ -49,7 +49,7 @@
         "blend": "alpha",
         "simulate": "SimulateFlakes",
         "shade": "ShadeFlakes",
-        "size": [0.02, 0.6]
+        "size": [0.015, 0.35]
       },
       {
         "name": "kick",
@@ -99,7 +99,7 @@
       "group": "falling",
       "type": "float",
       "label": { "ko": "밀도", "en": "Density", "ja": "密度", "zh": "密度" },
-      "default": 0.75,
+      "default": 0.30,
       "min": 0.0,
       "max": 1.0,
       "step": 0.05
@@ -109,7 +109,7 @@
       "group": "falling",
       "type": "float",
       "label": { "ko": "낙하 속도", "en": "Fall Speed", "ja": "落下速度", "zh": "下落速度" },
-      "default": 2.5,
+      "default": 2.2,
       "min": 0.5,
       "max": 10.0,
       "step": 0.1
@@ -119,17 +119,17 @@
       "group": "falling",
       "type": "float",
       "label": { "ko": "눈송이 크기", "en": "Flake Size", "ja": "雪片サイズ", "zh": "雪花大小" },
-      "default": 0.14,
-      "min": 0.02,
-      "max": 0.5,
-      "step": 0.01
+      "default": 0.045,
+      "min": 0.010,
+      "max": 0.300,
+      "step": 0.005
     },
     {
       "key": "wind",
       "group": "falling",
       "type": "vec3",
       "label": { "ko": "바람", "en": "Wind", "ja": "風", "zh": "风力" },
-      "default": [0.5, 0.0, 0.2],
+      "default": [0.35, 0.0, 0.15],
       "min": -10.0,
       "max": 10.0,
       "step": 0.1
@@ -139,7 +139,7 @@
       "group": "falling",
       "type": "float",
       "label": { "ko": "난류", "en": "Turbulence", "ja": "乱気流", "zh": "湍流" },
-      "default": 0.5,
+      "default": 0.45,
       "min": 0.0,
       "max": 3.0,
       "step": 0.05
@@ -149,9 +149,9 @@
       "group": "falling",
       "type": "float",
       "label": { "ko": "범위 반경", "en": "Area Radius", "ja": "範囲半径", "zh": "范围半径" },
-      "default": 22.0,
+      "default": 40.0,
       "min": 5.0,
-      "max": 50.0,
+      "max": 80.0,
       "step": 1.0
     },
     {
@@ -159,7 +159,7 @@
       "group": "falling",
       "type": "float",
       "label": { "ko": "생성 높이", "en": "Spawn Height", "ja": "生成高さ", "zh": "生成高度" },
-      "default": 22.0,
+      "default": 24.0,
       "min": 5.0,
       "max": 40.0,
       "step": 1.0
