@@ -53,7 +53,8 @@ public:
 
     // Main thread, once per frame, OUTSIDE of command-list recording (i.e. before
     // ctx.BeginFrame()). Does at most: 1 render (RenderFn) and 4 texture uploads per call.
-    void Pump();
+    // `uploadsOnly`: skip the render step (it waits for the GPU and borrows the scene targets); Image entries still upload.
+    void Pump(bool uploadsOnly = false);
 
     int PendingCount() const;   // queued + loading + waiting for render/upload
     bool Busy() const { return PendingCount() > 0; }

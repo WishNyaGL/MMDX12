@@ -270,11 +270,11 @@ void ThumbnailCache::WorkerLoop() {
     }
 }
 
-void ThumbnailCache::Pump() {
+void ThumbnailCache::Pump(bool uploadsOnly) {
     if (!ctx_) return;
 
     // 1. Render step: at most one NeedsRender entry per Pump call.
-    {
+    if (!uploadsOnly) {
         std::string id;
         ThumbnailKind kind{};
         std::filesystem::path cacheFile;

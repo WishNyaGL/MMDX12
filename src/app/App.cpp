@@ -1066,6 +1066,8 @@ void App::RenderFrame() {
     if (screen_ == Screen::Select || screen_ == Screen::BenchLobby || screen_ == Screen::Loading || screen_ == Screen::Shaders ||
         screen_ == Screen::Mme || (screen_ == Screen::Studio && studioThumbsShown_))
         thumbs_.Pump();
+    else if (screen_ == Screen::Play && studioThumbsShown_)   // the play bar's pack picker: image previews only
+        thumbs_.Pump(true);
     studioThumbsShown_ = false;
 
     ImGui_ImplDX12_NewFrame();

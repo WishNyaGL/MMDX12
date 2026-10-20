@@ -1003,6 +1003,7 @@ bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width, 
     ImGui::SetNextWindowSize(ImVec2(std::max(width, Dp(340.0f)), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(12.0f), Dp(12.0f)));
     if (ImGui::BeginPopup(popup.c_str())) {
+        studioThumbsShown_ = true;   // the studio / play screens only pump thumbnails while one is drawn
         static char filter[96] = {};
         if (ImGui::IsWindowAppearing()) filter[0] = 0;
         const float pw = ImGui::GetContentRegionAvail().x;
@@ -1071,12 +1072,15 @@ bool App::DrawShaderSelector(const char* id, ShaderChoice& choice, float width, 
         }
         if (!needle.empty() && shown == 0) ImGui::TextDisabled("%s", Tr("검색 결과가 없습니다"));
         ImGui::EndChild();
-        Gap(6.0f);
-        if (Button("##packmanage", Tr("이펙트 관리 · 온라인에서 받기"), icon::Diamond, ButtonKind::Ghost)) {
-            ImGui::CloseCurrentPopup();
-            if (!choice.pack.empty()) shaderSelInstalled_ = choice.pack;
-            shaderTab_ = 0;
-            if (screen_ == Screen::Select) screen_ = Screen::Shaders;
+        // the manager is a screen of its own: only the library can switch to it (inside a scene / the studio the button did nothing)
+        if (screen_ == Screen::Select) {
+            Gap(6.0f);
+            if (Button("##packmanage", Tr("이펙트 관리 · 온라인에서 받기"), icon::Diamond, ButtonKind::Ghost)) {
+                ImGui::CloseCurrentPopup();
+                if (!choice.pack.empty()) shaderSelInstalled_ = choice.pack;
+                shaderTab_ = 0;
+                screen_ = Screen::Shaders;
+            }
         }
         ImGui::EndPopup();
     }
