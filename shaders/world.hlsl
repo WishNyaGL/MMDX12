@@ -258,6 +258,9 @@ SurfaceVsOut VSWorldSurface(uint vertexId : SV_VertexID) {
     groundMode = gSurfaceParams.z > 0.5;
     if (groundMode) {
         hasGround = PackGround(worldXZ, groundY, groundNormal);
+        // A thin / tall feature (a railing, a post, the edge of a step) gets no layer: the grid would drape a sheet
+        // over it (or bury a post in snow).
+        if (hasGround && PackGroundRange(worldXZ) > PackGroundStepLimit()) hasGround = false;
     }
 #endif
 
@@ -321,6 +324,12 @@ SurfacePsOut PSWorldSurface(SurfaceVsOut i) {
     SurfacePsOut o;
 #if defined(PACK_CAP_WORLD_GROUND) && PACK_CAP_WORLD_GROUND
     if (i.groundY < -1e8) discard;   // there is no ground under this fragment
+    if (i.groundY < 1e8) {           // a ground-following surface: per-pixel checks against the real ground
+        // a triangle spanning a ground step hangs in the air above the lower floor: keep only what lies on the ground
+        float gy = PackGroundHeight(i.posWorldXZ);
+        if (gy <= -1e8 || i.posWorld.y > gy + 1.5) discard;
+        if (PackGroundRange(i.posWorldXZ) > PackGroundStepLimit()) discard;
+    }
 #endif
     PackSurfaceShadeIn sin;
     sin.uv = i.uv;

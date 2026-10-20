@@ -287,21 +287,45 @@ inline float PackFieldCoverage(uint fieldIndex, float2 posLocalXZ) {
 #if defined(PACK_CAP_WORLD_GROUND) && PACK_CAP_WORLD_GROUND
 Texture2D<float> gGroundHeightMap : register(t19, space0);
 
-// The ground height at a map uv (0..1): -1e9 when no surface was drawn there.
+// One ground texel's height (-1e9 when no surface was drawn there).
+float PackGroundTexel(int2 texel) {
+    int2 size = int2(gGroundMap.x, gGroundMap.x);
+    float depth = gGroundHeightMap.Load(int3(clamp(texel, int2(0, 0), size - int2(1, 1)), 0));
+    return depth >= 1.0 - 1e-5 ? -1e9 : gGroundRect.y - depth * gGroundRect.z;
+}
+
+// The ground height at a map uv (0..1): -1e9 when no surface was drawn there. Bilinear between the 4 texels around
+// (exact on a sloped floor, so a thin layer does not sink between texel centres); next to a texel with no surface the
+// nearest texel is used.
 float PackGroundHeightAtUv(float2 uv) {
     if (gGroundRect.w < 0.5) return -1e9;
     if (gGroundMap.x <= 0.0) return gGroundRect.y;    // no stage model: the flat plane
     if (any(uv < 0.0) || any(uv > 1.0)) return -1e9;
+    float size = gGroundMap.x;
+    float2 t = uv * size - 0.5;
+    int2 t0 = (int2)floor(t);
+    float2 f = t - floor(t);
+    float h00 = PackGroundTexel(t0), h10 = PackGroundTexel(t0 + int2(1, 0));
+    float h01 = PackGroundTexel(t0 + int2(0, 1)), h11 = PackGroundTexel(t0 + int2(1, 1));
+    if (min(min(h00, h10), min(h01, h11)) <= -1e8)
+        return PackGroundTexel(clamp((int2)(uv * size), int2(0, 0), int2(size - 1, size - 1)));
+    return lerp(lerp(h00, h10, f.x), lerp(h01, h11, f.x), f.y);
+}
+
+// The ground's height spread (max - min) over the 3 x 3 texels around a map uv: large at a thin, tall feature (a
+// railing, a post, a step's edge), small on a floor; 1e9 when a texel has no surface.
+float PackGroundRangeAtUv(float2 uv) {
     int2 size = int2(gGroundMap.x, gGroundMap.x);
-    int2 texel = clamp((int2)(uv * (float)size), int2(0, 0), size - int2(1, 1));
-    if (gGroundHeightMap.Load(int3(texel, 0)) >= 1.0 - 1e-5) return -1e9;   // nothing was drawn there
-    // Conservative: the top-most surface of the 3x3 texels around (the nearest depth), so a thin layer on a
-    // sloped or bumpy floor stays above the real floor instead of sinking under it between texel centres.
-    float depth = 1.0;
+    int2 c = clamp((int2)(uv * (float)size), int2(0, 0), size - int2(1, 1));
+    float lo = 1e9, hi = -1e9;
     [unroll] for (int y = -1; y <= 1; ++y)
-        [unroll] for (int x = -1; x <= 1; ++x)
-            depth = min(depth, gGroundHeightMap.Load(int3(clamp(texel + int2(x, y), int2(0, 0), size - int2(1, 1)), 0)));
-    return gGroundRect.y - depth * gGroundRect.z;
+        [unroll] for (int x = -1; x <= 1; ++x) {
+            float h = PackGroundTexel(c + int2(x, y));
+            if (h <= -1e8) return 1e9;
+            lo = min(lo, h);
+            hi = max(hi, h);
+        }
+    return hi - lo;
 }
 
 // World xz -> ground map uv. The map's camera looks down -Y with +Z up, so world +z is NDC +y = texture v DOWN.
@@ -316,6 +340,18 @@ inline float PackGroundHeight(float2 xzWorld) {
     if (gGroundMap.x <= 0.0) return gGroundRect.y;
     float2 uv = PackGroundUv(xzWorld);
     return PackGroundHeightAtUv(uv);
+}
+
+// The ground's height spread around a world xz (PackGroundRangeAtUv): 0 on the flat studio floor.
+inline float PackGroundRange(float2 xzWorld) {
+    if (gGroundRect.w < 0.5 || gGroundMap.x <= 0.0) return 0.0;
+    return PackGroundRangeAtUv(PackGroundUv(xzWorld));
+}
+
+// The spread above which the ground counts as a thin / tall feature that a ground layer leaves out (a railing, a
+// post): at least 0.5 world units, else 1.2 texels (a 40 degree slope over the 3 x 3 window stays below it).
+inline float PackGroundStepLimit() {
+    return max(0.5, 1.2 * 2.0 * gGroundRect.x / max(gGroundMap.x, 1.0));
 }
 
 // The ground at a world xz: false when the point is outside the map or no surface was drawn there,
