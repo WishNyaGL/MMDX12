@@ -66,6 +66,7 @@ SHOT_CONFIGS = {
     "screen_ao": _shot("effect", "sour_miku", "theater", 22.0),
     "eye_adaptation": _shot("effect", "sour_miku", "theater", 8.0, 2),
     # world packs: Rom, a full-body free camera (set_camera) so the ground layers show; BEFORE = no world effect
+    "snow": _shot("world", "Rom_MMD", "pjsk_fireflower", 8.0, camera=([0, 10, 0], 25, 12, 45)),
     "rain": _shot("world", "Rom_MMD", "pjsk_fireflower", 8.0, camera=([0, 10, 0], 25, 8, 45)),
     "ground_mist": _shot("world", "Rom_MMD", "pjsk_fireflower", 8.0, camera=([0, 10, 0], 25, 12, 45)),
     "fireflies": _shot("world", "Rom_MMD", "pjsk_fireflower", 8.0, 3, camera=([0, 11, 0], 20, 6, 40)),
@@ -454,7 +455,7 @@ def main():
                 target_dirs = [web_pack_dir]
 
                 # built-in packs also live in shaders/packs/<id>/
-                if pid in ("hoyo_toon", "hoyo_toon_v2"):
+                if pid in ("hoyo_toon", "hoyo_toon_v2", "snow"):
                     app_pack_dir = REPO_ROOT / "shaders" / "packs" / pid
                     target_dirs.append(app_pack_dir)
 
