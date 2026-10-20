@@ -1557,18 +1557,20 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
     if (state.fieldDesc == DescriptorHeap::kInvalid) return;
     const D3D12_GPU_DESCRIPTOR_HANDLE fieldTable = FieldTable(ctx, state);
 
-    // Shadow table
-    D3D12_GPU_DESCRIPTOR_HANDLE shadowTable = pc.transient.SrvTable(
-        ctx, {pc.targets.shadowMap.res ? &pc.targets.shadowMap : nullptr});
+    // One transient table for the sun / spot / point shadow maps (slots 0 / 1 / 2): root params 8, 11 and 12 point at
+    // its descriptors. Three separate 8-slot tables per draw overflowed the frame's transient window in PT frames.
+    const D3D12_GPU_DESCRIPTOR_HANDLE shadowTable = pc.transient.SrvTable(
+        ctx, {pc.targets.shadowMap.res ? &pc.targets.shadowMap : nullptr,
+              pc.targets.spotShadowMap.res ? &pc.targets.spotShadowMap : nullptr,
+              pc.targets.pointShadowMap.res ? &pc.targets.pointShadowMap : nullptr});
+    const UINT srvInc = ctx.Device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     // The scene's punctual lights for the world surfaces: the lights buffer (root SRV), the spot / point
-    // shadow maps and the binding flags the shader reads. The offline path draws the surfaces into the GI
-    // layer (the tracer lights them), so it gets no punctual lights.
-    const bool haveLights = !offline && pc.lights != 0;
-    const D3D12_GPU_DESCRIPTOR_HANDLE spotShadowTable = pc.transient.SrvTable(
-        ctx, {pc.targets.spotShadowMap.res ? &pc.targets.spotShadowMap : nullptr});
-    const D3D12_GPU_DESCRIPTOR_HANDLE pointShadowTable = pc.transient.SrvTable(
-        ctx, {pc.targets.pointShadowMap.res ? &pc.targets.pointShadowMap : nullptr});
+    // shadow maps and the binding flags the shader reads. The offline GI path binds its own lights buffer too (no
+    // spot / point shadow maps there: those lights reach the surfaces unshadowed instead of not at all).
+    const bool haveLights = pc.lights != 0;
+    const D3D12_GPU_DESCRIPTOR_HANDLE spotShadowTable{shadowTable.ptr ? shadowTable.ptr + srvInc : 0};
+    const D3D12_GPU_DESCRIPTOR_HANDLE pointShadowTable{shadowTable.ptr ? shadowTable.ptr + 2ull * srvInc : 0};
     uint32_t lightFlags = 0;
     if (haveLights) lightFlags |= 1u;   // the lights buffer is bound
     if (pc.targets.spotShadowMap.res) lightFlags |= 2u;   // the spot shadow map is bound
@@ -1741,15 +1743,14 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     const D3D12_GPU_DESCRIPTOR_HANDLE depthTable = pc.transient.SrvTable(ctx, {&t.depth});
+    // The sun / spot / point shadow maps in one table (slots 0 / 1 / 2), as in DrawInstance; bound here as well so
+    // every root parameter of this signature has a value at the particle draw (the particle shaders do not read them).
     const D3D12_GPU_DESCRIPTOR_HANDLE shadowTable = pc.transient.SrvTable(
-        ctx, {t.shadowMap.res ? &t.shadowMap : nullptr});
-
-    // The punctual lights, bound here as well so every root parameter of this signature has a value at the
-    // particle draw (the particle shaders do not read them).
-    const D3D12_GPU_DESCRIPTOR_HANDLE spotShadowTable = pc.transient.SrvTable(
-        ctx, {t.spotShadowMap.res ? &t.spotShadowMap : nullptr});
-    const D3D12_GPU_DESCRIPTOR_HANDLE pointShadowTable = pc.transient.SrvTable(
-        ctx, {t.pointShadowMap.res ? &t.pointShadowMap : nullptr});
+        ctx, {t.shadowMap.res ? &t.shadowMap : nullptr, t.spotShadowMap.res ? &t.spotShadowMap : nullptr,
+              t.pointShadowMap.res ? &t.pointShadowMap : nullptr});
+    const UINT srvInc = ctx.Device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const D3D12_GPU_DESCRIPTOR_HANDLE spotShadowTable{shadowTable.ptr ? shadowTable.ptr + srvInc : 0};
+    const D3D12_GPU_DESCRIPTOR_HANDLE pointShadowTable{shadowTable.ptr ? shadowTable.ptr + 2ull * srvInc : 0};
     uint32_t lightFlags = 0;
     if (pc.lights != 0) lightFlags |= 1u;
     if (t.spotShadowMap.res) lightFlags |= 2u;
