@@ -287,11 +287,17 @@ float PackGroundHeightAtUv(float2 uv) {
     return gGroundRect.y - depth * gGroundRect.z;
 }
 
+// World xz -> ground map uv. The map's camera looks down -Y with +Z up, so world +z is NDC +y = texture v DOWN.
+inline float2 PackGroundUv(float2 xzWorld) {
+    float2 d = (xzWorld - gGroundMap.zw) / (2.0 * gGroundRect.x);
+    return float2(d.x + 0.5, 0.5 - d.y);
+}
+
 // The ground height at a world xz (-1e9 when there is no ground there).
 inline float PackGroundHeight(float2 xzWorld) {
     if (gGroundRect.w < 0.5) return -1e9;
     if (gGroundMap.x <= 0.0) return gGroundRect.y;
-    float2 uv = (xzWorld - gGroundMap.zw) / (2.0 * gGroundRect.x) + 0.5;
+    float2 uv = PackGroundUv(xzWorld);
     return PackGroundHeightAtUv(uv);
 }
 
@@ -305,7 +311,7 @@ inline bool PackGround(float2 xzWorld, out float height, out float3 normal) {
         height = gGroundRect.y;
         return true;
     }
-    float2 uv = (xzWorld - gGroundMap.zw) / (2.0 * gGroundRect.x) + 0.5;
+    float2 uv = PackGroundUv(xzWorld);
     float h = PackGroundHeightAtUv(uv);
     if (h <= -1e8) return false;
     height = h;
@@ -322,7 +328,7 @@ inline bool PackGround(float2 xzWorld, out float height, out float3 normal) {
     if (hd <= -1e8) hd = h;
     if (hu <= -1e8) hu = h;
     float sx = (hr - hl) / (2.0 * worldPerTexel);
-    float sz = (hu - hd) / (2.0 * worldPerTexel);
+    float sz = (hd - hu) / (2.0 * worldPerTexel);   // +v = -z
     normal = normalize(float3(-sx, 1.0, -sz));
     return true;
 }

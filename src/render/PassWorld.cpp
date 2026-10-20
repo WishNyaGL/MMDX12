@@ -712,7 +712,7 @@ void WorldPass::Impl::RenderGroundMap(PassContext& pc) {
     cmd->SetGraphicsRoot32BitConstant(4, 19, 0);
     XMFLOAT4X4 m;
     XMStoreFloat4x4(&m, vp);
-    cmd->SetGraphicsRoot32BitConstants(4, 4, &m, 16);
+    cmd->SetGraphicsRoot32BitConstants(4, 16, &m, 4);   // 16 dwords at offset 4
 
     for (GpuModel* model : pc.view.models) {
         if (!model) continue;

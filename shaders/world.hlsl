@@ -208,6 +208,7 @@ SurfaceVsOut VSWorldSurface(uint vertexId : SV_VertexID) {
         int2 camCell = (int2)floor(gEyePos.xz / base);        // the camera's coarse cell
         int2 quads8 = int2((int)(grid / 8), (int)(grid / 8));
         int2 base1 = 4 * (camCell - quads8);                   // the middle level's first cell (fine units)
+        int2 base2 = 4 * camCell - quads8;                     // the fine level's first cell, centred (fine units)
         int2 cell;
         if (level == 0u) {
             cell = camCell + int2((int)lx - (int)(grid / 2), (int)lz - (int)(grid / 2));
@@ -215,10 +216,10 @@ SurfaceVsOut VSWorldSurface(uint vertexId : SV_VertexID) {
             if (cell.x >= lo.x && cell.x < hi.x && cell.y >= lo.y && cell.y < hi.y) degenerate = true;
         } else if (level == 1u) {
             cell = base1 + int2((int)lx, (int)lz);
-            int2 lo = base1, hi = base1 + int2((int)(grid / 4), (int)(grid / 4));   // the cells the fine level covers
+            int2 lo = base2, hi = base2 + int2((int)(grid / 4), (int)(grid / 4));   // the cells the fine level covers
             if (cell.x >= lo.x && cell.x < hi.x && cell.y >= lo.y && cell.y < hi.y) degenerate = true;
         } else {
-            cell = 4 * base1 + int2((int)lx, (int)lz);
+            cell = 4 * base2 + int2((int)lx, (int)lz);
         }
         worldXZ = (float2(cell) + float2(c)) * spacing;
         uv = float2(lx + c.x, lz + c.y) / float(grid);
