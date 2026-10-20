@@ -305,7 +305,15 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
         CD3DX12_DESCRIPTOR_RANGE sceneDepthRange;
         sceneDepthRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 6); // t0 space6 SceneDepth (post particles)
 
-        CD3DX12_ROOT_PARAMETER p[10];
+        // The scene's punctual lights for the world surfaces: the light buffer (root SRV), the spot / point
+        // shadow maps and the binding flags (a root constant: bit0 lights, bit1 spot map, bit2 point map).
+        CD3DX12_DESCRIPTOR_RANGE spotShadowRange;
+        spotShadowRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 17, 0); // t17 space0 SpotShadowMap
+
+        CD3DX12_DESCRIPTOR_RANGE pointShadowRange;
+        pointShadowRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 18, 0); // t18 space0 PointShadowMap
+
+        CD3DX12_ROOT_PARAMETER p[14];
         p[0].InitAsConstantBufferView(0);                 // b0 SceneConstants
         p[1].InitAsConstantBufferView(1);                 // b1 WorldCB
         p[2].InitAsConstantBufferView(4);                 // b4 PackParamsExt
@@ -316,9 +324,13 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
         p[7].InitAsShaderResourceView(1, 2);              // t1 space2 gPrevPos
         p[8].InitAsDescriptorTable(1, &shadowRange);      // t15 space0 ShadowMap
         p[9].InitAsDescriptorTable(1, &sceneDepthRange);  // t0 space6 SceneDepth
+        p[10].InitAsShaderResourceView(16, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // t16 space0 Lights
+        p[11].InitAsDescriptorTable(1, &spotShadowRange, D3D12_SHADER_VISIBILITY_PIXEL);   // t17 space0
+        p[12].InitAsDescriptorTable(1, &pointShadowRange, D3D12_SHADER_VISIBILITY_PIXEL); // t18 space0
+        p[13].InitAsConstants(1, 5, 0, D3D12_SHADER_VISIBILITY_PIXEL); // b5 world light flags
 
         CD3DX12_ROOT_SIGNATURE_DESC rs;
-        rs.Init(10, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        rs.Init(14, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
         ComPtr<ID3DBlob> blob, err;
         if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
             LOG_ERROR("WorldPass: failed to serialize graphicsRootSig: %s",
@@ -1120,6 +1132,19 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
     D3D12_GPU_DESCRIPTOR_HANDLE shadowTable = pc.transient.SrvTable(
         ctx, {pc.targets.shadowMap.res ? &pc.targets.shadowMap : nullptr});
 
+    // The scene's punctual lights for the world surfaces: the lights buffer (root SRV), the spot / point
+    // shadow maps and the binding flags the shader reads. The offline path draws the surfaces into the GI
+    // layer (the tracer lights them), so it gets no punctual lights.
+    const bool haveLights = !offline && pc.lights != 0;
+    const D3D12_GPU_DESCRIPTOR_HANDLE spotShadowTable = pc.transient.SrvTable(
+        ctx, {pc.targets.spotShadowMap.res ? &pc.targets.spotShadowMap : nullptr});
+    const D3D12_GPU_DESCRIPTOR_HANDLE pointShadowTable = pc.transient.SrvTable(
+        ctx, {pc.targets.pointShadowMap.res ? &pc.targets.pointShadowMap : nullptr});
+    uint32_t lightFlags = 0;
+    if (haveLights) lightFlags |= 1u;   // the lights buffer is bound
+    if (pc.targets.spotShadowMap.res) lightFlags |= 2u;   // the spot shadow map is bound
+    if (pc.targets.pointShadowMap.res) lightFlags |= 4u;  // the point shadow map is bound
+
     std::vector<WorldCollider> sampledColliders;
     if (inst.colliders) inst.colliders->Sample(inst.time, sampledColliders);
     const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
@@ -1165,6 +1190,13 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
     cmd->SetGraphicsRootDescriptorTable(4, fieldTable);
     cmd->SetGraphicsRootDescriptorTable(5, packTexTable);
     cmd->SetGraphicsRootDescriptorTable(8, shadowTable);
+    // The punctual lights (root param 10 = the lights buffer, 11 / 12 = the spot / point shadow maps,
+    // 13 = the binding flags). The root SRV must never be 0: without a lights buffer the collider buffer
+    // (or the parameter block) is bound instead, and the shader reads no light (flag bit0 = 0).
+    cmd->SetGraphicsRootShaderResourceView(10, haveLights ? pc.lights : (colVa ? colVa : paramsExtVa));
+    cmd->SetGraphicsRootDescriptorTable(11, spotShadowTable);
+    cmd->SetGraphicsRootDescriptorTable(12, pointShadowTable);
+    cmd->SetGraphicsRoot32BitConstant(13, lightFlags, 0);
 
     // 1. Draw Surfaces (opaque, depth write)
     for (size_t si = 0; si < pack.world->surfaces.size(); ++si) {
@@ -1246,6 +1278,17 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
     const D3D12_GPU_DESCRIPTOR_HANDLE shadowTable = pc.transient.SrvTable(
         ctx, {t.shadowMap.res ? &t.shadowMap : nullptr});
 
+    // The punctual lights, bound here as well so every root parameter of this signature has a value at the
+    // particle draw (the particle shaders do not read them).
+    const D3D12_GPU_DESCRIPTOR_HANDLE spotShadowTable = pc.transient.SrvTable(
+        ctx, {t.spotShadowMap.res ? &t.spotShadowMap : nullptr});
+    const D3D12_GPU_DESCRIPTOR_HANDLE pointShadowTable = pc.transient.SrvTable(
+        ctx, {t.pointShadowMap.res ? &t.pointShadowMap : nullptr});
+    uint32_t lightFlags = 0;
+    if (pc.lights != 0) lightFlags |= 1u;
+    if (t.spotShadowMap.res) lightFlags |= 2u;
+    if (t.pointShadowMap.res) lightFlags |= 4u;
+
     for (const WorldInstance& inst : pc.view.worlds) {
         const ShaderPack* pack = ShaderPacks().Find(inst.pack);
         if (!pack || pack->type != PackType::World || !pack->world) continue;
@@ -1312,6 +1355,12 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
         cmd->SetGraphicsRootDescriptorTable(5, packTexTable);
         cmd->SetGraphicsRootDescriptorTable(8, shadowTable);
         cmd->SetGraphicsRootDescriptorTable(9, depthTable);
+        // The punctual lights (root param 10 = the lights buffer, 11 / 12 = the spot / point shadow maps,
+        // 13 = the binding flags); the root SRV is never 0 (the collider buffer stands in for it).
+        cmd->SetGraphicsRootShaderResourceView(10, pc.lights ? pc.lights : (colVa ? colVa : paramsExtVa));
+        cmd->SetGraphicsRootDescriptorTable(11, spotShadowTable);
+        cmd->SetGraphicsRootDescriptorTable(12, pointShadowTable);
+        cmd->SetGraphicsRoot32BitConstant(13, lightFlags, 0);
 
         for (size_t pi = 0; pi < pack->world->particles.size(); ++pi) {
             const auto& p = pack->world->particles[pi];

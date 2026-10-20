@@ -446,7 +446,7 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                 float3 po = OffsetRayOrigin(s.pos, s.faceN);
                 float3 dir = ld;
                 if (shadowType == 2 && l.shadowSoftness > 0.0) {
-                    float cosTheta = SoftShadowConeCos(1.0, l.shadowSoftness);
+                    float cosTheta = PunctualShadowConeCos(1.0, l.shadowSoftness);
                     dir = SampleCone(float2(Rand(rng), Rand(rng)), ld, cosTheta);
                 }
                 float hitVis = TraceShadowRayMasked(po, dir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
@@ -510,7 +510,7 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                     float3 po = OffsetRayOrigin(s.pos, s.faceN);
                     float3 dir = ld;
                     if (shadowType == 2 && lk.shadowSoftness > 0.0) {
-                        float cosTheta = SoftShadowConeCos(1.0, lk.shadowSoftness);
+                        float cosTheta = PunctualShadowConeCos(1.0, lk.shadowSoftness);
                         dir = SampleCone(float2(Rand(rng), Rand(rng)), ld, cosTheta);
                     }
                     float hitVis = TraceShadowRayMasked(po, dir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);

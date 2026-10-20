@@ -157,7 +157,7 @@ struct AppSettings {
     };
     std::map<std::string, SavedFormation> songFormations; // song id -> saved formation
     std::map<std::string, std::string> songCameras;       // song id -> chosen camera VMD file name (songs with several)
-    std::map<std::string, std::string> songStages;        // song id -> chosen stage library id ("-" = none; absent = bundled default)
+    std::map<std::string, std::string> songStages;        // song id -> chosen stage library id ("-" = studio floor / no stage model; absent = bundled default)
     std::map<std::string, std::string> songAudios;        // song id -> chosen audio file name (songs with several versions)
     // M8b: per-song video override. song id -> "<overlay|background|off>[:<black|screen|add|normal>]|<file name>"
     // (file empty = the classification; "off" = no video layers for this song). See App::ResolveSongVideos.

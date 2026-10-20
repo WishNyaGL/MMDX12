@@ -475,7 +475,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                         if (l.shadowType > 0.5) {
                             float3 rayDir = ld;
                             if (l.isArea <= 0.5 && l.shadowType > 1.5) {
-                                float cosCone = SoftShadowConeCos(0.9999, l.shadowSoftness);
+                                float cosCone = PunctualShadowConeCos(0.9999, l.shadowSoftness);
                                 rayDir = SampleCone(float2(Rand(rng), Rand(rng)), ld, cosCone);
                             }
                             rawVis = TraceShadowRayMasked(OffsetRayOrigin(pos, faceN), rayDir, max(dist - 0.05, 0.0),

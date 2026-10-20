@@ -730,7 +730,8 @@ void App::DrawSelect() {
                 const bool explicitChoice = sit != settings_.songStages.end();
                 const std::string chosenId = explicitChoice ? sit->second : bundled->id;
                 auto stageName = [&](const std::string& id) -> std::string {
-                    if (id == "-") return Tr("없음");
+                    // "-" = no stage model = the studio floor (see App::ResolveSongStage).
+                    if (id == "-") return Tr("스튜디오");
                     for (const auto& sts : library_.stages)
                         if (sts.id == id) return sts.displayName;
                     return id;
@@ -755,15 +756,19 @@ void App::DrawSelect() {
                         settings_.songStages.erase(song->id);
                         settings_.Save(settingsPath_);
                     }
-                    if (ImGui::Selectable(Tr("스테이지 없음"), explicitChoice && sit->second == "-")) {
+                    if (ImGui::Selectable(Tr("스튜디오 (스테이지 없음)"), explicitChoice && sit->second == "-")) {
                         settings_.songStages[song->id] = "-";
                         settings_.Save(settingsPath_);
                     }
-                    if (ImGui::Selectable((std::string(Tr("현재 선택: ")) + (st ? st->displayName : Tr("스튜디오"))).c_str(),
-                                          explicitChoice && sit->second != "-" && sit->second != bundled->id)) {
-                        if (st) settings_.songStages[song->id] = st->id;
-                        else settings_.songStages.erase(song->id);
-                        settings_.Save(settingsPath_);
+                    // Entry 3: the stage card the user picked in the stage list. Without a card there is nothing
+                    // to pick (entry 2 already is the studio floor), so the entry is hidden. The studio floor is
+                    // stored as "-", never erased: an erased choice falls back to the bundled stage.
+                    if (st) {
+                        if (ImGui::Selectable((std::string(Tr("현재 선택: ")) + st->displayName).c_str(),
+                                              explicitChoice && sit->second != "-" && sit->second != bundled->id)) {
+                            settings_.songStages[song->id] = st->id;
+                            settings_.Save(settingsPath_);
+                        }
                     }
                     ImGui::EndPopup();
                 }

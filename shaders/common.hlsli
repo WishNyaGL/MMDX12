@@ -137,6 +137,18 @@ float SoftShadowAngle(float baseAngle, float softness) {
 }
 float SoftShadowConeCos(float baseCos, float softness) { return cos(SoftShadowAngle(acos(baseCos), softness)); }
 
+// Punctual lights (spots / points) are small sources: 15 degrees is the sun's cap, so a punctual light's soft
+// cone is a fraction of it (kPunctualSoftScale). Without the scale a default spot (softness 0.5) is a 5.3 degree
+// light and its PCSS penumbra blurs the character's shadow away.
+static const float kPunctualSoftScale = 0.25;
+float PunctualSoftAngle(float softness) { return SoftShadowAngle(0.0, softness) * kPunctualSoftScale; }
+// The punctual cone cos: the base cone combined with the punctual soft angle the same way SoftShadowConeCos
+// combines its base cos with the sun's soft angle.
+float PunctualShadowConeCos(float baseCos, float softness) {
+    float t = pow(saturate(softness), 1.5);
+    return cos(acos(baseCos) * (1.0 - t) + PunctualSoftAngle(softness));
+}
+
 // Sun shadow cone for the ray paths: Hard keeps `baseCos` (each path's own sun disc), Soft widens it with softness.
 float SunShadowConeCos(float baseCos) {
     return (gSunShadowParams.x > 1.5) ? SoftShadowConeCos(baseCos, gSunShadowParams.y) : baseCos;

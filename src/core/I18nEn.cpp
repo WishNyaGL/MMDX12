@@ -1172,6 +1172,7 @@ const Entry kEnglish[] = {
     {"이 곡 폴더에 전용 스테이지가 들어 있습니다. 기본으로 재생돼요.", "This song's folder contains its own stage. It plays by default."},
     {"곡 전용: ", "Song stage: "},
     {"스테이지 없음", "No stage"},
+    {"스튜디오 (스테이지 없음)", "Studio (no stage)"},
     {"현재 선택: ", "Currently selected: "},
     {"이 곡 폴더에 길이가 같은 음원이 여러 개 있습니다(버전).", "This song's folder has several audio files of the same length (versions)."},
     {"영상", "Video"},

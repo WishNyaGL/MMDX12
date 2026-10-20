@@ -1,10 +1,51 @@
 // shaders/world.hlsl: Host shader for MMDX12 World Packs.
 // Compiled per world pack with MMDX_PACK pointing to the pack's world.hlsl.
 #include "common.hlsli"
+#include "shadow_common.hlsli"
 #include "world_api.hlsli"
 
 Texture2DArray<float> gWorldShadowMap : register(t15, space0);
 SamplerComparisonState gWorldShadowCmp : register(s3);
+
+// The scene's punctual lights (spots / points) for the world surfaces: the light buffer, the spot / point
+// shadow maps and the binding flags. The flags are a root constant (b5): bit0 = the lights buffer is bound,
+// bit1 = the spot shadow map is bound, bit2 = the point shadow map is bound.
+cbuffer WorldLightCB : register(b5) {
+    uint gWorldLightFlags;
+};
+// The scene's light layout (the Light struct of shadow_common.hlsli, must match the C++ upload, 112 bytes).
+StructuredBuffer<Light> gWorldLights : register(t16, space0);
+Texture2DArray<float> gWorldSpotShadowMap : register(t17, space0);
+Texture2DArray<float> gWorldPointShadowMap : register(t18, space0);
+
+// The scene's punctual lights on a world surface (diffuse only): the scene's PunctualDiffuse, with the
+// shared spot / point shadow-map visibility (hard or soft, like the scene).
+float3 WorldPunctualDiffuse(float3 wp, float3 n) {
+    if ((gWorldLightFlags & 1u) == 0u) return 0.0;
+    float3 sum = 0;
+    uint count = min((uint)gNumLights, 16u);
+    for (uint i = 0; i < count; ++i) {
+        Light l = gWorldLights[i];
+        if (l.affectDiffuse <= 0.0) continue;
+        float3 d = l.pos - wp;
+        float dist = length(d);
+        float3 ld = d / max(dist, 1e-4);
+        float atten = PunctualFalloff(dist, l.invRange, l.falloff);
+        if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
+        else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
+        float rawVis = 1.0;
+        if (atten > 0.0) {
+            if (l.cosOuter > -1.0) {
+                if (gWorldLightFlags & 2u) rawVis = SpotShadow(l, wp, n, dist, gWorldShadowCmp, gWorldSpotShadowMap);
+            } else {
+                if (gWorldLightFlags & 4u) rawVis = PointShadow(l, wp, n, dist, gWorldShadowCmp, gWorldPointShadowMap);
+            }
+        }
+        float3 shadowTerm = ShadowTransmission(rawVis, l.shadowDensity, l.shadowColor);
+        sum += l.color * shadowTerm * atten * saturate(dot(n, ld));
+    }
+    return sum;
+}
 
 // Sun visibility from the scene's cascaded shadow map (raster camera views; 1 where no cascade covers the point,
 // e.g. ray-traced / path-traced frames, which do not render the map).
@@ -187,6 +228,8 @@ SurfacePsOut PSWorldSurface(SurfaceVsOut i) {
     float3 hemi = PackHemiAmbient(sout.normal);
     float3 ambient = max(PackAmbient(), hemi);
     float3 lit = sout.albedo * (sunColor * (NdotL * shadow) + ambient) + sout.emission;
+    // The scene's punctual lights (spots / points) with their shadow maps, the same terms the stage floor gets.
+    lit += sout.albedo * WorldPunctualDiffuse(i.posWorld, sout.normal);
 
     o.color = float4(lit, sout.alpha);
     float3 viewN = normalize(mul(sout.normal, (float3x3)gView));

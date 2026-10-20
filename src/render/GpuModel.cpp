@@ -285,6 +285,19 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
 
     // Material constants.
     std::vector<MaterialConstants> consts(pmx.materials.size(), MaterialConstants{});
+    // A stage that never sets the PMX "receive self-shadow" flag on any of its materials is treated as
+    // unconfigured: ripped stages leave every flag at 0, so without this the stage never showed the
+    // character's cast shadow (only SSAO darkened it). Hand-made stages set the flag deliberately (on some of
+    // their materials) and keep their own choice.
+    bool stageAnyReceive = false;
+    if (role == ModelRole::Stage) {
+        for (const PmxMaterial& m : pmx.materials) {
+            if (m.flags & PmxMat_ReceiveShadow) {
+                stageAnyReceive = true;
+                break;
+            }
+        }
+    }
     for (size_t mIdx = 0; mIdx < pmx.materials.size(); ++mIdx) {
         const PmxMaterial& m = pmx.materials[mIdx];
         MaterialConstants& c = consts[mIdx];
@@ -324,7 +337,8 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         // No toon on a character material: the author wants it unmodelled (typically the face,
         // which often comes with painted hair shadows).
         if (!(c.flags & MatFlag_HasToon) && role != ModelRole::Stage) c.flags |= MatFlag_FlatShade;
-        if (m.flags & PmxMat_ReceiveShadow) c.flags |= MatFlag_ReceiveShadow;
+        if ((m.flags & PmxMat_ReceiveShadow) || (role == ModelRole::Stage && !stageAnyReceive))
+            c.flags |= MatFlag_ReceiveShadow;
         if (role == ModelRole::Stage) c.flags |= MatFlag_Stage;
         // MMD has no roughness: treat a tight, bright specular as a hint of gloss.
         const float specLum = 0.299f * m.specular.x + 0.587f * m.specular.y + 0.114f * m.specular.z;
