@@ -69,8 +69,12 @@ struct WorldCbData {
     XMFLOAT4 groundRect;
     // x: 0 = the field's extent, 1 = camera-centred, y: the camera radius (world units), z: 1 = above the ground
     XMFLOAT4 surfaceParams;
+    // Offline GI: this iteration's view-projection (shutter-time camera + thin-lens shear, as the outline layer), so
+    // world surfaces / particles take the renderer's DoF and motion blur; offlineParams.x = 1 when set.
+    XMFLOAT4X4 offlineViewProj;
+    XMFLOAT4 offlineParams;
 };
-static_assert(sizeof(WorldCbData) == 336);
+static_assert(sizeof(WorldCbData) == 416);   // matches WorldCB in world_api.hlsli
 
 // The ground height map: a top-down orthographic depth render of the stage / prop models.
 inline constexpr uint32_t kWorldGroundMapSize = 2048;
@@ -258,7 +262,10 @@ struct WorldPass::Impl {
     // The ground height map (world.ground): a top-down orthographic depth render of the stage / prop models, read by
     // the world shaders as R32_FLOAT. Only allocated when a pack requires the capability.
     Texture groundDepth;
-    uint32_t groundSrv = DescriptorHeap::kInvalid;        // the depth map's SRV (t19 space0)
+    uint32_t groundSrv = DescriptorHeap::kInvalid;
+    // DrawOffline's iteration camera (see WorldCbData::offlineViewProj)
+    XMFLOAT4X4 offlineVp{};
+    bool offlineVpSet = false;        // the depth map's SRV (t19 space0)
     Texture groundFallback;                                // 1x1 R32_FLOAT, bound without a map
     uint32_t groundFallbackSrv = DescriptorHeap::kInvalid;
     uint64_t groundVersion = ~0ull;                       // the models / pose the map was rendered from
@@ -1601,6 +1608,10 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
         cb.groundMap = groundMapParams;
         cb.groundRect = groundRectParams;
         cb.surfaceParams = surfaceParams;
+        if (offline && offlineVpSet) {
+            cb.offlineViewProj = offlineVp;
+            cb.offlineParams = XMFLOAT4(1.0f, 0.0f, 0.0f, 0.0f);
+        }
 
         const LightParams& lp = pc.view.light;
         XMVECTOR L = XMVector3Normalize(XMLoadFloat3(&lp.direction));
@@ -1997,8 +2008,11 @@ void WorldPass::Execute(PassContext& pc) {
 
 void WorldPass::DrawParticlesPost(PassContext& pc) { impl_->DrawParticlesPost(pc); }
 
-void WorldPass::DrawOffline(PassContext& pc, const Texture& edgeColorMsaa, const Texture& edgeDepthMsaa) {
+void WorldPass::DrawOffline(PassContext& pc, const Texture& edgeColorMsaa, const Texture& edgeDepthMsaa,
+                            const DirectX::XMFLOAT4X4* iterationViewProj) {
     if (pc.view.worlds.empty()) return;
+    impl_->offlineVpSet = iterationViewProj != nullptr;
+    if (iterationViewProj) impl_->offlineVp = *iterationViewProj;
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     Dx12Context& ctx = pc.ctx;
 

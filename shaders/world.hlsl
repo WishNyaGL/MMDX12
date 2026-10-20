@@ -308,7 +308,7 @@ SurfaceVsOut VSWorldSurface(uint vertexId : SV_VertexID) {
     o.posWorld = posWorld;
     o.normal = normWorld;
     o.uv = uv;
-    o.posH = mul(float4(posWorld, 1.0), gViewProj);
+    o.posH = WorldClip(posWorld);
     o.curClip = mul(float4(posWorld, 1.0), gViewProjNoJitter);
     o.prevClip = mul(float4(posWorld, 1.0), gPrevViewProjNoJitter);
     return o;
@@ -455,7 +455,7 @@ ParticleVsOut VSWorldParticle(uint vertexId : SV_VertexID) {
     o.data = p.data;
     o.size = p.size;
     o.age = p.age;
-    o.posH = mul(float4(posWorld, 1.0), gViewProj);
+    o.posH = WorldClip(posWorld);
     o.curClip = mul(float4(posWorld, 1.0), gViewProjNoJitter);
 
     float3 prevWorldPos = prevPos + (camRight * offset.x + camUp * offset.y) * p.size;

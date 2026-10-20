@@ -218,6 +218,7 @@ struct OfflineRenderer::Impl {
     void ConvolveBloom(PassContext& pc);
     void EffectInputs(PassContext& pc);
     bool EnsureTargets(uint32_t w, uint32_t h);
+    void IterationCamera(float shutter, float lensX, float lensY, DirectX::XMMATRIX& viewM, DirectX::XMMATRIX& proj) const;
     void DrawEdges(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t, const BuiltinTextures* b, RtScene& rt,
                    float shutter, float lensX, float lensY);
     // M5b: draws the MME layer for one iteration (host MRT colour = edgeColorMsaa surface, normal / velocity here)
@@ -537,7 +538,11 @@ void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, TransientD
     }
     if (!view.worlds.empty()) {
         PassContext spc = Pc(cmd, t, b, rt);
-        worldPass.DrawOffline(spc, edgeColorMsaa, edgeDepthMsaa);
+        DirectX::XMMATRIX iv, ip;
+        IterationCamera(shutter, lensX, lensY, iv, ip);
+        DirectX::XMFLOAT4X4 ivp;
+        DirectX::XMStoreFloat4x4(&ivp, DirectX::XMMatrixMultiply(iv, ip));
+        worldPass.DrawOffline(spc, edgeColorMsaa, edgeDepthMsaa, &ivp);
     }
     edgeColorMsaa.Transition(cmd, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
     edgeLayer.Transition(cmd, D3D12_RESOURCE_STATE_RESOLVE_DEST);
@@ -545,19 +550,11 @@ void OfflineRenderer::Impl::DrawEdges(ID3D12GraphicsCommandList* cmd, TransientD
     edgeLayer.Transition(cmd, kSrvAll);
 }
 
-// M5b: one iteration's MME layer, drawn into the edge layer's colour target (3 MRT: colour / normal / velocity) with
-// the iteration's lens / shutter camera, after the depth pass and before the edges. The MME colour then resolves with
-// the edges into edgeLayer and composites like the raster / PT MME layer.
-bool OfflineRenderer::Impl::DrawMmeLayer(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t,
-                                         const BuiltinTextures* b, RtScene& rt, float shutter, float lensX,
-                                         float lensY) {
-    if (!mme || !mmeSkin) return false;
-    bool anyMme = false;
-    for (GpuModel* gm : view.models)
-        if (gm && gm->HasMmeEffects()) { anyMme = true; break; }
-    if (!anyMme) return false;
-
-    Dx12Context& c = *ctx;
+// The offline iteration's camera: the shutter-time camera (offline_common.hlsli OfflineCameraAt) and the thin-lens
+// shear (offline_edge_skin.hlsli OfflineLensView), as view + projection (row vectors). Shared by the MME layer and
+// the world pass so both match the traced image's DoF and motion blur.
+void OfflineRenderer::Impl::IterationCamera(float shutter, float lensX, float lensY, DirectX::XMMATRIX& viewM,
+                                            DirectX::XMMATRIX& proj) const {
     using namespace DirectX;
     // The iteration's camera, exactly as offline_common.hlsli OfflineCameraAt: interpolate the camera-to-world basis
     // (rows right/up/forward) and eye between the shutter-open camera (sceneCpu.prevInvView) and this frame's
@@ -574,8 +571,8 @@ bool OfflineRenderer::Impl::DrawMmeLayer(ID3D12GraphicsCommandList* cmd, Transie
     c2w.r[1] = XMVectorSetW(up, 0.0f);
     c2w.r[2] = XMVectorSetW(fwd, 0.0f);
     c2w.r[3] = XMVectorSetW(eye, 1.0f);
-    XMMATRIX viewM = XMMatrixInverse(nullptr, c2w);
-    XMMATRIX proj = XMLoadFloat4x4(&sceneCpu.proj);
+    viewM = XMMatrixInverse(nullptr, c2w);
+    proj = XMLoadFloat4x4(&sceneCpu.proj);
     const float lensFocus = lensRadius > 0.0f ? focus : 0.0f;
     if (lensFocus > 0.0f) {
         // OfflineLensView: vp.xy -= lens * (1 - vp.z / focus), a view-space post-multiply (row-vector convention)
@@ -584,6 +581,24 @@ bool OfflineRenderer::Impl::DrawMmeLayer(ID3D12GraphicsCommandList* cmd, Transie
         shear.r[3] = XMVectorSet(-lensX, -lensY, 0.0f, 1.0f);
         viewM = viewM * shear;
     }
+}
+
+// M5b: one iteration's MME layer, drawn into the edge layer's colour target (3 MRT: colour / normal / velocity) with
+// the iteration's lens / shutter camera, after the depth pass and before the edges. The MME colour then resolves with
+// the edges into edgeLayer and composites like the raster / PT MME layer.
+bool OfflineRenderer::Impl::DrawMmeLayer(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t,
+                                         const BuiltinTextures* b, RtScene& rt, float shutter, float lensX,
+                                         float lensY) {
+    if (!mme || !mmeSkin) return false;
+    bool anyMme = false;
+    for (GpuModel* gm : view.models)
+        if (gm && gm->HasMmeEffects()) { anyMme = true; break; }
+    if (!anyMme) return false;
+
+    Dx12Context& c = *ctx;
+    using namespace DirectX;
+    XMMATRIX viewM, proj;
+    IterationCamera(shutter, lensX, lensY, viewM, proj);
     XMFLOAT4X4 viewF{}, projF{};
     XMStoreFloat4x4(&viewF, viewM);
     XMStoreFloat4x4(&projF, proj);

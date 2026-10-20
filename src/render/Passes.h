@@ -633,7 +633,9 @@ public:
     void Execute(PassContext& pc) override;
 
     // Offline GI renderer draws world surfaces and particles into edgeColorMsaa / edgeDepthMsaa
-    void DrawOffline(PassContext& pc, const Texture& edgeColorMsaa, const Texture& edgeDepthMsaa);
+    // iterationViewProj: the offline iteration's lens / shutter camera (nullptr = the scene camera)
+    void DrawOffline(PassContext& pc, const Texture& edgeColorMsaa, const Texture& edgeDepthMsaa,
+                     const DirectX::XMFLOAT4X4* iterationViewProj = nullptr);
 
     // Post-composite particle draw (raster / RT): alpha / additive blended into targets.lit, depth-tested against
     // targets.depth (R32_FLOAT raw device depth). Uses the same per-instance state as Execute.

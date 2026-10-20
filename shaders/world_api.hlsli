@@ -94,7 +94,15 @@ cbuffer WorldCB : register(b1) {
     // The surface being drawn: x: 0 = the field's extent, 1 = camera-centred, y: the camera radius (world units),
     // z: 1 = the pack's height is above the ground, w: unused
     float4 gSurfaceParams;
+    // Offline GI: the iteration's lens / shutter view-projection (gOfflineParams.x = 1 when set)
+    float4x4 gOfflineViewProj;
+    float4 gOfflineParams;
 };
+
+// The clip position of a world point: the offline iteration's camera (DoF / motion blur) or the frame camera.
+inline float4 WorldClip(float3 posWorld) {
+    return mul(float4(posWorld, 1.0), gOfflineParams.x > 0.5 ? gOfflineViewProj : gViewProj);
+}
 
 #define gTime (gWorldTime.x)
 

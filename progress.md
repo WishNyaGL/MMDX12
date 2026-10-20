@@ -2258,3 +2258,7 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   packaged smoke (select screen, 0 `[E]`, leftovers removed), delta manifest 82 new objects (+ .gz) uploaded, all 138
   files reachable, manifest hash matches; GitHub v2.5.0 (digests = local zips); website deployed (`/latest.json` -> 2.5.0).
 - Pitfall again: a path list written by Windows python carries `\r` (`tar -T` fails per file): `tr -d '\r'`.
+- Follow-up (user report): offline GI world particles / surfaces ignored the thin-lens DoF (and the shutter camera):
+  the world pass drew the GI edge layer with the frame's pinhole `gViewProj`. Now `OfflineRenderer::IterationCamera`
+  (shared with the MME layer) builds the iteration's lens / shutter view-projection and `WorldPass::DrawOffline` passes it
+  in `WorldCB::gOfflineViewProj` (`WorldClip` in the host VS). Verified: GI still, DoF on, background flakes blurred.
