@@ -147,6 +147,18 @@ inline float3 PackLocalToWorldVec(float3 vecLocal) {
 #if defined(PACK_CAP_WORLD_CAMERA) && PACK_CAP_WORLD_CAMERA
 inline float3 PackCameraPos() { return gEyePos.xyz; }
 
+// The centre of the camera-space box of `size` world units: ahead of the camera along its horizontal view direction
+// (40 % of the box), so the box covers what the camera sees (from just behind it to 0.9 x size ahead) rather than
+// mostly the space behind and beside it.
+inline float3 PackWrapCentre(float size) {
+    float3 f = float3(gView._13, gView._23, gView._33);   // the view's forward axis in world space (row vectors)
+    float2 fh = f.xz;
+    float l = length(fh);
+    fh = l > 1e-3 ? fh / l : float2(0.0, 0.0);              // looking straight down: no shift
+    float3 c = PackCameraPos();
+    return float3(c.x + fh.x * size * 0.4, c.y, c.z + fh.y * size * 0.4);
+}
+
 // The wrap size of the current particle system (0 for a local-space system): the edge length of the tile the
 // particles live in, in world units.
 inline float PackWrapSize() { return gWorldExtra.x; }
@@ -165,7 +177,7 @@ inline float3 PackParticleWorld(float3 posLocal) {
     float3 w = PackLocalToWorld(posLocal);
     float size = PackWrapSize();
     if (size > 0.0 && gWorldExtra.y > 0.5) {
-        float3 cam = PackCameraPos();
+        float3 cam = PackWrapCentre(size);
         w.x = cam.x + (frac((w.x - cam.x) / size + 0.5) - 0.5) * size;
         w.z = cam.z + (frac((w.z - cam.z) / size + 0.5) - 0.5) * size;
     }
@@ -282,8 +294,13 @@ float PackGroundHeightAtUv(float2 uv) {
     if (any(uv < 0.0) || any(uv > 1.0)) return -1e9;
     int2 size = int2(gGroundMap.x, gGroundMap.x);
     int2 texel = clamp((int2)(uv * (float)size), int2(0, 0), size - int2(1, 1));
-    float depth = gGroundHeightMap.Load(int3(texel, 0));
-    if (depth >= 1.0 - 1e-5) return -1e9;             // nothing was drawn there
+    if (gGroundHeightMap.Load(int3(texel, 0)) >= 1.0 - 1e-5) return -1e9;   // nothing was drawn there
+    // Conservative: the top-most surface of the 3x3 texels around (the nearest depth), so a thin layer on a
+    // sloped or bumpy floor stays above the real floor instead of sinking under it between texel centres.
+    float depth = 1.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+            depth = min(depth, gGroundHeightMap.Load(int3(clamp(texel + int2(x, y), int2(0, 0), size - int2(1, 1)), 0)));
     return gGroundRect.y - depth * gGroundRect.z;
 }
 

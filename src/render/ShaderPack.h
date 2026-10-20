@@ -54,6 +54,10 @@ struct PackWorldParticleSystem {
     enum class Space : uint8_t { Local = 0, Camera };
     Space space = Space::Local;
     float wrap = 120.0f;   // the camera-space tile size (world units), 1 .. 4096
+    // "wrapParam" (optional): the tile size follows that float param (value x "wrapScale"), so a pack's range slider
+    // sizes the tile; empty = the fixed "wrap".
+    std::string wrapParam;
+    float wrapScale = 1.0f;
     std::string simulate; // stateful: void <fn>(inout PackParticle p, PackSimInput s)
     std::string spawn;    // stateless: PackParticle <fn>(uint id, float t)
     std::string shade;    // float4 <fn>(PackParticleShadeIn i)

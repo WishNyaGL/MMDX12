@@ -406,9 +406,17 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   outline layer. Characters interact through a collider track (feet / toes / wrists, 30 Hz, no physics; play mode builds
   it once per scene: `WORLD colliders ready` log line). Play mode: `AppSettings::worldStack` (`--world id|none`, the 화면 효과
   panel's 월드 이펙트 section, manager "월드에 추가"); studio: outliner 월드 entities with placement + keyable params
-  (`RowKind::WorldParam`, saved in .mmdxproj). Built-in `shaders/packs/snow` ("눈"): falling snow, a 200-unit snow cover
-  with footprints (print colour / tint params), landing particles that thin out on trodden snow. No world gizmo / transform
-  keys yet. Zero cost without worlds.
+  (`RowKind::WorldParam`, saved in .mmdxproj). Surfaces also get the scene's spots / points + their soft / hard shadow
+  maps (shared `shaders/shadow_common.hlsli`). Capabilities in `"requires"` (apiVersion stays 6): `world.camera`
+  (`"space": "camera"` particles simulated in a world-fixed tile, drawn in a box around `PackWrapCentre` = the camera
+  shifted 0.4 box ahead; `"wrap"` or `"wrapParam"` + `"wrapScale"` = a range param sizes the box; never re-anchor
+  particles to the camera), `world.anchor` (fields centred on the performers' mean foot xz), `world.ground` (a top-down
+  2048^2 depth map of stage + prop models, back faces culled, read conservatively 3x3 by `PackGround[Height]`;
+  `"extent": "camera"` surfaces = 3 nested LOD grids around the camera, `"ground": true` = height above the ground,
+  clipped where there is none), `world.overlay` (premultiplied over the lit scene, negative slope bias, normal / velocity
+  untouched; keep it ~2 cm above the ground). Built-in `shaders/packs/snow` 2.0 ("눈"): snow in the camera box, cover on
+  every upward ground surface, performer-anchored footprints, landing particles that thin out on trodden snow. No world
+  gizmo / transform keys yet. Zero cost without worlds.
 - MME (docs/mme/mme_design.md; compatibility list docs/mme/compat_list.md): own .fx parser / preprocessor / IR in
   `asset/Mme*`, FXC SM5 wrappers `render/MmeCompiler` (object mode = host MRT), `render/MmeRuntime` (instances per
   (file, objectMode), targets, samplers, constant ring), `MmeScriptVM`, `MmeSemantics` (CONTROLOBJECT: missing object =

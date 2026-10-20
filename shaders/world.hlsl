@@ -344,10 +344,9 @@ SurfacePsOut PSWorldSurface(SurfaceVsOut i) {
     // matches the stage in every render path; the composite adds nothing on top (nt.z = -1 below).
     float3 hemi = PackHemiAmbient(sout.normal);
     float3 ambient = max(PackAmbient(), hemi);
-    float3 litBase = sout.albedo * (sunColor * (NdotL * shadow) + ambient);
-    float3 lit = litBase + sout.emission;
     // The scene's punctual lights (spots / points) with their shadow maps, the same terms the stage floor gets.
-    lit += sout.albedo * WorldPunctualDiffuse(i.posWorld, sout.normal);
+    float3 litBase = sout.albedo * (sunColor * (NdotL * shadow) + ambient + WorldPunctualDiffuse(i.posWorld, sout.normal));
+    float3 lit = litBase + sout.emission;
 
 #if defined(WORLD_SURFACE_OVERLAY) && WORLD_SURFACE_OVERLAY
     // The overlay blend: the premultiplied colour over the already-lit scene colour (the destination keeps its
@@ -416,7 +415,7 @@ ParticleVsOut VSWorldParticle(uint vertexId : SV_VertexID) {
     // one minus the frame's motion, so the wrap never leaves a velocity streak.
     if (gWorldExtra.x > 0.0 && gWorldExtra.y > 0.5) {
         float size = gWorldExtra.x;
-        float3 cam = gEyePos.xyz;
+        float3 cam = PackWrapCentre(size);   // the box ahead of the camera
         float3 wrapped;
         wrapped.x = cam.x + (frac((p.pos.x - cam.x) / size + 0.5) - 0.5) * size;
         wrapped.y = p.pos.y;

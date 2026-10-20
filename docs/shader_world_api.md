@@ -115,6 +115,9 @@ Each particle system in `"particles"`:
   units around the camera, so the effect covers the whole map instead of a disc around the entity.
 - `"wrap"`: The camera-space tile size in world units (default `120`, clamped to `1 .. 4096`). The pack keeps the
   particles inside the tile (`PackWrapTile`); the host wraps the drawn position into the box around the camera.
+- `"wrapParam"` / `"wrapScale"` (optional): the tile size follows a float param instead (the instance's value, else
+  the param's default, times `"wrapScale"`, default `1`), so a pack's range slider sizes the tile and the density
+  stays even. Only with `"space": "camera"`.
 
 ### Field Specification
 Each field in `"fields"`:
@@ -287,6 +290,8 @@ struct PackParticleShadeIn {
     (many steps recorded in one frame) **every step sees the current frame's camera**: the camera is not part of the
     simulation state.
   - `PackWrapSize()`: The wrap size of the current particle system (0 for a local-space system).
+  - `PackWrapCentre(size)`: The centre of the drawn box: the camera moved 40 % of the box ahead along its horizontal
+    view direction, so the box spans from just behind the camera to 0.9 x size in front of it (what the camera sees).
   - `PackWrapTile(posLocal)`: Wraps a local position's XZ into the tile $[-W/2, +W/2]$ around the local origin.
   - `PackParticleWorld(posLocal)`: The world position the particle is **drawn** at this frame (the camera-space wrap
     applied), so a simulation can test it against the ground (`PackGroundHeight`) at the place the particle appears.
@@ -334,11 +339,17 @@ A particle system with `"space": "camera"` simulates its particles in a **local 
 stay inside $[-W/2, +W/2]$ around the local origin (`W` = `"wrap"`), the Y is the world height. The pack keeps the
 particles inside the tile itself (`PackWrapTile`).
 
-The **host** maps every particle into the box of size `W` centred on the camera when it draws it:
+The **host** maps every particle into the box of size `W` around `c = PackWrapCentre(W)` (the camera, shifted 0.4 W
+ahead along its horizontal view direction) when it draws it:
 
 ```
-x' = cam.x + (frac((x - cam.x) / W + 0.5) - 0.5) * W      (the same for z; y is unchanged)
+x' = c.x + (frac((x - c.x) / W + 0.5) - 0.5) * W      (the same for z; y is unchanged)
 ```
+
+Simulate in world-fixed tile coordinates (integrate the motion in the tile, wrap with `PackWrapTile`, spawn uniformly
+over the whole tile) and let the host move the box. Do not re-anchor particles to the camera each step: they would
+move with the camera (no parallax, rain "on the lens"). Ground layers that should cover the same area can centre their
+falloff on `PackWrapCentre(W)` too.
 
 The wrap happens in world space, after the pack's local -> world transform. The previous position used for the motion
 vectors is `wrapped - (pos - prevPos)`, so a wrap never leaves a velocity streak: the particle's screen motion is its
@@ -384,7 +395,13 @@ discarded), and the gradient normal includes the ground's slope.
 ### 6.4 Overlay surfaces (`world.overlay`)
 
 See the surface specification in §2: premultiplied alpha over the already-lit scene colour, the depth test on, the
-depth write off, a small slope-scaled depth bias, and the normal / velocity targets untouched.
+depth write off, a slope-scaled depth bias towards the camera (standard Z: negative), and the normal / velocity targets
+untouched (independent blend). The host lights the overlay like an opaque surface (sun + shadow, hemisphere, the
+scene's spots / points): output = `lit * alpha + emission`.
+
+Keep an overlay a couple of centimetres above the ground (e.g. `0.02`): `PackGroundHeight` is conservative (the
+top-most surface of the 3 x 3 ground texels around the point, ~0.85 world units each on a large stage), but a layer of
+a few millimetres still sinks under a sloped floor at grazing angles.
 
 ---
 

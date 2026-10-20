@@ -2198,3 +2198,38 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - Verified: `build.cmd build_dev` builds; the world host shader compiles with dxc for the built-in snow pack (no new
   capabilities) and with all four `PACK_CAP_WORLD_*` defined; `pack_check --compile` compiles a test pack that uses every
   new API, and refuses the same pack without the `requires`.
+## 2026-10-21 - Stage shadows, song-stage studio choice, world effects over the whole map (camera / performers / ground)
+- User reports on 2.4.1 (delegated to opencode workers on `opencode/minimax-m3.1-flash-free`, reviewed + fixed here):
+  - Song-stage popup: "현재 선택: 스튜디오" erased the per-song choice (= the bundled stage again). Now "-" = studio floor,
+    labelled "스튜디오 (스테이지 없음)"; the 현재 선택 entry is hidden without a picked stage card (worker A).
+  - Stages showed no cast shadow (only SSAO darkened them). Two causes: ripped stages ship every PMX shadow flag 0 (survey
+    of the library: Sekai / Fireflower / Konton / Supernova rips all 0; hand-made MMD stages set them per part), so the
+    shaders skipped the shadow term; and stage spot shadows used the sun's 15 degree soft cap (a default spot = a 5.3
+    degree light whose PCSS erased the character's shadow). Fix: a stage with no receive flag on any material receives on
+    all (authored flags kept; casting unchanged, so a dome that does not cast never shades the stage), stage full shadow
+    0.42 (was 0.62; worker B's rewrite got lighter than before on high-ambient materials, rewritten), punctual soft angle =
+    1/4 of the sun's in raster PCSS / RT / PT / GI (`PunctualSoftAngle`, worker C).
+  - Snow ignored the scene's spots / points: world surfaces now get them with the shared soft / hard shadow code
+    (`shaders/shadow_common.hlsli`, worker C; the user asked for no hard-only copy).
+  - Decided with the user: play = light users, studio = creators; per-material cast / receive overrides belong in the
+    studio only (saved in .mmdxproj, never by editing the PMX) - not built yet. A stage without an operable root bone
+    cannot be moved in MMD either; a keyable studio placement track is the proposed answer (not built).
+- World capabilities (worker D, engine; worker E snow; worker F the user's own world packs): see CLAUDE.md "World
+  effects". Review fixes (Claude): ground map uv / normal z flip (the top-down camera puts +z at texture top), the fine LOD
+  level sat at a corner of the middle one, the ground render uploaded 4 of 16 matrix dwords (the worker also misreported
+  the correct `DrawSlice` call as a bug), overlay PSOs lacked IndependentBlendEnable and used a positive slope bias (hid
+  the layer behind sloped floors), overlays skipped the punctual lights, `PackGroundHeight` now conservative (3x3 max).
+  Added `wrapParam` / `wrapScale` and `PackWrapCentre` (box ahead of the camera: with a box centred on the camera a
+  subject 40-60 units away is outside it and the effect vanishes from the shot).
+- Worker F re-anchored every particle to the camera each step (camera-locked rain, no parallax): rewritten to world-fixed
+  tiles in the user's rain / sakura / fireflies / ground_mist; range defaults raised (45 / 45 / 40 / 60) with more particles
+  so the box reaches typical MMD camera distances; aurora reverted (its motes ring the curtains); confetti / fireworks
+  unchanged (placed events). Rain: wet floor = overlay on the real floor (the old one painted its own floor colour), puddles
+  by world-xz noise on flat ground, no disc. Sakura: the analytic carpet rendered as blobs, now scattered individual petals
+  (one per cell). Ground mist: overlay haze centred on the camera box, opacity x2.5 (the old opaque sheet hid the floor).
+  The user's packs live outside the repo (copied back to their Downloads `shader_packs` folder after review).
+- Verified (raster, 1600x900, Fireflower / Base Stage (0007), `--seek 20 --paused --no-physics`): stage spot + sun shadows,
+  snow on every upward surface incl. raised walkways (none on walls), old snow pack (no capabilities) unchanged after the
+  engine change (31 / 5.7M bytes), rain / sakura / fireflies / mist visible around a subject 60 units from the camera,
+  0 `[E]`. Not verified: PT / offline GI with the new capabilities, the song-stage popup by clicking (code review only),
+  puddles close up, studio-placed world entities off the origin.

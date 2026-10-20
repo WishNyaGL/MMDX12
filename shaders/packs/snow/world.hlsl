@@ -163,8 +163,8 @@ void SimulateFlakes(inout PackParticle p, PackSimInput s) {
     float turbulence = PackParam(4);
     float spawnHeight = PackParam(6);
 
-    // The camera-space tile (the manifest's "wrap"): flakes fill the whole tile, so the wrapped box around the camera
-    // has no empty bands. The range parameter fades flakes out by their distance from the camera (ShadeFlakes).
+    // The camera-space tile: its size is the range param ("wrapParam"); flakes fill the whole tile, so the wrapped box
+    // in front of the camera has no empty bands.
     float halfTile = 0.5 * max(PackWrapSize(), 1.0);
 
     // Initial state setup for newly created particles
@@ -281,9 +281,6 @@ float4 ShadeFlakes(PackParticleShadeIn i) {
     // Firm core with soft feathered edge: alpha ~0.75-0.85 in core
     float edge = smoothstep(0.5, 0.20, d);
     float alpha = edge * 0.85 * i.particle.color.a;
-    // The range around the camera (param 5): flakes fade out over the last 20 % of it (horizontal distance).
-    float rangeHalf = 0.5 * max(PackParam(5), 1.0);
-    alpha *= smoothstep(rangeHalf, rangeHalf * 0.8, length(i.posWorld.xz - PackCameraPos().xz));
 
     // Light with sun (forward scatter) + hemisphere ambient (scene sky / ground)
     float3 sunColor = PackSunColor();

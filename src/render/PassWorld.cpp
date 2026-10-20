@@ -23,6 +23,17 @@ namespace {
 
 using namespace DirectX;
 
+// A camera-space particle system's tile size: the fixed "wrap", or the "wrapParam" float param (the instance's value,
+// else the pack default) times "wrapScale".
+float ParticleWrap(const ShaderPack& pack, const PackWorldParticleSystem& p, const std::map<std::string, float>& params) {
+    if (p.wrapParam.empty()) return p.wrap;
+    float v = p.wrap / std::max(p.wrapScale, 0.01f);
+    for (const ShaderPackParam& q : pack.params)
+        if (q.key == p.wrapParam) v = q.def;
+    if (auto it = params.find(p.wrapParam); it != params.end()) v = it->second;
+    return std::clamp(v * p.wrapScale, 1.0f, 4096.0f);
+}
+
 struct GpuWorldColliderData {
     XMFLOAT3 pos{0, 0, 0};
     float radius = 0.0f;
@@ -1047,6 +1058,7 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                     // keeps its alpha, so the scene's coverage is untouched), the depth test on but no depth write and
                     // a small slope-scaled depth bias, so a surface a few mm above the ground does not z-fight. The
                     // normal / velocity targets keep the stage's own values.
+                    pso.BlendState.IndependentBlendEnable = TRUE;   // RT1 / RT2 keep the stage's normal / velocity
                     pso.BlendState.RenderTarget[0].BlendEnable = TRUE;
                     pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
                     pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
@@ -1060,7 +1072,7 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                     pso.BlendState.RenderTarget[2].BlendEnable = FALSE;
                     pso.BlendState.RenderTarget[2].RenderTargetWriteMask = 0;
                     pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-                    pso.RasterizerState.SlopeScaledDepthBias = 2.0f;
+                    pso.RasterizerState.SlopeScaledDepthBias = -2.0f;   // standard Z: negative = towards the camera
                     CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDrawOverlay)),
                             "WorldPass: sPipe.psoDrawOverlay");
                     pso.RasterizerState.SlopeScaledDepthBias = 0.0f;
@@ -1076,6 +1088,7 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                 pso.SampleDesc.Count = 4;
                 CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDrawOffline)), "WorldPass: sPipe.psoDrawOffline");
                 if (overlay) {
+                    pso.BlendState.IndependentBlendEnable = TRUE;   // RT1 / RT2 keep the stage's normal / velocity
                     pso.BlendState.RenderTarget[0].BlendEnable = TRUE;
                     pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
                     pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
@@ -1085,7 +1098,7 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                     pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
                     pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
                     pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-                    pso.RasterizerState.SlopeScaledDepthBias = 2.0f;
+                    pso.RasterizerState.SlopeScaledDepthBias = -2.0f;   // standard Z: negative = towards the camera
                     CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDrawOfflineOverlay)),
                             "WorldPass: sPipe.psoDrawOfflineOverlay");
                 }
@@ -1201,7 +1214,7 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
     auto setWrap = [&](size_t pi) {
         const auto& p = pack.world->particles[pi];
         const bool cam = p.space == PackWorldParticleSystem::Space::Camera;
-        wrapSize = cam ? p.wrap : 0.0f;
+        wrapSize = cam ? ParticleWrap(pack, p, inst.params) : 0.0f;
         cameraSpace = cam ? 1.0f : 0.0f;
     };
 
@@ -1676,7 +1689,7 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
 
         // The camera-space wrap (world.camera): the host draws the particle in a box around the camera.
         const bool cam = p.space == PackWorldParticleSystem::Space::Camera;
-        wrapSize = cam ? p.wrap : 0.0f;
+        wrapSize = cam ? ParticleWrap(pack, p, inst.params) : 0.0f;
         cameraSpace = cam ? 1.0f : 0.0f;
 
         const auto cb = makeWorldCb((uint32_t)pi, p.count);
@@ -1830,7 +1843,7 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
 
             // The camera-space wrap (world.camera): the host draws the particle in a box around the camera.
             const bool cam = p.space == PackWorldParticleSystem::Space::Camera;
-            wrapSize = cam ? p.wrap : 0.0f;
+            wrapSize = cam ? ParticleWrap(*pack, p, inst.params) : 0.0f;
             cameraSpace = cam ? 1.0f : 0.0f;
 
             const auto cb = makeWorldCb((uint32_t)pi, p.count);

@@ -654,6 +654,11 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                         }
                         if (auto w = pj.find("wrap"); w != pj.end() && w->is_number())
                             ps.wrap = std::clamp(w->get<float>(), 1.0f, 4096.0f);
+                        ps.wrapParam = Str(pj, "wrapParam");
+                        if (auto ws = pj.find("wrapScale"); ws != pj.end() && ws->is_number())
+                            ps.wrapScale = std::clamp(ws->get<float>(), 0.01f, 100.0f);
+                        if (!ps.wrapParam.empty() && ps.space != PackWorldParticleSystem::Space::Camera)
+                            problems.push_back("particle wrapParam needs \"space\": \"camera\"");
 
                         ps.simulate = Str(pj, "simulate");
                         ps.spawn = Str(pj, "spawn");
