@@ -2262,3 +2262,11 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   the world pass drew the GI edge layer with the frame's pinhole `gViewProj`. Now `OfflineRenderer::IterationCamera`
   (shared with the MME layer) builds the iteration's lens / shutter view-projection and `WorldPass::DrawOffline` passes it
   in `WorldCB::gOfflineViewProj` (`WorldClip` in the host VS). Verified: GI still, DoF on, background flakes blurred.
+
+## 2026-10-21 (3) - Release 2.5.1: gallery world packs were listed as incompatible
+- Bug: `kPackTypeWorldCompatible` (ShaderPackStore.h) was still `false` after 2.5.0 added world effects, so
+  `RemotePack::Compatible()` marked every gallery world pack (rain, ground mist, fireflies) "호환되지 않음". Flipped to `true`.
+- Release 2.5.1 (patch): notes `dist/notes_2.5.1.md`, `package_release.ps1` (195.5 / 15.8 MB), packaged smoke (select screen,
+  0 `[E]`, leftovers removed), delta manifest 2.5.1 (5 new objects, `--base-url https://mmdx.codingbot.kr/updates`) uploaded,
+  live manifest hash + exe object verified; GitHub v2.5.1; website deployed (`/latest.json` -> 2.5.1 with manifest).
+- Lesson: a "flip the constant when it does" placeholder needs a release checklist entry; grep `Compatible` flags when a feature ships.
