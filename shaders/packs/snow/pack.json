@@ -1,9 +1,10 @@
 {
   "format": 1,
   "id": "snow",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "apiVersion": 6,
   "type": "world",
+  "requires": ["world.camera", "world.anchor", "world.ground"],
   "name": {
     "ko": "눈",
     "en": "Snow",
@@ -31,6 +32,7 @@
         "format": "rg16f",
         "persistent": true,
         "rate": 20.0,
+        "anchor": "performers",
         "update": "UpdateCover"
       }
     ],
@@ -38,6 +40,9 @@
       {
         "field": "cover",
         "grid": 256,
+        "extent": "camera",
+        "radius": 400,
+        "ground": true,
         "height": "SnowHeight",
         "shade": "SnowShade"
       }
@@ -47,6 +52,8 @@
         "name": "fall",
         "count": 24000,
         "blend": "alpha",
+        "space": "camera",
+        "wrap": 80.0,
         "simulate": "SimulateFlakes",
         "shade": "ShadeFlakes",
         "size": [0.02, 0.40]
@@ -148,11 +155,11 @@
       "key": "area_radius",
       "group": "falling",
       "type": "float",
-      "label": { "ko": "범위 반경", "en": "Area Radius", "ja": "範囲半径", "zh": "范围半径" },
-      "default": 40.0,
-      "min": 5.0,
+      "label": { "ko": "범위 (카메라 주변)", "en": "Range (Around Camera)", "ja": "範囲 (カメラ周辺)", "zh": "范围（相机周围）" },
+      "default": 80.0,
+      "min": 10.0,
       "max": 80.0,
-      "step": 1.0
+      "step": 5.0
     },
     {
       "key": "spawn_height",

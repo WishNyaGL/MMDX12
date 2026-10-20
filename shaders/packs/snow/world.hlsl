@@ -1,6 +1,42 @@
 // shaders/packs/snow/world.hlsl
-// MMDX12 Built-in Snow World Shader Pack v1.0.0
-// Implements falling snow, ground snow cover with footprints, and kicked-up snow puffs.
+// MMDX12 Built-in Snow World Shader Pack v2.0.0
+// Falling snow over the whole map around the camera (the camera-space tile), snow on every upward surface
+// (the camera-centred cover above the ground) with the performers' footprints, and kicked-up snow puffs.
+//
+// Capabilities (declared in pack.json's "requires"): world.camera (the camera-space snowfall),
+// world.anchor (the performer-anchored cover field), world.ground (the ground height map and the cover
+// that follows the ground).
+
+// ============================================================================
+// 0. Shared helpers
+// ============================================================================
+
+// The snow cover's height ABOVE the ground at a local xz: the depth, the drifts and the footprint carve.
+// The cover field is performer-anchored: outside the field the cover is untouched snow (PackFieldSample returns 0)
+// and PackFieldCoverage fades the carve out over the field's border, so the border of the field is invisible.
+float SnowCoverHeight(float2 posLocalXZ) {
+    float depth = PackParam(7);
+    float footprintDepth = PackParam(8);
+
+    float4 f = PackFieldSample(0, posLocalXZ);
+    float coverage = PackFieldCoverage(0, posLocalXZ);
+    float carved = saturate(f.x) * coverage;   // x: the carved amount (the snow removed), y: the rim
+    float rim = f.y * coverage;
+
+    // Low-frequency wind drifts + subtle surface undulation
+    float drift = sin(posLocalXZ.x * 0.045 + posLocalXZ.y * 0.035) * 0.055 +
+                  cos(posLocalXZ.x * 0.028 - posLocalXZ.y * 0.058) * 0.042;
+    float micro = (sin(posLocalXZ.x * 0.75 + posLocalXZ.y * 0.50) +
+                   cos(posLocalXZ.x * 0.40 - posLocalXZ.y * 0.90)) * 0.007;
+
+    // The snow height carved down by the footsteps, with a raised rim and the natural drifts
+    return depth * (1.0 - carved * footprintDepth) + rim + drift + micro;
+}
+
+// The cover fades out where the ground is too steep to hold snow (the ground's normal below ~0.75).
+float SnowSlopeFade(float3 groundNormal) {
+    return saturate(groundNormal.y / 0.75);
+}
 
 // ============================================================================
 // 1. Snow Cover Field Update (ping-pong persistent field, rate = 20 Hz)
@@ -25,15 +61,21 @@ float4 UpdateCover(PackFieldInput f) {
         float d = distance(f.posLocal, colLocal.xz);
 
         if (d < effectiveRadius * 1.5) {
-            // Ankle ~1.0, toes ~0.2. Allow foot collider whose lower part touches snow
-            if (colLocal.y - col.radius <= depth + 0.50 && colLocal.y >= -0.6) {
-                float carveTarget = footprintDepth * smoothstep(effectiveRadius, effectiveRadius * 0.25, d);
-                val.x = max(val.x, carveTarget);
+            // The ground under the foot (the stage's height): the footprints also work on a raised stage.
+            float groundY = PackGroundHeight(col.pos.xz);
+            if (groundY > -1e8) {
+                // The snow surface in world units: the ground plus the snow depth.
+                float snowTop = groundY + depth;
+                // Ankle ~1.0, toes ~0.2. Allow foot collider whose lower part touches snow
+                if (col.pos.y - col.radius <= snowTop + 0.50 && col.pos.y >= groundY - 0.6) {
+                    float carveTarget = footprintDepth * smoothstep(effectiveRadius, effectiveRadius * 0.25, d);
+                    val.x = max(val.x, carveTarget);
 
-                float rimTarget = footprintDepth * 0.30 *
-                    smoothstep(effectiveRadius * 0.50, effectiveRadius * 0.88, d) *
-                    smoothstep(effectiveRadius * 1.50, effectiveRadius * 0.95, d);
-                val.y = max(val.y, rimTarget);
+                    float rimTarget = footprintDepth * 0.30 *
+                        smoothstep(effectiveRadius * 0.50, effectiveRadius * 0.88, d) *
+                        smoothstep(effectiveRadius * 1.50, effectiveRadius * 0.95, d);
+                    val.y = max(val.y, rimTarget);
+                }
             }
         }
     }
@@ -45,39 +87,23 @@ float4 UpdateCover(PackFieldInput f) {
 }
 
 // ============================================================================
-// 2. Snow Surface Height & Shading (grid = 256)
+// 2. Snow Surface Height & Shading (camera-centred grid around the camera)
 // ============================================================================
 float SnowHeight(PackSurfaceIn i) {
-    float depth = PackParam(7);
-    float footprintDepth = PackParam(8);
-    float4 f = PackFieldSample(0, i.posLocal);
-    float carved = saturate(f.x);
-    float rim = f.y;
-
-    // Low-frequency wind drifts + subtle surface undulation
-    float drift = sin(i.posLocal.x * 0.045 + i.posLocal.y * 0.035) * 0.055 +
-                  cos(i.posLocal.x * 0.028 - i.posLocal.y * 0.058) * 0.042;
-    float micro = (sin(i.posLocal.x * 0.75 + i.posLocal.y * 0.50) +
-                   cos(i.posLocal.x * 0.40 - i.posLocal.y * 0.90)) * 0.007;
-
-    // Base snow height carved down by footsteps with raised rim and natural drifts
-    float baseH = depth * (1.0 - carved * footprintDepth) + rim + drift + micro;
-
-    // Irregular organic perimeter spanning ~180 units across the 200 unit field
-    float angle = atan2(i.posLocal.y, i.posLocal.x);
-    float radius = length(i.posLocal);
-    float maxRadius = 88.0 + sin(angle * 5.0) * 5.5 + cos(angle * 8.0) * 4.0 + sin(angle * 13.0) * 2.0;
-    float edgeFade = smoothstep(maxRadius, maxRadius - 16.0, radius);
-
-    // Thin out height towards the edge and strictly keep above y = 0
-    float h = lerp(0.002, max(0.002, baseH), edgeFade);
-    return h;
+    // The height ABOVE the ground (the host adds the ground height and clips where there is no ground).
+    float h = SnowCoverHeight(i.posLocal.xy);
+    // No snow on steep surfaces: the cover thins out and vanishes where the ground is not nearly horizontal.
+    return h * SnowSlopeFade(i.groundNormal);
 }
 
 PackSurfaceOut SnowShade(PackSurfaceShadeIn i) {
     PackSurfaceOut o;
+
+    // The footprint carve (the field is performer-anchored: outside it the snow is untouched).
     float4 f = PackFieldSample(0, i.posLocal.xz);
-    float carved = saturate(f.x);
+    float coverage = PackFieldCoverage(0, i.posLocal.xz);
+    float carved = saturate(f.x) * coverage;
+
     // Pristine snow color and customizable footprint shade
     float3 baseColor = PackParamColor(11);  // default [0.96, 0.97, 1.0]
     float3 printColor = PackParamColor(13); // default [0.70, 0.75, 0.82] (soft, slightly cool grey-blue)
@@ -92,15 +118,12 @@ PackSurfaceOut SnowShade(PackSurfaceShadeIn i) {
     float grain = (float(cellHash & 0xffu) / 255.0 - 0.5) * 0.03;
     snowCol += grain;
 
-    // Irregular perimeter: blend color towards dark ground floor, clip outside
-    float angle = atan2(i.posLocal.z, i.posLocal.x);
-    float radius = length(i.posLocal.xz);
-    float maxRadius = 88.0 + sin(angle * 5.0) * 5.5 + cos(angle * 8.0) * 4.0 + sin(angle * 13.0) * 2.0;
-    float edgeFade = smoothstep(maxRadius, maxRadius - 16.0, radius);
-    clip(edgeFade - 0.001);
-    float3 groundColor = float3(0.08, 0.09, 0.11);
-    o.albedo = lerp(groundColor, snowCol, edgeFade);
+    // No snow on steep surfaces: the cover fades out with the ground's slope (the host clips where there is no
+    // ground at all).
+    float slope = SnowSlopeFade(i.groundNormal);
+    clip(slope - 0.02);
 
+    o.albedo = snowCol;
     o.alpha = 1.0;
     o.roughness = 0.8;
     o.normal = i.normal;
@@ -122,7 +145,7 @@ PackSurfaceOut SnowShade(PackSurfaceShadeIn i) {
 
             float shadow = PackSunShadow(i.posWorld);
             float3 sunColor = PackSunColor();
-            emission = sunColor * (spec * sparkleParam * 2.8 * shadow * edgeFade);
+            emission = sunColor * (spec * sparkleParam * 2.8 * shadow);
         }
     }
     o.emission = emission;
@@ -130,7 +153,7 @@ PackSurfaceOut SnowShade(PackSurfaceShadeIn i) {
 }
 
 // ============================================================================
-// 3. Falling Snow Particles (count = 24000)
+// 3. Falling Snow Particles (camera space, count = 24000)
 // ============================================================================
 void SimulateFlakes(inout PackParticle p, PackSimInput s) {
     float density = PackParam(0);
@@ -138,17 +161,18 @@ void SimulateFlakes(inout PackParticle p, PackSimInput s) {
     float flakeSize = PackParam(2);
     float3 wind = PackParamVec3(3);
     float turbulence = PackParam(4);
-    float areaRadius = PackParam(5);
     float spawnHeight = PackParam(6);
-    float depth = PackParam(7);
+
+    // The camera-space tile (the manifest's "wrap"): flakes fill the whole tile, so the wrapped box around the camera
+    // has no empty bands. The range parameter fades flakes out by their distance from the camera (ShadeFlakes).
+    float halfTile = 0.5 * max(PackWrapSize(), 1.0);
 
     // Initial state setup for newly created particles
     if (p.age < 0.0) {
         float3 rnd = PackRandom3(s.id, 10101u);
-        float r = sqrt(rnd.x) * areaRadius;
-        float theta = rnd.y * 6.2831853;
+        float2 tileXZ = (rnd.xy - 0.5) * 2.0 * halfTile;
         float localY = rnd.z * spawnHeight;
-        p.pos = PackLocalToWorld(float3(r * cos(theta), localY, r * sin(theta)));
+        p.pos = PackLocalToWorld(PackWrapTile(float3(tileXZ.x, localY, tileXZ.y)));
         p.age = rnd.z * 10.0;
 
         // Snowflake size distribution: typical flakes (82%), medium flakes (14%), near-camera flakes (4%)
@@ -196,20 +220,28 @@ void SimulateFlakes(inout PackParticle p, PackSimInput s) {
     p.vel = wind + turb + float3(swayX, -indSpeed, swayZ);
     p.pos += p.vel * s.dt;
 
-    // Check bounds: respawn if reaching snow surface, leaving cylinder, or falling below
+    // The landing test: the flake lands on the ground under the position it is DRAWN at (the camera-space wrap
+    // moves it around the camera), not at the local y = 0.
     float3 pLoc = PackWorldToLocal(p.pos);
-    float distXZ = length(pLoc.xz);
-    float4 cov = PackFieldSample(0, pLoc.xz);
-    float snowH = max(0.002, depth * (1.0 - saturate(cov.x)) + cov.y);
+    float3 drawn = PackParticleWorld(pLoc);
+    float groundY = PackGroundHeight(drawn.xz);
+    bool landed;
+    if (groundY > -1e8) {
+        // The ground plus the snow that lies on it
+        float snowTop = groundY + SnowCoverHeight(PackWorldToLocal(drawn).xz);
+        landed = (p.pos.y <= snowTop);
+    } else {
+        // No ground under it (a void): the flake falls to the bottom of the tile.
+        landed = (pLoc.y <= -1.0);
+    }
 
-    if (pLoc.y <= snowH || distXZ > areaRadius || pLoc.y > spawnHeight + 5.0 || pLoc.y < -1.0) {
-        // Respawn at the top
+    if (landed || pLoc.y > spawnHeight + 5.0) {
+        // Respawn at the top, inside the tile
         uint stepSeed = (uint)(s.time * 20.0);
         float3 rSpawn = PackRandom3(s.id, stepSeed ^ 54321u);
-        float r = sqrt(rSpawn.x) * areaRadius;
-        float theta = rSpawn.y * 6.2831853;
-        float3 newLoc = float3(r * cos(theta), spawnHeight + rSpawn.z * 1.5, r * sin(theta));
-        p.pos = PackLocalToWorld(newLoc);
+        float2 tileXZ = (rSpawn.xy - 0.5) * 2.0 * halfTile;
+        float3 newLoc = float3(tileXZ.x, spawnHeight + rSpawn.z * 1.5, tileXZ.y);
+        p.pos = PackLocalToWorld(PackWrapTile(newLoc));
         p.age = 0.0;
 
         float rSize = PackRandom(s.id, 777u);
@@ -249,6 +281,9 @@ float4 ShadeFlakes(PackParticleShadeIn i) {
     // Firm core with soft feathered edge: alpha ~0.75-0.85 in core
     float edge = smoothstep(0.5, 0.20, d);
     float alpha = edge * 0.85 * i.particle.color.a;
+    // The range around the camera (param 5): flakes fade out over the last 20 % of it (horizontal distance).
+    float rangeHalf = 0.5 * max(PackParam(5), 1.0);
+    alpha *= smoothstep(rangeHalf, rangeHalf * 0.8, length(i.posWorld.xz - PackCameraPos().xz));
 
     // Light with sun (forward scatter) + hemisphere ambient (scene sky / ground)
     float3 sunColor = PackSunColor();
@@ -267,10 +302,9 @@ float4 ShadeFlakes(PackParticleShadeIn i) {
 }
 
 // ============================================================================
-// 4. Kicked-up Snow Particles (count = 6000)
+// 4. Kicked-up Snow Particles (count = 6000, local space: they spawn at the feet)
 // ============================================================================
 void SimulateKick(inout PackParticle p, PackSimInput s) {
-    float depth = PackParam(7);
     float kickAmount = PackParam(15);
     float kickHeight = PackParam(16);
     float minFootSpeed = PackParam(17);
@@ -297,12 +331,18 @@ void SimulateKick(inout PackParticle p, PackSimInput s) {
         p.size = baseSize * (1.0 + lifeProgress * expansion);
         p.color.a = saturate(1.0 - lifeProgress * 1.05) * 0.9;
 
-        // Check landing on snow surface
+        // Check landing on the snow surface (the ground height under the particle)
         float3 pLoc = PackWorldToLocal(p.pos);
-        float4 cov = PackFieldSample(0, pLoc.xz);
-        float snowTop = max(0.002, depth * (1.0 - saturate(cov.x)) + cov.y);
+        float groundY = PackGroundHeight(p.pos.xz);
+        bool landed;
+        if (groundY > -1e8) {
+            float snowTop = groundY + SnowCoverHeight(pLoc.xz);
+            landed = (p.pos.y <= snowTop);
+        } else {
+            landed = (pLoc.y <= -1.0);
+        }
 
-        if (pLoc.y <= snowTop || p.age >= lifeSpan) {
+        if (landed || p.age >= lifeSpan) {
             p.age = -1.0;
             p.size = 0.0;
             p.color.a = 0.0;
@@ -329,36 +369,39 @@ void SimulateKick(inout PackParticle p, PackSimInput s) {
 
     // Check if the foot is near the snow top (covers ankles ~1.0 and toes ~0.2)
     float3 colLoc = PackWorldToLocal(col.pos);
-    float4 cov = PackFieldSample(0, colLoc.xz);
-    float snowTop = max(0.002, depth * (1.0 - saturate(cov.x)) + cov.y);
+    float groundY = PackGroundHeight(col.pos.xz);
+    if (groundY > -1e8) {
+        float snowTop = groundY + SnowCoverHeight(colLoc.xz);
+        if (col.pos.y - col.radius <= snowTop + 0.45 && col.pos.y >= snowTop - 0.7) {
+            // Snow still present under the foot: fresh snow = 1.0, fully carved print = ~0.0
+            float4 cov = PackFieldSample(0, colLoc.xz);
+            float coverage = PackFieldCoverage(0, colLoc.xz);
+            float snowAvailable = saturate(1.0 - saturate(cov.x) * coverage);
+            float snowFactor = smoothstep(0.05, 0.85, snowAvailable);
+            float effectiveKick = kickAmount * snowFactor;
 
-    if (colLoc.y - col.radius <= snowTop + 0.45 && colLoc.y >= snowTop - 0.7) {
-        // Snow still present under the foot: fresh snow = 1.0, fully carved print = ~0.0
-        float snowAvailable = saturate(1.0 - cov.x);
-        float snowFactor = smoothstep(0.05, 0.85, snowAvailable);
-        float effectiveKick = kickAmount * snowFactor;
+            // Scale spawn probability on fast steps by remaining snow
+            float prob = saturate((speed - minFootSpeed) * effectiveKick * s.dt * 6.0);
+            float rndRoll = PackRandom(s.id, (uint)(s.time * 60.0) ^ 0x7b29u);
+            if (rndRoll < prob) {
+                // Clump (~35%) vs fine powder (~65%)
+                float typeRoll = PackRandom(s.id, 0x5432u);
+                bool isClump = (typeRoll < 0.35);
 
-        // Scale spawn probability on fast steps by remaining snow
-        float prob = saturate((speed - minFootSpeed) * effectiveKick * s.dt * 6.0);
-        float rndRoll = PackRandom(s.id, (uint)(s.time * 60.0) ^ 0x7b29u);
-        if (rndRoll < prob) {
-            // Clump (~35%) vs fine powder (~65%)
-            float typeRoll = PackRandom(s.id, 0x5432u);
-            bool isClump = (typeRoll < 0.35);
+                float3 rndSpread = (PackRandom3(s.id, (uint)(s.time * 120.0) ^ 0x4f12u) - 0.5) * 2.0;
+                p.pos = col.pos + rndSpread * (col.radius * 0.4) + float3(0.0, -col.radius * 0.25, 0.0);
 
-            float3 rndSpread = (PackRandom3(s.id, (uint)(s.time * 120.0) ^ 0x4f12u) - 0.5) * 2.0;
-            p.pos = col.pos + rndSpread * (col.radius * 0.4) + float3(0.0, -col.radius * 0.25, 0.0);
+                float3 upwardKick = float3(0.0, kickHeight * (isClump ? 3.0 : 2.2), 0.0);
+                float3 randomSpread = rndSpread * (kickHeight * 1.2);
+                p.vel = (col.vel * 0.6 + upwardKick + randomSpread) * lerp(0.5, 1.0, snowFactor);
+                p.age = 0.0;
 
-            float3 upwardKick = float3(0.0, kickHeight * (isClump ? 3.0 : 2.2), 0.0);
-            float3 randomSpread = rndSpread * (kickHeight * 1.2);
-            p.vel = (col.vel * 0.6 + upwardKick + randomSpread) * lerp(0.5, 1.0, snowFactor);
-            p.age = 0.0;
-
-            float baseSize = isClump ? lerp(0.07, 0.15, PackRandom(s.id, 0x1234u))
-                                     : lerp(0.04, 0.08, PackRandom(s.id, 0x1234u));
-            p.size = baseSize * lerp(0.4, 1.0, snowFactor);
-            p.color = float4(1.0, 1.0, 1.0, 0.9 * lerp(0.3, 1.0, snowFactor));
-            p.data = float4(baseSize, isClump ? 1.0 : 0.0, 0.0, 0.0);
+                float baseSize = isClump ? lerp(0.07, 0.15, PackRandom(s.id, 0x1234u))
+                                         : lerp(0.04, 0.08, PackRandom(s.id, 0x1234u));
+                p.size = baseSize * lerp(0.4, 1.0, snowFactor);
+                p.color = float4(1.0, 1.0, 1.0, 0.9 * lerp(0.3, 1.0, snowFactor));
+                p.data = float4(baseSize, isClump ? 1.0 : 0.0, 0.0, 0.0);
+            }
         }
     }
 }
