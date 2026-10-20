@@ -2233,3 +2233,28 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   engine change (31 / 5.7M bytes), rain / sakura / fireflies / mist visible around a subject 60 units from the camera,
   0 `[E]`. Not verified: PT / offline GI with the new capabilities, the song-stage popup by clicking (code review only),
   puddles close up, studio-placed world entities off the origin.
+
+## 2026-10-21 (2) - Release 2.5.0, gallery world packs, MCP world / camera, gallery admin accounts
+- Before the release (Claude): PT frames with a world effect overflowed the transient descriptor window (three 8-slot
+  tables per world draw: now one table for sun / spot / point maps, params 8 / 11 / 12 offset into it); offline GI world
+  surfaces now get the punctual lights (they were black under spot-lit night presets). Ground layers: the 3x3-max ground
+  height buried posts and the grid draped sheets over railings (the user caught it in the snow preview after I had
+  passed it) -> bilinear ground height, `PackGroundRange` / `PackGroundStepLimit` (3x3 spread above max(0.5, 1.2 texels)
+  = a thin / tall feature, no layer there), fragments > 1.5 above the real ground discarded.
+- MCP: `set_render_settings` `world_stack` (shared stack parser with `effect_stack`; `key#n` vector params),
+  `get_render_settings` reports it, new `set_camera` (play screen free orbit camera / `motion: true`).
+  `tools/pack_previews.py`: world shots (`world_stack`, `set_camera`), `--exe`, snow written to the built-in folder too.
+- Gallery (website repo): Snow (built-in, gallery.json like hoyo_toon), Rain, Ground Mist, Fireflies (the user's packs,
+  authors MMDX12, minAppVersion 2.5.0, previews with Rom); `build-packs.mjs` kept only surface / effect types (world packs
+  would have listed as surface). Excluded after testing: aurora (the opaque surface host drew its whole 280-unit
+  height plane as a grey slab; as an overlay the slab is gone but no camera found the curtain), fireworks / confetti
+  (nothing visible at any tested time), sakura (my camera-space rewrite streaks the falling petals; the original is fine
+  and was restored in the user's folder - fix pending).
+- Gallery server (note20, deployed from the website repo): admin accounts = a stored `role: "admin"` on the user record
+  (read per request, survives logins; cookie writes need the site Origin), `/me` `isAdmin`, admin page without a token
+  for admin accounts; test `admin_role.test.mjs` (`NODE_ENV=test npm test`: 19 / 19). The user's GitHub account was promoted.
+- Release 2.5.0: `fetch_sdks.ps1` (this machine had an old 310.9.1 `nvngx_dlss.dll` and no RR / FG DLLs: delete the
+  file to refetch; compare against the previous manifest before shipping), `package_release.ps1` (195.5 / 15.8 MB),
+  packaged smoke (select screen, 0 `[E]`, leftovers removed), delta manifest 82 new objects (+ .gz) uploaded, all 138
+  files reachable, manifest hash matches; GitHub v2.5.0 (digests = local zips); website deployed (`/latest.json` -> 2.5.0).
+- Pitfall again: a path list written by Windows python carries `\r` (`tar -T` fails per file): `tr -d '\r'`.
