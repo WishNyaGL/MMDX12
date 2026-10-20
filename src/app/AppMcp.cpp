@@ -621,6 +621,40 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         return;
     }
 
+    if (tool == "set_camera") {
+        if (screen_ != Screen::Play || !scene_) {
+            promise->Reject("set_camera needs the play screen (studio: studio_set_camera)");
+            return;
+        }
+        if (args.value("motion", false)) {
+            if (!scene_->camera) {
+                promise->Reject("this song has no motion camera");
+                return;
+            }
+            useMotionCamera_ = true;
+        } else {
+            if (args.contains("target")) {
+                const nlohmann::json& t = args["target"];
+                if (!t.is_array() || t.size() != 3 || !t[0].is_number() || !t[1].is_number() || !t[2].is_number()) {
+                    promise->Reject("target must be [x,y,z]");
+                    return;
+                }
+                freeCam_.target = {t[0].get<float>(), t[1].get<float>(), t[2].get<float>()};
+            }
+            if (args.contains("yaw_deg")) freeCam_.yaw = DirectX::XMConvertToRadians(args["yaw_deg"].get<float>());
+            if (args.contains("pitch_deg")) freeCam_.pitch = DirectX::XMConvertToRadians(args["pitch_deg"].get<float>());
+            if (args.contains("distance")) freeCam_.distance = std::max(0.1f, args["distance"].get<float>());
+            if (args.contains("fov_deg")) freeCam_.fovDeg = std::clamp(args["fov_deg"].get<float>(), 1.0f, 150.0f);
+            useMotionCamera_ = false;
+        }
+        promise->Resolve({{"motion", useMotionCamera_},
+                          {"target", {freeCam_.target.x, freeCam_.target.y, freeCam_.target.z}},
+                          {"yaw_deg", DirectX::XMConvertToDegrees(freeCam_.yaw)},
+                          {"pitch_deg", DirectX::XMConvertToDegrees(freeCam_.pitch)},
+                          {"distance", freeCam_.distance},
+                          {"fov_deg", freeCam_.fovDeg}});
+        return;
+    }
     if (tool == "seek") {
         double sec = args.value("seconds", 0.0);
         if (screen_ == Screen::Play && scene_) {
@@ -684,6 +718,13 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             fx.push_back(entry);
         }
         r["effects"] = fx;
+        nlohmann::json worlds = nlohmann::json::array();
+        for (const EffectStackEntry& e : settings_.worldStack) {
+            nlohmann::json params = nlohmann::json::object();
+            for (const auto& [k, v] : e.params) params[k] = v;
+            worlds.push_back({{"id", e.pack}, {"enabled", e.enabled}, {"params", params}});
+        }
+        r["world_stack"] = worlds;
         if (screen_ == Screen::Play && scene_) {
             const ShaderChoice sc = settings_.CharacterShader(scene_->characterId);
             r["shader_pack"] = sc.pack;
@@ -893,63 +934,75 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
                 }
             }
         }
-        if (args.contains("effect_stack")) {  // the whole stack with parameters: [{id, enabled, params, texture_folder}]
-            if (args.contains("effects")) {
-                promise->Reject("Pass either effects or effect_stack, not both");
-                return;
-            }
-            const nlohmann::json& list = args["effect_stack"];
+        // A whole stack with parameters ([{id, enabled, params, texture_folder}]) of packs of one type: the effect stack
+        // (effect_stack) and the world-effect stack (world_stack). Vector / colour params use "key#0".."key#2".
+        const auto parseStack = [&](const char* argName, PackType type, const char* typeName,
+                                    std::vector<EffectStackEntry>& out) -> bool {
+            const std::string name = argName;
+            const nlohmann::json& list = args[argName];
             if (!list.is_array()) {
-                promise->Reject("effect_stack must be an array of {id, enabled, params, texture_folder}");
-                return;
+                promise->Reject(name + " must be an array of {id, enabled, params, texture_folder}");
+                return false;
             }
             for (const nlohmann::json& item : list) {
                 if (!item.is_object() || !item.contains("id") || !item["id"].is_string()) {
-                    promise->Reject("effect_stack entries need a string id");
-                    return;
+                    promise->Reject(name + " entries need a string id");
+                    return false;
                 }
                 const std::string id = item["id"].get<std::string>();
                 const ShaderPack* ep = reg.Find(id);
-                if (!ep || ep->type != PackType::Effect) {
-                    promise->Reject("Unknown effect pack: " + id);
-                    return;
+                if (!ep || ep->type != type) {
+                    promise->Reject(std::string("Unknown ") + typeName + " pack: " + id);
+                    return false;
                 }
                 EffectStackEntry entry{id, true, {}, {}};
                 if (item.contains("enabled")) {
                     if (!item["enabled"].is_boolean()) {
-                        promise->Reject("effect_stack " + id + ": enabled must be a boolean");
-                        return;
+                        promise->Reject(name + " " + id + ": enabled must be a boolean");
+                        return false;
                     }
                     entry.enabled = item["enabled"].get<bool>();
                 }
                 if (item.contains("params")) {
                     if (!item["params"].is_object()) {
-                        promise->Reject("effect_stack " + id + ": params must be an object {key: number}");
-                        return;
+                        promise->Reject(name + " " + id + ": params must be an object {key: number}");
+                        return false;
                     }
                     for (const auto& [key, value] : item["params"].items()) {
+                        const std::string base = key.substr(0, key.find('#'));
                         const auto it = std::find_if(ep->params.begin(), ep->params.end(),
-                                                     [&](const ShaderPackParam& sp) { return sp.key == key; });
+                                                     [&](const ShaderPackParam& sp) { return sp.key == base; });
                         if (it == ep->params.end() || !value.is_number()) {
                             std::string known;
                             for (const ShaderPackParam& sp : ep->params) known += (known.empty() ? "" : ", ") + sp.key;
-                            promise->Reject("effect_stack " + id + ": unknown or non-numeric param '" + key +
+                            promise->Reject(name + " " + id + ": unknown or non-numeric param '" + key +
                                             "' (known: " + known + ")");
-                            return;
+                            return false;
                         }
-                        entry.params[key] = std::clamp(value.get<float>(), it->min, it->max);
+                        const float v = value.get<float>();
+                        entry.params[key] = it->max > it->min ? std::clamp(v, it->min, it->max) : v;
                     }
                 }
                 if (item.contains("texture_folder")) {
                     if (!item["texture_folder"].is_string()) {
-                        promise->Reject("effect_stack " + id + ": texture_folder must be a string");
-                        return;
+                        promise->Reject(name + " " + id + ": texture_folder must be a string");
+                        return false;
                     }
                     entry.textureFolder = item["texture_folder"].get<std::string>();
                 }
-                effects.push_back(std::move(entry));
+                out.push_back(std::move(entry));
             }
+            return true;
+        };
+        if (args.contains("effect_stack")) {
+            if (args.contains("effects")) {
+                promise->Reject("Pass either effects or effect_stack, not both");
+                return;
+            }
+            if (!parseStack("effect_stack", PackType::Effect, "effect", effects)) return;
         }
+        std::vector<EffectStackEntry> worlds;
+        if (args.contains("world_stack") && !parseStack("world_stack", PackType::World, "world", worlds)) return;
 
         settings_.renderPath = renderPath;
         settings_.upscaler = upscaler;
@@ -985,6 +1038,7 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             settings_.SetCharacterShader(scene_->characterId, sc);
         }
         if (args.contains("effects") || args.contains("effect_stack")) settings_.effectStack = std::move(effects);
+        if (args.contains("world_stack")) settings_.worldStack = std::move(worlds);   // play mode reads it every frame
         if (materialSource >= 0) {   // P5: the character's PBR material source, then reload the scene at this time
             MaterialChoice mc;
             mc.ray = materialSource == 1;

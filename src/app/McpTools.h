@@ -301,6 +301,40 @@ R"json({
  "name": "play"
 })json",
 R"json({
+ "description": "Play-mode camera (like the --camera command line option): motion: true returns to the song's camera; otherwise a free orbit camera with target [x,y,z] (MMD world units), yaw_deg / pitch_deg (degrees; pitch + looks down from above) and distance. Missing fields keep the current free camera's values. Answers the camera now in effect.",
+ "inputSchema": {
+  "properties": {
+   "distance": {
+    "description": "Distance from the target (world units)",
+    "type": "number"
+   },
+   "fov_deg": {
+    "description": "Vertical field of view in degrees (free camera)",
+    "type": "number"
+   },
+   "motion": {
+    "description": "true = use the song's motion camera again (when the song has one)",
+    "type": "boolean"
+   },
+   "pitch_deg": {
+    "type": "number"
+   },
+   "target": {
+    "description": "Orbit target [x,y,z]",
+    "items": {
+     "type": "number"
+    },
+    "type": "array"
+   },
+   "yaw_deg": {
+    "type": "number"
+   }
+  },
+  "type": "object"
+ },
+ "name": "set_camera"
+})json",
+R"json({
  "description": "Pause playback (in play mode or studio)",
  "inputSchema": {
   "properties": {},
@@ -443,6 +477,37 @@ R"json({
       },
       "id": {
        "description": "Effect pack id",
+       "type": "string"
+      },
+      "params": {
+       "additionalProperties": {
+        "type": "number"
+       },
+       "description": "Parameter key -> value",
+       "type": "object"
+      },
+      "texture_folder": {
+       "description": "Per-entry texture folder (empty = the pack-level folder)",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id"
+     ],
+     "type": "object"
+    },
+    "type": "array"
+   },
+   "world_stack": {
+    "description": "The play-mode world-effect stack (type world packs: snow, rain, ...) with parameters, in order; replaces it, [] = none. Parameter keys are the pack's pack.json params (vector / colour components as key#0..key#2); values are clamped to their ranges, missing keys use the defaults",
+    "items": {
+     "properties": {
+      "enabled": {
+       "description": "Default true",
+       "type": "boolean"
+      },
+      "id": {
+       "description": "World pack id",
        "type": "string"
       },
       "params": {

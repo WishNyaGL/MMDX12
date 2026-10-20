@@ -65,6 +65,14 @@ SHOT_CONFIGS = {
     "lens_reflection": _shot("effect", "sour_miku", "theater", 8.0),
     "screen_ao": _shot("effect", "sour_miku", "theater", 22.0),
     "eye_adaptation": _shot("effect", "sour_miku", "theater", 8.0, 2),
+    # world packs: Rom, a full-body free camera (set_camera) so the ground layers show; BEFORE = no world effect
+    "rain": _shot("world", "Rom_MMD", "pjsk_fireflower", 8.0, camera=([0, 10, 0], 25, 8, 45)),
+    "ground_mist": _shot("world", "Rom_MMD", "pjsk_fireflower", 8.0, camera=([0, 10, 0], 25, 12, 45)),
+    "fireflies": _shot("world", "Rom_MMD", "pjsk_fireflower", 8.0, 3, camera=([0, 11, 0], 20, 6, 40)),
+    "fireworks": _shot("world", "Rom_MMD", "pjsk_fireflower", 12.0, camera=([0, 30, 0], 15, -14, 70)),
+    "aurora": _shot("world", "Rom_MMD", "pjsk_fireflower", 8.0, camera=([0, 30, 0], 15, -18, 60)),
+    "sakura": _shot("world", "Rom_MMD", "terrace", 8.0, camera=([0, 10, 0], 25, 14, 45)),
+    "confetti": _shot("world", "Rom_MMD", "terrace", 8.0, camera=([0, 11, 0], 20, 6, 42)),
 }
 
 
@@ -204,11 +212,16 @@ def capture_shot(controller: AppController, pack_id: str, cfg: dict,
     # 2. pause, seek, wait_frames 90
     controller.call("pause")
     controller.call("seek", seconds=float(seek_time))
+    if cfg.get("camera"):   # a free orbit camera instead of the song's (target, yaw, pitch, distance)
+        target, yaw, pitch, dist = cfg["camera"]
+        controller.call("set_camera", target=target, yaw_deg=yaw, pitch_deg=pitch, distance=dist)
     controller.call("wait_frames", n=90)
 
     # Helper to set BEFORE state
     def set_before():
         kwargs = {"effects": "none", "shader_pack": "default"}
+        if p_type == "world":
+            kwargs["world_stack"] = []
         if p_type == "surface":
             kwargs["shader_texture_folder"] = ""
         if lighting_preset is not None:
@@ -220,6 +233,11 @@ def capture_shot(controller: AppController, pack_id: str, cfg: dict,
     def set_after():
         if p_type == "surface":
             kwargs = {"shader_pack": pack_id, "shader_texture_folder": tex_folder, "effects": "none"}
+        elif p_type == "world":
+            entry = {"id": pack_id}
+            if cfg.get("params"):
+                entry["params"] = cfg["params"]
+            kwargs = {"world_stack": [entry], "effects": "none", "shader_pack": "default"}
         else:
             entry = {"id": pack_id}
             if cfg.get("params"):
@@ -274,7 +292,7 @@ def capture_shot(controller: AppController, pack_id: str, cfg: dict,
     notes = []
     if retry_count > 0:
         notes.append(f"retried {retry_count}x")
-    if p_type == "effect" and pack_diff < 1.0:
+    if p_type in ("effect", "world") and pack_diff < 1.0:
         notes.append("subtle effect")
 
     return {
@@ -355,7 +373,13 @@ def main():
     parser.add_argument("--bump", action="store_true", help="Bump the pack.json patch version (installed apps cache previews by id + version)")
     parser.add_argument("--web-root", type=str, default="", help="Website repo (default: ../MMDX12_Web)")
     parser.add_argument("--no-quit", action="store_true", help="Do not quit MMDX12 at the end")
+    parser.add_argument("--exe", type=str, default="", help="MMDX12.exe to launch (default: build_dev, else build)")
     args = parser.parse_args()
+
+    global APP_EXE, APP_BIN_DIR
+    if args.exe:
+        APP_EXE = Path(args.exe).resolve()
+        APP_BIN_DIR = APP_EXE.parent
 
     global WEB_REPO_ROOT
     if args.web_root:
