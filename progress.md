@@ -2164,3 +2164,12 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - Release 2.4.0: cover `docs/media/snow-2.4.0.jpg` (Sour Miku, Snow on the theater stage), notes `dist/notes_2.4.0.md`
   (4 languages), `package_release.ps1` (full 195.3 MB, lite 15.5 MB), packaged smoke (select screen, v2.4.0, 0 `[E]`/`[W]`,
   SR / RR / FG available; leftovers removed, stage file list identical to before).
+
+## 2026-10-20 - Studio effect stack not applied live, release 2.4.1
+- Bug: the studio "효과" panel's effect stack edits (`effChanged`: add / remove / toggle / reorder / parameter sliders) never reached
+  `ApplyRenderSettings()` (only `changed` did), so they showed up with the next bloom / LUT edit. Keyed values while playing /
+  scrubbing, undo / redo and timeline key edits had the same problem: nothing refreshed `RenderSettings::packEffects` per frame.
+- Fix: `effChanged` sets `changed`; the studio frame path refreshes only `packEffects` each frame (`App::UsableEffectStack`, shared with
+  `ApplyRenderSettings`, so the crash-guard quarantine filter still applies). A per-frame `ApplyRenderSettings()` was avoided: it would
+  override render settings the studio forces.
+- Release 2.4.1 (patch): notes `dist/notes_2.4.1.md`, `package_release.ps1`.

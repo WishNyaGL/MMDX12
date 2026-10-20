@@ -1146,6 +1146,12 @@ void App::RenderFrame() {
     } else {
         if (screen_ == Screen::Studio && studio_) {
             UpdateStudioScene();
+            // keyed effect parameters follow the playhead and undo / timeline edits change the stack without a settings edit
+            {
+                RenderSettings rs = renderer_.Settings();
+                rs.packEffects = UsableEffectStack();
+                renderer_.SetSettings(rs);
+            }
             BuildStudioFrameView(view);
             StudioAddQuadViews(view);
         } else if (inScene) {
@@ -1638,6 +1644,19 @@ void App::ApplyGraphicsPreset(int preset) {
     }
 }
 
+// The effect stack the renderer runs: the studio project's own stack evaluated at the playhead, else the play-mode one.
+// M5-U: quarantined (crash guard) effect packs never run. The stack entry stays so the manager can offer "다시 사용".
+std::vector<EffectStackEntry> App::UsableEffectStack() const {
+    std::vector<EffectStackEntry> out = studio_ ? StudioEvaluatedEffects((float)(studio_->time * kMmdFps)) : settings_.effectStack;
+    out.erase(std::remove_if(out.begin(), out.end(),
+                             [this](const EffectStackEntry& e) {
+                                 const ShaderPack* pk = ShaderPacks().Find(e.pack);
+                                 return !pk || !PackUsable(pk);
+                             }),
+              out.end());
+    return out;
+}
+
 void App::ApplyRenderSettings() {
     RenderSettings rs = renderer_.Settings();
     rs.msaaSamples = settings_.msaa;
@@ -1673,14 +1692,7 @@ void App::ApplyRenderSettings() {
     rs.lutIntensity = settings_.lutIntensity;
     // effect packs (the shader screens edit them); while the studio is open, the project's own stack evaluated at the
     // playhead (keyed parameters, docs/effect_ecosystem.md), as the MME post stack below
-    rs.packEffects = studio_ ? StudioEvaluatedEffects((float)(studio_->time * kMmdFps)) : settings_.effectStack;
-    // M5-U: quarantined (crash guard) effect packs never run. The stack entry stays so the manager can offer "다시 사용".
-    rs.packEffects.erase(std::remove_if(rs.packEffects.begin(), rs.packEffects.end(),
-                                        [this](const EffectStackEntry& e) {
-                                            const ShaderPack* pk = ShaderPacks().Find(e.pack);
-                                            return !pk || !PackUsable(pk);
-                                        }),
-                         rs.packEffects.end());
+    rs.packEffects = UsableEffectStack();
     // M6b: the MME post stack. --mme overrides for one run; while the studio is open the project's own stack
     // replaces the play-mode one (docs/mme/mme_design.md §2.10). The global MME switch off disables it everywhere.
     rs.mmeEffects = !MmeGlobalEnabled() ? std::vector<MmeEffectEntry>{}

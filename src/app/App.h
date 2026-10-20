@@ -362,6 +362,7 @@ private:
     void ApplyStartScreen();
     void ApplyCommandLinePreselection();
     void ApplyRenderSettings();
+    std::vector<EffectStackEntry> UsableEffectStack() const;
     // Theme: settings_.theme (or --theme) resolved to light / dark, applied to the UI kit palette, the ImGui style and
     // the title bar. Requests go through themeDirty_ and run before the next ImGui frame (never mid-frame).
     void ApplyTheme();

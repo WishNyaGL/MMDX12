@@ -393,7 +393,10 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
                     Para(Tr("화면 효과는 라이브러리 화면의 이펙트 탭 > 온라인에서 받을 수 있습니다."), p.ink3, size::Caption);
                 }
             }
-            if (effChanged) ++d.projectVersion;
+            if (effChanged) {
+                ++d.projectVersion;
+                changed = true;   // the stack is read by ApplyRenderSettings: push it now, not with the next bloom edit
+            }
         }
 
         // M6b: the project's own MME post stack (replaces the play-mode stack while the studio is open).
