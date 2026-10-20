@@ -573,6 +573,11 @@ int wmain(int argc, wchar_t** argv) {
                 {"PACK_TEX_SRGB_MASK", std::to_string(srgbMask) + "u"},
                 {"PACK_CAP_PARAMS_EXT", "1"}
             };
+            // The world capabilities (the app's world host defines them the same way)
+            if (pack.HasCap("world.camera")) baseDefines.push_back({"PACK_CAP_WORLD_CAMERA", "1"});
+            if (pack.HasCap("world.anchor")) baseDefines.push_back({"PACK_CAP_WORLD_ANCHOR", "1"});
+            if (pack.HasCap("world.ground")) baseDefines.push_back({"PACK_CAP_WORLD_GROUND", "1"});
+            if (pack.HasCap("world.overlay")) baseDefines.push_back({"PACK_CAP_WORLD_OVERLAY", "1"});
             if (pack.world) {
                 for (const auto& ps : pack.world->particles) {
                     if (!ps.simulate.empty()) {
@@ -632,6 +637,8 @@ int wmain(int argc, wchar_t** argv) {
                     defs.push_back({"WORLD_SURFACE", "1"});
                     defs.push_back({"WORLD_SURFACE_HEIGHT_FN", srf.height});
                     defs.push_back({"WORLD_SURFACE_SHADE_FN", srf.shade});
+                    if (srf.blend == mmdx::PackWorldSurface::Blend::Overlay)
+                        defs.push_back({"WORLD_SURFACE_OVERLAY", "1"});
                     printf("compile: surface height %s / shade %s (vs_6_0 / ps_6_0)\n", srf.height.c_str(), srf.shade.c_str());
                     std::string errs;
                     const mmdx::ComPtr vsBlob = mmdx::CompileShaderDxc(worldHlsl, "VSWorldSurface", "vs_6_0", defs, &errs);

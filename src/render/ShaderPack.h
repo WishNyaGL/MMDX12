@@ -49,6 +49,11 @@ struct PackWorldParticleSystem {
     uint32_t count = 0;   // 1 .. 262144
     enum class Blend : uint8_t { Alpha = 0, Add };
     Blend blend = Blend::Alpha;
+    // "space": "local" (default; the particles live in the entity's world space) or "camera" (the host wraps them
+    // into a box of "wrap" world units around the camera every frame; needs the "world.camera" capability).
+    enum class Space : uint8_t { Local = 0, Camera };
+    Space space = Space::Local;
+    float wrap = 120.0f;   // the camera-space tile size (world units), 1 .. 4096
     std::string simulate; // stateful: void <fn>(inout PackParticle p, PackSimInput s)
     std::string spawn;    // stateless: PackParticle <fn>(uint id, float t)
     std::string shade;    // float4 <fn>(PackParticleShadeIn i)
@@ -64,6 +69,10 @@ struct PackWorldField {
     Format format = Format::RGBA16F;
     bool persistent = false;
     float rate = 10.0f;   // steps per second (default 10 for persistent)
+    // "anchor": "transform" (default; the field is centred on the entity's origin) or "performers" (the field follows
+    // the performers: its centre is the mean xz of the foot colliders; needs the "world.anchor" capability).
+    enum class Anchor : uint8_t { Transform = 0, Performers };
+    Anchor anchor = Anchor::Transform;
     std::string update;   // float4 <fn>(PackFieldInput f)
 };
 
@@ -72,6 +81,15 @@ struct PackWorldSurface {
     uint32_t grid = 64;   // 16 .. 512 quads per side
     std::string height;   // float <fn>(PackSurfaceIn i)
     std::string shade;    // PackSurfaceOut <fn>(PackSurfaceShadeIn i)
+    // "extent": "field" (default; the grid covers the field's extent) or "camera" (a camera-centred grid of
+    // nested LOD levels; needs the "world.ground" capability).
+    enum class Extent : uint8_t { Field = 0, Camera };
+    Extent extent = Extent::Field;
+    float radius = 400.0f;   // "radius": the camera extent's half size (world units), 10 .. 4096
+    bool ground = false;      // "ground": true: the height function returns the height ABOVE the ground
+    // "blend": "opaque" (default) or "overlay" (premultiplied alpha over the lit scene; needs "world.overlay").
+    enum class Blend : uint8_t { Opaque = 0, Overlay };
+    Blend blend = Blend::Opaque;
 };
 
 struct PackWorldData {
@@ -199,6 +217,9 @@ inline constexpr PackCapability kPackCapabilities[] = {
     {"replaces.dof", 5}, {"textures", 2},  {"effect", 3},       {"inputs.scene", 0},
     {"inputs.audio", 0}, {"surface.output", 0}, {"inputs.id", 0}, {"passes.history", 0},
     {"passes.mips", 0}, {"params.ext", 0},
+    // World packs (docs/shader_world_api.md): the camera, the performer anchor, the ground map, the overlay blend.
+    // apiVersion 0: never implied by the version, the pack must declare them in "requires".
+    {"world.camera", 0}, {"world.anchor", 0}, {"world.ground", 0}, {"world.overlay", 0},
 };
 
 enum class ShaderPackParamType : uint8_t {

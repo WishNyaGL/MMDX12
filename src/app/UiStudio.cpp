@@ -124,6 +124,7 @@ bool App::FinishStudioLoad() {
             }
             sm->gpu->SetDefaultPackTextureFolder(m.defaultPackTextureFolder);
             sm->gpu->SetMaterialBlendHints(m.materialBlend, m.materialBlendDefault);
+            if (m.kind == ModelKind::Prop) sm->gpu->SetProp(true);   // the world's ground map includes the props
             if (!pkg.fromProject) StudioSuggestShader(*sm);   // added character with no shader choice: maybe suggest a pack
             sm->inst->UpdatePose();
         }

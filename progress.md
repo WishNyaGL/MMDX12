@@ -2173,3 +2173,28 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   `ApplyRenderSettings`, so the crash-guard quarantine filter still applies). A per-frame `ApplyRenderSettings()` was avoided: it would
   override render settings the studio forces.
 - Release 2.4.1 (patch): notes `dist/notes_2.4.1.md`, `package_release.ps1`.
+
+## 2026-10-21 - World pack capabilities: camera space, performer anchor, ground map, overlay surfaces
+- Spec D (engine side only; the packs are updated by another worker against the same API): the world effects cover the whole
+  map around the camera instead of a disc around the entity, the expensive persistent state (footprints) stays local to the
+  performers, and the snow / water lie on the real stage surfaces.
+- piVersion stays 6; the new features are capabilities in `requires`: `world.camera` (F1, F2), `world.anchor` (F3),
+  `world.ground` (F4, F5), `world.overlay` (F6). A pack that uses a manifest key of a capability it does not require is
+  refused with a problem line naming the capability (`world.particles[0].space 'camera' needs the "world.camera" capability`).
+  The world shaders get `PACK_CAP_WORLD_CAMERA` / `_ANCHOR` / `_GROUND` / `_OVERLAY`; the new API functions and the
+  struct fields exist only under their macro, so a pack without a capability renders exactly as before.
+- New manifest keys: `particles[].space` (`local` / `camera`) + `particles[].wrap`, `fields[].anchor`
+  (`transform` / `performers`), `surfaces[].extent` (`field` / `camera`) + `surfaces[].radius`,
+  `surfaces[].ground`, `surfaces[].blend` (`opaque` / `overlay`).
+- New API: `PackCameraPos` / `PackWrapSize` / `PackWrapTile` / `PackParticleWorld`, `PackFieldCentre` /
+  `PackFieldCoverage`, `PackGround` / `PackGroundHeight`; `PackSurfaceIn` / `PackSurfaceShadeIn` gained
+  `posWorldXZ` + `groundNormal`.
+- Host: the ground map is a top-down orthographic depth render (the shadow pass's `VSShadow` with an override matrix) of the
+  stage and prop models only, 2048^2, re-rendered when they change; the camera-centred surface grid is 3 nested LOD levels
+  (coarse / 4x finer / 16x finer) snapped to their spacing, each level skipping the cells the finer one covers; an overlay
+  surface is premultiplied alpha over the lit scene (depth test on, no depth write, a slope-scaled bias, no normal / velocity
+  writes). The camera-space wrap maps the particles into a box of `wrap` units around the camera and keeps the motion
+  vectors free of streaks.
+- Verified: `build.cmd build_dev` builds; the world host shader compiles with dxc for the built-in snow pack (no new
+  capabilities) and with all four `PACK_CAP_WORLD_*` defined; `pack_check --compile` compiles a test pack that uses every
+  new API, and refuses the same pack without the `requires`.

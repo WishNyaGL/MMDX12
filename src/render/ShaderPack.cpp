@@ -512,6 +512,13 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
     out.statusMessage.clear();
 
     std::vector<std::string> problems;
+    // The world block's capabilities are checked after "requires" is read (the check needs the declared caps).
+    std::vector<std::pair<std::string, std::string>> worldCapNeeds;
+    auto needWorldCap = [&worldCapNeeds](const char* cap, const std::string& why) {
+        for (const auto& n : worldCapNeeds)
+            if (n.first == cap) return;
+        worldCapNeeds.emplace_back(cap, why);
+    };
     nlohmann::json j;
     bool object = false;
     try {
@@ -635,6 +642,19 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                         else if (blendStr == "alpha" || blendStr.empty()) ps.blend = PackWorldParticleSystem::Blend::Alpha;
                         else problems.push_back("particle blend must be 'alpha' or 'add'");
 
+                        // "space": "local" (default) or "camera" (the host wraps the particles around the camera)
+                        std::string spaceStr = ToLowerAscii(Str(pj, "space"));
+                        if (spaceStr == "camera") {
+                            ps.space = PackWorldParticleSystem::Space::Camera;
+                            needWorldCap("world.camera", "world.particles[" + std::to_string(pi) + "].space 'camera'");
+                        } else if (spaceStr == "local" || spaceStr.empty()) {
+                            ps.space = PackWorldParticleSystem::Space::Local;
+                        } else {
+                            problems.push_back("particle space must be 'local' or 'camera'");
+                        }
+                        if (auto w = pj.find("wrap"); w != pj.end() && w->is_number())
+                            ps.wrap = std::clamp(w->get<float>(), 1.0f, 4096.0f);
+
                         ps.simulate = Str(pj, "simulate");
                         ps.spawn = Str(pj, "spawn");
                         if (ps.simulate.empty() && ps.spawn.empty())
@@ -694,6 +714,16 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                             fld.persistent = p->get<bool>();
                         if (auto rt = fj.find("rate"); rt != fj.end() && rt->is_number())
                             fld.rate = std::max(0.1f, rt->get<float>());
+                        // "anchor": "transform" (default) or "performers" (the field follows the performers)
+                        std::string anchorStr = ToLowerAscii(Str(fj, "anchor"));
+                        if (anchorStr == "performers") {
+                            fld.anchor = PackWorldField::Anchor::Performers;
+                            needWorldCap("world.anchor", "world.fields[" + std::to_string(fi) + "].anchor 'performers'");
+                        } else if (anchorStr == "transform" || anchorStr.empty()) {
+                            fld.anchor = PackWorldField::Anchor::Transform;
+                        } else {
+                            problems.push_back("field anchor must be 'transform' or 'performers'");
+                        }
                         fld.update = Str(fj, "update");
                         if (fld.update.empty())
                             problems.push_back("field '" + fld.name + "' must declare 'update'");
@@ -737,6 +767,35 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                             problems.push_back("surface must declare 'shade'");
                         else if (!IsValidHlslIdentifier(srf.shade))
                             problems.push_back("surface shade function '" + srf.shade + "' must be an HLSL identifier");
+
+                        // "extent": "field" (default) or "camera" (a camera-centred grid of LOD levels)
+                        std::string extentStr = ToLowerAscii(Str(sj, "extent"));
+                        if (extentStr == "camera") {
+                            srf.extent = PackWorldSurface::Extent::Camera;
+                            needWorldCap("world.ground", "world.surfaces[" + std::to_string(si) + "].extent 'camera'");
+                        } else if (extentStr == "field" || extentStr.empty()) {
+                            srf.extent = PackWorldSurface::Extent::Field;
+                        } else {
+                            problems.push_back("surface extent must be 'field' or 'camera'");
+                        }
+                        if (auto r = sj.find("radius"); r != sj.end() && r->is_number())
+                            srf.radius = std::clamp(r->get<float>(), 10.0f, 4096.0f);
+                        // "ground": true: the height function returns the height ABOVE the ground
+                        if (auto gr = sj.find("ground"); gr != sj.end() && gr->is_boolean()) {
+                            srf.ground = gr->get<bool>();
+                            if (srf.ground)
+                                needWorldCap("world.ground", "world.surfaces[" + std::to_string(si) + "].ground");
+                        }
+                        // "blend": "opaque" (default) or "overlay" (over the lit scene)
+                        std::string srfBlend = ToLowerAscii(Str(sj, "blend"));
+                        if (srfBlend == "overlay") {
+                            srf.blend = PackWorldSurface::Blend::Overlay;
+                            needWorldCap("world.overlay", "world.surfaces[" + std::to_string(si) + "].blend 'overlay'");
+                        } else if (srfBlend == "opaque" || srfBlend.empty()) {
+                            srf.blend = PackWorldSurface::Blend::Opaque;
+                        } else {
+                            problems.push_back("surface blend must be 'opaque' or 'overlay'");
+                        }
 
                         data->surfaces.push_back(std::move(srf));
                     }
@@ -887,6 +946,12 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
                 out.requiresCaps.push_back(cap);
             }
         }
+    }
+
+    // The world block's capabilities: a manifest key of a capability the pack does not require is refused.
+    for (const auto& need : worldCapNeeds) {
+        if (!out.HasCap(need.first))
+            problems.push_back(need.second + " needs the \"" + need.first + "\" capability in requires");
     }
 
     // groups: optional array of { "id": "...", "label": "...", "collapsed": bool }

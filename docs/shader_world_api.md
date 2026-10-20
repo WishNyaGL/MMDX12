@@ -75,6 +75,24 @@ my_world_pack/
 - `"world"`: The world entity specification (required).
 - `"params"`: Extended parameter declaration. World packs support up to 128 typed parameters (`params.ext` capability is always enabled).
 - `"textures"`: Up to 32 texture files (total uncompressed/compressed footprint up to 64 MB).
+- `"requires"`: Optional array of capability names. The world capabilities are listed in §2.1; a pack that uses a
+  manifest key of a capability it does not require is refused (the manifest problem names the capability).
+
+### 2.1 World capabilities
+
+`apiVersion` stays 6 for the world API: the new features are opt-in capabilities, declared in `"requires"`. A pack
+without them renders exactly as before.
+
+| Capability | What it enables | Manifest keys |
+| --- | --- | --- |
+| `world.camera` | The frame camera (`PackCameraPos`) and the camera-space particles | `particles[].space: "camera"`, `particles[].wrap` |
+| `world.anchor` | The performer-anchored fields (the field follows the performers) | `fields[].anchor: "performers"` |
+| `world.ground` | The ground height map and the camera-centred, ground-following surfaces | `surfaces[].extent: "camera"`, `surfaces[].radius`, `surfaces[].ground` |
+| `world.overlay` | The overlay surfaces (a wet floor / decal over the lit scene) | `surfaces[].blend: "overlay"` |
+
+The world shaders are compiled with `PACK_CAP_WORLD_CAMERA`, `PACK_CAP_WORLD_ANCHOR`, `PACK_CAP_WORLD_GROUND` and
+`PACK_CAP_WORLD_OVERLAY` defined to `1` when the pack requires the matching capability. The API functions and the
+struct fields below exist only under their macro, so a pack that does not require a capability cannot use it.
 
 ### `"world"` Object Properties
 - `"step"`: Fixed simulation step size in seconds. Allowed range: `1/240` (0.004167) to `1/15` (0.066667). Default: `1/60` (0.0166667).
@@ -92,6 +110,11 @@ Each particle system in `"particles"`:
 - `"spawn"`: Optional function name for stateless procedural evaluation ($f(id, t)$). Mutually exclusive with `"simulate"`.
 - `"shade"`: Function name for shading particles in the pixel shader.
 - `"size"`: 2-element array `[min, max]` specifying world-space particle radius hint for culling.
+- `"space"`: `"local"` (default; today's behaviour: the particles live in the entity's world space) or `"camera"`
+  (needs `"world.camera"`). A camera-space system is simulated in a local tile and drawn in a box of `"wrap"` world
+  units around the camera, so the effect covers the whole map instead of a disc around the entity.
+- `"wrap"`: The camera-space tile size in world units (default `120`, clamped to `1 .. 4096`). The pack keeps the
+  particles inside the tile (`PackWrapTile`); the host wraps the drawn position into the box around the camera.
 
 ### Field Specification
 Each field in `"fields"`:
@@ -104,6 +127,11 @@ Each field in `"fields"`:
   its own grid, step k at time k / rate, both when re-simulating after a seek and during playback, so a seek and
   continuous playback reach the same field at the same time.
 - `"update"`: Function name for compute shader ping-pong field updates.
+- `"anchor"`: `"transform"` (default; the field is centred on the entity's origin) or `"performers"` (needs
+  `"world.anchor"`). A performer-anchored field is centred on the mean xz of the foot colliders of the whole
+  collider track, so it follows the performers. The centre is constant for the instance, so the re-simulation stays
+  deterministic. `PackFieldInput.posLocal` and `PackSurfaceIn.posLocal` carry the local xz **including** the centre,
+  so a pack that compares them with `PackWorldToLocal(collider.pos).xz` keeps working unchanged.
 
 ### Surface Specification
 Each surface in `"surfaces"`:
@@ -111,6 +139,19 @@ Each surface in `"surfaces"`:
 - `"grid"`: Quads per side: `16` to `512` (generates `grid * grid * 2` triangles procedurally).
 - `"height"`: Function name returning vertex local height $Y$.
 - `"shade"`: Function name returning surface shading attributes (`PackSurfaceOut`).
+- `"extent"`: `"field"` (default; one grid over the field's extent) or `"camera"` (needs `"world.ground"`). A
+  camera-centred surface is drawn as 3 nested LOD levels around the camera (see §5.1).
+- `"radius"`: The camera extent's half size in world units (default `400`, clamped to `10 .. 4096`): the grid covers a
+  square of that half size around the camera.
+- `"ground"`: `true` (needs `"world.ground"`): the height function returns the height **above** the ground. The host
+  adds the ground height (`PackGroundHeight`) and clips the surface where there is no ground; the gradient normal
+  includes the ground's slope.
+- `"blend"`: `"opaque"` (default) or `"overlay"` (needs `"world.overlay"`). An overlay surface is drawn with
+  premultiplied alpha over the already-lit scene colour: the depth test is on, the depth write is off, a small
+  slope-scaled depth bias keeps a surface a few mm above the ground from z-fighting, and the normal / velocity
+  targets keep the stage's own values. The output is `lit * alpha + emission` over `destination * (1 - alpha)`, where
+  `lit` is the host's usual lighting of `sout.albedo` (sun + shadow + hemisphere + punctual). A pack darkens the
+  floor with a dark albedo and `alpha` = wetness, and adds the highlights through the emission.
 
 ---
 
@@ -150,6 +191,10 @@ struct PackSurfaceIn {
     float2 uv;          // Grid UV in [0, 1]
     float2 posLocal;    // Local-space XZ coordinates
     float time;         // Current time
+#if PACK_CAP_WORLD_GROUND
+    float2 posWorldXZ;  // The vertex's world XZ
+    float3 groundNormal;// The ground's normal under the vertex (up when there is no ground)
+#endif
 };
 
 struct PackSurfaceOut {
@@ -167,6 +212,10 @@ struct PackSurfaceShadeIn {
     float3 normal;      // Computed world-space gradient normal
     float3 viewDir;     // Normalized vector towards camera
     float time;         // Current time
+#if PACK_CAP_WORLD_GROUND
+    float2 posWorldXZ;  // The fragment's world XZ
+    float3 groundNormal;// The ground's normal under the fragment (up when there is no ground)
+#endif
 };
 
 struct PackParticleShadeIn {
@@ -226,9 +275,26 @@ struct PackParticleShadeIn {
 - **Colliders**:
   - `PackColliderCount()`: Number of active scene colliders this frame.
   - `PackCollider(i)`: Returns `PackColliderData` with `pos` (float3), `radius` (float), `vel` (float3), and `flags` (uint). Flags indicate body parts: `kColliderFoot = 1`, `kColliderHand = 2`, `kColliderLeft = 4`.
-- **Fields**:
+- **Fields**: 
   - `PackFieldSample(fieldIndex, posLocalXZ)`: Bilinear sample of field `fieldIndex` (0 .. 3) at local XZ coordinates.
+    With `"world.anchor"` the local XZ include the field's centre, so the sample is taken relative to it; outside the
+    field's extent the sample is `float4(0,0,0,0)`.
   - `PackFieldLoad(fieldIndex, int2 texel)`: Point fetch of field texel.
+  - `PackFieldCoverage(fieldIndex, posLocalXZ)` (`world.anchor`): 1 inside the field, fading smoothly to 0 over the
+    outer 5 % of its extent, 0 outside it.
+- **Camera** (`world.camera`):
+  - `PackCameraPos()`: The frame camera's world eye position (the scene's `gEyePos`). During a seek re-simulation
+    (many steps recorded in one frame) **every step sees the current frame's camera**: the camera is not part of the
+    simulation state.
+  - `PackWrapSize()`: The wrap size of the current particle system (0 for a local-space system).
+  - `PackWrapTile(posLocal)`: Wraps a local position's XZ into the tile $[-W/2, +W/2]$ around the local origin.
+  - `PackParticleWorld(posLocal)`: The world position the particle is **drawn** at this frame (the camera-space wrap
+    applied), so a simulation can test it against the ground (`PackGroundHeight`) at the place the particle appears.
+- **Ground** (`world.ground`):
+  - `PackGround(xzWorld, out height, out normal)`: The ground at a world XZ: `false` when the point is outside the map
+    or no surface was drawn there, else the top-most surface's height and its normal (from the height map's central
+    differences, in world space).
+  - `PackGroundHeight(xzWorld)`: The ground height at a world XZ, or `-1e9` when there is no ground there.
 - **Pack Textures**:
   - `PackSampleTex(i, uv)` / `PackSampleTexLevel(i, uv, lod)`: Sample pack texture `i` (0 .. 31).
   - `PackTexSize(i)` / `PackTexCount()`.
@@ -260,7 +326,69 @@ World pack simulations run in fixed time increments `step` and are completely de
 
 ---
 
-## 6. Rendering Pipeline Integration
+## 6. The World Capabilities in Detail
+
+### 6.1 Camera-space particles (`world.camera`)
+
+A particle system with `"space": "camera"` simulates its particles in a **local tile**: the XZ of the local position
+stay inside $[-W/2, +W/2]$ around the local origin (`W` = `"wrap"`), the Y is the world height. The pack keeps the
+particles inside the tile itself (`PackWrapTile`).
+
+The **host** maps every particle into the box of size `W` centred on the camera when it draws it:
+
+```
+x' = cam.x + (frac((x - cam.x) / W + 0.5) - 0.5) * W      (the same for z; y is unchanged)
+```
+
+The wrap happens in world space, after the pack's local -> world transform. The previous position used for the motion
+vectors is `wrapped - (pos - prevPos)`, so a wrap never leaves a velocity streak: the particle's screen motion is its
+own motion, not the jump of the wrap.
+
+### 6.2 The ground height map (`world.ground`)
+
+When any enabled world instance requires `world.ground`, the host keeps a **ground map**: a top-down orthographic
+depth render (the camera looks straight down, -Y) of the **stage and prop models only** (never the performers):
+
+- R32_FLOAT 2048 x 2048 (a depth texture read as R32F), covering the union of the stage models' world AABB in XZ,
+  clamped to 2048 x 2048 world units around its centre (the map is square). The Y range comes from the same AABB.
+- Back faces are culled, so a sky dome (its triangles face inward) is not a roof.
+- Materials that are invisible (diffuse alpha < 0.5), additive (`MatFlag_Additive`) or without a depth write
+  (`MatFlag_NoDepthWrite`) are skipped; alpha-tested materials use the shadow pass's alpha-test path, so their
+  cut-out texels do not become ground.
+- The map is re-rendered when the set of stage / prop models changes or their pose changes (a stage motion, a studio
+  placement), at most once per frame.
+- With **no** stage model (a studio floor) the ground is the plane $y = 0$ everywhere (no render needed).
+
+`PackGround` / `PackGroundHeight` read the map: the height comes from the map's depth, the normal from the height
+map's central differences in world space.
+
+### 6.3 The camera-centred surface grid (`world.ground`)
+
+A surface with `"extent": "camera"` is drawn as **3 nested LOD levels**, each `grid` x `grid` quads:
+
+| Level | Cell size | Covered half size (around the camera) |
+| --- | --- | --- |
+| 0 (coarse) | `2R / grid` | `R` |
+| 1 (middle) | `(2R / grid) / 4` | `R / 4` |
+| 2 (fine) | `(2R / grid) / 16` | `R / 16` |
+
+`R` is `"radius"`. The cells are snapped to their level's spacing (the grid is anchored to the world, not to the
+camera), so the surface does not swim when the camera moves, and a level skips the cells the next finer level covers,
+so no region is drawn twice (no z-fighting). The levels tile exactly only with a grid that is a multiple of 8, so the
+host rounds the grid down to one.
+
+With `"ground": true` the pack's height function returns the height **above** the ground: the host adds
+`PackGroundHeight(world xz)` to the world Y and clips the surface where there is no ground (the fragment is
+discarded), and the gradient normal includes the ground's slope.
+
+### 6.4 Overlay surfaces (`world.overlay`)
+
+See the surface specification in §2: premultiplied alpha over the already-lit scene colour, the depth test on, the
+depth write off, a small slope-scaled depth bias, and the normal / velocity targets untouched.
+
+---
+
+## 7. Rendering Pipeline Integration
 
 - **Raster and Ray-Traced Real-Time Views**:
   - `WorldPass` executes between `ScenePass` and `ResolvePass`.
@@ -278,10 +406,10 @@ World pack simulations run in fixed time increments `step` and are completely de
 
 ---
 
-## 7. Verification
+## 8. Verification
 
 Validate world packs using the CLI tool:
 ```cmd
 build_dev\bin\pack_check.exe <path_to_pack> --compile
 ```
-This parses `pack.json`, enforces all limits, and compiles every declared entry point (`simulate`, `spawn`, `update`, `height`, `shade`).
+This parses `pack.json`, enforces all limits, and compiles every declared entry point (`simulate`, `spawn`, `update`, `height`, `shade`) with the pack's capability macros, as the app compiles them.

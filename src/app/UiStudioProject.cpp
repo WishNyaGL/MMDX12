@@ -772,6 +772,7 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
         return false;
     }
     gpu->SetMaterialBlendHints(pm.materialBlend, pm.materialBlendDefault);
+    if (m.IsProp()) gpu->SetProp(true);   // the world's ground map includes the props
     // the GPU may still read the old model's buffers from frames in flight
     ctx_.WaitForGpu();
     const std::shared_ptr<const PmxModel> old = m.pmx;

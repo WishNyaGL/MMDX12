@@ -132,7 +132,12 @@ void CSWorldFieldUpdate(uint3 id : SV_DispatchThreadID) {
     if (texel.x >= size || texel.y >= size) return;
     float2 uv = (float2(texel) + 0.5) / float(size);
     float extent = gFieldExtent[fieldIndex].z;
+    // The local xz include the field's centre (the anchor), so the pack compares them with the collider positions.
+#if defined(PACK_CAP_WORLD_ANCHOR) && PACK_CAP_WORLD_ANCHOR
+    float2 posLocal = (uv - 0.5) * extent + PackFieldCentre();
+#else
     float2 posLocal = (uv - 0.5) * extent;
+#endif
     PackFieldInput f;
     f.uv = uv;
     f.posLocal = posLocal;
@@ -152,6 +157,11 @@ struct SurfaceVsOut {
     float2 uv : TEXCOORD2;
     float4 curClip : TEXCOORD3;
     float4 prevClip : TEXCOORD4;
+#if defined(PACK_CAP_WORLD_GROUND) && PACK_CAP_WORLD_GROUND
+    float2 posWorldXZ : TEXCOORD5;
+    float3 groundNormal : TEXCOORD6;
+    float groundY : TEXCOORD7;   // -1e9: there is no ground under this vertex
+#endif
 };
 
 SurfaceVsOut VSWorldSurface(uint vertexId : SV_VertexID) {
@@ -165,23 +175,106 @@ SurfaceVsOut VSWorldSurface(uint vertexId : SV_VertexID) {
         uint2(0, 1), uint2(1, 0), uint2(1, 1)
     };
     uint2 c = cornerOffsets[corner];
-    uint qx = quadId % grid;
-    uint qz = quadId / grid;
-    float2 gridVertex = float2(qx + c.x, qz + c.y);
-    float2 uv = gridVertex / float(grid);
-    float extent = gFieldExtent[(uint)gWorldParams.z & 3u].z;   // worldParams.z = the surface's field
-    float2 posLocalXZ = (uv - 0.5) * extent;
+    uint fieldIndex = (uint)gWorldParams.z & 3u;
+    float extent = gFieldExtent[fieldIndex].z;   // worldParams.z = the surface's field
+
+    float2 localXZ = float2(0.0, 0.0);
+    float2 worldXZ = float2(0.0, 0.0);
+    float2 uv = float2(0.0, 0.0);
+    float cellWorld = 1.0;      // the world size of one cell
+    float regionWorld = 1.0;    // the world size of the whole region
+    bool degenerate = false;    // a cell a finer level covers: no fragments
+
+#if defined(PACK_CAP_WORLD_GROUND) && PACK_CAP_WORLD_GROUND
+    if (gSurfaceParams.x > 0.5) {
+        // The camera-centred grid: 3 nested LOD levels, each grid x grid quads.
+        //   level 0: the whole square of half-size R (cells of 2R/grid)
+        //   level 1: the central quarter of it (cells 4x finer)
+        //   level 2: the central sixteenth (cells 16x finer)
+        // The cells are snapped to their level's spacing (the grid is anchored to the world, not to the camera, so it
+        // does not swim when the camera moves) and a level skips the cells the next finer level covers, so no region is
+        // drawn twice. The host rounds the grid to a multiple of 8, so the levels tile exactly.
+        uint quads = grid * grid;
+        uint level = min(quadId / quads, 2u);
+        uint q = quadId - level * quads;
+        uint lx = q % grid;
+        uint lz = q / grid;
+
+        float radius = max(gSurfaceParams.y, 1.0);
+        float base = 2.0 * radius / float(grid);
+        float lodScale = (level == 0u) ? 1.0 : (level == 1u ? 0.25 : 0.0625);
+        float spacing = base * lodScale;
+
+        int2 camCell = (int2)floor(gEyePos.xz / base);        // the camera's coarse cell
+        int2 quads8 = int2((int)(grid / 8), (int)(grid / 8));
+        int2 base1 = 4 * (camCell - quads8);                   // the middle level's first cell (fine units)
+        int2 cell;
+        if (level == 0u) {
+            cell = camCell + int2((int)lx - (int)(grid / 2), (int)lz - (int)(grid / 2));
+            int2 lo = camCell - quads8, hi = camCell + quads8;  // the cells the middle level covers
+            if (cell.x >= lo.x && cell.x < hi.x && cell.y >= lo.y && cell.y < hi.y) degenerate = true;
+        } else if (level == 1u) {
+            cell = base1 + int2((int)lx, (int)lz);
+            int2 lo = base1, hi = base1 + int2((int)(grid / 4), (int)(grid / 4));   // the cells the fine level covers
+            if (cell.x >= lo.x && cell.x < hi.x && cell.y >= lo.y && cell.y < hi.y) degenerate = true;
+        } else {
+            cell = 4 * base1 + int2((int)lx, (int)lz);
+        }
+        worldXZ = (float2(cell) + float2(c)) * spacing;
+        uv = float2(lx + c.x, lz + c.y) / float(grid);
+        cellWorld = spacing;
+        regionWorld = 2.0 * radius * lodScale;
+        localXZ = PackWorldToLocal(float3(worldXZ.x, 0.0, worldXZ.y)).xz;
+    } else
+#endif
+    {
+        // The field's extent (the default): one grid over the field's extent, centred on the entity.
+        uint qx = quadId % grid;
+        uint qz = quadId / grid;
+        float2 gridVertex = float2(qx + c.x, qz + c.y);
+        uv = gridVertex / float(grid);
+#if defined(PACK_CAP_WORLD_ANCHOR) && PACK_CAP_WORLD_ANCHOR
+        localXZ = (uv - 0.5) * extent + PackFieldCentre();
+#else
+        localXZ = (uv - 0.5) * extent;
+#endif
+        worldXZ = PackLocalToWorld(float3(localXZ.x, 0.0, localXZ.y)).xz;
+        cellWorld = extent / float(grid);
+        regionWorld = extent;
+    }
+
+    if (degenerate) {   // a zero-area triangle: the rasterizer produces no fragments
+        o.posH = float4(0.0, 0.0, 0.0, 1.0);
+        return o;
+    }
+
+    // The ground under this vertex (the host's height map): the pack's height is then the height ABOVE the ground.
+    bool groundMode = false;
+    float groundY = 0.0;
+    float3 groundNormal = float3(0.0, 1.0, 0.0);
+    bool hasGround = false;
+#if defined(PACK_CAP_WORLD_GROUND) && PACK_CAP_WORLD_GROUND
+    groundMode = gSurfaceParams.z > 0.5;
+    if (groundMode) {
+        hasGround = PackGround(worldXZ, groundY, groundNormal);
+    }
+#endif
 
     PackSurfaceIn sin;
     sin.uv = uv;
-    sin.posLocal = posLocalXZ;
+    sin.posLocal = localXZ;
     sin.time = gWorldTime.x;
+#if defined(PACK_CAP_WORLD_GROUND) && PACK_CAP_WORLD_GROUND
+    sin.posWorldXZ = worldXZ;
+    sin.groundNormal = hasGround ? groundNormal : float3(0.0, 1.0, 0.0);
+#endif
     float localY = WORLD_SURFACE_HEIGHT_FN(sin);
 
     // Gradient normal in local space
-    float eps = (grid > 0) ? (extent / float(grid) * 0.5) : 0.01;
-    PackSurfaceIn sR = sin; sR.uv.x += eps / extent; sR.posLocal.x += eps;
-    PackSurfaceIn sU = sin; sU.uv.y += eps / extent; sU.posLocal.y += eps;
+    float eps = cellWorld * 0.5;
+    float duv = regionWorld > 0.0 ? eps / regionWorld : 0.0;
+    PackSurfaceIn sR = sin; sR.uv.x += duv; sR.posLocal.x += eps;
+    PackSurfaceIn sU = sin; sU.uv.y += duv; sU.posLocal.y += eps;
     float hR = WORLD_SURFACE_HEIGHT_FN(sR);
     float hU = WORLD_SURFACE_HEIGHT_FN(sU);
     float3 dX = float3(eps, hR - localY, 0.0);
@@ -189,8 +282,24 @@ SurfaceVsOut VSWorldSurface(uint vertexId : SV_VertexID) {
     float3 normLocal = normalize(cross(dZ, dX));
     float3 normWorld = normalize(PackLocalToWorldVec(normLocal));
 
-    float3 posLocal = float3(posLocalXZ.x, localY, posLocalXZ.y);
+    float3 posLocal = float3(localXZ.x, localY, localXZ.y);
     float3 posWorld = PackLocalToWorld(posLocal);
+#if defined(PACK_CAP_WORLD_GROUND) && PACK_CAP_WORLD_GROUND
+    if (groundMode) {
+        // The ground's slope joins the pack's own: the surface follows the ground.
+        float2 packSlope = float2(-normWorld.x / max(normWorld.y, 1e-4), -normWorld.z / max(normWorld.y, 1e-4));
+        float2 groundSlope = float2(-groundNormal.x / max(groundNormal.y, 1e-4),
+                                    -groundNormal.z / max(groundNormal.y, 1e-4));
+        float2 total = packSlope + groundSlope;
+        normWorld = normalize(float3(-total.x, 1.0, -total.y));
+        posWorld.y = hasGround ? (groundY + localY) : 0.0;
+    }
+    o.posWorldXZ = posWorld.xz;
+    o.groundNormal = hasGround ? groundNormal : float3(0.0, 1.0, 0.0);
+    // A large positive height when the surface does not follow the ground (nothing is discarded then);
+    // a large negative one when there is no ground under the vertex (the fragment is discarded).
+    o.groundY = groundMode ? (hasGround ? groundY : -1e9) : 1e9;
+#endif
 
     o.posWorld = posWorld;
     o.normal = normWorld;
@@ -209,6 +318,9 @@ struct SurfacePsOut {
 
 SurfacePsOut PSWorldSurface(SurfaceVsOut i) {
     SurfacePsOut o;
+#if defined(PACK_CAP_WORLD_GROUND) && PACK_CAP_WORLD_GROUND
+    if (i.groundY < -1e8) discard;   // there is no ground under this fragment
+#endif
     PackSurfaceShadeIn sin;
     sin.uv = i.uv;
     sin.posLocal = PackWorldToLocal(i.posWorld);
@@ -216,6 +328,10 @@ SurfacePsOut PSWorldSurface(SurfaceVsOut i) {
     sin.normal = normalize(i.normal);
     sin.viewDir = normalize(gEyePos.xyz - i.posWorld);
     sin.time = gWorldTime.x;
+#if defined(PACK_CAP_WORLD_GROUND) && PACK_CAP_WORLD_GROUND
+    sin.posWorldXZ = i.posWorldXZ;
+    sin.groundNormal = i.groundNormal;
+#endif
 
     PackSurfaceOut sout = WORLD_SURFACE_SHADE_FN(sin);
 
@@ -227,11 +343,18 @@ SurfacePsOut PSWorldSurface(SurfaceVsOut i) {
     // matches the stage in every render path; the composite adds nothing on top (nt.z = -1 below).
     float3 hemi = PackHemiAmbient(sout.normal);
     float3 ambient = max(PackAmbient(), hemi);
-    float3 lit = sout.albedo * (sunColor * (NdotL * shadow) + ambient) + sout.emission;
+    float3 litBase = sout.albedo * (sunColor * (NdotL * shadow) + ambient);
+    float3 lit = litBase + sout.emission;
     // The scene's punctual lights (spots / points) with their shadow maps, the same terms the stage floor gets.
     lit += sout.albedo * WorldPunctualDiffuse(i.posWorld, sout.normal);
 
+#if defined(WORLD_SURFACE_OVERLAY) && WORLD_SURFACE_OVERLAY
+    // The overlay blend: the premultiplied colour over the already-lit scene colour (the destination keeps its
+    // alpha, so the scene's coverage is untouched).
+    o.color = float4(litBase * sout.alpha + sout.emission, sout.alpha);
+#else
     o.color = float4(lit, sout.alpha);
+#endif
     float3 viewN = normalize(mul(sout.normal, (float3x3)gView));
     // normal target: view normal, reflectivity -1 = no SSAO / SSR (the host already lit it), coverage 1
     o.normal = float4(OctEncode(viewN), -1.0, 1.0);
@@ -284,6 +407,22 @@ ParticleVsOut VSWorldParticle(uint vertexId : SV_VertexID) {
 #else
     PackParticle p = gParticles[pId];
     float3 prevPos = gPrevPos[pId].xyz;
+#endif
+
+#if defined(PACK_CAP_WORLD_CAMERA) && PACK_CAP_WORLD_CAMERA
+    // The camera-space wrap: the particle is drawn in the box of gWorldExtra.x world units around the camera (the
+    // pack keeps it in its own tile; the host moves the tile with the camera). The previous position is the wrapped
+    // one minus the frame's motion, so the wrap never leaves a velocity streak.
+    if (gWorldExtra.x > 0.0 && gWorldExtra.y > 0.5) {
+        float size = gWorldExtra.x;
+        float3 cam = gEyePos.xyz;
+        float3 wrapped;
+        wrapped.x = cam.x + (frac((p.pos.x - cam.x) / size + 0.5) - 0.5) * size;
+        wrapped.y = p.pos.y;
+        wrapped.z = cam.z + (frac((p.pos.z - cam.z) / size + 0.5) - 0.5) * size;
+        prevPos = wrapped - (p.pos - prevPos);
+        p.pos = wrapped;
+    }
 #endif
 
     if (p.age < 0.0 || p.color.a <= 0.0 || p.size <= 0.0) {

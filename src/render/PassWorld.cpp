@@ -50,8 +50,20 @@ struct WorldCbData {
     XMFLOAT4 sunColor;      // rgb: sunColor, w: shadowDistance
     XMFLOAT4 ambient;       // rgb: ambientColor, w: 0
     XMFLOAT4 fieldExtent[4];// xy: size, z: extent, w: 1/extent
+    // x: the particle system's wrap size (0 = local space), y: 1 = camera space, z,w: the field anchor (local xz)
+    XMFLOAT4 worldExtra;
+    // x: the ground map's size in texels (0 = the flat plane), y: 1/size, z,w: the map's origin (world xz)
+    XMFLOAT4 groundMap;
+    // x: the map's half extent (world units), y: the map's top y, z: the y range (top - bottom), w: 1 = a ground exists
+    XMFLOAT4 groundRect;
+    // x: 0 = the field's extent, 1 = camera-centred, y: the camera radius (world units), z: 1 = above the ground
+    XMFLOAT4 surfaceParams;
 };
-static_assert(sizeof(WorldCbData) == 272);
+static_assert(sizeof(WorldCbData) == 336);
+
+// The ground height map: a top-down orthographic depth render of the stage / prop models.
+inline constexpr uint32_t kWorldGroundMapSize = 2048;
+inline constexpr float kWorldGroundMaxExtent = 1024.0f;   // half size: at most 2048 x 2048 world units
 
 DXGI_FORMAT ParseFieldDxgiFormat(PackWorldField::Format fmt) {
     switch (fmt) {
@@ -59,6 +71,34 @@ DXGI_FORMAT ParseFieldDxgiFormat(PackWorldField::Format fmt) {
         case PackWorldField::Format::RG16F: return DXGI_FORMAT_R16G16_FLOAT;
         case PackWorldField::Format::RGBA16F: default: return DXGI_FORMAT_R16G16B16A16_FLOAT;
     }
+}
+
+// The model's vertex layout (the same one the scene / shadow passes use): the ground map reuses the shadow pass's
+// vertex shader, so it needs the same input layout.
+const D3D12_INPUT_ELEMENT_DESC kWorldMmdLayout[] = {
+    {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"BLENDINDICES", 0, DXGI_FORMAT_R16G16B16A16_UINT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"BLENDWEIGHT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"TEXCOORD", 1, DXGI_FORMAT_R32_FLOAT, 0, 56, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"TEXCOORD", 2, DXGI_FORMAT_R32G32B32_FLOAT, 1, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"TEXCOORD", 3, DXGI_FORMAT_R32G32B32_FLOAT, 2, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"TEXCOORD", 4, DXGI_FORMAT_R32G32B32_FLOAT, 3, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},   // GpuSdef
+    {"TEXCOORD", 5, DXGI_FORMAT_R32G32B32_FLOAT, 3, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"TEXCOORD", 6, DXGI_FORMAT_R32G32B32_FLOAT, 3, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"TEXCOORD", 7, DXGI_FORMAT_R32_FLOAT, 3, 36, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"TEXCOORD", 8, DXGI_FORMAT_R32G32B32A32_FLOAT, 4, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},   // GpuAddUv
+    {"TEXCOORD", 9, DXGI_FORMAT_R32G32B32A32_FLOAT, 4, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+};
+
+// The model's vertex / index buffers (the same binding the scene and shadow passes use).
+void BindGroundModelBuffers(ID3D12GraphicsCommandList* cmd, const GpuModel& model, uint64_t frame) {
+    D3D12_VERTEX_BUFFER_VIEW vbs[5] = {model.VertexBufferView(), model.MorphBufferView(frame),
+                                       model.PrevMorphBufferView(frame), model.SdefBufferView(),
+                                       model.AddUvBufferView()};
+    cmd->IASetVertexBuffers(0, 5, vbs);
+    cmd->IASetIndexBuffer(&model.IndexBufferView());
 }
 
 } // namespace
@@ -123,6 +163,8 @@ struct WorldPass::Impl {
         struct SurfacePso {
             ComPtr<ID3D12PipelineState> psoDraw;
             ComPtr<ID3D12PipelineState> psoDrawOffline;
+            ComPtr<ID3D12PipelineState> psoDrawOverlay;         // "blend": "overlay"
+            ComPtr<ID3D12PipelineState> psoDrawOfflineOverlay;
         };
         std::vector<SurfacePso> surfaces;
     };
@@ -135,6 +177,10 @@ struct WorldPass::Impl {
         uint64_t colliderVersion = 0;
         double simTime = 0.0;
         bool initialized = false;
+        // The field's anchor (world.anchor): the mean xz of the foot colliders over the whole collider track, in the
+        // entity's local space. Constant for the instance, so the re-simulation stays deterministic.
+        float anchorX = 0.0f, anchorZ = 0.0f;
+        uint64_t anchorVersion = ~0ull;
 
         struct ParticleBuf {
             ComPtr<ID3D12Resource> buffer;  // RWStructuredBuffer<PackParticle>
@@ -174,6 +220,12 @@ struct WorldPass::Impl {
     D3D12_GPU_DESCRIPTOR_HANDLE FieldTable(Dx12Context& ctx, const InstanceState& st) const {
         return ctx.SrvHeap().Gpu(st.fieldDesc + 16 + st.LatestMask() * 4);
     }
+    // The ground map's descriptor (t19 space0): the depth map, or the 1x1 fallback when there is no map.
+    D3D12_GPU_DESCRIPTOR_HANDLE GroundTable(Dx12Context& ctx) const {
+        if (groundSrv != DescriptorHeap::kInvalid) return ctx.SrvHeap().Gpu(groundSrv);
+        if (groundFallbackSrv != DescriptorHeap::kInvalid) return ctx.SrvHeap().Gpu(groundFallbackSrv);
+        return D3D12_GPU_DESCRIPTOR_HANDLE{};
+    }
     // Moves a particle system's two buffers to `to` (UAV for the compute steps, SRV for drawing).
     static void TransitionParticles(ID3D12GraphicsCommandList* cmd, InstanceState::ParticleBuf& b,
                                     D3D12_RESOURCE_STATES to) {
@@ -192,6 +244,20 @@ struct WorldPass::Impl {
     }
     std::map<std::pair<uint32_t, std::string>, InstanceState> instances;
 
+    // The ground height map (world.ground): a top-down orthographic depth render of the stage / prop models, read by
+    // the world shaders as R32_FLOAT. Only allocated when a pack requires the capability.
+    Texture groundDepth;
+    uint32_t groundSrv = DescriptorHeap::kInvalid;        // the depth map's SRV (t19 space0)
+    Texture groundFallback;                                // 1x1 R32_FLOAT, bound without a map
+    uint32_t groundFallbackSrv = DescriptorHeap::kInvalid;
+    uint64_t groundVersion = ~0ull;                       // the models / pose the map was rendered from
+    bool groundValid = false;
+    XMFLOAT4 groundMapParams{0, 0, 0, 0};                 // x: the map size (texels), y: 1/size, z,w: the origin
+    XMFLOAT4 groundRectParams{0, 0, 0, 0};                // x: the half extent, y: the top y, z: the y range, w: on
+    // The ground render's pipeline: the shadow pass's VS (skinning) with an orthographic override matrix.
+    ComPtr<ID3D12RootSignature> groundRootSig;
+    ComPtr<ID3D12PipelineState> groundPso;
+
     ~Impl() {
         for (UploadSegment& seg : uploads)
             for (UploadChunk& c : seg.chunks)
@@ -208,6 +274,15 @@ struct WorldPass::Impl {
     D3D12_GPU_VIRTUAL_ADDRESS AllocParamsExt(const ShaderPack& pack, const std::map<std::string, float>& params);
     D3D12_GPU_VIRTUAL_ADDRESS AllocColliders(const std::vector<WorldCollider>& colliders);
     D3D12_GPU_VIRTUAL_ADDRESS AllocWorldCb(const WorldCbData& cb);
+
+    // The ground map (world.ground).
+    void EnsureGroundResources(Dx12Context& ctx);
+    void RenderGroundMap(PassContext& pc);
+    void ReleaseGroundResources(Dx12Context& ctx);
+    // Renders the ground map when a world pack needs it (a pack that requires the "world.ground" capability).
+    void EnsureGround(PassContext& pc);
+    // The field's anchor (world.anchor): the mean xz of the foot colliders over the whole collider track.
+    void UpdateAnchor(const WorldInstance& inst, InstanceState& state);
 
     void SimulateInstance(PassContext& pc, const WorldInstance& inst, const ShaderPack& pack,
                           PackPipelines& pipes, InstanceState& state);
@@ -240,9 +315,13 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
     CD3DX12_DESCRIPTOR_RANGE packTexRange;
     packTexRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kPackMaxTexturesWorld, 0, 5); // t0..t31 space5
 
+    // The ground height map (the host's top-down depth render of the stage / props), t19 space0.
+    CD3DX12_DESCRIPTOR_RANGE groundRange;
+    groundRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 19, 0);
+
     // 1. Particle Compute Root Signature
     {
-        CD3DX12_ROOT_PARAMETER p[8];
+        CD3DX12_ROOT_PARAMETER p[9];
         p[0].InitAsConstantBufferView(0);                 // b0 SceneConstants
         p[1].InitAsConstantBufferView(1);                 // b1 WorldCB
         p[2].InitAsConstantBufferView(4);                 // b4 PackParamsExt
@@ -251,9 +330,10 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
         p[5].InitAsDescriptorTable(1, &packTexRange);     // t0..t31 space5 PackTex
         p[6].InitAsUnorderedAccessView(0, 0);             // u0 space0 gParticles
         p[7].InitAsUnorderedAccessView(1, 0);             // u1 space0 gPrevPos
+        p[8].InitAsDescriptorTable(1, &groundRange);      // t19 space0 GroundMap
 
         CD3DX12_ROOT_SIGNATURE_DESC rs;
-        rs.Init(8, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        rs.Init(9, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
         ComPtr<ID3DBlob> blob, err;
         if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
             LOG_ERROR("WorldPass: failed to serialize particleComputeRootSig: %s",
@@ -273,7 +353,7 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
         CD3DX12_DESCRIPTOR_RANGE nextRange;
         nextRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 space0 gFieldNext
 
-        CD3DX12_ROOT_PARAMETER p[8];
+        CD3DX12_ROOT_PARAMETER p[9];
         p[0].InitAsConstantBufferView(0);                 // b0 SceneConstants
         p[1].InitAsConstantBufferView(1);                 // b1 WorldCB
         p[2].InitAsConstantBufferView(4);                 // b4 PackParamsExt
@@ -282,9 +362,10 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
         p[5].InitAsDescriptorTable(1, &packTexRange);     // t0..t31 space5 PackTex
         p[6].InitAsDescriptorTable(1, &prevRange);        // t0 space1 FieldPrev
         p[7].InitAsDescriptorTable(1, &nextRange);        // u0 space0 FieldNext
+        p[8].InitAsDescriptorTable(1, &groundRange);      // t19 space0 GroundMap
 
         CD3DX12_ROOT_SIGNATURE_DESC rs;
-        rs.Init(8, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        rs.Init(9, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
         ComPtr<ID3DBlob> blob, err;
         if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
             LOG_ERROR("WorldPass: failed to serialize fieldComputeRootSig: %s",
@@ -313,7 +394,7 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
         CD3DX12_DESCRIPTOR_RANGE pointShadowRange;
         pointShadowRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 18, 0); // t18 space0 PointShadowMap
 
-        CD3DX12_ROOT_PARAMETER p[14];
+        CD3DX12_ROOT_PARAMETER p[15];
         p[0].InitAsConstantBufferView(0);                 // b0 SceneConstants
         p[1].InitAsConstantBufferView(1);                 // b1 WorldCB
         p[2].InitAsConstantBufferView(4);                 // b4 PackParamsExt
@@ -328,9 +409,10 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
         p[11].InitAsDescriptorTable(1, &spotShadowRange, D3D12_SHADER_VISIBILITY_PIXEL);   // t17 space0
         p[12].InitAsDescriptorTable(1, &pointShadowRange, D3D12_SHADER_VISIBILITY_PIXEL); // t18 space0
         p[13].InitAsConstants(1, 5, 0, D3D12_SHADER_VISIBILITY_PIXEL); // b5 world light flags
+        p[14].InitAsDescriptorTable(1, &groundRange);     // t19 space0 GroundMap
 
         CD3DX12_ROOT_SIGNATURE_DESC rs;
-        rs.Init(14, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        rs.Init(15, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
         ComPtr<ID3DBlob> blob, err;
         if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
             LOG_ERROR("WorldPass: failed to serialize graphicsRootSig: %s",
@@ -341,6 +423,58 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
                                                  IID_PPV_ARGS(&graphicsRootSig)),
                      "WorldPass: CreateRootSignature graphics"))
             return false;
+    }
+
+    // 4. The ground map's pipeline: the shadow pass's VS (mmd.hlsl's VSShadow, with the skinning) drawn with an
+    // orthographic override matrix into a depth-only target (the stage / prop models, back faces culled).
+    {
+        CD3DX12_ROOT_PARAMETER params[5];
+        params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_VERTEX);
+        params[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+        params[2].InitAsShaderResourceView(0, 0, D3D12_SHADER_VISIBILITY_VERTEX);
+        CD3DX12_DESCRIPTOR_RANGE table;
+        table.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 1);
+        params[3].InitAsDescriptorTable(1, &table, D3D12_SHADER_VISIBILITY_PIXEL);
+        params[4].InitAsConstants(20, 2, 0, D3D12_SHADER_VISIBILITY_VERTEX);
+        CD3DX12_STATIC_SAMPLER_DESC sampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+        CD3DX12_ROOT_SIGNATURE_DESC rs;
+        rs.Init(5, params, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        ComPtr<ID3DBlob> blob, err;
+        if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
+            LOG_ERROR("WorldPass: failed to serialize the ground root signature: %s",
+                      err ? (const char*)err->GetBufferPointer() : "unknown");
+        } else if (!CheckHr(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                        IID_PPV_ARGS(&groundRootSig)),
+                            "WorldPass: CreateRootSignature ground")) {
+            groundRootSig.Reset();
+        }
+
+        std::string shaderErr;
+        ComPtr<ID3DBlob> vs = CompileShaderDxc(shaderDir / L"mmd.hlsl", "VSShadow", "vs_6_0", {}, &shaderErr);
+        ComPtr<ID3DBlob> ps = vs ? CompileShaderDxc(shaderDir / L"mmd.hlsl", "PSShadowAlpha", "ps_6_0", {}, &shaderErr)
+                                 : nullptr;
+        if (!vs || !ps) {
+            LOG_ERROR("WorldPass: the ground map's shaders failed: %s", shaderErr.c_str());
+        } else {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+            pso.InputLayout = {kWorldMmdLayout, (UINT)std::size(kWorldMmdLayout)};
+            pso.pRootSignature = groundRootSig.Get();
+            pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+            pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+            pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+            pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;   // a sky dome (inward faces) is not a roof
+            pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+            pso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+            pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+            pso.SampleMask = UINT_MAX;
+            pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pso.NumRenderTargets = 0;
+            pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+            pso.SampleDesc.Count = 1;
+            CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&groundPso)),
+                    "WorldPass: the ground map PSO");
+        }
     }
 
     EnsureRings(ctx);
@@ -408,6 +542,13 @@ void WorldPass::Impl::CreateDefaultResources(Dx12Context& ctx) {
     defaultBlackFieldTex.srvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     defaultBlackFieldTex.width = defaultBlackFieldTex.height = 1;
 
+    // The ground map's fallback: a 1x1 R32_FLOAT, bound when no pack needs a real map.
+    groundFallback.Create(ctx, 1, 1, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE,
+                          D3D12_RESOURCE_STATE_COMMON, L"world.groundFallback");
+    groundFallbackSrv = ctx.SrvHeap().Allocate(1);
+    if (groundFallbackSrv != DescriptorHeap::kInvalid && groundFallback.res)
+        groundFallback.WriteSrv(device, ctx.SrvHeap().Cpu(groundFallbackSrv));
+
     // Default dummy collider buffer (1 entry)
     const CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
     const auto colDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(GpuWorldColliderData));
@@ -460,6 +601,204 @@ D3D12_GPU_VIRTUAL_ADDRESS WorldPass::Impl::AllocWorldCb(const WorldCbData& cb) {
     return Upload(&cb, sizeof(WorldCbData), 256);
 }
 
+// ---- the ground height map (world.ground) ---------------------------------------------------
+
+// The ground map's resources: the depth texture (read by the world shaders as R32_FLOAT). The 1x1 fallback lives in
+// CreateDefaultResources (it is always bound, so the descriptor is never null).
+void WorldPass::Impl::EnsureGroundResources(Dx12Context& ctx) {
+    if (groundSrv != DescriptorHeap::kInvalid) return;
+    ID3D12Device* device = ctx.Device();
+    if (!groundDepth.Create(ctx, kWorldGroundMapSize, kWorldGroundMapSize, RenderTargets::kDepthFormat,
+                            D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_COMMON, L"world.ground")) {
+        LOG_ERROR("WorldPass: the ground map could not be created");
+        return;
+    }
+    groundSrv = ctx.SrvHeap().Allocate(1);
+    if (groundSrv != DescriptorHeap::kInvalid)
+        groundDepth.WriteSrv(device, ctx.SrvHeap().Cpu(groundSrv));
+}
+
+void WorldPass::Impl::ReleaseGroundResources(Dx12Context& ctx) {
+    if (groundSrv != DescriptorHeap::kInvalid) {
+        ctx.SrvHeap().Free(groundSrv, 1);
+        groundSrv = DescriptorHeap::kInvalid;
+    }
+    groundDepth.Release(ctx);
+    groundValid = false;
+    groundVersion = ~0ull;
+}
+
+// The stage / prop models that make the ground (never the performers) and their world AABB.
+static void CollectGroundModels(const PassContext& pc, XMFLOAT3& bmin, XMFLOAT3& bmax, uint64_t& version) {
+    bmin = XMFLOAT3(1e30f, 1e30f, 1e30f);
+    bmax = XMFLOAT3(-1e30f, -1e30f, -1e30f);
+    version = 1469598103934665603ull;
+    auto mix = [&version](uint64_t v) {
+        version ^= v;
+        version *= 1099511628211ull;
+    };
+    for (GpuModel* model : pc.view.models) {
+        if (!model) continue;
+        if (model->Role() != ModelRole::Stage && !model->IsProp()) continue;
+        mix(model->Uid());
+        const XMFLOAT4X4* bones = model->BoneMatricesCpu(pc.frame);
+        if (!bones || model->BoneCount() == 0) continue;
+        const XMMATRIX root = XMLoadFloat4x4(&bones[0]);
+        const uint32_t* raw = reinterpret_cast<const uint32_t*>(&root);
+        for (int i = 0; i < 16; ++i) mix(raw[i]);
+        const XMFLOAT3 mn = model->BoundsMin();
+        const XMFLOAT3 mx = model->BoundsMax();
+        for (int i = 0; i < 8; ++i) {
+            const XMVECTOR corner = XMVectorSet((i & 1) ? mx.x : mn.x, (i & 2) ? mx.y : mn.y,
+                                                (i & 4) ? mx.z : mn.z, 1.0f);
+            const XMVECTOR w = XMVector3Transform(corner, root);
+            XMFLOAT3 f;
+            XMStoreFloat3(&f, w);
+            bmin.x = std::min(bmin.x, f.x); bmin.y = std::min(bmin.y, f.y); bmin.z = std::min(bmin.z, f.z);
+            bmax.x = std::max(bmax.x, f.x); bmax.y = std::max(bmax.y, f.y); bmax.z = std::max(bmax.z, f.z);
+        }
+    }
+}
+
+// The ground map: a top-down orthographic depth render of the stage / prop models (the shadow pass's VS with an
+// override matrix, back faces culled so a sky dome is not a roof). It is re-rendered when the models or their pose
+// change, at most once per frame.
+void WorldPass::Impl::RenderGroundMap(PassContext& pc) {
+    XMFLOAT3 bmin, bmax;
+    uint64_t version = 0;
+    CollectGroundModels(pc, bmin, bmax, version);
+
+    if (bmin.x > bmax.x) {   // no stage / prop model: the ground is the plane y = 0
+        groundMapParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+        groundRectParams = XMFLOAT4(1.0f, 0.0f, 1.0f, 1.0f);
+        groundValid = true;
+        groundVersion = version;
+        return;
+    }
+
+    if (groundValid && version == groundVersion) return;   // nothing moved
+
+    const float cx = (bmin.x + bmax.x) * 0.5f;
+    const float cz = (bmin.z + bmax.z) * 0.5f;
+    float half = std::max({bmax.x - bmin.x, bmax.z - bmin.z, 1.0f}) * 0.5f;
+    half = std::min(half, kWorldGroundMaxExtent);
+    const float yTop = bmax.y + 1.0f;
+    const float yBottom = bmin.y - 1.0f;
+    const float yRange = std::max(yTop - yBottom, 0.01f);
+
+    // The camera looks straight down (-Y): the view x / y axes are the world x / z, the view z is the height.
+    const XMMATRIX view = XMMatrixLookToLH(XMVectorSet(cx, yTop, cz, 1.0f), XMVectorSet(0.0f, -1.0f, 0.0f, 0.0f),
+                                            XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f));
+    const XMMATRIX proj = XMMatrixOrthographicOffCenterLH(-half, half, -half, half, 0.0f, yRange);
+    const XMMATRIX vp = view * proj;
+
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    Dx12Context& ctx = pc.ctx;
+    groundDepth.Transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.DsvHeap().Cpu(groundDepth.dsv);
+    cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+
+    D3D12_VIEWPORT viewport{0.0f, 0.0f, (float)kWorldGroundMapSize, (float)kWorldGroundMapSize, 0.0f, 1.0f};
+    D3D12_RECT scissor{0, 0, (LONG)kWorldGroundMapSize, (LONG)kWorldGroundMapSize};
+    cmd->RSSetViewports(1, &viewport);
+    cmd->RSSetScissorRects(1, &scissor);
+
+    cmd->SetGraphicsRootSignature(groundRootSig.Get());
+    cmd->SetGraphicsRootConstantBufferView(0, pc.sceneConstants);
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // The shadow CB's matrix override: gCascade 19 selects gPointViewProj, which the matrix below replaces
+    // (the matrix sits at dword 4 of the shadow constant buffer: gCascade + the pad).
+    cmd->SetGraphicsRoot32BitConstant(4, 19, 0);
+    XMFLOAT4X4 m;
+    XMStoreFloat4x4(&m, vp);
+    cmd->SetGraphicsRoot32BitConstants(4, 4, &m, 16);
+
+    for (GpuModel* model : pc.view.models) {
+        if (!model) continue;
+        if (model->Role() != ModelRole::Stage && !model->IsProp()) continue;
+        BindGroundModelBuffers(cmd, *model, pc.frame);
+        cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
+        const auto& consts = model->MaterialConstantsCpu();
+        ID3D12PipelineState* bound = nullptr;
+        for (size_t i = 0; i < model->Materials().size() && i < consts.size(); ++i) {
+            const GpuModel::Material& mat = model->Materials()[i];
+            if (mat.indexCount == 0) continue;
+            const MaterialConstants& mc = consts[i];
+            if (mc.diffuse.w < 0.5f) continue;                                        // invisible
+            if (mc.flags & (MatFlag_Additive | MatFlag_NoDepthWrite)) continue;       // no depth write
+            ID3D12PipelineState* want = groundPso.Get();
+            if (!want) continue;
+            if (want != bound) {
+                cmd->SetPipelineState(want);
+                bound = want;
+            }
+            cmd->SetGraphicsRootConstantBufferView(1, mat.constants);
+            cmd->SetGraphicsRootDescriptorTable(3, ctx.SrvHeap().Gpu(mat.srvTable));
+            cmd->DrawIndexedInstanced(mat.indexCount, 1, mat.indexStart, 0, 0);
+            pc.stats.drawCalls++;
+        }
+    }
+    groundDepth.Transition(cmd, kSrv);
+
+    groundMapParams = XMFLOAT4((float)kWorldGroundMapSize, 1.0f / (float)kWorldGroundMapSize, cx, cz);
+    groundRectParams = XMFLOAT4(half, yTop, yRange, 1.0f);
+    groundVersion = version;
+    groundValid = true;
+}
+
+// The ground map, when a world pack needs it (a pack that requires the "world.ground" capability). The map is
+// rendered before the simulation, so a simulation can query the ground.
+void WorldPass::Impl::EnsureGround(PassContext& pc) {
+    bool needed = false;
+    for (const WorldInstance& inst : pc.view.worlds) {
+        const ShaderPack* pack = ShaderPacks().Find(inst.pack);
+        if (pack && pack->type == PackType::World && pack->world && pack->HasCap("world.ground")) {
+            needed = true;
+            break;
+        }
+    }
+    if (!needed) return;
+    EnsureGroundResources(pc.ctx);
+    if (!groundRootSig || !groundPso) return;   // the shaders failed to compile: no ground
+    RenderGroundMap(pc);
+}
+
+// The field's anchor (world.anchor): the mean xz of the foot colliders over the whole collider track, in the
+// entity's local space. It is computed once (the collider track changes with the cast, not with the time).
+void WorldPass::Impl::UpdateAnchor(const WorldInstance& inst, InstanceState& state) {
+    const uint64_t ver = inst.colliders ? inst.colliders->version : 0;
+    if (state.anchorVersion == ver) return;
+    state.anchorVersion = ver;
+    state.anchorX = 0.0f;
+    state.anchorZ = 0.0f;
+    if (!inst.colliders) return;
+
+    const WorldColliderTrack& track = *inst.colliders;
+    double sumX = 0.0, sumZ = 0.0;
+    uint64_t count = 0;
+    for (uint32_t s = 0; s < track.sampleCount; ++s) {
+        const WorldCollider* c = &track.samples[(size_t)s * track.perSample];
+        for (uint32_t i = 0; i < track.perSample; ++i) {
+            if (!(c[i].flags & kColliderFoot)) continue;
+            sumX += c[i].pos.x;
+            sumZ += c[i].pos.z;
+            ++count;
+        }
+    }
+    if (count == 0) return;
+
+    // The mean world xz -> the entity's local space (the field's centre).
+    const XMFLOAT3 mean = XMFLOAT3((float)(sumX / (double)count), 0.0f, (float)(sumZ / (double)count));
+    const XMMATRIX mWorld = XMLoadFloat4x4(&inst.transform);
+    const XMMATRIX mInvWorld = XMMatrixInverse(nullptr, mWorld);
+    const XMVECTOR local = XMVector3Transform(XMLoadFloat3(&mean), mInvWorld);
+    XMFLOAT3 l;
+    XMStoreFloat3(&l, local);
+    state.anchorX = l.x;
+    state.anchorZ = l.z;
+}
+
 WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Context& ctx, const ShaderPack& pack) {
     if (pack.type != PackType::World || !pack.world) return nullptr;
     ID3D12Device* device = ctx.Device();
@@ -490,6 +829,11 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
         {"PACK_TEX_SRGB_MASK", std::to_string(srgbMask) + "u"},
         {"PACK_TEX_COUNT", std::to_string(texCount)}
     };
+    // The world capabilities (docs/shader_world_api.md): the pack declares them in "requires".
+    if (pack.HasCap("world.camera")) baseDefines.push_back({"PACK_CAP_WORLD_CAMERA", "1"});
+    if (pack.HasCap("world.anchor")) baseDefines.push_back({"PACK_CAP_WORLD_ANCHOR", "1"});
+    if (pack.HasCap("world.ground")) baseDefines.push_back({"PACK_CAP_WORLD_GROUND", "1"});
+    if (pack.HasCap("world.overlay")) baseDefines.push_back({"PACK_CAP_WORLD_OVERLAY", "1"});
 
     // 1. CSWorldClear
     {
@@ -671,6 +1015,8 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
             d.push_back({"WORLD_SURFACE", "1"});
             d.push_back({"WORLD_SURFACE_HEIGHT_FN", s.height});
             d.push_back({"WORLD_SURFACE_SHADE_FN", s.shade});
+            const bool overlay = s.blend == PackWorldSurface::Blend::Overlay;
+            if (overlay) d.push_back({"WORLD_SURFACE_OVERLAY", "1"});
             std::string err;
             ComPtr<ID3DBlob> vs = CompileShaderDxc(hostShader, "VSWorldSurface", "vs_6_0", d, &err);
             ComPtr<ID3DBlob> ps = CompileShaderDxc(hostShader, "PSWorldSurface", "ps_6_0", d, &err);
@@ -696,6 +1042,32 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                 pso.SampleDesc.Count = msaa;
                 CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDraw)), "WorldPass: sPipe.psoDraw");
 
+                if (overlay) {
+                    // The overlay blend: the premultiplied colour over the already-lit scene colour (the destination
+                    // keeps its alpha, so the scene's coverage is untouched), the depth test on but no depth write and
+                    // a small slope-scaled depth bias, so a surface a few mm above the ground does not z-fight. The
+                    // normal / velocity targets keep the stage's own values.
+                    pso.BlendState.RenderTarget[0].BlendEnable = TRUE;
+                    pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+                    pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                    pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+                    pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ZERO;
+                    pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
+                    pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                    pso.BlendState.RenderTarget[1].BlendEnable = FALSE;
+                    pso.BlendState.RenderTarget[1].RenderTargetWriteMask = 0;
+                    pso.BlendState.RenderTarget[2].BlendEnable = FALSE;
+                    pso.BlendState.RenderTarget[2].RenderTargetWriteMask = 0;
+                    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+                    pso.RasterizerState.SlopeScaledDepthBias = 2.0f;
+                    CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDrawOverlay)),
+                            "WorldPass: sPipe.psoDrawOverlay");
+                    pso.RasterizerState.SlopeScaledDepthBias = 0.0f;
+                    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+                    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+                }
+
                 // Offline GI variant (1 RTV, 4 MSAA)
                 pso.NumRenderTargets = 1;
                 pso.RTVFormats[0] = RenderTargets::kColorFormat;
@@ -703,6 +1075,20 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                 pso.RTVFormats[2] = DXGI_FORMAT_UNKNOWN;
                 pso.SampleDesc.Count = 4;
                 CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDrawOffline)), "WorldPass: sPipe.psoDrawOffline");
+                if (overlay) {
+                    pso.BlendState.RenderTarget[0].BlendEnable = TRUE;
+                    pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+                    pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                    pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+                    pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ZERO;
+                    pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
+                    pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+                    pso.RasterizerState.SlopeScaledDepthBias = 2.0f;
+                    CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDrawOfflineOverlay)),
+                            "WorldPass: sPipe.psoDrawOfflineOverlay");
+                }
             } else {
                 LOG_ERROR("WorldPack '%s' surface: Draw PSO failed: %s", pack.id.c_str(), err.c_str());
             }
@@ -806,6 +1192,19 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
         else if (inst.time - state.simTime > 0.25) needResim = true;
     }
 
+    // The field's anchor (world.anchor): the mean xz of the foot colliders, in the entity's local space.
+    UpdateAnchor(inst, state);
+
+    // The current particle system's wrap (camera space): 0 for a local-space system.
+    float wrapSize = 0.0f;
+    float cameraSpace = 0.0f;
+    auto setWrap = [&](size_t pi) {
+        const auto& p = pack.world->particles[pi];
+        const bool cam = p.space == PackWorldParticleSystem::Space::Camera;
+        wrapSize = cam ? p.wrap : 0.0f;
+        cameraSpace = cam ? 1.0f : 0.0f;
+    };
+
     // Helper: Build WorldCbData for a step
     auto makeWorldCb = [&](float timeVal, float dtVal, float simVal, uint32_t stepIdx,
                            uint32_t colCount, uint32_t fieldCount, uint32_t partIdx, uint32_t countOrGrid) {
@@ -816,6 +1215,9 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
         XMStoreFloat4x4(&cb.worldToLocal, mInvWorld);
         cb.worldTime = XMFLOAT4(timeVal, dtVal, simVal, (float)stepIdx);
         cb.worldParams = XMFLOAT4((float)colCount, (float)fieldCount, (float)partIdx, (float)countOrGrid);
+        cb.worldExtra = XMFLOAT4(wrapSize, cameraSpace, state.anchorX, state.anchorZ);
+        cb.groundMap = groundMapParams;
+        cb.groundRect = groundRectParams;
 
         const LightParams& lp = pc.view.light;
         XMVECTOR L = XMVector3Normalize(XMLoadFloat3(&lp.direction));
@@ -865,6 +1267,8 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
         if (inst.colliders) inst.colliders->Sample(t, sampledColliders);
         else sampledColliders.clear();
         const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
+        wrapSize = 0.0f;   // a field step never runs in camera space
+        cameraSpace = 0.0f;
         const auto cb = makeWorldCb((float)t, k ? (float)pDt : 0.0f, (float)(t - pDt), (uint32_t)k,
                                     (uint32_t)sampledColliders.size(), (uint32_t)state.fields.size(),
                                     (uint32_t)fi + (reset ? 16u : 0u), fTex.size);
@@ -876,6 +1280,7 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
         cmd->SetComputeRootShaderResourceView(3, colVa);
         cmd->SetComputeRootDescriptorTable(4, makeFieldTable());
         cmd->SetComputeRootDescriptorTable(5, packTexTable);
+        cmd->SetComputeRootDescriptorTable(8, GroundTable(ctx));
         fTex.Current().Transition(cmd, kUav);
         bindFieldPrevNext(fi);
         const uint32_t gx = (fTex.size + 7) / 8;
@@ -910,6 +1315,7 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
                 const auto& p = pack.world->particles[pi];
                 if (p.simulate.empty()) continue; // stateless particles don't clear/simulate
                 auto& pBuf = state.particles[pi];
+                setWrap(pi);
 
                 const auto cb = makeWorldCb((float)inst.time, stepDt, 0.0f, 0,
                                             0, (uint32_t)state.fields.size(), (uint32_t)pi, pBuf.count);
@@ -921,6 +1327,7 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
                 cmd->SetComputeRootShaderResourceView(3, defaultColliderBuffer->GetGPUVirtualAddress());
                 cmd->SetComputeRootDescriptorTable(4, makeFieldTable());
                 cmd->SetComputeRootDescriptorTable(5, packTexTable);
+                cmd->SetComputeRootDescriptorTable(8, GroundTable(ctx));
                 TransitionParticles(cmd, pBuf, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 cmd->SetComputeRootUnorderedAccessView(6, pBuf.buffer->GetGPUVirtualAddress());
                 cmd->SetComputeRootUnorderedAccessView(7, pBuf.prevPos->GetGPUVirtualAddress());
@@ -960,7 +1367,10 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
                 cmd->SetComputeRootConstantBufferView(0, pc.sceneConstants);
                 cmd->SetComputeRootConstantBufferView(2, paramsExtVa);
                 cmd->SetComputeRootDescriptorTable(5, packTexTable);
+                cmd->SetComputeRootDescriptorTable(8, GroundTable(ctx));
 
+                wrapSize = 0.0f;   // a field step never runs in camera space
+                cameraSpace = 0.0f;
                 const auto cb = makeWorldCb((float)tNext, stepDt, (float)tCur, s, (uint32_t)sampledColliders.size(),
                                             (uint32_t)state.fields.size(), (uint32_t)fi + (s == 0 ? 16u : 0u), fTex.size);
                 const D3D12_GPU_VIRTUAL_ADDRESS cbVa = AllocWorldCb(cb);
@@ -987,12 +1397,14 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
                 const auto& p = pack.world->particles[pi];
                 if (p.simulate.empty() || pipes.particles[pi].psoSimulate == nullptr) continue;
                 auto& pBuf = state.particles[pi];
+                setWrap(pi);
 
                 cmd->SetComputeRootSignature(particleComputeRootSig.Get());
                 cmd->SetPipelineState(pipes.particles[pi].psoSimulate.Get());
                 cmd->SetComputeRootConstantBufferView(0, pc.sceneConstants);
                 cmd->SetComputeRootConstantBufferView(2, paramsExtVa);
                 cmd->SetComputeRootDescriptorTable(5, packTexTable);
+                cmd->SetComputeRootDescriptorTable(8, GroundTable(ctx));
 
                 const auto cb = makeWorldCb((float)tNext, stepDt, (float)tCur, s,
                                             (uint32_t)sampledColliders.size(), (uint32_t)state.fields.size(),
@@ -1002,7 +1414,6 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
                 cmd->SetComputeRootConstantBufferView(1, cbVa);
                 cmd->SetComputeRootShaderResourceView(3, colVa);
                 cmd->SetComputeRootDescriptorTable(4, makeFieldTable());
-                TransitionParticles(cmd, pBuf, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 cmd->SetComputeRootUnorderedAccessView(6, pBuf.buffer->GetGPUVirtualAddress());
                 cmd->SetComputeRootUnorderedAccessView(7, pBuf.prevPos->GetGPUVirtualAddress());
 
@@ -1035,7 +1446,10 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
                 cmd->SetComputeRootConstantBufferView(0, pc.sceneConstants);
                 cmd->SetComputeRootConstantBufferView(2, paramsExtVa);
                 cmd->SetComputeRootDescriptorTable(5, packTexTable);
+                cmd->SetComputeRootDescriptorTable(8, GroundTable(ctx));
 
+                wrapSize = 0.0f;   // a field step never runs in camera space
+                cameraSpace = 0.0f;
                 const auto cb = makeWorldCb((float)tNext, stepDt, (float)state.simTime, 0,
                                             (uint32_t)sampledColliders.size(), (uint32_t)state.fields.size(),
                                             (uint32_t)fi, fTex.size);
@@ -1063,12 +1477,14 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
                 const auto& p = pack.world->particles[pi];
                 if (p.simulate.empty() || pipes.particles[pi].psoSimulate == nullptr) continue;
                 auto& pBuf = state.particles[pi];
+                setWrap(pi);
 
                 cmd->SetComputeRootSignature(particleComputeRootSig.Get());
                 cmd->SetPipelineState(pipes.particles[pi].psoSimulate.Get());
                 cmd->SetComputeRootConstantBufferView(0, pc.sceneConstants);
                 cmd->SetComputeRootConstantBufferView(2, paramsExtVa);
                 cmd->SetComputeRootDescriptorTable(5, packTexTable);
+                cmd->SetComputeRootDescriptorTable(8, GroundTable(ctx));
 
                 const auto cb = makeWorldCb((float)tNext, stepDt, (float)state.simTime, 0,
                                             (uint32_t)sampledColliders.size(), (uint32_t)state.fields.size(),
@@ -1151,6 +1567,12 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
 
     const float stepDt = pack.world->step > 0.0f ? pack.world->step : (1.0f / 60.0f);
 
+    // The field's anchor (world.anchor) and the current draw's wrap / surface parameters.
+    UpdateAnchor(inst, state);
+    float wrapSize = 0.0f;
+    float cameraSpace = 0.0f;
+    XMFLOAT4 surfaceParams(0.0f, 0.0f, 0.0f, 0.0f);
+
     auto makeWorldCb = [&](uint32_t partIdx, uint32_t countOrGrid) {
         WorldCbData cb{};
         XMMATRIX mWorld = XMLoadFloat4x4(&inst.transform);
@@ -1160,6 +1582,10 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
         cb.worldTime = XMFLOAT4((float)inst.time, stepDt, (float)state.simTime, 0.0f);
         cb.worldParams = XMFLOAT4((float)sampledColliders.size(), (float)state.fields.size(),
                                   (float)partIdx, (float)countOrGrid);
+        cb.worldExtra = XMFLOAT4(wrapSize, cameraSpace, state.anchorX, state.anchorZ);
+        cb.groundMap = groundMapParams;
+        cb.groundRect = groundRectParams;
+        cb.surfaceParams = surfaceParams;
 
         const LightParams& lp = pc.view.light;
         XMVECTOR L = XMVector3Normalize(XMLoadFloat3(&lp.direction));
@@ -1197,25 +1623,47 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
     cmd->SetGraphicsRootDescriptorTable(11, spotShadowTable);
     cmd->SetGraphicsRootDescriptorTable(12, pointShadowTable);
     cmd->SetGraphicsRoot32BitConstant(13, lightFlags, 0);
+    // The ground map (t19 space0): the depth map, or the 1x1 fallback when there is none.
+    cmd->SetGraphicsRootDescriptorTable(14, GroundTable(ctx));
 
     // 1. Draw Surfaces (opaque, depth write)
     for (size_t si = 0; si < pack.world->surfaces.size(); ++si) {
         const auto& s = pack.world->surfaces[si];
         auto& sPipe = pipes.surfaces[si];
-        ID3D12PipelineState* pso = offline ? sPipe.psoDrawOffline.Get() : sPipe.psoDraw.Get();
+        const bool overlay = s.blend == PackWorldSurface::Blend::Overlay;
+        ID3D12PipelineState* pso = nullptr;
+        if (overlay)
+            pso = offline ? sPipe.psoDrawOfflineOverlay.Get() : sPipe.psoDrawOverlay.Get();
+        else
+            pso = offline ? sPipe.psoDrawOffline.Get() : sPipe.psoDraw.Get();
         if (!pso) continue;
 
         uint32_t fieldIndex = 0;   // the surface's "field" by name (worldParams.z)
         for (size_t fi = 0; fi < pack.world->fields.size(); ++fi)
             if (pack.world->fields[fi].name == s.field) fieldIndex = (uint32_t)fi;
-        const auto cb = makeWorldCb(fieldIndex, s.grid);
+
+        // The camera-centred grid ("extent": "camera"): 3 LOD levels of grid x grid quads. The levels tile exactly
+        // only with a grid that is a multiple of 8, so the grid is rounded down to one.
+        uint32_t grid = s.grid;
+        uint32_t vertexCount = s.grid * s.grid * 6;
+        float extentMode = 0.0f;
+        if (s.extent == PackWorldSurface::Extent::Camera) {
+            grid = std::max(8u, (s.grid / 8u) * 8u);
+            vertexCount = 3u * grid * grid * 6u;
+            extentMode = 1.0f;
+        }
+        surfaceParams = XMFLOAT4(extentMode, s.radius, s.ground ? 1.0f : 0.0f, 0.0f);
+        wrapSize = 0.0f;
+        cameraSpace = 0.0f;
+
+        const auto cb = makeWorldCb(fieldIndex, grid);
         cmd->SetGraphicsRootConstantBufferView(1, AllocWorldCb(cb));
         cmd->SetPipelineState(pso);
 
-        const uint32_t vertexCount = s.grid * s.grid * 6;
         cmd->DrawInstanced(vertexCount, 1, 0, 0);
         pc.stats.drawCalls++;
     }
+    surfaceParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
 
     // 2. Draw Particles (alpha / add, no depth write)
     if (!drawParticles) return;
@@ -1225,6 +1673,11 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
         auto& pBuf = state.particles[pi];
         ID3D12PipelineState* pso = offline ? pPipe.psoDrawOffline.Get() : pPipe.psoDraw.Get();
         if (!pso) continue;
+
+        // The camera-space wrap (world.camera): the host draws the particle in a box around the camera.
+        const bool cam = p.space == PackWorldParticleSystem::Space::Camera;
+        wrapSize = cam ? p.wrap : 0.0f;
+        cameraSpace = cam ? 1.0f : 0.0f;
 
         const auto cb = makeWorldCb((uint32_t)pi, p.count);
         cmd->SetGraphicsRootConstantBufferView(1, AllocWorldCb(cb));
@@ -1313,6 +1766,9 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
         const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
 
         const float instStepDt = pack->world->step > 0.0f ? pack->world->step : (1.0f / 60.0f);
+        UpdateAnchor(inst, state);
+        float wrapSize = 0.0f;
+        float cameraSpace = 0.0f;
         auto makeWorldCb = [&](uint32_t partIdx, uint32_t countOrGrid) {
             WorldCbData cb{};
             XMMATRIX mWorld = XMLoadFloat4x4(&inst.transform);
@@ -1322,6 +1778,9 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
             cb.worldTime = XMFLOAT4((float)inst.time, instStepDt, (float)state.simTime, 0.0f);
             cb.worldParams = XMFLOAT4((float)sampledColliders.size(), (float)state.fields.size(),
                                       (float)partIdx, (float)countOrGrid);
+            cb.worldExtra = XMFLOAT4(wrapSize, cameraSpace, state.anchorX, state.anchorZ);
+            cb.groundMap = groundMapParams;
+            cb.groundRect = groundRectParams;
 
             const LightParams& lp = pc.view.light;
             XMVECTOR L = XMVector3Normalize(XMLoadFloat3(&lp.direction));
@@ -1361,12 +1820,18 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
         cmd->SetGraphicsRootDescriptorTable(11, spotShadowTable);
         cmd->SetGraphicsRootDescriptorTable(12, pointShadowTable);
         cmd->SetGraphicsRoot32BitConstant(13, lightFlags, 0);
+        cmd->SetGraphicsRootDescriptorTable(14, GroundTable(ctx));
 
         for (size_t pi = 0; pi < pack->world->particles.size(); ++pi) {
             const auto& p = pack->world->particles[pi];
             auto& pPipe = pipes->particles[pi];
             auto& pBuf = state.particles[pi];
             if (!pPipe.psoDrawPost) continue;
+
+            // The camera-space wrap (world.camera): the host draws the particle in a box around the camera.
+            const bool cam = p.space == PackWorldParticleSystem::Space::Camera;
+            wrapSize = cam ? p.wrap : 0.0f;
+            cameraSpace = cam ? 1.0f : 0.0f;
 
             const auto cb = makeWorldCb((uint32_t)pi, p.count);
             cmd->SetGraphicsRootConstantBufferView(1, AllocWorldCb(cb));
@@ -1399,6 +1864,7 @@ void WorldPass::OnResize(Dx12Context& ctx, RenderTargets& targets) {
 
 void WorldPass::ReleaseTargets(Dx12Context& ctx) {
     impl_->packTextures.Clear(ctx);
+    impl_->ReleaseGroundResources(ctx);
     for (auto& [k, inst] : impl_->instances) {
         for (auto& f : inst.fields) {
             f.texA.Release(ctx);
@@ -1427,6 +1893,9 @@ void WorldPass::Execute(PassContext& pc) {
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     Dx12Context& ctx = pc.ctx;
     RenderTargets& t = pc.targets;
+
+    // 0. The ground map (world.ground): the stage's real surfaces, before the simulation.
+    impl_->EnsureGround(pc);
 
     // 1. Simulation Phase (Compute)
     for (const WorldInstance& inst : pc.view.worlds) {
@@ -1518,6 +1987,9 @@ void WorldPass::DrawOffline(PassContext& pc, const Texture& edgeColorMsaa, const
     if (pc.view.worlds.empty()) return;
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     Dx12Context& ctx = pc.ctx;
+
+    // The ground map (world.ground), before the simulation.
+    impl_->EnsureGround(pc);
 
     // Simulate instances
     for (const WorldInstance& inst : pc.view.worlds) {

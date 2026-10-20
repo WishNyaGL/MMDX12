@@ -152,6 +152,10 @@ public:
     // static, then a motion may be bound).
     void SetDynamic(bool dynamic) { dynamic_ = dynamic; }
     bool Dynamic() const { return dynamic_; }
+    // A prop (a studio accessory): drawn like a character (it follows bones), but the world's ground map includes it
+    // (it is a real surface the effects may lie on) while the performers never are.
+    void SetProp(bool prop) { prop_ = prop; }
+    bool IsProp() const { return prop_; }
     uint32_t BoneCount() const { return boneCount_; }
     uint32_t VertexCount() const { return vertexCount_; }
     uint32_t IndexCount() const { return indexCount_; }
@@ -260,6 +264,7 @@ private:
     bool hasPbrRecords_ = false;
     ModelRole role_ = ModelRole::Character;
     bool dynamic_ = false;   // M8a: an animated stage rebuilds its BLAS
+    bool prop_ = false;      // a studio prop (the world's ground map includes it)
     DirectX::XMFLOAT3 boundsMin_{}, boundsMax_{};
     ComPtr<ID3D12Resource> boneBuf_[kRing];
     void* boneMapped_[kRing] = {};
