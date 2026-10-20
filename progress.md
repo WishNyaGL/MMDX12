@@ -2270,3 +2270,15 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   0 `[E]`, leftovers removed), delta manifest 2.5.1 (5 new objects, `--base-url https://mmdx.codingbot.kr/updates`) uploaded,
   live manifest hash + exe object verified; GitHub v2.5.1; website deployed (`/latest.json` -> 2.5.1 with manifest).
 - Lesson: a "flip the constant when it does" placeholder needs a release checklist entry; grep `Compatible` flags when a feature ships.
+- After the release (same day): the 2.5.1 notes got a cover image (`docs/media/world-effects-2.5.1.jpg`, the user's studio
+  screenshot; release body edited, site redeployed twice per the gh-release-edit pitfall).
+- Unreleased (commit 6090be4, for the next patch): (1) pack picker previews stayed blank in the studio / play screens:
+  `ThumbnailCache::Pump` only ran on menu screens (studio: only while the add popup was open), so Image entries never
+  uploaded. The picker popup sets `studioThumbsShown_`; studio pumps fully, play pumps `Pump(uploadsOnly=true)` (the render
+  step waits for the GPU / borrows the scene targets). Verified in the studio. (2) The picker's "이펙트 관리 · 온라인에서 받기"
+  button only switched screens from the library (dead in studio / play): now shown on `Screen::Select` only. A modal gallery
+  inside the studio / play screens would be the real fix (not built).
+- Pitfall: MCP default pipe `mmdx12_mcp` can belong to another instance (first one wins); `mcp_x.py` talks to it, so a
+  freshly launched build's screenshots can come from the wrong app. Use `MmdxPipe(pid=<pid>)` (`mmdx12_mcp_<pid>`) and check
+  `CreationDate` / `ExecutablePath` of the processes.
+- Next: collect more fixes for 2.5.2; consider a release-checklist step "install a gallery pack of each type in the build".
