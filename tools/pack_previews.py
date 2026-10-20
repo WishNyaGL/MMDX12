@@ -65,6 +65,9 @@ SHOT_CONFIGS = {
     "lens_reflection": _shot("effect", "sour_miku", "theater", 8.0),
     "screen_ao": _shot("effect", "sour_miku", "theater", 22.0),
     "eye_adaptation": _shot("effect", "sour_miku", "theater", 8.0, 2),
+    # rain effect packs: Rom in the night street, the rain world shot's camera
+    "rain_lens": _shot("effect", "Rom_MMD", "pjsk_fireflower", 8.0, camera=([0, 10, 0], 25, 8, 45)),
+    "rain_grade": _shot("effect", "Rom_MMD", "pjsk_fireflower", 8.0, camera=([0, 10, 0], 25, 8, 45)),
     # world packs: Rom, a full-body free camera (set_camera) so the ground layers show; BEFORE = no world effect
     "snow": _shot("world", "Rom_MMD", "pjsk_fireflower", 8.0, camera=([0, 10, 0], 25, 12, 45)),
     "rain": _shot("world", "Rom_MMD", "pjsk_fireflower", 8.0, camera=([0, 10, 0], 25, 8, 45)),
@@ -220,9 +223,7 @@ def capture_shot(controller: AppController, pack_id: str, cfg: dict,
 
     # Helper to set BEFORE state
     def set_before():
-        kwargs = {"effects": "none", "shader_pack": "default"}
-        if p_type == "world":
-            kwargs["world_stack"] = []
+        kwargs = {"effects": "none", "shader_pack": "default", "world_stack": []}   # no leftover world effect
         if p_type == "surface":
             kwargs["shader_texture_folder"] = ""
         if lighting_preset is not None:
@@ -233,7 +234,7 @@ def capture_shot(controller: AppController, pack_id: str, cfg: dict,
     # Helper to set AFTER state
     def set_after():
         if p_type == "surface":
-            kwargs = {"shader_pack": pack_id, "shader_texture_folder": tex_folder, "effects": "none"}
+            kwargs = {"shader_pack": pack_id, "shader_texture_folder": tex_folder, "effects": "none", "world_stack": []}
         elif p_type == "world":
             entry = {"id": pack_id}
             if cfg.get("params"):
@@ -243,7 +244,7 @@ def capture_shot(controller: AppController, pack_id: str, cfg: dict,
             entry = {"id": pack_id}
             if cfg.get("params"):
                 entry["params"] = cfg["params"]
-            kwargs = {"effect_stack": [entry], "shader_pack": "default"}
+            kwargs = {"effect_stack": [entry], "shader_pack": "default", "world_stack": []}
         if lighting_preset is not None:
             kwargs["lighting_preset"] = int(lighting_preset)
         controller.call("set_render_settings", **kwargs)
