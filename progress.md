@@ -2282,3 +2282,26 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   freshly launched build's screenshots can come from the wrong app. Use `MmdxPipe(pid=<pid>)` (`mmdx12_mcp_<pid>`) and check
   `CreationDate` / `ExecutablePath` of the processes.
 - Next: collect more fixes for 2.5.2; consider a release-checklist step "install a gallery pack of each type in the build".
+
+## 2026-10-23 - Video motion capture ("영상에서 모션 만들기")
+- Goal: the YouTube tutorial (uy35EDsNMUQ) shows QuickMagic, a closed paid cloud AI mocap (video -> body / hand / face VMD).
+  Not embeddable; the same pipeline is built from open parts: Google MediaPipe models (Apache-2.0) as ONNX (opencv_zoo +
+  QtMeshEditor mirrors, MIT reference code) on ONNX Runtime 1.22 CPU. MiKaPo (same idea, GPL-3.0) used as approach only.
+- Workflow: Claude = architect (MocapTypes.h contract, CMake, specs, review, fixes); Antigravity workers built the
+  extractor (A), the solver + round-trip test (B) and the studio integration (C, resumed once after over-exploring).
+- New: `src/mocap/` (OrtRuntime, MocapExtractor, MocapSolver), `tools/mocap_probe`, `tools/mocap_solver_test`,
+  `app/UiStudioMocap.cpp` (model menu, options / progress modal, one undo step), ui-script `studiomocap`, fetch_sdks +
+  package_release (bin/mocap, ORT / MediaPipe / QtMeshEditor licence notes).
+- Review fixes (Claude): hand presence read the handedness output (hands "found" on 50-80 % of frames, all garbage; real
+  presence ~0 because the pose-derived crop sat on the wrist and was too big) -> forearm-direction crop candidates +
+  MediaPipe landmark re-crop + tracking; head from face landmarks used normalised y-down image coords as 3D (upside-down
+  head; the worker's test never fed face landmarks); センター Y lifted crouches instead of lowering them (test only checked
+  for sinking) -> exact ground contact by posing the model per frame; non-ASCII path logging; IK re-enabled after the
+  replaced range. The test now also checks face-landmark heads (3 deg) and foot contact both ways (0.12).
+- Verified: mocap_solver_test PASS; mocap_probe on captures/media_kit/raster.mp4 (6 s): pose 99 %, hands L 27 % R 38 %,
+  face 44 %, 85 ms/frame; studio ui-script run: 3227 keys in 16 s, one undo step, 0 [E]; the solved pose at frame 0 / 9
+  matches the video (hand over the face, other arm out, feet on the floor).
+- Not verified / open: MediaPipe blendshape Left/Right side convention (`SolveOptions::mirrorBlendshapeSides`, default off)
+  on a real face video; real human footage (only anime renders tested); jumps are not recovered (feet stay planted); the
+  options dialog was not clicked by hand (script path only); lite zip carries the mocap files (no optional component).
+- Repo moved F: -> D: (build/ reconfigured; CLAUDE.md build line updated).

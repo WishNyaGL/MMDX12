@@ -18,3 +18,5 @@ CLAUDE.local.md
 __pycache__/
 # user studio projects saved inside the repo (personal data, not test fixtures)
 /projects/
+/external/onnxruntime/bin/
+/external/mocap/

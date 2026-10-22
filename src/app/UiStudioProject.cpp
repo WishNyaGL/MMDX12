@@ -1271,6 +1271,14 @@ void App::DrawStudioModelMenu(int index) {
                     StudioSelectModel(index);
                     StudioOpenBakeDialog();
                 }
+                if (m.kind == ModelKind::Character) {
+                    if (MenuItemChip("##mmocap", Tr("영상에서 모션 만들기…"), icon::VideoCamera)) {
+                        ImGui::CloseCurrentPopup();
+                        StudioSelectModel(index);
+                        StudioOpenMocapDialog();
+                    }
+                    Tooltip(Tr("춤 영상에서 몸 · 손가락 · 표정 모션을 만들어요"));
+                }
             }
             MenuSeparator();
             if (MenuItemChip("##remove", Tr("제거…"), icon::Trash)) {

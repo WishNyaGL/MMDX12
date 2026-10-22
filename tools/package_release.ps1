@@ -43,6 +43,8 @@ Copy-Item (Join-Path $bin 'pack_check.exe') $stage   # shader pack authors: mani
 Copy-Item (Join-Path $bin '*.dll') $stage
 Copy-Item -Recurse (Join-Path $bin 'shaders') $stage
 Copy-Item -Recurse (Join-Path $bin 'assets') $stage
+# video motion capture models (tools/fetch_sdks.ps1; onnxruntime.dll comes with *.dll above)
+if (Test-Path (Join-Path $bin 'mocap')) { Copy-Item -Recurse (Join-Path $bin 'mocap') $stage }
 foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
     Copy-Item (Join-Path $crt.FullName $dll) $stage
 }
@@ -66,6 +68,8 @@ $third = @{
     'Pretendard'      = 'assets\fonts\Pretendard-LICENSE.txt'
     'Phosphor'        = 'assets\fonts\Phosphor-LICENSE.txt'
     'NotoSansCJK'     = 'assets\fonts\Noto-LICENSE.txt'
+    'ONNXRuntime'     = 'external\onnxruntime\LICENSE'
+    'MediaPipe-models' = 'external\mocap\models\NOTICE.txt'
 }
 foreach ($k in $third.Keys) { Copy-Item (Join-Path $root $third[$k]) (Join-Path $lic "$k.txt") }
 @'
@@ -73,6 +77,11 @@ JSON for Modern C++ 3.12.0 (https://github.com/nlohmann/json)
 SPDX-FileCopyrightText: 2013 - 2025 Niels Lohmann <https://nlohmann.me>
 SPDX-License-Identifier: MIT (see https://github.com/nlohmann/json/blob/develop/LICENSE.MIT)
 '@ | Set-Content -Encoding utf8 (Join-Path $lic 'nlohmann-json.txt')
+@'
+Video motion capture (src/mocap): Google MediaPipe models (Apache-2.0, see MediaPipe-models.txt) converted to ONNX by
+opencv_zoo (https://github.com/opencv/opencv_zoo) and QtMeshEditor (https://github.com/fernandotonon/QtMeshEditor,
+MIT License, Copyright (c) 2012-2023 QtMeshEditor; the face blendshape landmark subset follows its FaceCapGeom).
+'@ | Set-Content -Encoding utf8 (Join-Path $lic 'mocap-sources.txt')
 @'
 dxcompiler.dll / dxil.dll: DirectX Shader Compiler from the Windows SDK, redistributable
 (https://github.com/microsoft/DirectXShaderCompiler, LICENSE.TXT).

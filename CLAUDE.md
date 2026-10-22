@@ -6,7 +6,8 @@ progress.md is the session log. Read its latest entry first.
 ## Build & verify
 - `build.cmd [dir] [--target X]` sets up the VS 18 environment and builds with CMake + Ninja (RelWithDebInfo).
   The default dir is `build`; the output is `build\bin\MMDX12.exe`. CMake and Ninja come from pip (`%USERPROFILE%\miniconda3\Scripts`).
-  From bash: `cmd //c "F:\\repos\\MMDX12\\build.cmd build"`.
+  From bash: `cmd //c "D:\\repos\\MMDX12\\build.cmd build"` (the repo moved F: -> D: on 2026-10-23; a build dir configured
+  on the old path fails with "CMakeCache.txt directory ... is different": delete its CMakeCache.txt + CMakeFiles).
 - The source lists are globbed (`CONFIGURE_DEPENDS`). If a new `.cpp` is not picked up, delete the build dir.
 - Header dependencies come from cl's localized `/showIncludes` prefix stored at configure time; a dir configured from a
   UTF-8 console stored it in the wrong code page (no deps: header edits rebuilt nothing, stale-layout crashes).
@@ -72,7 +73,7 @@ progress.md is the session log. Read its latest entry first.
     without dialogs: `studionew`, `studiosave`/`studioopen <file>`, `studioautosave`, `studioadd <character|stage|prop> <file>`,
     `studioaddlib <character|stage> <substr>`, `studiosong <substr>`, `studioaudio <file|none> [offset]`,
     `studiobgvideo <file|none>`, `studiobgvideoopt <offsetSeconds> <asBackground 0|1>`,
-    `studioselect`/`studioremove <index>`, `studioreplace <index> <file>` / `studioreplacelib <index> <substr>` (swap a model's file), `studiorename <text>`, `studiomaterial <default|ray> [emd path]` (PBR material source of the selected model), `studioattach <parent|-1> <bone|-> tx ty tz rx ry rz s`,
+    `studioselect`/`studioremove <index>`, `studioreplace <index> <file>` / `studioreplacelib <index> <substr>` (swap a model's file), `studiorename <text>`, `studiomaterial <default|ray> [emd path]` (PBR material source of the selected model), `studiomocap <video> [start end] [nohands] [noface]` (mocap from video on selected model), `studioattach <parent|-1> <bone|-> tx ty tz rx ry rz s`,
     `studioaspect <w:h>` (frame aspect preset, e.g. `9:16`, `16:9`, `2.39:1`).
     Drag and drop: `drop <file>[|<file>...]` injects a drop path list (models → characters/props, `.vmd`/`.vpd` onto
     the selected / single new model, audio, `.mmdxproj`; `|` separates paths so they may contain spaces).
@@ -95,6 +96,10 @@ progress.md is the session log. Read its latest entry first.
   - `anim_probe <pmx> <vmd> [cam.vmd]`: IK convergence, CPU skinning bounds, NaN scan, physics scan (explosions, cost)
   - `render_smoke`: renders a cube with no assets
   - `vmd_roundtrip <file|dir> [--vpd-selftest]`: VMD load -> save -> load comparison (SaveVmd), VPD self test
+  - `mocap_probe <video> [--start s] [--end s] [--no-face] [--no-hands] [--overlay <dir> [--every N]] [--solve <pmx> --vmd <out>]`:
+    video motion capture landmarks per second + overlay PNGs (skeleton / hands / face mesh), optional retarget to a VMD
+  - `mocap_solver_test [pmx] [vmd] [frames]`: retarget round trip (VMD pose -> synthetic landmarks -> solve -> joint,
+    finger tip, foot contact, head errors; static key reduction; blendshape -> morph table)
   - `pmm_probe <file.pmm> [--no-fuzz] [--fuzz-rounds N]`: PMM (MMD project) dump (models / per-track key counts /
     camera / accessories / audio / MME controllers) + a fuzz self test (truncate at every 1 KiB, random byte flips)
   - `rest_pose_test [model|dir...]`: T-pose -> A-pose self test (synthetic model: bones, weights, morphs, bodies, joints), then the arm angle of every PMX/PMD found
@@ -227,6 +232,17 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
 - Theme: `ui::P()` is the live palette (light / dark, `ui::SetTheme`); never cache colours in statics. `App::ApplyTheme` (settings `theme`, `--theme auto|light|dark`) runs before the next ImGui frame and re-runs `ui::ApplyStyle`. Capture both: `--theme dark|light`.
 - `app`: the `App` state machine, ImGui screens (`Ui*.cpp`) built on `UiKit` (tokens, fonts, widgets; see DESIGN.md), `ThumbnailCache` (rendered by
   `Renderer::RenderToImage` with default RenderSettings, never the user's effect stack / exposure / LUT), `Lighting` presets, `SceneLoader` (worker thread), benchmark, WinHTTP leaderboard.
+- `mocap` (video motion capture, "영상에서 모션 만들기", the open replacement for QuickMagic-style AI mocap): `MocapExtractor`
+  (video -> `MocapClip`, MocapTypes.h: MMD-space metric pose / hand landmarks, face mesh + 52 ARKit blendshapes) runs Google
+  MediaPipe models as ONNX (opencv_zoo person / pose / palm / hand, QtMeshEditor face mesh + blendshapes) on ONNX Runtime
+  1.22 CPU. `onnxruntime.dll` is loaded by ABSOLUTE path from the exe folder (`OrtRuntime`, ORT_API_MANUAL_INIT, headers
+  vendored in external/onnxruntime/include): Windows 11 ships an older System32 copy. DLL + models come from
+  `tools/fetch_sdks.ps1` (git-ignored external/onnxruntime/bin, external/mocap/models -> bin/mocap). Hands: crops along the
+  forearm, then MediaPipe's landmark re-crop + tracking (the hand model's 2nd scalar output is handedness, not presence).
+  `MocapSolver` retargets direction-based onto any PMX (calibrated from rest bones; FK legs + an IK-off key; センター Y by
+  posing the model per frame so the lowest foot touches the floor; One-Euro smoothing; RDP key reduction). Studio: model
+  menu "영상에서 모션 만들기…" (app/UiStudioMocap.cpp, worker + progress like the physics bake, ONE undo step, replaces the
+  covered range, IK back on after it), ui-script `studiomocap`. Anime renders: body ~99 %, hands ~30 %, face ~45 % of frames.
 - `audio`: miniaudio. The audio cursor is the master clock.
 - `studio` (+ `app/UiStudio*.cpp`): the Studio editor (Screen::Studio). `StudioDoc` holds the models with name-keyed editable
   motions (`MotionData`, StudioMotion.h, converted to VmdMotion and re-bound with `BoundMotion::Bind` after edits), the camera
