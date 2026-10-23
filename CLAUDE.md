@@ -6,7 +6,7 @@ progress.md is the session log. Read its latest entry first.
 ## Build & verify
 - `build.cmd [dir] [--target X]` sets up the VS 18 environment and builds with CMake + Ninja (RelWithDebInfo).
   The default dir is `build`; the output is `build\bin\MMDX12.exe`. CMake and Ninja come from pip (`%USERPROFILE%\miniconda3\Scripts`).
-  From bash: `cmd //c "D:\\repos\\MMDX12\\build.cmd build"` (the repo moved F: -> D: on 2026-10-23; a build dir configured
+  From bash: `cmd //c "F:\\repos\\MMDX12\\build.cmd build"` (the drive letter changed F: -> D: -> F: on 2026-10-23; a build dir configured
   on the old path fails with "CMakeCache.txt directory ... is different": delete its CMakeCache.txt + CMakeFiles).
 - The source lists are globbed (`CONFIGURE_DEPENDS`). If a new `.cpp` is not picked up, delete the build dir.
 - Header dependencies come from cl's localized `/showIncludes` prefix stored at configure time; a dir configured from a

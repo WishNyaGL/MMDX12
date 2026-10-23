@@ -2305,3 +2305,28 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   on a real face video; real human footage (only anime renders tested); jumps are not recovered (feet stay planted); the
   options dialog was not clicked by hand (script path only); lite zip carries the mocap files (no optional component).
 - Repo moved F: -> D: (build/ reconfigured; CLAUDE.md build line updated).
+
+## 2026-10-23/24 - Offline GI measured + optimised; studio viewport renderer selector (GI preview)
+- Question: is the GI irradiance cache prepass a bottleneck / would unbiased brute force be faster? Measured (1080p still,
+  01_9001 + Evergreen, new `--offline-prepass 0|1` + per-image `OFFLINE TIMING` log line): NO. Cache 10.2 s, brute force
+  14.6 s (+43 %), images equal (0.4/255). The real costs: the sampling tail (~40 % of the time after 512 spp, < 12 % of
+  the pixels) and a latency-bound prepass (one thread per cache sample: coarse levels left the GPU idle).
+- Optimisations (shaders/offline_gi.hlsl, OfflineRenderer.cpp): `CSPrepassLevel` = one 32-lane group per sample
+  (prepass GPU 500 -> 200 ms per video frame); video frames skip the cache-lit dot display (`job.still` only); tail tile
+  compaction (`CSClearTiles` / `CSActiveTiles`, tile list u7 / t5 with the count in its last row, dispatch sized from a
+  lagged read-back count = upper bound because the active set only shrinks). Lossy (user allowed slight loss): stills
+  min/max 256/4096 -> 128/2048 spp, video preset error thresholds x1.33, outline layers 256 -> 64. RMSE vs a 4096 spp
+  reference 0.45/255. Result: still 10.5 -> 7.6 s (-28 %), video (표준, 1080p) 4.2 -> 2.97 s/frame (-29 %).
+  The GI render benchmark's fixed workload is untouched, but its score is not comparable with older versions (prepass).
+- Studio viewport renderer (Opencode worker deepseek-v4.1-flash-free#low built it from Claude's contract; Claude reviewed):
+  transport-bar dropdown 래스터 / 레이 트레이싱 / 패스 트레이싱 / GI 미리보기 (`studioRenderer=` ini, `--studio-renderer`,
+  ui-script `studiorenderer`, `STUDIOGI` in studiostate). Applies to the lit single view only; unlit / wire / quad stay raster.
+  GI = `App::RecordStudioGiViewport` (UiOffline.cpp): OfflineRenderer at the viewport size (Present fits into
+  `ViewportArea`, `OfflineJobDesc::frameBudgetMs` 30), restart key over camera / time / history / project version / light /
+  job settings / pose hash; half resolution on change, full after 0.3 s. Review fixes: a fast half-res job that already
+  finished never promoted to full resolution; prepass badge counted from 0; a deleted comment.
+- Verified: headless studio scripts (GI badge + image, RT / PT really engaged: 2.4 / 19.7 per-pixel diff vs raster, unlit /
+  quad fall back to raster with PT selected, GI job dropped on unlit), quick GI benchmark, 0 [E].
+- Notes: the D: drive vanished mid-session; the repo is back on F: (build/ reconfigured, CLAUDE.md build line). Studio PT
+  looks hazy on Base Stage (0007): the same in play mode (pre-existing). GI preview while playing restarts every frame (noisy).
+- Next: interactive GI preview by hand (navigation feel, UI stutter during the 6 prepass frames at large viewports).
