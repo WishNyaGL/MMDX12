@@ -47,10 +47,10 @@ struct VideoQualityPreset {
     float relativeCost;               // render time relative to "high" (measured at 1080p, estimates only)
 };
 inline constexpr VideoQualityPreset kVideoQualities[] = {
-    {"초안", 32, 128, 0.012f, 128, 4, 0.21f},
-    {"표준", 64, 384, 0.006f, 256, 8, 0.43f},
-    {"고품질", kOfflineVideoMinSamples, kOfflineVideoMaxSamples, kOfflineErrorThreshold, 512, 12, 1.0f},
-    {"최고", 256, 2048, 0.0025f, 1024, 12, 2.1f}};
+    {"초안", 32, 128, 0.016f, 128, 4, 0.21f},
+    {"표준", 64, 384, 0.008f, 256, 8, 0.43f},
+    {"고품질", kOfflineVideoMinSamples, kOfflineVideoMaxSamples, 0.0053f, 512, 12, 1.0f},
+    {"최고", 256, 2048, 0.0033f, 1024, 12, 2.1f}};
 inline constexpr int kVideoQualityCount = 4;
 
 // Which renderer produces the video frames. The first three are the real-time renderers, driven at

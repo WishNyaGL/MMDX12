@@ -55,7 +55,9 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     if (jobWithMme.mmeEffects.empty()) jobWithMme.mmeEffects = settings_.mmeEffects;
     offline_->Begin(cmd, transient_, &builtin_, *rt_, view, sc, lights, count, jobWithMme, ctx_->FrameNumber(),
                     mme_.get(), mmeSkin_.get());
-    if (offlinePresent_) offline_->Present(cmd, transient_, presentRect_);
+    float area[4];
+    ViewportArea(settings_, (float)ctx_->Width(), (float)ctx_->Height(), area);
+    if (offlinePresent_) offline_->Present(cmd, transient_, presentRect_, area);
     sceneVisible_ = false;
     havePrev_ = false;
     return true;
@@ -67,7 +69,9 @@ void Renderer::RenderOffline(ID3D12GraphicsCommandList* cmd) {
     cmd->SetDescriptorHeaps(1, heaps);
     transient_.Begin(ctx_->FrameSlot());
     offline_->Render(cmd, transient_, &builtin_, *rt_);
-    if (offlinePresent_) offline_->Present(cmd, transient_, presentRect_);
+    float area[4];
+    ViewportArea(settings_, (float)ctx_->Width(), (float)ctx_->Height(), area);
+    if (offlinePresent_) offline_->Present(cmd, transient_, presentRect_, area);
     sceneVisible_ = false;
     havePrev_ = false;
 }

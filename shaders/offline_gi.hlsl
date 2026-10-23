@@ -930,27 +930,35 @@ bool IcLookup(Surf s, out float3 E) {
     return cover > 0.5;
 }
 
-[numthreads(8, 8, 1)]
-void CSPrepassLevel(uint3 id : SV_DispatchThreadID) {
+// One thread group per cache sample: the gather paths are spread over the group's lanes (a thread per sample
+// left the GPU idle on the coarse levels, a few hundred samples each running every path serially). All lanes
+// trace the same camera ray with the same seed, so they agree on the hit and on `need` (uniform branches).
+static const uint kPrepassLanes = 32u;
+groupshared float3 gsPrepassInd[kPrepassLanes];
+
+[numthreads(32, 1, 1)]
+void CSPrepassLevel(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex) {
     uint W = (uint)gP1.x, H = (uint)gP1.y;
     uint level = (uint)gP0.z;
     float s = gP0.w, ps = gP1.z;
     uint2 dims = (uint2(W, H) + (uint)s - 1u) / (uint)s;
-    if (id.x >= dims.x || id.y >= dims.y) return;
-    float2 q = min((float2)id.xy * s + s * 0.5, float2(W, H) - 0.5);
-    uint rng = RngSeed(id.xy, (uint)gP0.x, 17u);
+    if (gid.x >= dims.x || gid.y >= dims.y) return;
+    float2 q = min((float2)gid.xy * s + s * 0.5, float2(W, H) - 0.5);
+    uint rng = RngSeed(gid.xy, (uint)gP0.x, 17u);
     float3 o, d;
     CameraRay(q, float2(0.5, 0.5), o, d);
     Surf sf;
     float t;
     if (!TraceScene(o, d, gNearZ, rng, 0.0, sf, t, true) || sf.emitter) {
-        gPreG[id.xy] = float4(0, 0, 1e6, 0);
-        gPreE[id.xy] = 0;
+        if (lane == 0u) {
+            gPreG[gid.xy] = float4(0, 0, 1e6, 0);
+            gPreE[gid.xy] = 0;
+        }
         return;
     }
     float3 vn = normalize(mul(sf.n, (float3x3)gView));
     float z = mul(float4(sf.pos, 1.0), gView).z;
-    gPreG[id.xy] = float4(OctEncode(vn), z, 1.0);
+    if (lane == 0u) gPreG[gid.xy] = float4(OctEncode(vn), z, 1.0);
 
     bool need = level == 0u;
     float3 Ei = 0;
@@ -961,7 +969,7 @@ void CSPrepassLevel(uint3 id : SV_DispatchThreadID) {
         if (cover <= 1e-3 || disc || lmax > lmin * 1.8 + 0.05) need = true;
     }
     if (!need) {
-        gPreE[id.xy] = float4(Ei, 0.0);
+        if (lane == 0u) gPreE[gid.xy] = float4(Ei, 0.0);
         return;
     }
     // indirect irradiance: multi-bounce diffuse gather (faces: around the view direction, nearby
@@ -971,13 +979,20 @@ void CSPrepassLevel(uint3 id : SV_DispatchThreadID) {
     float3 axis = face ? -d : sf.n;
     float tMin = face ? kFlatGatherSkip : 0.0;
     uint rays = max((uint)gP1.w, 1u);
+    uint prng = RngSeed(gid.xy, (uint)gP0.x, 29u + lane);
     float3 ind = 0;
-    [loop] for (uint i = 0; i < rays; ++i) {
-        float3 dir = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), axis);
+    [loop] for (uint i = lane; i < rays; i += kPrepassLanes) {
+        float3 dir = CosineSampleHemisphere(float2(Rand(prng), Rand(prng)), axis);
         if (!face && dot(dir, sf.faceN) <= 0.0) continue;
-        ind += GatherPath(OffsetRayOrigin(sf.pos, sf.faceN), dir, tMin, rng);
+        ind += GatherPath(OffsetRayOrigin(sf.pos, sf.faceN), dir, tMin, prng);
     }
-    gPreE[id.xy] = float4(PI * ind / (float)rays, 1.0);
+    gsPrepassInd[lane] = ind;
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0u) {
+        float3 sum = 0;
+        [loop] for (uint k = 0u; k < kPrepassLanes; ++k) sum += gsPrepassInd[k];
+        gPreE[gid.xy] = float4(PI * sum / (float)rays, 1.0);
+    }
 }
 
 [numthreads(8, 8, 1)]
@@ -1069,11 +1084,61 @@ void CSClearCounter(uint3 id : SV_DispatchThreadID) {
     gCounter[uint2(0, 0)] = 0u;
 }
 
+// ---- sampling tail: active tile compaction --------------------------------------------------------
+// Once few pixels still sample, a whole-image dispatch keeps a full wave busy for every scattered active
+// pixel. The tile list (R32_UINT, tilesX x (tilesY + 1)) holds the 8x8 tiles with a pixel still sampling
+// (x | y << 16); texel (0, tilesY) is their count.
+//   CSClearTiles   u7 list: count = 0
+//   CSActiveTiles  gP0 = (seed, studioFloor, 0, minSamples), gP1 = (w, h, 0, error threshold); a group per tile
+//   CSRender       gP3.z = 1: groups walk the list (t5) instead of the whole image
+RWTexture2D<uint> gTileListW : register(u7);
+Texture2D<uint> gTileList : register(t5);
+
+bool PixelConverged(uint2 pix) {
+    float4 acc = gAccum[pix];
+    if (acc.a < gP0.w) return false;
+    float2 m = gMoments[pix] / acc.a;
+    return sqrt(max(m.y - m.x * m.x, 0.0) / acc.a) < gP1.w;
+}
+
+[numthreads(1, 1, 1)]
+void CSClearTiles(uint3 id : SV_DispatchThreadID) {
+    uint tw, th;
+    gTileListW.GetDimensions(tw, th);
+    gTileListW[uint2(0, th - 1u)] = 0u;
+}
+
+groupshared uint gsTileActive;
+
+[numthreads(8, 8, 1)]
+void CSActiveTiles(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_GroupIndex) {
+    if (gi == 0u) gsTileActive = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    uint2 pix = gid.xy * 8u + gtid.xy;
+    if (pix.x < (uint)gP1.x && pix.y < (uint)gP1.y && !PixelConverged(pix)) InterlockedOr(gsTileActive, 1u);
+    GroupMemoryBarrierWithGroupSync();
+    if (gi == 0u && gsTileActive != 0u) {
+        uint tw, th;
+        gTileListW.GetDimensions(tw, th);
+        uint idx;
+        InterlockedAdd(gTileListW[uint2(0, th - 1u)], 1u, idx);
+        gTileListW[uint2(idx % tw, idx / tw)] = gid.x | (gid.y << 16);
+    }
+}
+
 // One camera path per pixel (pixels that already converged return early).
 [numthreads(8, 8, 1)]
-void CSRender(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= (uint)gP1.x || id.y >= (uint)gP1.y) return;
+void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
     uint2 pix = id.xy;
+    if (gP3.z > 0.5) {   // tile list mode (the sampling tail)
+        uint tw, th;
+        gTileList.GetDimensions(tw, th);
+        uint idx = gid.y * tw + gid.x;
+        if (idx >= gTileList[uint2(0, th - 1u)]) return;
+        uint tile = gTileList[uint2(idx % tw, idx / tw)];
+        pix = uint2(tile & 0xFFFFu, tile >> 16) * 8u + gtid.xy;
+    }
+    if (pix.x >= (uint)gP1.x || pix.y >= (uint)gP1.y) return;
     uint sampleIndex = (uint)gP0.z;
     float4 acc = gAccum[pix];
     if (sampleIndex > 0u && acc.a >= gP0.w) {

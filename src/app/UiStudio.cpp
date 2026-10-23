@@ -325,6 +325,7 @@ void App::LeaveStudio() {
     renderer_.SetSettings(rs);
     studioLeaveConfirm_ = false;
     studioPending_ = StudioAction::None;
+    ResetStudioGi();   // a viewport GI job does not outlive the studio
     screen_ = Screen::Select;
     ApplyRenderSettings();  // also restores the user's render path: the studio forces the raster path (editing view)
 }
@@ -2339,15 +2340,25 @@ void App::DrawStudio() {
     DrawToast();
 
     // The 3D view fills the viewport panel (back buffer pixels = ImGui display pixels).
-    // PT/RT cannot render the Unlit / Wireframe shading or the quad view: the studio viewport is
-    // an editing view and always renders with the raster path (LeaveStudio restores the user's
-    // path; offline / video / still renders keep their own chosen renderer).
+    // The chosen studio renderer draws the lit single view; Unlit / Wireframe shading and the quad view are
+    // editing views and always render with the raster path. GI preview (choice 3) draws through its own
+    // offline path in RecordStudioGiViewport; Raster stays the fallback there. LeaveStudio restores the
+    // user's path via ApplyRenderSettings; offline / video / still renders keep their own chosen renderer.
     {
+        const ViewShading shading = (ViewShading)std::clamp(d.shading, 0, 2);
+        const bool lit = shading == ViewShading::Lit && d.viewLayout == 0;
+        const int choice = std::clamp(settings_.studioRenderer, 0, 3);
+        RenderPath want = RenderPath::Raster;
+        if (lit && renderer_.RayTracingSupported()) {
+            if (choice == 1) want = RenderPath::RayTraced;
+            else if (choice == 2) want = RenderPath::PathTraced;
+        }
         RenderSettings rs = renderer_.Settings();
-        if (rs.renderPath != RenderPath::Raster) {
-            rs.renderPath = RenderPath::Raster;
+        if (rs.renderPath != want) {
+            rs.renderPath = want;
             renderer_.SetSettings(rs);
         }
+        if (!StudioGiActive() && (studioGi_.valid || studioGi_.active)) ResetStudioGi();
     }
     if (viewportOpen) {
         RenderSettings rs = renderer_.Settings();
@@ -3438,6 +3449,43 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
         ImGui::PopStyleVar();
         ImGui::SameLine(0, Dp(12.0f));
     }
+    // renderer: the lit single view of the viewport (raster / ray traced / path traced / GI preview)
+    {
+        const bool rtOk = renderer_.RayTracingSupported();
+        const bool giOk = renderer_.OfflineSupported();
+        int cur = std::clamp(settings_.studioRenderer, 0, 3);
+        if ((cur == 1 || cur == 2) && !rtOk) cur = 0;   // an unsupported saved choice runs as raster
+        if (cur == 3 && !giOk) cur = 0;
+        const char* names[4] = {Tr("래스터"), Tr("레이 트레이싱"), Tr("패스 트레이싱"), Tr("GI 미리보기")};
+        ImGui::SetNextItemWidth(Dp(150.0f));
+        PushFont(Font::Regular, size::Small);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(6.0f), Dp(6.0f)));
+        const bool rendererOpen = ImGui::BeginCombo("##studiorenderer", names[cur], ImGuiComboFlags_NoArrowButton);
+        ImGui::PopStyleVar();
+        {
+            const ImVec2 cmax = ImGui::GetItemRectMax(), cmin = ImGui::GetItemRectMin();
+            Icon(ImGui::GetWindowDrawList(), icon::CaretDown, 12.0f,
+                 ImVec2(cmax.x - Dp(12.0f), (cmin.y + cmax.y) * 0.5f), P().ink3);
+        }
+        Tooltip(Tr("뷰포트 렌더러 (솔리드 단일 뷰에 적용)"));
+        if (rendererOpen) {
+            for (int i = 0; i < 4; ++i) {
+                const bool disabled = (i == 1 || i == 2) ? !rtOk : (i == 3 ? !giOk : false);
+                ImGui::BeginDisabled(disabled);
+                if (ImGui::Selectable(names[i], cur == i)) {
+                    settings_.studioRenderer = i;
+                    settings_.Save(settingsPath_);
+                }
+                if (disabled)
+                    Tooltip(i == 3 ? Tr("이 그래픽 카드에서는 오프라인 GI 렌더를 사용할 수 없습니다")
+                                   : Tr("이 그래픽 카드에서는 레이 트레이싱을 사용할 수 없습니다"));
+                ImGui::EndDisabled();
+            }
+            ImGui::EndCombo();
+        }
+        PopFont();
+        ImGui::SameLine(0, Dp(12.0f));
+    }
 
     // frame field with one-frame steppers (also ← / →): applied on Enter (typing must not seek on every digit)
     const auto stepFrame = [&](int delta) {
@@ -3965,6 +4013,28 @@ void App::DrawStudioViewport(float x0, float y0, float x1, float y1) {
         const char* layouts[] = {Tr("단일"), Tr("4분할")};
         ImGui::SetCursorScreenPos(ImVec2(x1 - Dp(segW) - Dp(12.0f) - Dp(layW) - Dp(8.0f), y0 + Dp(8.0f)));
         Segmented("##viewlayout", layouts, 2, &d.viewLayout, layW, 30.0f);
+    }
+    if (StudioGiActive()) {
+        // GI preview progress, bottom-left of the viewport
+        const OfflineProgress& gi = renderer_.OfflineStatus();
+        std::string text;
+        if (gi.phase == OfflinePhase::Prepass) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), Tr("GI · 프리패스 %u/%u"), std::min(gi.prepassStep + 1, gi.prepassSteps), gi.prepassSteps);
+            text = buf;
+        } else if (gi.phase == OfflinePhase::Render) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "GI · %u spp", gi.samples);
+            text = buf;
+        } else if (gi.phase == OfflinePhase::Done) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "GI · %u spp · %s", gi.samples, Tr("완료"));
+            text = buf;
+        }
+        if (!text.empty()) {
+            ImVec2 gb;
+            Badge(dl, ImVec2(x0 + Dp(12.0f), y1 - Dp(34.0f)), text.c_str(), p.accentSoft, p.accentInk, &gb);
+        }
     }
     if (d.models.empty() && studioJobs_.empty()) {
         const char* t1 = Tr("빈 프로젝트");

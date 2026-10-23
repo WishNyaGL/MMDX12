@@ -48,7 +48,7 @@ struct ImageRGBA8;
 inline constexpr uint32_t kOfflineStillWidth = 3840, kOfflineStillHeight = 2160;
 inline constexpr uint32_t kOfflineVideoWidth = 3840, kOfflineVideoHeight = 2160;
 inline constexpr uint32_t kOfflineVideoFps = 60;
-inline constexpr uint32_t kOfflineStillMinSamples = 256, kOfflineStillMaxSamples = 4096;
+inline constexpr uint32_t kOfflineStillMinSamples = 128, kOfflineStillMaxSamples = 2048;
 inline constexpr uint32_t kOfflineVideoMinSamples = 128, kOfflineVideoMaxSamples = 1024;
 inline constexpr float kOfflineErrorThreshold = 0.004f;  // standard error of perceptual luminance (~1/255)
 
@@ -65,6 +65,8 @@ struct OfflineJobDesc {
     float errorThreshold = kOfflineErrorThreshold;
     uint32_t prepassRays = 512;   // multi-bounce gather paths per irradiance cache sample
     uint32_t maxBounces = 12;     // path depth of the render (1..12)
+    // GPU-time budget of one app frame's share of work (ms). The viewport preview uses a small value.
+    float frameBudgetMs = 90.0f;
     // Post effects (applied once the image has converged; the preview shows the plain image).
     bool bloom = true;
     bool bloomConvolution = false;   // FFT convolution bloom with the starburst kernel instead of the soft glow
@@ -128,10 +130,10 @@ public:
     // Records this frame's share of work (no-op when Idle or Done).
     void Render(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, const BuiltinTextures* builtin,
                 RtScene& rt);
-    // Draws the current image (preview or final) letterboxed onto the back buffer, cleared to
-    // black around it. Leaves the back buffer RTV bound with a full-window viewport/scissor
-    // (the Renderer::Render contract for UI drawing). Writes the image rectangle to rect[4].
-    void Present(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, float rect[4]);
+    // Draws the current image (preview or final) fitted into `area` (x, y, w, h in back-buffer pixels), cleared to
+    // black around it. Leaves the back buffer RTV bound with a full-window viewport/scissor (the Renderer::Render
+    // contract for UI drawing). Writes the image rectangle to rect[4].
+    void Present(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, float rect[4], const float area[4]);
 
     const OfflineProgress& Progress() const { return progress_; }
     void Cancel();  // phase -> Idle; resources are kept for the next job

@@ -64,7 +64,7 @@ OfflineJobDesc MakeJobDesc(const AppOptions& o, const AppSettings& st, const Vid
         j.width = (uint32_t)(o.offlineSize[0] & ~1);
         j.height = (uint32_t)(o.offlineSize[1] & ~1);
     }
-    j.prepass = prepass;
+    j.prepass = o.offlinePrepass >= 0 ? o.offlinePrepass == 1 : prepass;
     if (o.offlineSpp > 0) {
         j.maxSamples = (uint32_t)o.offlineSpp;
         j.minSamples = std::min(j.minSamples, j.maxSamples);
@@ -144,6 +144,72 @@ bool CameraJumped(const CameraParams& a, const CameraParams& b, double fps) {
 }
 
 constexpr float kPoseJumpUnits = 15.0f;   // character centre bone travel per 30 fps frame treated as a teleport
+
+// Studio viewport GI preview: FNV-1a 64 over the inputs that change the image (a changed key restarts the job).
+uint64_t FnvBytes(uint64_t h, const void* data, size_t n) {
+    const uint8_t* p = (const uint8_t*)data;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= (uint64_t)p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+uint64_t FnvFloat(uint64_t h, float v) {
+    const int64_t q = (int64_t)std::llround((double)v * 10000.0);   // quantised to 1e-4
+    return FnvBytes(h, &q, sizeof(q));
+}
+uint64_t FnvInt(uint64_t h, int64_t v) { return FnvBytes(h, &v, sizeof(v)); }
+uint64_t FnvString(uint64_t h, const std::string& s) {
+    const uint64_t n = (uint64_t)s.size();
+    h = FnvBytes(h, &n, sizeof(n));
+    return FnvBytes(h, s.data(), s.size());
+}
+uint64_t FnvLight(uint64_t h, const LightParams& l) {
+    h = FnvBytes(h, &l.direction, sizeof(l.direction));
+    h = FnvBytes(h, &l.color, sizeof(l.color));
+    h = FnvFloat(h, l.sunIntensity);
+    h = FnvBytes(h, &l.skyZenith, sizeof(l.skyZenith));
+    h = FnvBytes(h, &l.skyHorizon, sizeof(l.skyHorizon));
+    h = FnvBytes(h, &l.groundColor, sizeof(l.groundColor));
+    h = FnvFloat(h, l.hemiStrength);
+    h = FnvFloat(h, l.rimStrength);
+    h = FnvBytes(h, &l.rimColor, sizeof(l.rimColor));
+    h = FnvInt(h, (int64_t)l.sunShadow);
+    h = FnvFloat(h, l.sunShadowSoftness);
+    h = FnvFloat(h, l.sunShadowDensity);
+    h = FnvBytes(h, &l.sunShadowColor, sizeof(l.sunShadowColor));
+    const uint64_t count = (uint64_t)l.punctual.size();
+    h = FnvBytes(h, &count, sizeof(count));
+    for (const PunctualLight& p : l.punctual) h = FnvBytes(h, &p, sizeof(p));
+    return h;
+}
+uint64_t FnvEffects(uint64_t h, const std::vector<EffectStackEntry>& stack) {
+    const uint64_t count = (uint64_t)stack.size();
+    h = FnvBytes(h, &count, sizeof(count));
+    for (const EffectStackEntry& e : stack) {
+        h = FnvString(h, e.pack);
+        h = FnvInt(h, e.enabled ? 1 : 0);
+        const uint64_t params = (uint64_t)e.params.size();
+        h = FnvBytes(h, &params, sizeof(params));
+        for (const auto& [k, v] : e.params) {
+            h = FnvString(h, k);
+            h = FnvFloat(h, v);
+        }
+    }
+    return h;
+}
+// Pose of every visible studio model: skinning matrices + morph weights.
+uint64_t FnvStudioPose(uint64_t h, const studio::StudioDoc& d) {
+    for (const auto& m : d.models) {
+        if (!m->visible || !m->inst) continue;
+        for (const DirectX::XMFLOAT4X4& mx : m->inst->SkinMatrices())
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c) h = FnvFloat(h, (&mx._11)[r * 4 + c]);
+        const size_t morphs = m->pmx ? m->pmx->morphs.size() : 0;
+        for (size_t i = 0; i < morphs; ++i) h = FnvFloat(h, m->inst->MorphWeight((int)i));
+    }
+    return h;
+}
 
 }  // namespace
 
@@ -610,6 +676,114 @@ void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
     offline_.beginPending = false;
     offline_.imageStartWall = timeSeconds_;
     offline_.imageStartClock = std::chrono::steady_clock::now();
+}
+
+bool App::StudioGiActive() const {
+    if (!studio_ || screen_ != Screen::Studio) return false;
+    if ((ViewShading)std::clamp(studio_->shading, 0, 2) != ViewShading::Lit) return false;
+    if (studio_->viewLayout != 0) return false;
+    if (std::clamp(settings_.studioRenderer, 0, 3) != 3) return false;
+    return renderer_.OfflineSupported();
+}
+
+void App::ResetStudioGi() {
+    if (studioGi_.active) renderer_.CancelOffline();
+    studioGi_ = StudioGiState{};
+}
+
+void App::RecordStudioGiViewport(ID3D12GraphicsCommandList* cmd, FrameView& view) {
+    studio::StudioDoc& d = *studio_;
+    view.motionBlur = false;
+    const RenderSettings& rs = renderer_.Settings();
+    const uint32_t baseW = std::max(64u, rs.viewportW);
+    const uint32_t baseH = std::max(64u, rs.viewportH);
+    const auto scaled = [](uint32_t base, float scale) {
+        uint32_t v = (uint32_t)std::floor((float)base * scale) & ~1u;   // rounded down to even
+        return std::max(64u, v);
+    };
+
+    OfflineJobDesc job = MakeJobDesc(options_, settings_, offline_.video, /*video*/ false, /*prepass*/ true,
+                                     d.AspectRatio());
+    if (!options_.mmeSet) job.mmeEffects = StudioMmeEntries();
+    job.effects = StudioEvaluatedEffects((float)(d.time * kMmdFps));
+    job.minSamples = 16;
+    job.maxSamples = 512;
+    job.errorThreshold = 2.0f * kOfflineErrorThreshold;
+    job.prepassRays = 128;
+    job.maxBounces = 6;
+    job.frameBudgetMs = 30.0f;
+    // The key uses the unscaled viewport size: the 0.5 -> 1.0 promotion must not itself count as a change.
+    job.width = baseW;
+    job.height = baseH;
+
+    uint64_t key = 14695981039346656037ull;
+    key = FnvBytes(key, &view.camera.view, sizeof(view.camera.view));
+    key = FnvBytes(key, &view.camera.eye, sizeof(view.camera.eye));
+    key = FnvFloat(key, view.camera.fovYRadians);
+    key = FnvFloat(key, view.camera.nearZ);
+    key = FnvFloat(key, view.camera.farZ);
+    key = FnvFloat(key, (float)d.time);
+    key = FnvInt(key, (int64_t)d.history.Version());
+    key = FnvInt(key, (int64_t)d.projectVersion);
+    key = FnvLight(key, view.light);
+    key = FnvInt(key, (int64_t)job.width);
+    key = FnvInt(key, (int64_t)job.height);
+    key = FnvInt(key, job.bloom ? 1 : 0);
+    key = FnvInt(key, job.bloomConvolution ? 1 : 0);
+    key = FnvFloat(key, job.bloomIntensity);
+    key = FnvFloat(key, job.bloomThreshold);
+    key = FnvFloat(key, job.bloomLook.radius);
+    key = FnvInt(key, job.bloomLook.blend);
+    key = FnvFloat(key, job.bloomLook.depthMask);
+    key = FnvInt(key, job.dof ? 1 : 0);
+    key = FnvFloat(key, job.dofAperture);
+    key = FnvInt(key, job.volumetric ? 1 : 0);
+    key = FnvFloat(key, job.volumetricDensity);
+    key = FnvFloat(key, view.focusDistance);
+    key = FnvFloat(key, view.apertureScale);
+    key = FnvEffects(key, job.effects);
+    key = FnvStudioPose(key, d);
+
+    StudioGiState& g = studioGi_;
+    const bool keyChanged = !g.valid || key != g.key;
+    if (keyChanged) {
+        g.key = key;
+        g.valid = true;
+        g.keySince = timeSeconds_;
+        g.scale = 0.5f;
+        job.width = scaled(baseW, g.scale);
+        job.height = scaled(baseH, g.scale);
+        if (renderer_.BeginOffline(cmd, view, job)) {
+            g.active = true;
+            g.warned = false;
+            return;
+        }
+        g.active = false;
+        if (!g.warned) {
+            LOG_WARN("studio GI preview: could not start (ray tracing scene not built: %zu models)", view.models.size());
+            g.warned = true;
+        }
+        renderer_.Render(cmd, view);
+        return;
+    }
+
+    // the view held still: the full-resolution job (also after a fast half-resolution job already finished)
+    if (g.active && g.scale == 0.5f && timeSeconds_ - g.keySince >= 0.3) {
+        g.scale = 1.0f;
+        job.width = scaled(baseW, g.scale);
+        job.height = scaled(baseH, g.scale);
+        if (renderer_.BeginOffline(cmd, view, job)) {
+            g.active = true;
+            return;
+        }
+        g.active = false;
+        if (!g.warned) {
+            LOG_WARN("studio GI preview: could not start (ray tracing scene not built: %zu models)", view.models.size());
+            g.warned = true;
+        }
+    }
+    if (g.active && renderer_.OfflineStatus().phase != OfflinePhase::Idle) renderer_.RenderOffline(cmd);
+    else renderer_.Render(cmd, view);
 }
 
 void App::AfterOfflineFrame() {

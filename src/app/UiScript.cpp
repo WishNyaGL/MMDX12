@@ -127,6 +127,12 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             LOG_INFO("STUDIOFOCUS keys=%zu distance=%.2f aperture=%.2f subject=%u subjectName=%s dof=%d", d.camera.focus.size(),
                      studioFocusShown_, studioFocusAperture_, studioFocusSubject_,
                      StudioModelLabel(studioFocusSubject_).c_str(), (int)settings_.dof);
+            {
+                const OfflineProgress& gi = renderer_.OfflineStatus();
+                LOG_INFO("STUDIOGI renderer=%d active=%d phase=%d samples=%u w=%u h=%u",
+                         std::clamp(settings_.studioRenderer, 0, 3), (int)StudioGiActive(), (int)gi.phase,
+                         gi.samples, gi.width, gi.height);
+            }
         }
         if (studio_) {
             const studio::StudioDoc& d = *studio_;
@@ -347,6 +353,23 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                     if (outError) *outError = "Unknown aspect ratio: " + args[0];
                     return false;
                 }
+            }
+        }
+    } else if (cmd == "studiorenderer") {  // studiorenderer <raster|rt|pt|gi>
+        if (!args.empty()) {
+            const std::string v = ToLowerAscii(args[0]);
+            int r = -1;
+            if (v == "raster") r = 0;
+            else if (v == "rt") r = 1;
+            else if (v == "pt") r = 2;
+            else if (v == "gi") r = 3;
+            if (r >= 0) {
+                settings_.studioRenderer = r;
+                settings_.Save(settingsPath_);
+            } else {
+                LOG_WARN("ui script: unknown studio renderer '%s'", args[0].c_str());
+                if (outError) *outError = "Unknown studio renderer: " + args[0];
+                return false;
             }
         }
     } else if (cmd == "studiolightpreset") {  // studiolightpreset <0-3>

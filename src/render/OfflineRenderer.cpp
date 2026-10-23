@@ -28,7 +28,7 @@ namespace {
 
 constexpr uint32_t kSlots = Dx12Context::kFramesInFlight;
 constexpr uint32_t kLightBytes = Renderer::kMaxPunctualLights * sizeof(GpuLight);
-constexpr uint32_t kEdgeIterations = 256;
+constexpr uint32_t kEdgeIterations = 64;   // outline layers averaged for DoF / motion blur
 constexpr float kConvolutionBloomGain = 6.0f;        // as the real-time convolution bloom output
 constexpr float kConvolutionBloomIntensity = 0.12f;  // CSFinalize multiplier of the convolved bloom  // outline layers averaged for motion blur / depth of field
 constexpr float kLensScale = 0.007f;       // lens radius / focus distance (~8 px background blur at 1080p)
@@ -110,6 +110,7 @@ struct OfflineRenderer::Impl {
     std::filesystem::path shaderDir;
     // offline_gi.hlsl (ComputePipeline, cs_6_5)
     ComputePipeline clearImage, clearCounter, defaultRender, prepassLevel, prepassDisplay, prepassSmooth;
+    ComputePipeline clearTiles, activeTiles;   // the sampling tail's tile list (offline_gi.hlsl CSActiveTiles)
     ComputePipeline* render = &defaultRender;
     PtPackVariants ptVariants;
     // offline_post.hlsl
@@ -155,6 +156,9 @@ struct OfflineRenderer::Impl {
     bool mmeWaitDone = false;          // the readiness hold passed (ready or timed out); latching per image
     uint64_t mmeGeneration = 0;        // bumped per MME-layer iteration (MmeSkin re-skin at its shutter)
     Texture counter;                   // 1x1 R32_UINT
+    Texture tileList;                  // R32_UINT tilesX x (tilesY + 1): tiles still sampling, count at (0, tilesY)
+    ComPtr<ID3D12Resource> tileReadback;   // kFramesInFlight * 512 bytes: the tile count per slot
+    uint32_t lastTiles = UINT32_MAX;   // tile count of the latest read-back list (an upper bound for later ones)
     Texture preE[kOfflinePrepassLevels], preG[kOfflinePrepassLevels];  // prepass levels (irradiance, geometry)
     uint32_t prepassFine = 2;          // stride of the finest prepass level (pixels)
     bool clearPending = false;         // the prepass display used accum: clear before the render
@@ -169,8 +173,16 @@ struct OfflineRenderer::Impl {
     ComPtr<ID3D12QueryHeap> timestampHeap;        // 2 * kFramesInFlight
     ComPtr<ID3D12Resource> timestampReadback;     // kFramesInFlight * 16 bytes
     uint64_t timestampFrequency = 0;
-    struct Slot { uint32_t serial = 0; bool counted = false; uint32_t countedSample = 0; bool timed = false; uint32_t items = 0; };
+    // level: the prepass level the slot dispatched (-1: render iterations)
+    struct Slot { uint32_t serial = 0; bool counted = false; uint32_t countedSample = 0; bool timed = false; uint32_t items = 0; int level = -1; bool tiled = false; };
     Slot slots[Dx12Context::kFramesInFlight];
+    // per-image timing (the OFFLINE TIMING log line): wall clock per phase, GPU time from the slot timestamps
+    // (the render's last kFramesInFlight frames are not read back yet when the line is written)
+    std::chrono::steady_clock::time_point tBegin, tRender;
+    double gpuPrepassMs[kOfflinePrepassLevels] = {}, gpuRenderMs = 0.0;
+    uint32_t prepassFrames = 0, renderFrames = 0;
+    double msAt[5] = {};               // wall ms (since Begin) when samples first reached 256 / 512 / 1024 / 2048 / maxSamples-1
+    float activeAt[5] = {};
     // job state
     FrameView view;                    // copy of the job's view (PassContext needs one)
     OfflineJobDesc job;
@@ -357,6 +369,7 @@ bool OfflineRenderer::Impl::EnsureTargets(uint32_t w, uint32_t h) {
         ok &= preE[l].Create(c, lw, lh, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrvAll, L"offline.prepass.E");
         ok &= preG[l].Create(c, lw, lh, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrvAll, L"offline.prepass.G");
     }
+    ok &= tileList.Create(c, (w + 7) / 8, (h + 7) / 8 + 1, DXGI_FORMAT_R32_UINT, uav, kUav, L"offline.tileList");
     ok &= icFinal.Create(c, preE[kOfflinePrepassLevels - 1].width, preE[kOfflinePrepassLevels - 1].height,
                          DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrvAll, L"offline.icFinal");
     ok &= edgeColorMsaa.Create(c, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
@@ -699,18 +712,31 @@ void OfflineRenderer::Impl::Work(ID3D12GraphicsCommandList* cmd, TransientDescri
 
     // a) results of the frame that used this slot kFramesInFlight frames ago (BeginFrame already waited for it)
     if (slots[slot].serial == serial) {
-        if (slots[slot].timed && slots[slot].items > 0 && timestampFrequency) {
+        if (slots[slot].timed && timestampFrequency) {
             D3D12_RANGE range{slot * 16, slot * 16 + 16};
             void* mapped = nullptr;
             if (SUCCEEDED(timestampReadback->Map(0, &range, &mapped))) {
                 const uint64_t* data = (const uint64_t*)mapped + slot * 2;
                 if (data[1] > data[0]) {
                     const float ms = (float)((double)(data[1] - data[0]) * 1000.0 / (double)timestampFrequency);
-                    const float perItem = ms / (float)slots[slot].items;
-                    itemsPerFrame = std::clamp(90.0f / std::max(perItem, 0.01f), 1.0f, 64.0f);
+                    if (slots[slot].level >= 0) gpuPrepassMs[slots[slot].level] += ms;
+                    else gpuRenderMs += ms;
+                    if (slots[slot].items > 0) {
+                        const float perItem = ms / (float)slots[slot].items;
+                        itemsPerFrame = std::clamp(job.frameBudgetMs / std::max(perItem, 0.01f), 1.0f, 64.0f);
+                    }
                 }
                 D3D12_RANGE none{0, 0};
                 timestampReadback->Unmap(0, &none);
+            }
+        }
+        if (slots[slot].tiled) {
+            D3D12_RANGE range{slot * 512, slot * 512 + sizeof(uint32_t)};
+            void* mapped = nullptr;
+            if (SUCCEEDED(tileReadback->Map(0, &range, &mapped))) {
+                lastTiles = *(const uint32_t*)((const uint8_t*)mapped + slot * 512);
+                D3D12_RANGE none{0, 0};
+                tileReadback->Unmap(0, &none);
             }
         }
         if (slots[slot].counted) {
@@ -742,7 +768,10 @@ void OfflineRenderer::Impl::Work(ID3D12GraphicsCommandList* cmd, TransientDescri
         clearPending = false;
     }
     if (pg.phase == OfflinePhase::Prepass) {
+        slots[slot].level = (int)pg.prepassStep;
+        ++prepassFrames;
         Prepass(pc, pg);
+        if (pg.phase == OfflinePhase::Render) tRender = std::chrono::steady_clock::now();
         cmd->EndQuery(timestampHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
         cmd->ResolveQueryData(timestampHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2,
                               timestampReadback.Get(), slot * 16);
@@ -755,6 +784,38 @@ void OfflineRenderer::Impl::Work(ID3D12GraphicsCommandList* cmd, TransientDescri
     if (icValid)
         icSrv = t.SrvTable(*ctx, {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                                   &preG[kOfflinePrepassLevels - 1], &icFinal});
+    // Sampling tail: once at most half of the pixels still sample, list the 8x8 tiles that do (once per call) and
+    // dispatch only those; scattered active pixels kept whole waves busy. The dispatch is sized from an older count:
+    // the active set only shrinks, so it is an upper bound (the extra groups return).
+    const uint32_t tilesX = (width + 7) / 8, tilesY = (height + 7) / 8;
+    const bool tiled = activeTiles && tileList.res && lastActive != UINT32_MAX &&
+                       (uint64_t)lastActive * 2 <= (uint64_t)width * height;
+    uint32_t tileGroupsY = 0;
+    if (tiled) {
+        tileList.Transition(cmd, kUav);
+        D3D12_GPU_DESCRIPTOR_HANDLE tileUav = t.UavTable(*ctx, {&accum, &albedo, &moments, &gbuf, &counter, &edgeAccum,
+                                                                &gbufId, &tileList});
+        const float c[8] = {0.0f, 0.0f, 0.0f, (float)job.minSamples, (float)width, (float)height, 0.0f,
+                            job.errorThreshold};
+        clearTiles.Dispatch(pc, {}, tileUav, c, 8, 1, 1);
+        UavBarrier(cmd);
+        activeTiles.Dispatch(pc, {}, tileUav, c, 8, tilesX, tilesY);
+        UavBarrier(cmd);
+        tileList.Transition(cmd, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+        fp.Offset = slot * 512;
+        fp.Footprint = {DXGI_FORMAT_R32_UINT, 1, 1, 1, 256};
+        CD3DX12_TEXTURE_COPY_LOCATION dst(tileReadback.Get(), fp), src(tileList.res.Get(), 0);
+        const D3D12_BOX box{0, tilesY, 0, 1, tilesY + 1, 1};
+        cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+        tileList.Transition(cmd, kSrvAll);
+        slots[slot].tiled = true;
+        const uint32_t bound = std::min(lastTiles, tilesX * tilesY);
+        tileGroupsY = (bound + tilesX - 1) / tilesX;
+        table = GiTable(cmd, t);   // GiTable left the image targets in UAV; the copy did not touch them
+        icSrv = t.SrvTable(*ctx, {nullptr, nullptr, nullptr, nullptr, nullptr, &tileList,
+                                  icValid ? &preG[kOfflinePrepassLevels - 1] : nullptr, icValid ? &icFinal : nullptr});
+    }
     // Progressive start: 1, 2, 3 ... samples per frame, so the preview visibly refines from noise.
     const uint32_t items = std::min(std::max(1u, (uint32_t)itemsPerFrame), 1u + samples / 4u);
 
@@ -793,10 +854,22 @@ void OfflineRenderer::Impl::Work(ID3D12GraphicsCommandList* cmd, TransientDescri
         const float c[16] = {NextSeed(), studioFloor, (float)s, (float)job.minSamples,
                              (float)width, (float)height, 0.0f, job.errorThreshold,
                              shutter, focus, lensRadius, icValid ? 1.0f : 0.0f,
-                             (float)job.maxBounces, (float)prepassFine, 0.0f, 0.0f};
-        render->Dispatch(pc, icSrv, table, c, 16, Groups(width), Groups(height));
+                             (float)job.maxBounces, (float)prepassFine, tiled ? 1.0f : 0.0f, 0.0f};
+        if (tiled) {
+            if (tileGroupsY > 0) render->Dispatch(pc, icSrv, table, c, 16, tilesX, tileGroupsY);
+        } else {
+            render->Dispatch(pc, icSrv, table, c, 16, Groups(width), Groups(height));
+        }
         UavBarrier(cmd);
         ++samples;
+        {
+            const uint32_t marks[5] = {256u, 512u, 1024u, 2048u, job.maxSamples - 1u};
+            for (int k = 0; k < 5; ++k)
+                if (samples == marks[k]) {
+                    msAt[k] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tBegin).count();
+                    activeAt[k] = pg.activeFraction;
+                }
+        }
         if (count) {
             counter.Transition(cmd, D3D12_RESOURCE_STATE_COPY_SOURCE);
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
@@ -812,9 +885,25 @@ void OfflineRenderer::Impl::Work(ID3D12GraphicsCommandList* cmd, TransientDescri
     }
 
     // b) finish or preview
+    ++renderFrames;
     if (samples >= job.maxSamples || lastActive == 0) {
         Finish(pc);
         pg.phase = OfflinePhase::Done;
+        const auto now = std::chrono::steady_clock::now();
+        const auto msSince = [&](std::chrono::steady_clock::time_point a) {
+            return std::chrono::duration<double, std::milli>(now - a).count();
+        };
+        const bool hadPrepass = job.prepass;
+        double gpuPre = 0.0;
+        for (double v : gpuPrepassMs) gpuPre += v;
+        LOG_INFO("OFFLINE TIMING %ux%u prepass=%d rays=%u bounces=%u | wall total %.0f ms, prepass %.0f ms (%u frames), "
+                 "render %.0f ms (%u frames) | gpu prepass %.0f ms [%.0f %.0f %.0f %.0f %.0f %.0f], render %.0f ms (partial) | "
+                 "samples %u (min %u max %u) active %.4f motion %d lens %d | at 256/512/1k/2k/max: %.0f/%.0f/%.0f/%.0f/%.0f ms active %.4f/%.4f/%.4f/%.4f/%.4f",
+                 width, height, hadPrepass ? 1 : 0, job.prepassRays, job.maxBounces, msSince(tBegin),
+                 hadPrepass ? std::chrono::duration<double, std::milli>(tRender - tBegin).count() : 0.0, prepassFrames,
+                 msSince(hadPrepass ? tRender : tBegin), renderFrames, gpuPre, gpuPrepassMs[0], gpuPrepassMs[1],
+                 gpuPrepassMs[2], gpuPrepassMs[3], gpuPrepassMs[4], gpuPrepassMs[5], gpuRenderMs, samples,
+                 job.minSamples, job.maxSamples, pg.activeFraction, motion ? 1 : 0, lensRadius > 0.0f ? 1 : 0, msAt[0], msAt[1], msAt[2], msAt[3], msAt[4], activeAt[0], activeAt[1], activeAt[2], activeAt[3], activeAt[4]);
     } else {
         const float c[8] = {0.0f, 0.0f, 0.08f, 1.0f, (float)width, (float)height, 0.12f, (float)edgeLayers};
         DispatchPost(pc, finalize, &ldr, nullptr, nullptr, c, Groups(width), Groups(height));
@@ -855,11 +944,14 @@ void OfflineRenderer::Impl::Prepass(PassContext& pc, OfflineProgress& pg) {
     const float c[16] = {NextSeed(), studioFloor, (float)k, (float)stride,
                          (float)width, (float)height, (float)(stride * 2), (float)job.prepassRays,
                          1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    prepassLevel.Dispatch(pc, srv, uav, c, 16, Groups(preE[k].width), Groups(preE[k].height));
+    prepassLevel.Dispatch(pc, srv, uav, c, 16, preE[k].width, preE[k].height);   // a group per sample
     UavBarrier(cmd);
 
     preE[k].Transition(cmd, kSrvAll);
     preG[k].Transition(cmd, kSrvAll);
+    // The cache-lit display with the sample dots is for the still preview only: video frames are shown as the
+    // encoded image (App), so they skip the two full-resolution passes per level.
+    const bool display = job.still;
     D3D12_GPU_DESCRIPTOR_HANDLE uav2 =
         pc.transient.UavTable(*ctx, {&accum, &albedo, &moments, &gbuf, &counter, &edgeAccum});
     D3D12_GPU_DESCRIPTOR_HANDLE srv2 =
@@ -868,11 +960,12 @@ void OfflineRenderer::Impl::Prepass(PassContext& pc, OfflineProgress& pg) {
     const float c2[16] = {NextSeed(), studioFloor, (float)k, (float)stride,
                           (float)width, (float)height, 0.0f, 0.0f,
                           1.0f, 0.0f, 0.0f, 0.0f, dot, 0.0f, 0.0f, 0.0f};
-    prepassDisplay.Dispatch(pc, srv2, uav2, c2, 16, Groups(width), Groups(height));
-    UavBarrier(cmd);
-
-    const float fin[8] = {0.0f, 0.0f, 0.08f, 1.0f, (float)width, (float)height, 0.12f, 0.0f};
-    DispatchPost(pc, finalize, &ldr, nullptr, nullptr, fin, Groups(width), Groups(height));
+    if (display) {
+        prepassDisplay.Dispatch(pc, srv2, uav2, c2, 16, Groups(width), Groups(height));
+        UavBarrier(cmd);
+        const float fin[8] = {0.0f, 0.0f, 0.08f, 1.0f, (float)width, (float)height, 0.12f, 0.0f};
+        DispatchPost(pc, finalize, &ldr, nullptr, nullptr, fin, Groups(width), Groups(height));
+    }
 
     if (++pg.prepassStep >= kOfflinePrepassLevels) {
         // edge-aware smoothing of the finest level -> the cache the render reads
@@ -888,7 +981,7 @@ void OfflineRenderer::Impl::Prepass(PassContext& pc, OfflineProgress& pg) {
         icFinal.Transition(cmd, kSrvAll);
         icValid = true;
         pg.phase = OfflinePhase::Render;
-        clearPending = true;
+        clearPending = display;   // the display wrote accum
     }
 }
 
@@ -1017,6 +1110,8 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
     bool ok = true;
     ok &= m.clearImage.Create(ctx, gi, "CSClearImage");
     ok &= m.clearCounter.Create(ctx, gi, "CSClearCounter");
+    if (!m.clearTiles.Create(ctx, gi, "CSClearTiles") || !m.activeTiles.Create(ctx, gi, "CSActiveTiles"))
+        m.activeTiles = {};   // optional: the tail then keeps dispatching the whole image
     ok &= m.defaultRender.Create(ctx, gi, "CSRender");
     m.render = &m.defaultRender;
     ok &= m.prepassLevel.Create(ctx, gi, "CSPrepassLevel");
@@ -1179,6 +1274,11 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
                                                  IID_PPV_ARGS(&m.counterReadback)),
                  "OfflineRenderer: counter readback"))
         return false;
+    if (!CheckHr(device->CreateCommittedResource(&readback, D3D12_HEAP_FLAG_NONE, &crDesc,
+                                                 D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                 IID_PPV_ARGS(&m.tileReadback)),
+                 "OfflineRenderer: tile readback"))
+        return false;
     D3D12_QUERY_HEAP_DESC qh{};
     qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
     qh.Count = 2 * kSlots;
@@ -1209,7 +1309,7 @@ void OfflineRenderer::Shutdown() {
     m.fft.Release(ctx);
     for (Texture* t : {&m.accum, &m.albedo, &m.moments, &m.gbuf, &m.edgeLayer, &m.edgeAccum, &m.denoiseA, &m.denoiseB, &m.ldr, &m.bloomA, &m.bloomB, &m.edgeColorMsaa,
                        &m.edgeDepthMsaa, &m.edgeNormalMsaa, &m.edgeVelocityMsaa, &m.mmeShadowMap, &m.mmeShadowDepth,
-                       &m.counter, &m.volA, &m.volB, 
+                       &m.counter, &m.tileList, &m.volA, &m.volB, 
                        &m.litA, &m.litB, &m.ldrB, &m.fxDepth, &m.fxNormal, &m.fxVel, &m.gbufId})
         t->Release(ctx);
     if (m.sceneCb && m.sceneCbMapped) m.sceneCb->Unmap(0, nullptr);
@@ -1271,7 +1371,13 @@ void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors
     const float aperture = lensDof ? job.dofAperture * std::max(0.0f, view.apertureScale) : 0.0f;
     m.lensRadius = view.focusDistance > 0.0f && aperture > 0.0f ? kLensScale * aperture * view.focusDistance : 0.0f;
     // itemsPerFrame carries over: consecutive images (video) cost about the same per dispatch
-    for (Impl::Slot& s : m.slots) { s.counted = false; s.timed = false; }
+    for (Impl::Slot& s : m.slots) { s.counted = false; s.timed = false; s.tiled = false; }
+    m.tBegin = m.tRender = std::chrono::steady_clock::now();
+    for (double& v : m.gpuPrepassMs) v = 0.0;
+    m.gpuRenderMs = 0.0;
+    m.prepassFrames = m.renderFrames = 0;
+    m.lastTiles = UINT32_MAX;
+    for (int k = 0; k < 5; ++k) { m.msAt[k] = 0.0; m.activeAt[k] = 0.0f; }
 
     // 1b. PT pack pipeline selection
     m.render = m.ptVariants.Resolve(*m.ctx, m.shaderDir, m.view.models, m.defaultRender, "offline_gi.hlsl", "CSRender", "offline");
@@ -1325,7 +1431,8 @@ void OfflineRenderer::Render(ID3D12GraphicsCommandList* cmd, TransientDescriptor
     impl_->Work(cmd, transient, builtin, rt, progress_);
 }
 
-void OfflineRenderer::Present(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, float rect[4]) {
+void OfflineRenderer::Present(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, float rect[4],
+                              const float area[4]) {
     rect[0] = rect[1] = rect[2] = rect[3] = 0;
     if (!impl_) return;
     Impl& m = *impl_;
@@ -1346,14 +1453,8 @@ void OfflineRenderer::Present(ID3D12GraphicsCommandList* cmd, TransientDescripto
         return;
     }
     Texture& ldr = m.ldr;
-    const float s = std::min(bw / (float)ldr.width, bh / (float)ldr.height);
-    const float vw = (float)ldr.width * s;
-    const float vh = (float)ldr.height * s;
-    rect[0] = (bw - vw) / 2.0f;
-    rect[1] = (bh - vh) / 2.0f;
-    rect[2] = vw;
-    rect[3] = vh;
-    D3D12_VIEWPORT viewport{rect[0], rect[1], vw, vh, 0.0f, 1.0f};
+    FitInArea(area, (float)ldr.width, (float)ldr.height, rect);
+    D3D12_VIEWPORT viewport{rect[0], rect[1], rect[2], rect[3], 0.0f, 1.0f};
     cmd->RSSetViewports(1, &viewport);
     cmd->RSSetScissorRects(1, &fullScissor);
 

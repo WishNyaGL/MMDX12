@@ -100,6 +100,7 @@ namespace mmdx {
 //   --lighting <0..3>      lighting preset for this run (Studio, Sunset, Concert, Night)
 //   --quality <0..3>       graphics preset for this run (low, medium, high, ultra)
 //   --render <raster|rt|pt>            render path for this run (override settings)
+//   --studio-renderer <raster|rt|pt|gi>  studio viewport renderer for this run (lit single view; override settings)
 //   --upscaler <none|dlss|fsr|xess>    upscaler for this run (override settings)
 //   --upscale-quality <native|quality|balanced|performance|ultra>  upscaler quality for this run
 //   --frame-gen <off|2|3|4>            DLSS Frame Generation multiplier for this run (2x / 3x / 4x)
@@ -173,6 +174,7 @@ struct AppOptions {
     int lighting = -1;         // --lighting: override settings for this run
     int quality = -1;          // --quality: override settings for this run
     int renderPath = -1;       // --render <raster|rt|pt>: override settings for this run
+    int studioRenderer = -1;   // --studio-renderer <raster|rt|pt|gi>: override settings for this run
     int shading = -1;          // --shading <lit|unlit|wire>: raster ViewShading override for this run (hidden)
     int upscaler = -1;         // --upscaler <none|dlss|fsr|xess>: override settings for this run
     int upscalerQuality = -1;  // --upscale-quality <native|quality|balanced|performance|ultra>: override settings for this run
@@ -227,6 +229,7 @@ struct AppOptions {
     std::filesystem::path offlineStill, offlineVideo;  // --offline-still / --offline-video
     double offlineRange[2] = {-1.0, -1.0};             // --offline-range (seconds; < 0 = unset)
     int offlineSpp = 0;                                // --offline-spp (0 = default)
+    int offlinePrepass = -1;                           // --offline-prepass 0|1: GI irradiance cache prepass (-1 = default on)
     int offlineSize[2] = {0, 0};                       // --offline-size (0 = default)
     int offlineFps = 0, offlineBitrate = 0;            // --offline-fps / --offline-bitrate (0 = settings)
     int offlineQuality = -1;                           // --offline-quality (-1 = settings)
@@ -506,6 +509,17 @@ private:
     void StudioImportVmdFrom(const std::filesystem::path& path);  // merge into the selected model (camera VMDs: camera)
     void StudioExportVmd();                                   // save dialog, then StudioExportVmdTo
     bool StudioExportVmdTo(const std::filesystem::path& path);  // selected model's motion (or the camera)
+    bool StudioGiActive() const;   // the GI preview draws the studio viewport this frame
+    void RecordStudioGiViewport(ID3D12GraphicsCommandList* cmd, FrameView& view);  // instead of Renderer::Render
+    void ResetStudioGi();          // drops the viewport GI job (a real render / leaving the studio)
+    struct StudioGiState {
+        uint64_t key = 0;          // restart key of the running / last job
+        bool valid = false;        // key is meaningful
+        bool active = false;       // a viewport job is running (BeginOffline succeeded)
+        float scale = 0.5f;        // resolution scale of the running job
+        double keySince = 0;       // timeSeconds_ when `key` was first seen
+        bool warned = false;       // the BeginOffline failure was logged for this entry into GI mode
+    } studioGi_;
     void DrawStudioTopBar(float x0, float y0, float x1, float y1);
     void DrawStudioOutliner(float x0, float y0, float x1, float y1);
     void StudioSelectWorld(uint32_t uid);              // 0 = no world selected

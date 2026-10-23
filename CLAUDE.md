@@ -17,7 +17,7 @@ progress.md is the session log. Read its latest entry first.
   `*_6_0` on SM 6.0 devices because FXC needs ~5.5 min for PSMain since the PBR branch (FXC stays their fallback; a PSO
   never mixes DXBC and DXIL). Slow cold compiles (> 1 s) log a `shader compile` line. Ray-query shaders use DXC (`*_6_5`, `-HV 2018` because common.hlsli uses vector ternaries that HLSL 2021 rejects). `dxcompiler.dll`/`dxil.dll` are copied from the Windows SDK.
 - Upscaler runtime DLLs are git-ignored: run `tools/fetch_sdks.ps1` once (DLSS 310.9.16, XeSS 3.0.2, FidelityFX 2.3.0), then rebuild. Missing DLLs only disable that upscaler.
-- Render path / upscaler from the CLI: `--render raster|rt|pt`, `--upscaler none|dlss|fsr|xess`, `--upscale-quality native|quality|balanced|performance|ultra`,
+- Render path / upscaler from the CLI: `--render raster|rt|pt`, `--studio-renderer raster|rt|pt|gi` (studio viewport: lit single view), `--upscaler none|dlss|fsr|xess`, `--upscale-quality native|quality|balanced|performance|ultra`,
   `--dlss-model auto|cnn|transformer|transformer2`, `--dlss-rr 0|1` (DLSS Ray Reconstruction on the RayTraced / PathTraced
   paths with DLSS; it replaces the RT AO / reflection filtering and the PT denoiser, and runs instead of TAA),
   `--frame-gen off|2|3|4` (DLSS Frame Generation; 3x / 4x need RTX 50).
@@ -74,7 +74,7 @@ progress.md is the session log. Read its latest entry first.
     `studioaddlib <character|stage> <substr>`, `studiosong <substr>`, `studioaudio <file|none> [offset]`,
     `studiobgvideo <file|none>`, `studiobgvideoopt <offsetSeconds> <asBackground 0|1>`,
     `studioselect`/`studioremove <index>`, `studioreplace <index> <file>` / `studioreplacelib <index> <substr>` (swap a model's file), `studiorename <text>`, `studiomaterial <default|ray> [emd path]` (PBR material source of the selected model), `studiomocap <video> [start end] [nohands] [noface]` (mocap from video on selected model), `studioattach <parent|-1> <bone|-> tx ty tz rx ry rz s`,
-    `studioaspect <w:h>` (frame aspect preset, e.g. `9:16`, `16:9`, `2.39:1`).
+    `studioaspect <w:h>` (frame aspect preset, e.g. `9:16`, `16:9`, `2.39:1`), `studiorenderer <raster|rt|pt|gi>` (viewport renderer).
     Drag and drop: `drop <file>[|<file>...]` injects a drop path list (models → characters/props, `.vmd`/`.vpd` onto
     the selected / single new model, audio, `.mmdxproj`; `|` separates paths so they may contain spaces).
     Focus: `studiofocus <frame> <auto|target|manual> [model index|distance] [aperture] [transition] [head|upper|center]`
@@ -483,6 +483,13 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   GI: the prepass builds a screen-space irradiance cache (6 adaptive levels, 512 gather paths per sample, smoothed);
   `CSRender` takes indirect diffuse at camera hits from it via `IcLookup` (projects the hit into the frame camera,
   so lens/shutter samples work) and falls back to brute force where it has no matching surface.
+  Measured (2026-10-23, 1080p): the cache is NOT the bottleneck (brute force `--offline-prepass 0` = +43 % time, same
+  image). `CSPrepassLevel` runs one 32-lane group per cache sample (the gather paths split over the lanes); video frames
+  skip the cache-lit dot display (`job.still` only). The sampling tail dispatches only the 8x8 tiles still sampling
+  (`CSActiveTiles` -> tile list u7 / t5, count in its last row) once <= half the pixels are active. Each image logs one
+  `OFFLINE TIMING` line (wall / GPU per phase, time at 256..max spp). Studio viewport "GI 미리보기" (`--studio-renderer gi`,
+  transport bar dropdown, `App::RecordStudioGiViewport`) runs the same renderer at the viewport size: restart key =
+  camera, time, history / project version, light, job settings, pose hash; half resolution on changes, full after 0.3 s.
   Note `--autoplay` and `--seek` are consumed after loading (App.cpp), so CLI triggers must not depend on them.
 - Headers are the module contracts. Keep `App.h`, `Renderer.h` etc. authoritative when extending.
 

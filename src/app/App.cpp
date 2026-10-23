@@ -392,6 +392,15 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.offlineRange[1] = bv;
         } else if (arg == L"--offline-spp") {
             opt.offlineSpp = _wtoi(next().c_str());
+        } else if (arg == L"--studio-renderer") {
+            const std::string v = ToLowerAscii(WideToUtf8(next()));
+            if (v == "raster") opt.studioRenderer = 0;
+            else if (v == "rt") opt.studioRenderer = 1;
+            else if (v == "pt") opt.studioRenderer = 2;
+            else if (v == "gi") opt.studioRenderer = 3;
+            else LOG_WARN("unknown --studio-renderer value: %s (want raster|rt|pt|gi)", v.c_str());
+        } else if (arg == L"--offline-prepass") {
+            opt.offlinePrepass = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--offline-fps") {
             opt.offlineFps = _wtoi(next().c_str());
         } else if (arg == L"--offline-bitrate") {
@@ -495,6 +504,7 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.lighting >= 0) settings_.lighting = std::clamp(options_.lighting, 0, kLightingPresetCount - 1);
     if (options_.quality >= 0) ApplyGraphicsPreset(std::clamp(options_.quality, 0, 3));
     if (options_.renderPath >= 0) settings_.renderPath = std::clamp(options_.renderPath, 0, 2);
+    if (options_.studioRenderer >= 0) settings_.studioRenderer = std::clamp(options_.studioRenderer, 0, 3);
     shadingOverride_ = options_.shading;
     if (options_.upscaler >= 0) settings_.upscaler = std::clamp(options_.upscaler, 0, 3);
     if (options_.upscalerQuality >= 0) settings_.upscalerQuality = std::clamp(options_.upscalerQuality, 0, 4);
@@ -711,6 +721,7 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
         settings_.shadowMapSize = persisted.shadowMapSize;
     }
     if (options_.renderPath >= 0) settings_.renderPath = persisted.renderPath;
+    if (options_.studioRenderer >= 0) settings_.studioRenderer = persisted.studioRenderer;
     if (options_.upscaler >= 0) settings_.upscaler = persisted.upscaler;
     if (options_.upscalerQuality >= 0) settings_.upscalerQuality = persisted.upscalerQuality;
     if (options_.dlssModel >= 0) settings_.dlssModel = persisted.dlssModel;
@@ -1146,6 +1157,7 @@ void App::RenderFrame() {
         RecordOfflineFrame(cmd);          // the sample render behind the dialog: nothing is presented
         renderer_.ClearBackBuffer(cmd);   // the UI draws on a clean surface as usual
     } else {
+        bool studioGi = false;
         if (screen_ == Screen::Studio && studio_) {
             UpdateStudioScene();
             // keyed effect parameters follow the playhead and undo / timeline edits change the stack without a settings edit
@@ -1156,6 +1168,7 @@ void App::RenderFrame() {
             }
             BuildStudioFrameView(view);
             StudioAddQuadViews(view);
+            studioGi = StudioGiActive();
         } else if (inScene) {
             const float frame = (float)(playTime_ * scene_->motionFps);
             UpdateScene(frame);
@@ -1166,7 +1179,8 @@ void App::RenderFrame() {
             lastLiveCamera_ = view.camera;
             haveLastLiveCamera_ = true;
         }
-        renderer_.Render(cmd, view);
+        if (studioGi) RecordStudioGiViewport(cmd, view);
+        else renderer_.Render(cmd, view);
     }
     // M5-U crash guard: packs active in this frame that were not active in the previous one get a marker before the
     // frame is presented; the marker is cleared after the Present succeeded. A crash during the next frames leaves the

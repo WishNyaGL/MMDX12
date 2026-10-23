@@ -68,6 +68,7 @@ void App::StudioRenderRange(double& a, double& b) const {
 
 void App::StartStudioRender(bool video) {
     if (!studio_ || offline_.mode != OfflineMode::None || !studioJobs_.empty()) return;
+    ResetStudioGi();   // a real studio render takes over the offline renderer
     StudioDoc& d = *studio_;
     if (video) {
         double a = 0, b = 0;

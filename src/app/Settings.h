@@ -46,6 +46,7 @@ struct AppSettings {
     int lighting = 0;          // LightingPreset (app/Lighting.h)
     float exposure = 1.0f;     // 0.5 .. 2.0
     int renderPath = 0;        // RenderPath: 0 raster, 1 ray traced, 2 path traced
+    int studioRenderer = 0;    // studio viewport (lit single view): 0 raster, 1 ray traced, 2 path traced, 3 GI preview
     int upscaler = 0;          // UpscalerKind: 0 none, 1 DLSS, 2 FSR, 3 XeSS
     int upscalerQuality = 1;   // UpscalerQuality: 0 native AA, 1 quality, 2 balanced, 3 performance, 4 ultra performance
     // DLSS Frame Generation: 0 off, 2 / 3 / 4 (multiplier). Only applies to the live play scene.
