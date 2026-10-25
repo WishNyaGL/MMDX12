@@ -7,6 +7,8 @@
 #include "asset/MaterialChoice.h"
 #include "asset/PbrMaterial.h"
 #include "asset/PmxModel.h"
+#include "asset/StageManifest.h"
+#include "asset/StageMaterials.h"
 #include "render/RenderTypes.h"   // VideoLayerDesc (M8b)
 #include <atomic>
 #include <memory>
@@ -49,6 +51,11 @@ struct ScenePackage {
     std::string characterDisplayName;
     std::vector<LoadedModelCpu> stageParts;   // empty when no stage selected
     std::string stageId;                      // the loaded stage's library id (may differ from the lobby selection)
+    // S1b: an MMDX stage's manifest and the variant its parts were loaded with (null for a classic stage). The App
+    // keeps them in SceneRuntime and evaluates the stage every frame (light rig, material targets).
+    std::shared_ptr<const StageManifest> stageManifest;
+    std::string stageVariant;                              // empty = the manifest's default variant
+    std::vector<StageMaterialBinding> stagePartBindings;    // parallel to stageParts (rule -> material map)
     std::shared_ptr<BoundMotion> motion;      // bound to character
     std::shared_ptr<CameraMotion> camera;     // null if the song has no camera vmd
     std::vector<VmdLightKey> lightKeys;       // the camera vmd's light / self-shadow keys (may be empty)
@@ -95,10 +102,13 @@ std::shared_ptr<PmxModel> LoadCharacterModelOnly(const std::filesystem::path& pa
 // Textures are decoded in parallel (std::for_each with std::execution::par).
 // If `formation` is provided and non-empty, loads the cast performers into character (center) and extraCharacters.
 // `materialChoice` resolves each model's PBR material source by library id (work unit P5); empty = Default for all.
+// S1b: an MMDX stage (`stage->manifestPath`) is loaded part by part with its manifest's material rules applied on the
+// loader thread; the manifest / variant travel in the package (`stageManifest`, `stageVariant`).
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
                       ScenePackage& out, LoadProgress* progress, std::string* error,
                       const std::vector<PerformerCast>* formation = nullptr,
-                      const MaterialChoiceFn& materialChoice = {});
+                      const MaterialChoiceFn& materialChoice = {},
+                      const std::string& stageVariant = {});
 
 // Render benchmark scene: characters[i] posed by the dance of songs[i] (sizes equal, >= 1).
 // out.character / out.motion = index 0, out.extraCharacters / out.extraMotions = the rest.

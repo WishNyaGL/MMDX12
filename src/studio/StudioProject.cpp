@@ -470,6 +470,8 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                     jm["shader"]["remembered"] = rem;
                 }
             }
+            // S1b: the variant chosen for an MMDX stage, saved as the model's "stageVariant" (absent = the default).
+            if (!m.stageVariant.empty()) jm["stageVariant"] = m.stageVariant;
             // P5: the per-model PBR material source (Default is not written); the .emd path is relative to the project.
             // Written for every kind (character, stage, prop).
             if (m.material.ray) {
@@ -769,6 +771,8 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                         if (!emd.empty()) pm.material.emd = PathToUtf8(ResolvePath(emd, dir));
                     }
                 }
+                // S1b: an MMDX stage part's saved variant (absent = the manifest's default variant)
+                pm.stageVariant = ReadString(m, "stageVariant", "");
                 // M6a: the per-model MME choice (absent = characters None / stages Auto)
                 pm.mme = kind == ModelKind::Stage ? MmeChoice{MmeChoice::Auto, {}} : MmeChoice{};
                 if (m.contains("mme") && m["mme"].is_object()) {

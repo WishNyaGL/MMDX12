@@ -5,6 +5,7 @@
 #include "anim/Motion.h"
 #include "app/Benchmark.h"
 #include "app/Lighting.h"
+#include "app/StageRuntime.h"
 #include "app/McpServer.h"
 #include "app/RenderBench.h"
 #include "app/LeaderboardClient.h"
@@ -52,6 +53,7 @@ namespace mmdx {
 //   --library <dir>        override library folder for this run
 //   --character <substr>   preselect: first character whose id or displayName contains substr (case-insensitive)
 //   --stage <substr>       preselect stage ("none" = no stage)
+//   --stage-variant <id>   the MMDX stage's variant for this run (wins over the saved stageVariant= ini choice)
 //   --song <substr>        preselect song
 //   --autoplay             after the scan, start playing the preselection immediately
 //   --seek <seconds>       start position for --autoplay
@@ -241,6 +243,7 @@ struct AppOptions {
     float uiScale = 0.0f;           // --ui-scale (0 = the window's DPI scale)
     std::string formation;          // --formation <spec>
     std::string songAudio;          // --song-audio <substring>: pick an audio version of the song for this run
+    std::string stageVariant;       // --stage-variant <id>: the MMDX stage's variant for this run (wins over the saved)
     std::string startScreen;  // --screen select|bench: open that screen after the scan; --frames then counts every frame  // --free-camera: start in the orbit camera instead of the VMD camera
     std::string updateFeed;   // --update-feed: feed URL / file override (empty: the default feed)
     int updateRelaunchFrames = 0;  // --update-relaunch-frames: relaunch the updated app with --frames (E2E)
@@ -286,6 +289,8 @@ private:
         std::vector<std::unique_ptr<ModelInstance>> stages;
         std::vector<std::unique_ptr<GpuModel>> stageGpu;
         std::string stageId;   // M6a: the stage library id (key of the saved MME choice / display scale)
+        // S1b: an MMDX stage's runtime (manifest, variant, light rig, material targets); invalid for a classic stage.
+        std::shared_ptr<StageRuntime> stage;
         // The cast a formation (unit song) scene was loaded with; empty for a single-performer scene. Kept so a
         // material-source change can reload the same formation (App::ReloadPlaySceneForMaterial).
         std::vector<PerformerCast> formation;
@@ -616,6 +621,12 @@ private:
     void StudioAddLight(studio::LightKind kind);
     void StudioDeleteLight(uint32_t uid);
     void StudioApplyLightPreset(int presetIndex);
+    // S1b: an MMDX stage with a light rig replaces the project's lights with it (one LightsCommand step + a toast).
+    void StudioApplyStageLightRig(const std::vector<studio::StudioPackageModel>& loadedParts);
+    // S1b: the studio's per-frame MMDX stage targets (material values; the rig is a copy in the scene lights).
+    void StudioApplyStageTargets();
+    // S1b: the variant of the selected / given MMDX stage model (inspector combo); pushes one undoable step.
+    void StudioSetStageVariant(int model, const std::string& variantId);
     void StudioViewportLightHandles(bool hovered);
     bool StudioScriptLightGizmoPoint(const std::string& part, ImVec2& out) const;
     LightAnchors StudioBuildLightAnchors() const;
@@ -1066,6 +1077,8 @@ private:
     bool playMaterialsOpen_ = false;               // play bar shader popup: the material list is expanded
     bool lobbyMaterialsOpen_ = false;              // library shader tab: the material list is expanded
     std::string lobbyMatId_;                       // character whose model the list below was loaded for
+    std::string lobbyStageManifestId_;              // MMDX stage whose variant deck the lobby panel read
+    std::shared_ptr<const StageManifest> lobbyStageManifest_;   // the selected MMDX stage's manifest (null: classic)
     std::future<std::shared_ptr<PmxModel>> lobbyMatFuture_;
     std::shared_ptr<PmxModel> lobbyMatPmx_;
     enum class PackCompareMode { Drag, Hover };
@@ -1198,6 +1211,20 @@ private:
     ThumbnailCache thumbs_;
     bool thumbsClearPending_ = false;
     int libraryTab_ = 0;          // 0 characters, 1 stages, 2 songs
+    // The lighting preset in effect this frame: the play scene's own choice ("스테이지 조명" for a loaded MMDX stage
+    // with lights, else the ordinary setting).
+    LightingPreset PlayLighting() const {
+        if (playLighting_ >= 0) return (LightingPreset)playLighting_;
+        if (scene_ && scene_->stage && scene_->stage->HasLights()) return LightingPreset::Stage;
+        return (LightingPreset)settings_.lighting;
+    }
+    int playLighting_ = -1;   // S1b: this scene's lighting choice (-1 = the default: the stage rig when it has lights,
+                              // else settings_.lighting); "스테이지 조명" is never written to the ini
+    // Sets this scene's lighting choice; an ordinary preset also becomes the saved default for other stages.
+    void PlaySetLighting(int preset) {
+        playLighting_ = preset;
+        if (preset >= 0 && preset < kLightingPresetCount) settings_.lighting = preset;
+    }
     int lobbyTab_ = 0;                                                   // select screen settings tab: 0 screen, 1 shader, 2 detail
     std::filesystem::path assetsDir_;
     std::vector<ColorLutEntry> luts_;   // built-in looks + .cube files (ListColorLuts)

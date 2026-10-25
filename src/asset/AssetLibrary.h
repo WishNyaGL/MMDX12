@@ -106,6 +106,12 @@ struct LibraryOverrides {
 LibraryScanResult ScanLibrary(const std::filesystem::path& root, ScanProgress* progress = nullptr,
                               const LibraryOverrides* overrides = nullptr);
 
+// MMDX stages installed next to the executable (`<exe>/stages/<folder>/stage.json`, docs/stage_ecosystem.md §1): every
+// folder holding a valid stage.json is one stage, its id prefixed "stages:" so it never collides with a library id.
+// A missing / empty root returns nothing. Synchronous (reads the manifests and checks their model files).
+std::vector<StageAsset> ScanInstalledStages(const std::filesystem::path& root);
+inline constexpr const char* kInstalledStageIdPrefix = "stages:";
+
 // Copies the suggested folder layout (assets/library_template: characters/, stages/, songs/ with
 // READMEs) into a missing or empty library folder (only README files count as empty).
 // Returns true when it created something.

@@ -163,6 +163,11 @@ struct AppSettings {
     // M8b: per-song video override. song id -> "<overlay|background|off>[:<black|screen|add|normal>]|<file name>"
     // (file empty = the classification; "off" = no video layers for this song). See App::ResolveSongVideos.
     std::map<std::string, std::string> songVideos;
+    // S1b: the variant picked for an MMDX stage in the lobby, per stage id. Persisted as
+    // "stageVariant=<variant id>|<stage id>" lines (the stage id last, like the other per-id lines).
+    std::map<std::string, std::string> stageVariants;   // stage id -> variant id
+    std::string StageVariant(const std::string& stageId) const;
+    void SetStageVariant(const std::string& stageId, const std::string& variantId);   // empty removes the entry
 
     const VideoProbe* FindVideoProbe(uint64_t key) const;
     void SetVideoProbe(uint64_t key, double secondsPerFrame);  // replaces an entry with the same key

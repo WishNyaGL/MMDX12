@@ -680,7 +680,7 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         r["render_path"] = (settings_.renderPath == 1 ? "rt" : settings_.renderPath == 2 ? "pt" : "raster");
         r["upscaler"] = (settings_.upscaler == 1 ? "dlss" : settings_.upscaler == 2 ? "fsr" : settings_.upscaler == 3 ? "xess" : "none");
         r["upscale_quality"] = (settings_.upscalerQuality == 0 ? "native" : settings_.upscalerQuality == 1 ? "quality" : settings_.upscalerQuality == 2 ? "balanced" : settings_.upscalerQuality == 3 ? "performance" : "ultra");
-        r["lighting_preset"] = settings_.lighting;
+        r["lighting_preset"] = (int)PlayLighting();   // S1b: the scene's choice ("스테이지 조명" included)
         r["graphics_preset"] = settings_.graphicsPreset;
         r["shadows"] = settings_.shadows;
         r["ssao"] = settings_.ssao;
@@ -1007,7 +1007,7 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         settings_.renderPath = renderPath;
         settings_.upscaler = upscaler;
         settings_.upscalerQuality = upscaleQuality;
-        if (args.contains("lighting_preset")) settings_.lighting = args["lighting_preset"].get<int>();
+        if (args.contains("lighting_preset")) PlaySetLighting(args["lighting_preset"].get<int>());
         if (args.contains("quality")) ApplyGraphicsPreset(args["quality"].get<int>());
         if (args.contains("dof")) settings_.dof = args["dof"].get<bool>();
         if (args.contains("volumetric")) settings_.volumetric = args["volumetric"].get<bool>();

@@ -34,6 +34,15 @@ progress.md is the session log. Read its latest entry first.
   `--pbr-debug none|albedo|normal|roughness|metalness|ao|emissive|model` shows one channel (`asset/PbrMaterial`,
   `shaders/pbr_common.hlsli`). Imported glTF/GLB/VRM/FBX models fill the same block from their PBR maps
   (asset/ModelImport `ImportedPbr`, `BuildImportedPbrModelData`); VRM / MToon / KHR_materials_unlit stay NPR (no record).
+- MMDX stages (docs/stage_format.md, `asset/StageManifest.h`): a folder with a `stage.json`. Play mode loads its parts
+  through `LoadScenePackage` and the studio through `LoadStudioStage` / `LoadStudioPackage` /
+  `LoadStudioProjectPackage` (manifest order, not the library's flat part list); the manifest's `materials` rules are
+  applied on the loader thread (`asset/StageMaterials`), and `app/StageRuntime` evaluates the stage every frame at the
+  song time: `lights.*` targets feed `BuildSceneLighting` (play mode's lighting picker "스테이지 조명", the scene default
+  when the stage has lights) and `materials.*` targets go through `GpuModel::SetPbrOverrides`. Installed stages live in
+  `<exe>/stages/<id>/` with the id prefix `stages:`; the lobby saves the variant as `stageVariant=<id>|<stage id>` and
+  `--stage-variant <id>` overrides one run (`studioaddlib stage <substr>` works for them, `studiostate` logs
+  `stageVariant=`).
 - No debugger is installed (no cdb). For crashes, use the dbghelp `CrashFilter` in `tools/render_smoke.cpp`.
 - Visual verification without a human: render a frame headlessly, then Read the PNG. First read "Running MMDX12.exe from the CLI" below.
   - Play scene: `MMDX12.exe --character <s> --stage <s|none> --song <s> --autoplay --seek <sec> --frames N --capture out.png`
@@ -120,6 +129,8 @@ progress.md is the session log. Read its latest entry first.
     `components_e2e.py`: headless optional-component (app/Components.h) fetch E2E - the lite zip's upscaler DLLs / CJK fonts,
     fetched from the installed version's manifest via `--component <id> --download-component`
   - `mcp_pipe.py` / `mcp_x.py`: talk to a running app's pipe without the bridge (`python tools/mcp_x.py "click 플레이" "wait 30" "shot out.png" "items 셰이더"`)
+  - `run_capture.py`: the only supported way to launch `MMDX12.exe` (pre-flight refusals + log watchdog + report;
+    see "Running MMDX12.exe from the CLI")
 - The play bar auto-hides while playing with no mouse movement, so captures usually don't show it.
 
 ## Running MMDX12.exe from the CLI (read this before EVERY launch)
@@ -127,15 +138,17 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
 - **No `--autoplay` = no scene.** `--character/--song` only preselect cards in the lobby. Without `--autoplay` (or when
   either name does not resolve) the app sits in the lobby, and `--frames` never counts there (it counts only inside a
   scene or with `--screen`), so the run never quits. Every scene capture needs `--character <s> --song <s> --autoplay`.
-- **Always wrap a run in `timeout <sec>`** and read `<build>/bin/mmdx12.log` afterwards (overwritten every run;
-  `mmdx12.previous.log` keeps the one before). Scene reached = `motion bound` + `STARTUP first frame` lines; neither =
+- **Always wrap a run in a timeout and read `<build>/bin/mmdx12.log` afterwards** (overwritten every run;
+  `mmdx12.previous.log` keeps the one before); `tools/run_capture.py` does both for you (it is the only way to launch).
+  Scene reached = `motion bound` + `STARTUP first frame` lines; neither =
   it never left the lobby (bad `--character/--song`, multi-part song without `--formation`, or a cold library scan in a
   fresh build dir: the first run of a build dir rescans the library, ~25 s). Grep `[E]`/`[W]` after every capture;
   unknown arguments are only a `[W] unknown command line argument` line, never an error.
 - **Name matching** = case-insensitive substring of the library id (the relative path, e.g.
   `model/Sekai Model Pack v4/LeoNeed/Ichika/01_9001.pmx`) or the display name; the FIRST match wins, so use a
   distinctive fragment (`01_9001`, `LeoNeed/Ichika`). `--stage none` = no stage. Songs with >= 2 dance parts open the
-  formation modal: pass `--formation` (see below) or pick a one-part song. Ids: `build/bin/cache/library_result.json`.
+  formation modal (except in the studio, which loads its own models): pass `--formation` (see below) or pick a
+  one-part song. Ids: `build/bin/cache/library_result.json`.
 - **Same frame across runs (A/B comparisons): `--seek <sec> --paused --no-physics`.**
   `--seek` alone keeps playing: the capture happens `--frames` frames later in wall-clock time, so two identical runs
   differ (measured: 113k of 518k pixels). `--paused` holds the scene at the seek time (residual 1.2k px = physics
@@ -148,8 +161,21 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   for a fixed free camera; it implies `--free-camera`). A HEAD baseline = `git stash`, build another dir, `git stash pop`.
 - **One window at a time.** Every run opens a visible window: never launch runs in parallel, tell the user before a
   batch. A running exe locks its build dir (`LNK1168`): when a worker is building in `build/`, run another build dir.
+- **Agents and workers launch the app ONLY through `tools/run_capture.py`** (never `MMDX12.exe` directly, never
+  `timeout ...`): it refuses argument lists that cannot reach a scene or cannot quit by themselves (one window at a
+  time, a real `--character/--song/--stage` from `<exe dir>/cache/library_result.json`, `--formation` for multi-part
+  songs, a quit condition), defaults `--width 1600 --height 900`, kills the process tree on a missing `STARTUP first
+  frame` / `motion bound` / an unknown-argument line / `--timeout`, and prints the exit reason, elapsed time, the
+  `[E]`/`[W]` lines and the capture path + size. Exit 0 = quit by itself, target reached, capture present; 2 = refused.
+  `python tools/run_capture.py --selftest` checks the pre-flight logic without launching.
+  - Play capture: `python tools/run_capture.py --character 01_9001 --stage none --song Evergreen --autoplay --seek 20 --paused --no-physics --frames 60 --effect none --shader-pack none --capture out.png`
+  - Studio ui-script capture (scripts use absolute pixel coordinates: pin the window size the script was authored for,
+    e.g. 1920 x 1080 overrides the 1600 x 900 default):
+    `python tools/run_capture.py --exe build_dev/bin/MMDX12.exe --character 01_9001 --screen studio --width 1920 --height 1080 --ui-script captures/studio/m2_a.txt --frames 120 --capture captures/out.png`
+  - Wrapper options go before the app's own arguments (`--exe`, `--timeout`, `--first-frame-timeout`,
+    `--allow-gui` for a deliberate interactive run, `--allow-library`); `--` is optional.
 - Canonical A/B capture (run once per build, then diff the PNGs):
-  `timeout 120 <build>/bin/MMDX12.exe --character 01_9001 --stage none --song Evergreen --autoplay --seek 20 --paused --no-physics --frames 60 --effect none --shader-pack none --capture out.png`
+  `python tools/run_capture.py --exe <build>/bin/MMDX12.exe --character 01_9001 --stage none --song Evergreen --autoplay --seek 20 --paused --no-physics --frames 60 --effect none --shader-pack none --capture out.png`
 
 ## Architecture (src/)
 - `core`: logging, text encodings (Shift-JIS/UTF-16/UTF-8).

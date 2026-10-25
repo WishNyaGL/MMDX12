@@ -39,7 +39,11 @@ void App::UpdatePlay(double dt) {
     if (!io.WantCaptureKeyboard) {
         if (ImGui::IsKeyPressed(ImGuiKey_Space)) SetPlaying(!playing_);
         if (ImGui::IsKeyPressed(ImGuiKey_L)) {
-            settings_.lighting = (settings_.lighting + 1) % kLightingPresetCount;
+            // S1b: "스테이지 조명" only cycles in while the loaded stage has a light rig (it is this scene's choice,
+            // never written to the ini).
+            const int count = s->stage && s->stage->HasLights() ? kLightingChoiceCount : kLightingPresetCount;
+            const int next = ((int)PlayLighting() + 1) % count;
+            PlaySetLighting(next);
             settings_.Save(settingsPath_);
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
@@ -447,20 +451,26 @@ void App::DrawPlayOverlay() {
     ImGui::EndDisabled();
     x += Dp(44.0f);
     {
-        const char* lightIcons[] = {icon::Sun, icon::CircleHalf, icon::Sparkle, icon::Moon};
-        const std::string tip = std::string(Tr("조명: ")) + LightingPresetName((LightingPreset)settings_.lighting) + " (L)";
+        const char* lightIcons[] = {icon::Sun, icon::CircleHalf, icon::Sparkle, icon::Moon, icon::Lightbulb};
+        const bool stageRig = s->stage && s->stage->HasLights();
+        const std::string tip = std::string(Tr("조명: ")) + LightingPresetName(PlayLighting()) + " (L)";
         // a menu of the named presets (clicking used to cycle blindly through them; L still cycles)
         ImGui::SetCursorScreenPos(ImVec2(x, cy - Dp(20.0f)));
-        if (IconButton("##light", lightIcons[settings_.lighting], tip.c_str(), false, 40.0f)) ImGui::OpenPopup("##lightmenu");
+        const int iconIndex = std::clamp((int)PlayLighting(), 0, kLightingChoiceCount - 1);
+        if (IconButton("##light", lightIcons[iconIndex], tip.c_str(), PlayLighting() == LightingPreset::Stage,
+                       40.0f))
+            ImGui::OpenPopup("##lightmenu");
         ImGui::SetNextWindowPos(ImVec2(x, cy - Dp(28.0f)), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
         ImGui::SetNextWindowSize(ImVec2(Dp(200.0f), 0));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(8.0f), Dp(8.0f)));
         if (ImGui::BeginPopup("##lightmenu")) {
-            for (int i = 0; i < kLightingPresetCount; ++i) {
+            // S1b: "스테이지 조명" is offered while the loaded MMDX stage has a light rig.
+            const int count = stageRig ? kLightingChoiceCount : kLightingPresetCount;
+            for (int i = 0; i < count; ++i) {
                 ImGui::PushID(i);
-                const char* hint = i == settings_.lighting ? Tr("사용 중") : nullptr;
+                const char* hint = i == (int)PlayLighting() ? Tr("사용 중") : nullptr;
                 if (MenuItem("##preset", LightingPresetName((LightingPreset)i), lightIcons[i], hint)) {
-                    settings_.lighting = i;
+                    PlaySetLighting(i);
                     settings_.Save(settingsPath_);
                     ImGui::CloseCurrentPopup();
                 }

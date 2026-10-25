@@ -22,6 +22,7 @@ const char* LightingPresetName(LightingPreset p) {
     case LightingPreset::Sunset: return Tr("노을");
     case LightingPreset::Concert: return Tr("콘서트");
     case LightingPreset::Night: return Tr("밤");
+    case LightingPreset::Stage: return Tr("스테이지 조명");
     }
     return "";
 }
@@ -119,6 +120,11 @@ void BuildLighting(LightingPreset preset, double t, const DirectX::XMFLOAT3& foc
         out.punctual.push_back(fill);
         break;
     }
+    case LightingPreset::Stage:
+        // The loaded MMDX stage's own rig (BuildSceneLighting with the stage's lights) is what the caller uses; this
+        // fallback is the Studio preset so a stage without lights never renders black.
+        BuildLighting(LightingPreset::Studio, t, focus, out);
+        break;
     }
 }
 

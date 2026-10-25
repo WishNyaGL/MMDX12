@@ -11,8 +11,12 @@
 
 namespace mmdx {
 
-enum class LightingPreset : int { Studio = 0, Sunset = 1, Concert = 2, Night = 3 };
-inline constexpr int kLightingPresetCount = 4;
+// Stage (S1b) is not a preset: it renders the loaded MMDX stage's own light rig, so it has no PresetLights.
+enum class LightingPreset : int { Studio = 0, Sunset = 1, Concert = 2, Night = 3, Stage = 4 };
+inline constexpr int kLightingPresetCount = 4;   // the real presets (PresetLights / BuildLighting cover these)
+// Every lighting choice a picker may list: the presets plus "스테이지 조명" (offered only while a loaded stage has lights;
+// the saved `lighting` setting is clamped to the preset range, so a stage choice never persists).
+inline constexpr int kLightingChoiceCount = 5;
 
 const char* LightingPresetName(LightingPreset p);  // Korean UI label
 

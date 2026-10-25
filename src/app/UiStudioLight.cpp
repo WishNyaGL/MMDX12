@@ -161,6 +161,35 @@ void App::StudioApplyLightPreset(int presetIndex) {
     d.rowsKey = ~0ull;
 }
 
+// S1b: an MMDX stage that ships a light rig replaces the project's lights with it, in ONE undoable step. The lights
+// become ordinary scene lights (S3 turns them into real stage overrides).
+void App::StudioApplyStageLightRig(const std::vector<studio::StudioPackageModel>& loadedParts) {
+    if (!studio_) return;
+    StudioDoc& d = *studio_;
+    std::shared_ptr<const StageManifest> manifest;
+    for (const studio::StudioPackageModel& part : loadedParts)
+        if (part.stageManifest && !part.stageManifest->lights.empty()) {
+            manifest = part.stageManifest;
+            break;
+        }
+    if (!manifest) return;
+    std::vector<SceneLight> before = d.lights;
+    std::vector<SceneLight> after = manifest->lights;
+    for (SceneLight& l : after) {
+        l.uid = d.nextLightUid++;   // the stage's order is its identity; uids are per project
+        if (l.name.empty()) l.name = LightKindName(l.kind);
+        l.viewportVisible = true;
+    }
+    d.history.Push(std::make_unique<LightsCommand>(d, Tr("스테이지 조명"), before, after));
+    d.selectedLightUid = 0;
+    ++d.projectVersion;
+    d.rowsKey = ~0ull;
+    toast_ = {Tr("스테이지 조명을 불러왔어요"),
+              manifest->DisplayName(StageLanguage()) + "  ·  " + std::to_string(after.size()) + Tr("개 조명"),
+              {}, false, timeSeconds_ + 4.0};
+    LOG_INFO("studio: stage light rig '%s' (%d lights)", manifest->id.c_str(), (int)after.size());
+}
+
 
 // ---------------------------------------------------------------------------
 // Outliner

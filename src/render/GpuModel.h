@@ -11,6 +11,7 @@
 #include "asset/PmxModel.h"
 #include <DirectXMath.h>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,22 @@ struct BuiltinTextures {
 };
 
 enum class ModelRole : uint8_t { Character = 0, Stage = 1 };
+
+// One material's PBR record values for this frame (MMDX stage `materials.<rule>.<field>` targets, docs/stage_format.md).
+// A set field replaces the record's value: baseColor is LINEAR and stored sRGB-encoded like an authored constant,
+// roughness goes to the record's smoothness slot as linear roughness (TYPE 2, like imported glTF), metallic to metalness,
+// emissive is linear and already multiplied by its strength, alpha is the record's diffuseAlpha (coverage).
+// castShadow / receiveShadow are the material's shadow flags, not record fields.
+struct PbrOverride {
+    size_t material = 0;
+    std::optional<DirectX::XMFLOAT3> baseColor;
+    std::optional<float> roughness;
+    std::optional<float> metallic;
+    std::optional<DirectX::XMFLOAT3> emissive;
+    std::optional<float> alpha;
+    std::optional<bool> castShadow;
+    std::optional<bool> receiveShadow;
+};
 
 // Per-material PBR source (MaterialSource) and the PBR debug channel (PbrDebug) live in render/RenderTypes.h
 // (with the rest of the render settings); GpuModel reads them through RenderSettings.
@@ -185,6 +202,13 @@ public:
     uint32_t PbrIndex(size_t material) const {
         return material < pbrIndex_.size() ? pbrIndex_[material] : DescriptorHeap::kInvalid;
     }
+    // Runtime PBR overrides (MMDX stage material targets): applies `list` for ring entry `frame % 3` and only when
+    // `version` differs from the one that entry was written with (same contract as UpdateMaterials). The FIRST call
+    // with a non-empty list moves the PBR records into a 3-entry UPLOAD-heap ring with one SRV each (a model that
+    // never gets overrides keeps its single DEFAULT-heap buffer, bit-identical to before); PbrSrv() then returns the
+    // entry's SRV, so raster / RT / PT / offline GI all follow. An empty list restores the model's own record values.
+    // Call before the passes read PbrSrv() (i.e. every frame, in UpdateScene).
+    void SetPbrOverrides(uint64_t frame, const std::vector<PbrOverride>& list, uint64_t version);
     // Generic data traits of the model (additional UVs, toon-map materials) for ShaderPack::Suggests.
     ModelTraits Traits() const;
     D3D12_GPU_VIRTUAL_ADDRESS BoneBuffer(uint64_t frame) const;      // StructuredBuffer<float4x4> (t0)
@@ -260,8 +284,21 @@ private:
     std::vector<ComPtr<ID3D12Resource>> pbrTextures_;   // decoded map textures referenced by the records
     std::vector<uint32_t> pbrTextureSrvs_;              // SRV heap index per pbrTextures_ entry
     uint32_t pbrSrv_ = DescriptorHeap::kInvalid;
+    uint32_t pbrStaticSrv_ = DescriptorHeap::kInvalid;   // the DEFAULT-heap buffer's SRV (kept for Destroy)
     std::vector<uint32_t> pbrIndex_;
     bool hasPbrRecords_ = false;
+    // Base PBR records (the ones Create built) and the 3-entry UPLOAD-heap ring of SetPbrOverrides. Lazily created.
+    std::vector<GpuPbrMaterial> pbrRecords_;
+    ComPtr<ID3D12Resource> pbrRingBuf_;
+    void* pbrRingMapped_ = nullptr;
+    static_assert(kRing == 3, "pbrRingSrvs_ initialiser lists kRing entries");
+    uint32_t pbrRingSrvs_[kRing] = {DescriptorHeap::kInvalid, DescriptorHeap::kInvalid, DescriptorHeap::kInvalid};
+    uint64_t pbrRingVersion_[kRing] = {};
+    uint64_t pbrRingBytes_ = 0;
+    bool pbrOverridesActive_ = false;   // the ring exists (PbrSrv() follows it)
+    // Per material receive-shadow override from SetPbrOverrides (-1 none, 0 off, 1 on); applied in UpdateMaterials.
+    std::vector<int8_t> stageReceive_;   // per material receiveShadow override (-1 none, 0 off, 1 on)
+    uint64_t stageFlagsGen_ = 0;         // bumped when a shadow flag override changes (UpdateMaterials version)
     ModelRole role_ = ModelRole::Character;
     bool dynamic_ = false;   // M8a: an animated stage rebuilds its BLAS
     bool prop_ = false;      // a studio prop (the world's ground map includes it)

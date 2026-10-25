@@ -8,6 +8,8 @@
 #include "asset/PbrMaterial.h"
 #include "asset/PmmLoader.h"
 #include "asset/PmxModel.h"
+#include "asset/StageManifest.h"
+#include "asset/StageMaterials.h"
 #include "studio/CommandStack.h"
 #include "studio/SceneLight.h"
 #include "studio/StudioMotion.h"
@@ -54,6 +56,13 @@ struct StudioModel {
     ShaderChoice shader;           // characters: shader pack (render/ShaderPack.h); empty = the default shading
     MmeChoice mme;                 // M6a: MME object effect choice; characters default None, stages Auto
     MaterialChoice material;       // P5: per-material PBR source (Default / Ray-MMD + optional explicit .emd)
+    // S1b: a part of an MMDX stage keeps the shared manifest, its index in `manifest->models` and the variant chosen for
+    // the stage (empty = the manifest's default). The runtime rebuilds the rule -> material binding from it; the variant
+    // is saved in the project as the model's "stageVariant".
+    std::shared_ptr<const StageManifest> stageManifest;
+    int stagePart = -1;            // index in manifest->models (-1 = not an MMDX stage part)
+    std::string stageVariant;
+    StageMaterialBinding stageBinding;   // rule -> material map (resolved when the part enters the document)
     std::shared_ptr<const PmxModel> pmx;
     std::unique_ptr<ModelInstance> inst;
     std::unique_ptr<GpuModel> gpu;
@@ -538,6 +547,11 @@ struct StudioPackageModel {
     ShaderChoice shader;                     // characters: shader pack
     MmeChoice mme;                           // M6a: MME object effect choice
     MaterialChoice material;                 // P5: per-material PBR source (Default / Ray-MMD)
+    // S1b: an MMDX stage part carries its manifest (shared with its siblings) and its index in manifest->models; the
+    // studio keeps the variant per part so a project round trip restores it.
+    std::shared_ptr<const StageManifest> stageManifest;
+    int stagePart = -1;
+    std::string stageVariant;
     MotionData motion;                       // names canonicalised to pmx
 };
 struct StudioPackage {
@@ -572,15 +586,17 @@ struct StudioPackage {
 // character's motion (names canonicalised to the model), its camera VMD the camera track.
 bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset* song,
                        StudioPackage& out, LoadProgress* progress, std::string* error,
-                       const MaterialChoiceFn& materialChoice = {});
+                       const MaterialChoiceFn& materialChoice = {}, const std::string& stageVariant = {});
 // One model file (PMX, glTF/GLB/VRM, FBX/OBJ) as a character, stage or prop. Characters import with
 // asset ModelRole::Character, stages and props with ModelRole::Stage. `out.motion` stays empty.
 bool LoadStudioModel(const std::filesystem::path& path, ModelKind kind, const std::string& label,
                      StudioPackageModel& out, LoadProgress* progress, std::string* error,
                      const MaterialChoice& choice = {});
 // Every part of a library stage (failed parts are skipped with a warning; false only when none loads).
+// S1b: an MMDX stage's manifest rules are applied to each part on the worker thread and the manifest / part index /
+// `variant` travel on the package models (`stageManifest`, `stagePart`, `stageVariant`).
 bool LoadStudioStage(const StageAsset& stage, std::vector<StudioPackageModel>& out, LoadProgress* progress,
-                     std::string* error, const MaterialChoice& choice = {});
+                     std::string* error, const MaterialChoice& choice = {}, const std::string& variant = {});
 // A library song as studio motions: dance + facial VMDs merged into `dance` (camera/light/shadow cleared, names NOT
 // canonicalised), the camera VMD's camera/light/shadow keys into `camera`. False when no VMD could be read.
 bool LoadStudioSong(const SongAsset& song, MotionData& dance, MotionData& camera, std::string* error);

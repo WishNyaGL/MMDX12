@@ -373,6 +373,12 @@ bool AppSettings::Load(const std::filesystem::path& file) {
             // characterMaterialSuggested=<character id>: Ray-MMD material data was already suggested
             if (!value.empty()) characterMaterialSuggested.insert(value);
         }
+        else if (key == "stageVariant") {
+            // stageVariant=<variant id>|<stage id> (the stage id last, like the other per-id lines)
+            const size_t bar = value.find('|');
+            if (bar != std::string::npos && bar > 0 && bar + 1 < value.size())
+                stageVariants[value.substr(bar + 1)] = value.substr(0, bar);
+        }
         else if (key == "paramGroupOpen") {
             // paramGroupOpen=<pack>|<group>|0|1
             const size_t a = value.find('|');
@@ -532,7 +538,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
     renderScale = std::clamp(renderScale, 0.5f, 2.0f);
     graphicsPreset = std::clamp(graphicsPreset, 0, 4);
     if (shadowMapSize != 1024 && shadowMapSize != 2048 && shadowMapSize != 4096) shadowMapSize = 2048;
-    lighting = std::clamp(lighting, 0, 3);
+    lighting = std::clamp(lighting, 0, 3);   // the ordinary presets; "스테이지 조명" (4) is a run-time choice
     exposure = std::clamp(exposure, 0.5f, 2.0f);
     renderPath = std::clamp(renderPath, 0, 2);
     studioRenderer = std::clamp(studioRenderer, 0, 3);
@@ -560,6 +566,16 @@ float AppSettings::CharacterScale(const std::string& id) const {
 void AppSettings::SetCharacterScale(const std::string& id, float scale) {
     if (std::fabs(scale - 1.0f) < 0.005f) characterScales.erase(id);
     else characterScales[id] = std::clamp(scale, 0.25f, 4.0f);
+}
+
+std::string AppSettings::StageVariant(const std::string& stageId) const {
+    const auto it = stageVariants.find(stageId);
+    return it == stageVariants.end() ? std::string() : it->second;
+}
+
+void AppSettings::SetStageVariant(const std::string& stageId, const std::string& variantId) {
+    if (variantId.empty()) stageVariants.erase(stageId);
+    else stageVariants[stageId] = variantId;
 }
 
 namespace {
@@ -685,6 +701,7 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
                      c.file.empty() ? "-" : PathToUtf8(c.file).c_str(), id.c_str());
     for (const auto& [id, m] : characterMaterials)
         if (m.ray) std::fprintf(f, "characterMaterial=ray|%s|%s\n", m.emd.c_str(), id.c_str());
+    for (const auto& [id, v] : stageVariants) std::fprintf(f, "stageVariant=%s|%s\n", v.c_str(), id.c_str());
     for (const std::string& id : characterMaterialSuggested)
         std::fprintf(f, "characterMaterialSuggested=%s\n", id.c_str());
     for (const EffectStackEntry& e : effectStack) {

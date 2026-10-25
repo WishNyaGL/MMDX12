@@ -102,6 +102,8 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.formation = WideToUtf8(next());
         } else if (arg == L"--song-audio") {
             opt.songAudio = WideToUtf8(next());
+        } else if (arg == L"--stage-variant") {
+            opt.stageVariant = WideToUtf8(next());
         } else if (arg == L"--autoplay") {
             opt.autoplay = true;
         } else if (arg == L"--seek") {
@@ -1810,9 +1812,13 @@ void App::StartLoad(LoadTarget target, const CharacterAsset* ch, const StageAsse
     const std::vector<VideoLayerDesc> videos = ResolveSongVideos(so);
     const bool hasFormation = formation != nullptr && !formation->empty();
     const std::vector<PerformerCast> form = hasFormation ? *formation : std::vector<PerformerCast>{};
+    // S1b: the MMDX stage variant: --stage-variant, else the ini choice for that stage (empty = the manifest's default).
+    const std::string stageVariant =
+        !hasStage ? std::string()
+                  : (!options_.stageVariant.empty() ? options_.stageVariant : settings_.StageVariant(s.id));
     loadFuture_ = std::async(std::launch::async, [=, pkg = loadPackage_.get(), this] {
         const bool ok = LoadScenePackage(c, hasStage ? &s : nullptr, so, *pkg, &loadProgress_, &loadError_,
-                                         hasFormation ? &form : nullptr, MaterialChoiceResolver());
+                                         hasFormation ? &form : nullptr, MaterialChoiceResolver(), stageVariant);
         pkg->videos = videos;   // M8b: LoadScenePackage resets the package; re-apply the resolved video layers
         pkg->formation = form;  // the cast a material-source reload reuses (unit songs)
         return ok;
@@ -1845,10 +1851,17 @@ void App::PollLoad() {
         return; // stay on Loading; DrawLoading shows the error + "돌아가기"
     }
 
+    // S1b: the play scene defaults the lighting picker to "스테이지 조명" when the loaded MMDX stage has a light rig
+    // (an ordinary preset chosen for other stages stays as it is).
+    playLighting_ = -1;
     if (loadTarget_ == LoadTarget::Play) {
         playTime_ = options_.seekSeconds;
         options_.seekSeconds = 0;
         playing_ = true;
+        // S1b: a loaded MMDX stage with a light rig defaults the lighting picker to "스테이지 조명"; an ordinary preset
+        // chosen for other stages stays as it is.
+        if (scene_->stage && scene_->stage->HasLights() && settings_.lighting < kLightingPresetCount)
+            playLighting_ = (int)LightingPreset::Stage;
         useMotionCamera_ = scene_->camera != nullptr && !options_.freeCamera;
         if (options_.hasCamera) {
             const float* c = options_.camera;
@@ -2042,7 +2055,8 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         s->extras.push_back(std::move(perf));
     }
 
-    for (LoadedModelCpu& part : pkg.stageParts) {
+    for (size_t i = 0; i < pkg.stageParts.size(); ++i) {
+        LoadedModelCpu& part = pkg.stageParts[i];
         auto inst = std::make_unique<ModelInstance>(part.pmx);
         inst->UpdatePose();
         auto gpu = renderer_.CreateModel(batch, *part.pmx, part.textures, ModelRole::Stage, &part.pbr);
@@ -2053,6 +2067,22 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         gpu->SetMaterialBlendHints(part.materialBlend, part.materialBlendDefault);
         s->stages.push_back(std::move(inst));
         s->stageGpu.push_back(std::move(gpu));
+    }
+    // S1b: an MMDX stage's runtime: the manifest, its variant, and the rule -> material binding of every loaded part.
+    if (pkg.stageManifest) {
+        std::vector<StageRuntimePart> parts;
+        for (size_t i = 0; i < s->stageGpu.size() && i < pkg.stagePartBindings.size(); ++i) {
+            StageRuntimePart p;
+            p.part = (int)i;
+            p.gpu = s->stageGpu[i].get();
+            p.binding = pkg.stagePartBindings[i];
+            parts.push_back(std::move(p));
+        }
+        s->stage = std::make_shared<StageRuntime>();
+        s->stage->Init(pkg.stageManifest, pkg.stageVariant, std::move(parts));
+        LOG_INFO("MMDX stage: %s variant '%s' parts %d lights %d rules %d", pkg.stageManifest->id.c_str(),
+                 pkg.stageVariant.c_str(), (int)s->stage->Manifest()->models.size(),
+                 (int)pkg.stageManifest->lights.size(), (int)pkg.stageManifest->materials.size());
     }
 
     // M5c: MME effect objects (an accessory `.x` + its same-stem `.fx`). --mme-object, else the persisted play-mode
@@ -2177,6 +2207,7 @@ void App::UnloadScene() {
     playMmeDraft_.valid = false;     // a fresh scene re-captures the MME draft when its tab opens
     audio_.Unload();
     playing_ = false;
+    playLighting_ = -1;   // S1b: the next scene picks its own default (stage rig / the saved preset)
 }
 
 // Auto workflow (완전 자동), play scenes only: a required CONTROLOBJECT controller was missing, but its file may
@@ -2325,6 +2356,11 @@ void App::UpdateScene(float frame) {
             SuggestRayMaterial(extra.characterId, extra.instance->Model().sourcePath,
                                (int)extra.instance->Model().materials.size());
     }
+    // S1b: the MMDX stage's material targets at the song time, BEFORE UpdateMaterials so its rebuild (a
+    // receiveShadow override) lands in this frame's constants ring.
+    if (scene_->stage && scene_->stage->Valid() && screen_ != Screen::BenchRender)
+        scene_->stage->Apply(scene_->motionFps > 0.0f ? (double)frame / scene_->motionFps : playTime_,
+                             ctx_.FrameNumber());
     for (size_t i = 0; i < scene_->stages.size(); ++i) {
         ModelInstance& st = *scene_->stages[i];
         // M8a: the bundled stage's motion animates on the song clock (the normal pose path, no physics).
@@ -2489,7 +2525,8 @@ void App::PumpColliderTrack() {
     });
 }
 
-void App::BuildFrameView(float frame, FrameView& view) {    view.frame = frame;
+void App::BuildFrameView(float frame, FrameView& view) {
+    view.frame = frame;
     if (useMotionCamera_ && scene_->camera) {
         CameraPose pose = scene_->camera->Evaluate(frame);
         CameraMotion::ToView(pose, &view.camera.view, &view.camera.eye);
@@ -2553,8 +2590,41 @@ void App::BuildFrameView(float frame, FrameView& view) {    view.frame = frame;
         const int center = scene_->character->Model().FindBone("\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xBC");
         if (center >= 0) focus = scene_->character->BoneWorldPosition(center);
     }
-    const LightingPreset preset = screen_ == Screen::BenchRun ? LightingPreset::Studio : (LightingPreset)settings_.lighting;
-    BuildLighting(preset, playTime_, focus, view.light);
+    const LightingPreset preset = screen_ == Screen::BenchRun ? LightingPreset::Studio : PlayLighting();
+    // S1b: an MMDX stage is evaluated once per frame here (song time): the material targets go to the parts' GPU
+    // records (SetPbrOverrides), the light targets into the rig BuildSceneLighting resolves below.
+    const double stageSeconds = scene_->motionFps > 0.0f ? (double)frame / scene_->motionFps : playTime_;
+    const std::vector<studio::SceneLight>* stageRig = nullptr;
+    if (scene_->stage && scene_->stage->Valid() && screen_ != Screen::BenchRun)
+        stageRig = &scene_->stage->Apply(stageSeconds, ctx_.FrameNumber());
+    const bool stageLights = stageRig && !stageRig->empty();
+    if (stageLights && preset == LightingPreset::Stage) {
+        // the stage's own rig (cue / binding targets on its lights included)
+        LightAnchors stageAnchors;
+        stageAnchors.focus = focus;
+        stageAnchors.head = focus;
+        const auto boneOf = [](const ModelInstance& inst, const char* name) {
+            const int b = inst.Model().FindBone(name);
+            return b >= 0 ? inst.BoneWorldPosition(b) : DirectX::XMFLOAT3{0, 10, 0};
+        };
+        if (scene_->character) {
+            stageAnchors.focus = boneOf(*scene_->character, "\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xBC");
+            stageAnchors.head = boneOf(*scene_->character, "\xE9\xA0\xAD");
+        }
+        for (size_t i = 0; i < scene_->extras.size(); ++i) {
+            const SceneRuntime::Performer& p = scene_->extras[i];
+            if (!p.instance) continue;
+            LightAnchors::Character c;
+            c.uid = (uint32_t)(2 + i);
+            c.centre = boneOf(*p.instance, "\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xBC");
+            c.head = boneOf(*p.instance, "\xE9\xA0\xAD");
+            stageAnchors.characters.push_back(c);
+        }
+        BuildSceneLighting(*stageRig, scene_->lightTrack, stageSeconds, stageAnchors, view.light);
+    } else {
+        // "스테이지 조명" without a stage rig (or a classic stage): the Studio preset, as before.
+        BuildLighting(preset == LightingPreset::Stage ? LightingPreset::Studio : preset, playTime_, focus, view.light);
+    }
     // --classic: vanilla-MMD shading (plain toon key light): a hard-edged sun shadow, no rim / specular rim light
     if (classicLighting_) {
         view.light.sunShadow = LightShadowType::Hard;

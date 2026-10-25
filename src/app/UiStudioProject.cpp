@@ -11,6 +11,7 @@
 #include "app/Icons.h"
 #include "app/UiKit.h"
 #include "asset/RayMaterial.h"
+#include "asset/StageMaterials.h"
 #include "asset/VideoReader.h"
 #include "core/I18n.h"
 #include "core/Log.h"
@@ -180,6 +181,7 @@ ProjectData App::StudioProjectData() const {
         pm.shader = m.shader;
         pm.material = m.material;
         pm.mme = m.mme;
+        pm.stageVariant = m.stageVariant;   // S1b: an MMDX stage part's variant (the stage's parts share it)
         if (m.IsProp()) {
             pm.attach = m.attach;
             pm.attach.parent = m.attach.parent >= 0 ? d.IndexOfUid((uint32_t)m.attach.parent) : -1;  // uid -> index
@@ -422,9 +424,33 @@ void App::StudioAddModelFile(ModelKind kind, const std::filesystem::path& file, 
             if (!material) choice = ResolveMaterialChoice(replaceLibraryId, studio_->models[(size_t)at]->path);
         }
     }
-    job->future = std::async(std::launch::async, [j, kind, file, label, choice, replaceLibraryId] {
+    // S1b: a replaced MMDX stage part keeps its manifest / variant, and its material rules apply on this worker.
+    std::shared_ptr<const StageManifest> stageManifest;
+    int stagePart = -1;
+    std::string stageVariant;
+    if (replaceUid && studio_) {
+        const int at = studio_->IndexOfUid(replaceUid);
+        if (at >= 0 && studio_->models[(size_t)at]->stageManifest) {
+            const StudioModel& old = *studio_->models[(size_t)at];
+            stageManifest = old.stageManifest;
+            stagePart = old.stagePart;
+            stageVariant = old.stageVariant;
+        }
+    }
+    job->future = std::async(std::launch::async, [j, kind, file, label, choice, replaceLibraryId, stageManifest,
+                                                  stagePart, stageVariant] {
         const bool ok = LoadStudioModel(file, kind, label, j->models[0], &j->progress, &j->error, choice);
-        if (ok && j->models[0].libraryId.empty()) j->models[0].libraryId = replaceLibraryId;
+        if (!ok) return false;
+        StudioPackageModel& m = j->models[0];
+        if (m.libraryId.empty()) m.libraryId = replaceLibraryId;
+        if (stageManifest) {
+            m.stageManifest = stageManifest;
+            m.stagePart = stagePart;
+            m.stageVariant = stageVariant;
+            if (!stageManifest->materials.empty() && m.pmx)
+                ApplyStageMaterialRules(*stageManifest, stageVariant, {}, 0.0,
+                                        MatchStageMaterialRules(stageManifest->materials, *m.pmx), *m.pmx, m.pbr);
+        }
         return ok;
     });
     studioJobs_.push_back(std::move(job));
@@ -476,8 +502,9 @@ void App::StudioAddLibraryStage(int index, uint32_t replaceUid) {
     job->replaceUid = replaceUid;
     StudioJob* j = job.get();
     const MaterialChoice choice = ResolveMaterialChoice(s.id, s.parts.empty() ? std::filesystem::path() : s.parts[0]);
-    job->future = std::async(std::launch::async, [j, s, choice] {
-        return LoadStudioStage(s, j->models, &j->progress, &j->error, choice);
+    const std::string variant = settings_.StageVariant(s.id);
+    job->future = std::async(std::launch::async, [j, s, choice, variant] {
+        return LoadStudioStage(s, j->models, &j->progress, &j->error, choice, variant);
     });
     studioJobs_.push_back(std::move(job));
 }
@@ -663,6 +690,11 @@ void App::StudioPollJobs() {
                 sm->libraryId = pm.libraryId;
                 sm->material = pm.material;
                 sm->mme = pm.mme;
+                sm->stageManifest = pm.stageManifest;
+                sm->stagePart = pm.stagePart;
+                sm->stageVariant = pm.stageVariant;
+                if (pm.stageManifest && pm.pmx)
+                    sm->stageBinding = MatchStageMaterialRules(pm.stageManifest->materials, *pm.pmx);
                 sm->defaultPackTextureFolder = pm.defaultPackTextureFolder;
                 sm->kind = pm.kind;
                 sm->fx = pm.fx;
@@ -697,6 +729,8 @@ void App::StudioPollJobs() {
                 d.physicsFrame = -1.0f;
                 if (d.models[(size_t)first]->kind != ModelKind::Stage && !replaced) StudioSelectModel(first);
                 if (!replaced) toast_ = {Tr("모델을 추가했어요"), job.label, {}, false, timeSeconds_ + 3.0};
+                // S1b: a freshly added MMDX stage with a light rig replaces the scene's lights with it, as ONE step.
+                if (!replaced) StudioApplyStageLightRig(job.models);
                 LOG_INFO("studio: added %s (%d models)", job.label.c_str(), (int)d.models.size());
                 // a dropped VMD / VPD with one new model waits for it: apply now that the model is in the document
                 if (!replaced && !job.queuedDrops.empty()) ApplyQueuedDrops(first, job.queuedDrops);
@@ -793,6 +827,12 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
     m.libraryId = pm.libraryId;
     m.path = pm.pmx->sourcePath;
     m.pmx = pm.pmx;
+    // S1b: a replaced MMDX stage part keeps its manifest / variant (the same file re-read keeps them too)
+    m.stageManifest = pm.stageManifest;
+    m.stagePart = pm.stagePart;
+    m.stageVariant = pm.stageVariant;
+    m.stageBinding = pm.stageManifest ? MatchStageMaterialRules(pm.stageManifest->materials, *pm.pmx)
+                                      : StageMaterialBinding{};
     m.inst = std::make_unique<ModelInstance>(pm.pmx);
     m.gpu = std::move(gpu);
     m.defaultPackTextureFolder = pm.defaultPackTextureFolder;

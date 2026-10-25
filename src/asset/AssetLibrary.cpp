@@ -534,7 +534,10 @@ bool SaveLibraryScanResult(const LibraryScanResult& result) {
     j["effects"] = std::move(effects);
 
     WriteJsonAtomically(resultFile, j);
-    return true;
+    std::error_code ec;
+    const bool ok = std::filesystem::exists(resultFile, ec);
+    if (!ok) LOG_WARN("library: scan cache write failed: %s", PathToUtf8(resultFile).c_str());
+    return ok;
 }
 
 bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult& out) {
@@ -2278,6 +2281,11 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         return ToLowerAscii(a.displayName) < ToLowerAscii(b.displayName);
     };
     std::sort(result.characters.begin(), result.characters.end(), byLowerName);
+    // Installed MMDX stages (`<exe>/stages`, prefix "stages:") join the stage list: their ids never collide.
+    {
+        const std::vector<StageAsset> installed = ScanInstalledStages(ExecutableDir() / L"stages");
+        result.stages.insert(result.stages.end(), installed.begin(), installed.end());
+    }
     std::sort(result.stages.begin(), result.stages.end(), byLowerName);
     std::sort(result.songs.begin(), result.songs.end(), byLowerName);
     std::sort(result.effects.begin(), result.effects.end(), byLowerName);
@@ -2295,6 +2303,51 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         SaveLibraryScanResult(result);
     }
     return result;
+}
+
+// MMDX stages installed next to the executable (docs/stage_ecosystem.md §1): <root>/<folder>/stage.json.
+std::vector<StageAsset> ScanInstalledStages(const std::filesystem::path& root) {
+    std::vector<StageAsset> out;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(root, ec)) return out;
+    std::vector<std::filesystem::path> dirs;
+    for (std::filesystem::directory_iterator it(root, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        dirs.push_back(it->path().lexically_normal());
+    }
+    std::sort(dirs.begin(), dirs.end());
+    for (const std::filesystem::path& dir : dirs) {
+        StageManifest manifest;
+        std::string error;
+        if (!LoadStageManifest(dir / Utf8ToPath(kStageManifestName), manifest, error) || manifest.models.empty()) continue;
+        StageAsset stage;
+        stage.id = std::string(kInstalledStageIdPrefix) + PathToUtf8(dir.filename());
+        stage.format = "MMDX";
+        stage.manifestPath = dir / Utf8ToPath(kStageManifestName);
+        stage.displayName = manifest.DisplayName(StageLanguage());
+        if (stage.displayName.empty()) stage.displayName = PathToUtf8(dir.filename());
+        for (const StagePart& part : manifest.models) {
+            const std::filesystem::path p = (dir / Utf8ToPath(part.file)).lexically_normal();
+            std::error_code partEc;
+            if (!std::filesystem::is_regular_file(p, partEc)) continue;
+            PmxProbe probe;
+            std::string probeErr;
+            if (IsMmdModelFormat(ModelFormatFromPath(p))) {
+                if (ModelFormatFromPath(p) == ModelFormat::Pmx ? ProbePmx(p, probe, &probeErr)
+                                                               : ProbePmd(p, probe, &probeErr))
+                    stage.vertexCount += probe.vertexCount;
+            } else {
+                ModelProbe mp;
+                if (ProbeModelFile(p, mp, &probeErr)) stage.vertexCount += mp.vertexCount;
+            }
+            stage.parts.push_back(p);
+        }
+        std::sort(stage.parts.begin(), stage.parts.end());
+        if (stage.parts.empty()) continue;
+        out.push_back(std::move(stage));
+    }
+    return out;
 }
 
 bool CreateLibrarySkeleton(const std::filesystem::path& root, const std::filesystem::path& templateDir) {

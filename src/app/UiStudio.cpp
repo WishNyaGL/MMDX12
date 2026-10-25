@@ -82,8 +82,11 @@ void App::StartStudioLoad(const CharacterAsset* ch, const StageAsset* st, const 
     const StageAsset s = hasStage ? *st : StageAsset{};
     const SongAsset so = hasSong ? SongAsChosen(*song) : SongAsset{};
     loadFuture_ = std::async(std::launch::async, [=, pkg = studioPackage_.get(), this] {
+        const std::string variant =
+            hasStage ? ResolveStageVariant(std::string(), settings_.StageVariant(s.id), options_.stageVariant)
+                     : std::string();
         return LoadStudioPackage(c, hasStage ? &s : nullptr, hasSong ? &so : nullptr, *pkg, &loadProgress_,
-                                 &loadError_, MaterialChoiceResolver());
+                                 &loadError_, MaterialChoiceResolver(), variant);
     });
 }
 
@@ -106,6 +109,11 @@ bool App::FinishStudioLoad() {
         sm->shader = m.shader;
         sm->material = m.material;
         sm->mme = m.mme;
+        sm->stageManifest = m.stageManifest;
+        sm->stagePart = m.stagePart;
+        sm->stageVariant = m.stageVariant;
+        if (m.stageManifest && m.pmx)
+            sm->stageBinding = MatchStageMaterialRules(m.stageManifest->materials, *m.pmx);
         sm->uid = doc->nextUid++;
         sm->fx = m.fx;   // M5c: effect objects carry their `.fx`
         if (m.pmx) {
@@ -581,6 +589,9 @@ void App::UpdateStudioScene() {
         if (!resetPhysics && !d.playing && posing) physicsDt = 1.0f / 60.0f;
     }
     d.physicsFrame = frame;
+    // S1b: the MMDX stage material targets at the timeline time, BEFORE UpdateMaterials (a changed shadow flag rebuilds
+    // the constants in this frame).
+    StudioApplyStageTargets();
 
     // props last: their root follows a bone of a model posed in the first pass
     for (int pass = 0; pass < 2; ++pass)
@@ -749,6 +760,43 @@ LightAnchors App::StudioBuildLightAnchors() const {
     return anchors;
 }
 
+void App::StudioApplyStageTargets() {
+    // S1b: every MMDX stage part in the document shares its manifest; the rules resolve once per manifest per frame and
+    // each part applies them to its own materials. Stage lights are ordinary scene lights here (copied on add).
+    StudioDoc& d = *studio_;
+    const uint64_t frame = ctx_.FrameNumber();
+    for (size_t i = 0; i < d.models.size(); ++i) {
+        const StudioModel& m = *d.models[i];
+        if (!m.stageManifest || !m.gpu || m.stageManifest->materials.empty()) continue;
+        // gather the parts of this manifest still in the document (they were all added together)
+        std::vector<StageModelOverridePart> parts;
+        for (const auto& other : d.models) {
+            if (!other->stageManifest || other->stageManifest.get() != m.stageManifest.get() || !other->gpu) continue;
+            StageModelOverridePart p;
+            p.part = other->stagePart;
+            p.gpu = other->gpu.get();
+            p.binding = &other->stageBinding;   // resolved once when the part entered the document
+            parts.push_back(p);
+        }
+        ApplyStageMaterialTargets(*m.stageManifest, m.stageVariant, d.time, frame, parts);
+        break;   // one pass per manifest (all its parts are in `parts`)
+    }
+}
+
+void App::StudioSetStageVariant(int model, const std::string& variantId) {
+    if (!studio_) return;
+    StudioDoc& d = *studio_;
+    if (model < 0 || model >= (int)d.models.size()) return;
+    StudioModel& m = *d.models[model];
+    if (!m.stageManifest) return;
+    m.stageVariant = variantId;
+    // every part of the same stage takes the variant (one stage = one variant), still one undoable project edit
+    for (auto& other : d.models)
+        if (other->stageManifest.get() == m.stageManifest.get()) other->stageVariant = variantId;
+    // the part's records return to the manifest's rule values for the new variant on the next frame
+    ++d.projectVersion;
+}
+
 void App::BuildStudioFrameView(FrameView& view) {
     StudioDoc& d = *studio_;
     StudioCamera(view.camera);
@@ -808,7 +856,6 @@ void App::BuildStudioFrameView(FrameView& view) {
     LightAnchors anchors = StudioBuildLightAnchors();
     BuildSceneLighting(d.lights, d.camera.light, d.time, anchors, view.light);
     StudioApplyLightTracks(view);
-
     // DoF: the focus track over the automatic focus (UiStudioFocus.cpp)
     StudioComputeFocus(view);
     // Background AVI (背景AVI): the video feeds screen.bmp materials; drawn as background only when the project
@@ -3689,6 +3736,30 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
         ImGui::Dummy(ImVec2(w, Dp(28.0f)));
         if (m) {
             line(Tr("본 / 모프"), std::to_string(m->pmx->bones.size()) + " / " + std::to_string(m->pmx->morphs.size()));
+            // S1b: an MMDX stage part's variant (one combo; the stage's parts share it). Saved in the project.
+            if (m->stageManifest && m->stageManifest->variants.size() >= 2) {
+                const StageManifest& man = *m->stageManifest;
+                std::string current = m->stageVariant;
+                if (current.empty() && man.DefaultVariant()) current = man.DefaultVariant()->id;
+                int selected = -1;
+                for (size_t i = 0; i < man.variants.size(); ++i)
+                    if (man.variants[i].id == current) selected = (int)i;
+                if (selected < 0) selected = 0;
+                std::string label = man.variants[(size_t)selected].label.Get(StageLanguage());
+                if (label.empty()) label = man.variants[(size_t)selected].id;
+                ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+                line(Tr("스테이지 배리언트"), label);
+                ImGui::SetNextItemWidth(w);
+                if (ImGui::BeginCombo("##stagevariant", label.c_str())) {
+                    for (size_t i = 0; i < man.variants.size(); ++i) {
+                        const StageVariant& v = man.variants[i];
+                        std::string item = v.label.Get(StageLanguage());
+                        if (item.empty()) item = v.id;
+                        if (ImGui::Selectable(item.c_str(), (int)i == selected)) StudioSetStageVariant(d.selectedModel, v.id);
+                    }
+                    ImGui::EndCombo();
+                }
+            }
             if (m->IsProp()) DrawStudioPropPanel(w);
             else DrawStudioPlacePanel(w);
             // P2.2: per-model physics off (saved in the project; baked keys play instead of physics)

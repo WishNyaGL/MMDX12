@@ -31,4 +31,4 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
 - **One window at a time.** Every run opens a visible window: never launch runs in parallel, tell the user before a
   batch. A running exe locks its build dir (`LNK1168`): when a worker is building in `build/`, run another build dir.
 - Canonical A/B capture (run once per build, then diff the PNGs):
-  `timeout 120 <build>/bin/MMDX12.exe --character 01_9001 --stage none --song Evergreen --autoplay --seek 20 --paused --no-physics --frames 60 --effect none --shader-pack none --capture out.png`
+  `python tools/run_capture.py --exe <build>/bin/MMDX12.exe --character 01_9001 --stage none --song Evergreen --autoplay --seek 20 --paused --no-physics --frames 60 --effect none --shader-pack none --capture out.png`

@@ -303,8 +303,43 @@ Values are clamped to their param's range / option list. Then every binding turn
 assignment (`target` + typed value: float, vec3, colour, bool or string). The function is deterministic and does no
 I/O, so seeks, reverse playback, video and GI shutter samples agree.
 
-## Validation
+## Runtime (S1b: loading, materials, lights, variants)
 
+Play mode (`app/SceneLoader`, `LoadScenePackage`) and the studio (`studio/StudioLoader`, `LoadStudioStage` /
+`LoadStudioPackage` / `LoadStudioProjectPackage`) load an MMDX stage **part by part from `models`** (manifest order,
+glTF / GLB / PMX through `LoadModelFile`), not from the library's flat part list. A part that fails stays out with a
+warning; the stage still loads its other parts.
+
+* **Material rules** are resolved on the loader worker thread before the GPU upload (`asset/StageMaterials.h`): a
+  material a rule matches gets the rule's values in its PBR record (a material without a record gets one whose albedo
+  reads the PMX diffuse map times the factor, smoothness 0.5, metalness 0), `alpha` overwrites the PMX diffuse alpha,
+  and `castShadow` / `receiveShadow` set the PMX material's shadow flags. "First matching rule wins per field" is
+  `StageEffectiveMaterialValues`. The linear stage colours are written the way the shader reads the slots (an
+  sRGB-encoded constant, or a linear factor on a sampled map).
+* **Runtime targets** (`materials.<rule>.<field>` from bindings / cues): the App evaluates the stage every frame at the
+  song time (`app/StageRuntime`), replays the light assignments onto a copy of `lights` for `BuildSceneLighting`, and
+  hands the material assignments to `GpuModel::SetPbrOverrides` (a 3-entry ring of UPLOAD-heap PBR records, one SRV
+  each, so raster / RT / PT / offline GI see the same values; only changed values are re-uploaded). A model that never
+  receives an override keeps its single DEFAULT-heap record buffer.
+* **Lighting in play mode**: the lighting picker gains "스테이지 조명" while the loaded stage has lights, and that is the
+  scene's default then (an ordinary preset chosen for other stages is kept). It renders `lights` through
+  `BuildSceneLighting` exactly like the studio does. Without a stage rig the entry is hidden, and the Studio preset is
+  the fallback.
+* **Studio**: adding an MMDX stage that has lights replaces the project's scene lights with the stage's rig as ONE
+  undoable step (`LightsCommand`, toast). They are ordinary scene lights afterwards (S3 replaces this with overrides).
+  The stage's material targets run every frame at the timeline time; the variant is the inspector's
+  "스테이지 배리언트" combo, saved per model in the project as `"stageVariant"`.
+* **Variant**: the lobby's select screen ("셰이더" tab) shows a combo when the selected stage has >= 2 variants, saved as
+  `stageVariant=<variant id>|<stage id>` in `mmdx12.ini`; `--stage-variant <id>` wins for one run. Empty = the
+  manifest's `defaultVariant`.
+* Ignored silently until their milestones: `screens.*`, `packs.*` and `environment.*` targets (S5 / S6 / S9), and the
+  `transmission` / `ior` / `mirror` / `screen` material fields (S2b / S10 / S5). They are parsed, validated and carried,
+  never warned about at run time.
+* Installed stages live in `<exe>/stages/<id>/` (next to the executable, like `shader_packs`): their library ids are
+  prefixed `stages:<id>` so they never collide with a user-library id. A missing folder is fine. The user's library can
+  hold MMDX stages too (detection stays by content).
+
+## Validation
 `ValidateStageManifest` (`asset/StageManifest.h`) is everything checkable from the JSON alone, and `tools/stage_check`
 adds the file / model checks:
 
@@ -321,6 +356,7 @@ adds the file / model checks:
 
 ```
 python tools/stagegen/stagegen.py --out captures/stages    # the three procedural test stages
+python tools/stagegen/stagegen.py --out build/bin/stages   # install them next to the exe (<exe>/stages/<id>/)
 build/bin/stage_check captures/stages/cyclorama           # errors -> exit code != 0
 build/bin/stage_check --selftest                          # evaluator / validator unit checks
 ```

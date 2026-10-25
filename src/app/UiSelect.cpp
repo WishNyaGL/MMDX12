@@ -14,6 +14,7 @@
 
 #include "core/Log.h"
 #include "core/TextUtil.h"
+#include "asset/StageManifest.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "studio/FileDialog.h"
@@ -957,6 +958,49 @@ void App::DrawSelect() {
                         }
                     }
                 }
+                // S1b: an MMDX stage's variants (the per-asset render option deck). Saved per stage as
+                // "stageVariant=<variant id>|<stage id>"; --stage-variant wins for one run.
+                if (st && !st->manifestPath.empty()) {
+                    if (lobbyStageManifestId_ != st->id) {
+                        lobbyStageManifestId_ = st->id;
+                        lobbyStageManifest_.reset();
+                        auto manifest = std::make_shared<StageManifest>();
+                        std::string err;
+                        if (LoadStageManifest(st->manifestPath, *manifest, err)) lobbyStageManifest_ = manifest;
+                        else LOG_WARN("lobby: MMDX stage manifest failed: %s: %s",
+                                      PathToUtf8(st->manifestPath).c_str(), err.c_str());
+                    }
+                    const StageManifest* manifest = lobbyStageManifest_.get();
+                    if (manifest && manifest->variants.size() >= 2) {
+                        Gap(14.0f);
+                        SectionLabel(Tr("스테이지 배리언트"));
+                        std::string current = settings_.StageVariant(st->id);
+                        if (current.empty()) current = manifest->DefaultVariant() ? manifest->DefaultVariant()->id : "";
+                        int selected = -1;
+                        for (size_t i = 0; i < manifest->variants.size(); ++i)
+                            if (manifest->variants[i].id == current) selected = (int)i;
+                        if (selected < 0) selected = 0;
+                        std::string currentLabel = manifest->variants[(size_t)selected].label.Get(StageLanguage());
+                        if (currentLabel.empty()) currentLabel = manifest->variants[(size_t)selected].id;
+                        if (ImGui::BeginCombo("##stagevariant", currentLabel.c_str())) {
+                            for (size_t i = 0; i < manifest->variants.size(); ++i) {
+                                const StageVariant& v = manifest->variants[i];
+                                std::string label = v.label.Get(StageLanguage());
+                                if (label.empty()) label = v.id;
+                                if (ImGui::Selectable(label.c_str(), (int)i == selected)) {
+                                    settings_.SetStageVariant(st->id, v.id);
+                                    settings_.Save(settingsPath_);
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        PushFont(Font::Regular, size::Caption);
+                        ImGui::TextDisabled("%s", options_.stageVariant.empty()
+                                                      ? Tr("플레이 · 스튜디오에 적용됩니다")
+                                                      : Tr("--stage-variant 가 이번 실행 동안 우선합니다"));
+                        PopFont();
+                    }
+                }
 
                 // M6b: the character's MME object effect choice (없음 / 모델 동봉 효과 / 파일 선택…), saved as
                 // characterMme=. Applied at the next play / studio load.
@@ -1122,11 +1166,15 @@ void App::DrawSelect() {
             }
             Gap(18.0f);
             SectionLabel(Tr("조명"));
-            const char* lightIcons[] = {icon::Sun, icon::CircleHalf, icon::Sparkle, icon::Moon};
-            for (int i = 0; i < kLightingPresetCount; ++i) {
+            const char* lightIcons[] = {icon::Sun, icon::CircleHalf, icon::Sparkle, icon::Moon, icon::Lightbulb};
+            // S1b: "스테이지 조명" only shows for a selected MMDX stage (its rig is what the entry renders).
+            const bool stageRig = st && !st->manifestPath.empty();
+            const int lightCount = stageRig ? kLightingChoiceCount : kLightingPresetCount;
+            const int shownLighting = std::clamp(settings_.lighting, 0, lightCount - 1);
+            for (int i = 0; i < lightCount; ++i) {
                 if (i % 2) ImGui::SameLine(0, Dp(8.0f));
                 ImGui::PushID(i);
-                if (Chip("##light", LightingPresetName((LightingPreset)i), lightIcons[i], settings_.lighting == i, chipW)) {
+                if (Chip("##light", LightingPresetName((LightingPreset)i), lightIcons[i], shownLighting == i, chipW)) {
                     settings_.lighting = i;
                     settings_.Save(settingsPath_);
                 }

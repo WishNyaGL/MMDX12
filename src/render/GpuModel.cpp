@@ -573,13 +573,16 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                      L"model.pbr");
+        pbrRecords_ = records;   // the base values SetPbrOverrides restores / rings copy from
         if (!pbrBuf_) {
             LOG_WARN("model '%s': PBR record buffer creation failed", name_.c_str());
             pbrIndex_.assign(pmx.materials.size(), DescriptorHeap::kInvalid);
+            pbrRecords_.clear();
         } else {
             const uint32_t alloc = ctx.SrvHeap().Allocate(1);
             if (alloc != DescriptorHeap::kInvalid) {
                 pbrSrv_ = alloc;
+                pbrStaticSrv_ = alloc;
                 D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
                 srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -590,6 +593,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             } else {
                 pbrBuf_.Reset();
                 pbrIndex_.assign(pmx.materials.size(), DescriptorHeap::kInvalid);
+                pbrRecords_.clear();
             }
         }
     }
@@ -685,6 +689,8 @@ void GpuModel::UpdateMaterials(uint64_t frame, const std::vector<PmxMorph::Mater
     const size_t n = materials_.size();
     const bool identity = mul.size() != n || add.size() != n;
     if (identity) version = 0;
+    // a stage receiveShadow override changed: fold it into the version so the constants rebuild and re-upload
+    if (stageFlagsGen_) version ^= (stageFlagsGen_ << 24);
     const bool alpha = opacity != 1.0f;
     if (alpha) version |= (1ull << 63);  // fold the opacity into the version so a change re-uploads (1 stays untouched)
     if (version != materialVersion_) {
@@ -716,6 +722,11 @@ void GpuModel::UpdateMaterials(uint64_t frame, const std::vector<PmxMorph::Mater
                 c.toonAdd = a.toonFactor;
             }
             if (alpha) c.diffuse.w = std::clamp(c.diffuse.w * opacity, 0.0f, 1.0f);  // studio accessory opacity
+            if (i < stageReceive_.size() && stageReceive_[i] >= 0) {
+                // a stage material rule's receiveShadow (a runtime target keeps driving it)
+                if (stageReceive_[i] == 1) c.flags |= MatFlag_ReceiveShadow;
+                else c.flags &= ~MatFlag_ReceiveShadow;
+            }
             Material& mat = materials_[i];
             mat.visible = c.diffuse.w > 0.0f;
             mat.drawEdge = materialBase_[i].edgeFlag && c.edgeSize > 0 && c.edgeColor.w > 0 && mat.visible;
@@ -739,6 +750,143 @@ void GpuModel::UpdateMaterials(uint64_t frame, const std::vector<PmxMorph::Mater
         memset(dst + bytes, 0, kPackExtCbBytes - bytes);
         packExtEntryVersion_[r] = packParamsExtVersion_;
     }
+}
+
+void GpuModel::SetPbrOverrides(uint64_t frame, const std::vector<PbrOverride>& list, uint64_t version) {
+    if (!ctx_) return;
+    // The shadow flags do not live in the PBR record: apply them first, so a stage rule that only sets castShadow /
+    // receiveShadow also works on a material without a record.
+    if (stageReceive_.size() < materials_.size()) stageReceive_.resize(materials_.size(), -1);
+    bool flagsChanged = false;
+    for (const PbrOverride& o : list) {
+        if (o.material >= materials_.size()) continue;
+        if (o.castShadow && materialBase_[o.material].castFlag != *o.castShadow) {
+            materialBase_[o.material].castFlag = *o.castShadow;   // UpdateMaterials re-derives Material::castShadow
+            flagsChanged = true;
+        }
+        if (o.receiveShadow) {
+            const int8_t v = *o.receiveShadow ? 1 : 0;
+            if (stageReceive_[o.material] != v) {
+                stageReceive_[o.material] = v;
+                flagsChanged = true;
+            }
+        }
+    }
+    if (flagsChanged) ++stageFlagsGen_;   // UpdateMaterials rebuilds / re-uploads the constants next frame
+    if (pbrRecords_.empty()) return;      // the model has no PBR records to drive
+    const uint32_t r = (uint32_t)(frame % kRing);
+    if (list.empty()) {
+        if (!pbrOverridesActive_) return;
+        // no overrides: everything returns to the model's own records (the DEFAULT buffer).
+        pbrOverridesActive_ = false;
+        for (uint32_t s = 0; s < kRing; ++s) pbrRingVersion_[s] = 0;
+        pbrSrv_ = pbrStaticSrv_;
+        return;
+    }
+    if (!pbrOverridesActive_) {
+        // first override: one UPLOAD-heap copy of the records per ring entry, each with its own SRV (PbrSrv() must
+        // follow the ring, and the DEFAULT buffer is not CPU-writable). Created once; an empty list only switches
+        // PbrSrv() back to the static records.
+        if (!pbrRingBuf_) {
+            pbrRingBytes_ = pbrRecords_.size() * sizeof(GpuPbrMaterial);
+            ComPtr<ID3D12Resource> ring = CreateUploadBuffer(ctx_->Device(), (uint32_t)(pbrRingBytes_ * kRing),
+                                                             L"model.pbrRing");
+            if (!ring || FAILED(ring->Map(0, nullptr, &pbrRingMapped_)) || !pbrRingMapped_) {
+                LOG_WARN("model '%s': PBR override ring creation failed", name_.c_str());
+                return;
+            }
+            pbrRingBuf_ = ring;
+            for (uint32_t s = 0; s < kRing; ++s) {
+                memcpy((uint8_t*)pbrRingMapped_ + s * pbrRingBytes_, pbrRecords_.data(), pbrRingBytes_);
+                pbrRingVersion_[s] = 0;
+                const uint32_t alloc = ctx_->SrvHeap().Allocate(1);
+                if (alloc == DescriptorHeap::kInvalid) {
+                    LOG_WARN("model '%s': out of SRV descriptors for the PBR override ring", name_.c_str());
+                    for (uint32_t f = 0; f < s; ++f)
+                        if (pbrRingSrvs_[f] != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(pbrRingSrvs_[f], 1);
+                    for (uint32_t& f : pbrRingSrvs_) f = DescriptorHeap::kInvalid;
+                    pbrRingBuf_->Unmap(0, nullptr);
+                    pbrRingMapped_ = nullptr;
+                    pbrRingBuf_.Reset();
+                    return;
+                }
+                pbrRingSrvs_[s] = alloc;
+                D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+                srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                srv.Format = DXGI_FORMAT_R32_TYPELESS;
+                srv.Buffer.FirstElement = (UINT)(s * pbrRingBytes_ / 4);
+                srv.Buffer.NumElements = (UINT)(pbrRingBytes_ / 4);
+                srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                ctx_->Device()->CreateShaderResourceView(pbrRingBuf_.Get(), &srv, ctx_->SrvHeap().Cpu(alloc));
+            }
+        }
+        pbrOverridesActive_ = true;
+    }
+    pbrSrv_ = pbrRingSrvs_[r];
+    if (pbrRingVersion_[r] == version) return;   // this ring entry already holds these values
+    // start from the model's own records, then the overrides (later entries win, like the evaluator's assignment order)
+    GpuPbrMaterial* dst = reinterpret_cast<GpuPbrMaterial*>((uint8_t*)pbrRingMapped_ + r * pbrRingBytes_);
+    memcpy(dst, pbrRecords_.data(), pbrRingBytes_);
+    const auto encode = [](float linear) {
+        linear = std::clamp(linear, 0.0f, 1.0f);
+        return linear <= 0.0031308f ? linear * 12.92f : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+    };
+    for (const PbrOverride& o : list) {
+        // the override indexes a material, the record buffer holds one record per material that has one
+        if (o.material >= pbrIndex_.size()) continue;
+        const uint32_t rec = pbrIndex_[o.material];
+        if (rec == DescriptorHeap::kInvalid || rec >= pbrRecords_.size()) continue;
+        GpuPbrMaterial& m = dst[rec];
+        if (o.baseColor) {
+            GpuPbrSlot& albedo = m.slots[(int)PbrSlotId::Albedo];
+            m.params.y = 0.0f;   // ALBEDO_MAP_APPLY_DIFFUSE off: the override is the albedo
+            if (albedo.textureSrv < 0) {
+                albedo.applyScale = 0;   // no map: the sRGB-encoded constant is the albedo
+                albedo.value.x = encode(o.baseColor->x);
+                albedo.value.y = encode(o.baseColor->y);
+                albedo.value.z = encode(o.baseColor->z);
+            } else {
+                albedo.applyScale = 1;   // a map: the LINEAR colour tints it
+                albedo.value.x = std::clamp(o.baseColor->x, 0.0f, 1.0f);
+                albedo.value.y = std::clamp(o.baseColor->y, 0.0f, 1.0f);
+                albedo.value.z = std::clamp(o.baseColor->z, 0.0f, 1.0f);
+            }
+        }
+        if (o.roughness) {
+            GpuPbrSlot& s = m.slots[(int)PbrSlotId::Smoothness];
+            s.textureSrv = -1;   // the override replaces a map: one value for the whole material
+            s.swizzle = 0;
+            s.type = 2;          // linear roughness: the shader's roughness = value^2 (glTF / stage convention)
+            s.applyScale = 0;
+            s.value.x = std::clamp(*o.roughness, 0.0f, 1.0f);
+        }
+        if (o.metallic) {
+            GpuPbrSlot& s = m.slots[(int)PbrSlotId::Metalness];
+            s.textureSrv = -1;
+            s.swizzle = 0;
+            s.applyScale = 0;
+            s.value.x = std::clamp(*o.metallic, 0.0f, 1.0f);
+        }
+        if (o.emissive) {
+            GpuPbrSlot& s = m.slots[(int)PbrSlotId::Emissive];
+            if (s.textureSrv < 0) {
+                s.applyScale = 0;   // no map: the sRGB-encoded constant
+                s.value.x = encode(o.emissive->x);
+                s.value.y = encode(o.emissive->y);
+                s.value.z = encode(o.emissive->z);
+            } else {
+                s.applyScale = 1;   // a map: the LINEAR colour multiplies the decoded map
+                s.value.x = std::clamp(o.emissive->x, 0.0f, 1.0f);
+                s.value.y = std::clamp(o.emissive->y, 0.0f, 1.0f);
+                s.value.z = std::clamp(o.emissive->z, 0.0f, 1.0f);
+            }
+            const bool on = o.emissive->x > 0.0f || o.emissive->y > 0.0f || o.emissive->z > 0.0f;
+            m.flags = on ? (m.flags | 4u) : (m.flags & ~4u);   // GpuPbrFlags bit 2: emissive
+        }
+        if (o.alpha) m.diffuseAlpha = std::clamp(*o.alpha, 0.0f, 1.0f);
+    }
+    pbrRingVersion_[r] = version;
 }
 
 void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& params,
@@ -908,8 +1056,16 @@ void GpuModel::Destroy() {
     if (rt_.srv != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(rt_.srv, 2);
     if (addUvSrv_ != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(addUvSrv_, 1);
     addUvSrv_ = DescriptorHeap::kInvalid;
-    if (pbrSrv_ != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(pbrSrv_, 1);
+    if (pbrStaticSrv_ != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(pbrStaticSrv_, 1);
     pbrSrv_ = DescriptorHeap::kInvalid;
+    pbrStaticSrv_ = DescriptorHeap::kInvalid;
+    for (uint32_t s = 0; s < kRing; ++s)   // the ring outlives a return to the static records (empty list)
+        if (pbrRingSrvs_[s] != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(pbrRingSrvs_[s], 1);
+    for (uint32_t& s : pbrRingSrvs_) s = DescriptorHeap::kInvalid;
+    if (pbrRingBuf_ && pbrRingMapped_) pbrRingBuf_->Unmap(0, nullptr);
+    pbrRingMapped_ = nullptr;
+    pbrRingBuf_.Reset();
+    pbrRecords_.clear();
     for (uint32_t s : pbrTextureSrvs_)
         if (s != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(s, 1);
     pbrTextureSrvs_.clear();

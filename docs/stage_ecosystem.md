@@ -21,6 +21,8 @@ videos, (3) a Times Square-like plaza with many LED billboards and building fire
   glTF 2.0 (`.glb` / `.gltf`, preferred: Blender exports it with standard PBR extensions) or PMX (lets existing MMD stages
   be upgraded by wrapping them). A stage may have several model parts.
 - **Detection by content**: any library folder holding a valid `stage.json` is an MMDX stage (never by folder name).
+  Installed stages (gallery downloads, tests) live in `<exe>/stages/<id>/` (like `<exe>/shader_packs`), a second scan
+  root next to the user's library; the user's library is never written to.
   Its model files are not also listed as plain stages.
 - **Editing = overrides**: the studio never edits the installed stage. Exposed params, variant, light / screen / part
   overrides are stored in the `.mmdxproj` and keyable on the timeline. Mesh work stays in Blender.
@@ -46,7 +48,7 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | # | Milestone | Status |
 |---|---|---|
 | S1a | Format core (asset layer): `stage.json` parser, param / variant / binding evaluator, library detection, `stage_check`, procedural test stages (`tools/stagegen`) | done 2026-10-25 |
-| S1b | App integration: play + studio load MMDX stages, manifest lights as "스테이지 조명", material overrides, lobby variant picker | |
+| S1b | App integration: play + studio load MMDX stages, manifest lights as "스테이지 조명", material overrides, lobby variant picker | done 2026-10-25 |
 | S2a | glTF material / light import: transmission, ior, volume, emissive_strength, clearcoat (approx.), texture_transform, KHR_lights_punctual | |
 | S2b | Mesh dielectrics: transmissive materials refract in RT / PT / offline GI (thin + volume), raster approximation | |
 | S3 | Studio stage entity: outliner group, overrides saved in the project, keyable stage params (timeline rows) | |

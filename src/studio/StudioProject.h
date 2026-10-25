@@ -71,6 +71,7 @@ struct ProjectModel {    std::string name;                  // outliner label (U
     ShaderChoice shader;               // characters: shader pack ("shader", absent = the default shading)
     MmeChoice mme;                     // M6a: MME object effect choice ("mme", absent = characters None / stages Auto)
     MaterialChoice material;           // P5: per-material PBR source ("material", absent = Default)
+    std::string stageVariant;          // S1b: an MMDX stage part's variant ("stageVariant", absent = the default)
     MotionData motion;                 // its keys; motion.modelName is written as the VMD header model name
 };
 

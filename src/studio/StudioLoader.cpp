@@ -5,6 +5,8 @@
 #include "asset/AssetLibrary.h"
 #include "asset/MmeHints.h"
 #include "asset/ModelImport.h"
+#include "asset/StageManifest.h"
+#include "asset/StageMaterials.h"
 #include "asset/VmdMotion.h"
 #include "core/I18n.h"
 #include "core/Log.h"
@@ -72,7 +74,7 @@ bool LoadModel(const std::filesystem::path& path, ModelRole role, const std::str
 
 bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset* song,
                        StudioPackage& out, LoadProgress* progress, std::string* error,
-                       const MaterialChoiceFn& materialChoice) {
+                       const MaterialChoiceFn& materialChoice, const std::string& stageVariant) {
     const auto choiceFor = [&](const std::string& id, const std::filesystem::path& path) {
         return materialChoice ? materialChoice(id, path) : MaterialChoice{};
     };
@@ -81,24 +83,15 @@ bool LoadStudioPackage(const CharacterAsset& character, const StageAsset* stage,
         if (progress) progress->fraction.store(0.0f, std::memory_order_relaxed);
 
         if (stage) {
-            const size_t n = stage->parts.size();
-            for (size_t k = 0; k < n; ++k) {
-                const std::string label =
-                    stage->displayName + (n > 1 ? " " + std::to_string(k + 1) + "/" + std::to_string(n) : "");
-                if (progress) progress->SetStatus(Tr("스테이지 로드: ") + label);
-                StudioPackageModel part;
-                part.kind = ModelKind::Stage;
-                part.mme = MmeChoice{MmeChoice::Auto, {}};   // M6a: stages default to Auto
-                part.libraryId = stage->id;   // P5: a stage's material choice is keyed by its library id
-                std::string err;
-                const float f0 = 0.05f + 0.35f * (float)k / (float)n, f1 = 0.05f + 0.35f * (float)(k + 1) / (float)n;
-                if (!LoadModel(stage->parts[k], ModelRole::Stage, label, progress, f0, f1, part, &err,
-                               choiceFor(stage->id, stage->parts[k]))) {
-                    LOG_WARN("studio: stage part load failed: %s: %s", PathToUtf8(stage->parts[k]).c_str(), err.c_str());
-                    continue;
-                }
-                out.models.push_back(std::move(part));
+            // S1b: an MMDX stage (same part loading as LoadStudioStage) with the stage's per-library material choice.
+            const MaterialChoice stageChoice =
+                choiceFor(stage->id, stage->parts.empty() ? std::filesystem::path() : stage->parts[0]);
+            std::vector<StudioPackageModel> parts;
+            std::string serr;
+            if (!LoadStudioStage(*stage, parts, progress, &serr, stageChoice, stageVariant)) {
+                LOG_WARN("studio: stage load failed: %s: %s", stage->displayName.c_str(), serr.c_str());
             }
+            for (StudioPackageModel& part : parts) out.models.push_back(std::move(part));
         }
 
         if (progress) progress->SetStatus(Tr("캐릭터 로드: ") + character.displayName);
@@ -185,10 +178,42 @@ bool LoadStudioModel(const std::filesystem::path& path, ModelKind kind, const st
 }
 
 bool LoadStudioStage(const StageAsset& stage, std::vector<StudioPackageModel>& out, LoadProgress* progress,
-                     std::string* error, const MaterialChoice& choice) {
+                     std::string* error, const MaterialChoice& choice, const std::string& variant) {
     try {
         out.clear();
-        const size_t n = stage.parts.size();
+        // S1b: an MMDX stage loads its manifest's parts (manifest order) with its material rules applied; a classic
+        // stage keeps the library's part list.
+        std::shared_ptr<const StageManifest> manifest;
+        std::vector<std::filesystem::path> paths;
+        std::vector<int> partIndices;
+        if (!stage.manifestPath.empty()) {
+            auto m = std::make_shared<StageManifest>();
+            std::string err;
+            if (LoadStageManifest(stage.manifestPath, *m, err)) {
+                manifest = m;
+                for (size_t i = 0; i < m->models.size(); ++i) {
+                    const std::filesystem::path p =
+                        (stage.manifestPath.parent_path() / Utf8ToPath(m->models[i].file)).lexically_normal();
+                    std::error_code ec;
+                    if (!std::filesystem::is_regular_file(p, ec)) {
+                        LOG_WARN("studio: MMDX stage part missing: %s", PathToUtf8(p).c_str());
+                        continue;
+                    }
+                    paths.push_back(p);
+                    partIndices.push_back((int)i);
+                }
+            } else {
+                LOG_WARN("studio: MMDX stage manifest failed: %s: %s", PathToUtf8(stage.manifestPath).c_str(),
+                         err.c_str());
+            }
+        }
+        if (!manifest) {
+            for (size_t i = 0; i < stage.parts.size(); ++i) {
+                paths.push_back(stage.parts[i]);
+                partIndices.push_back((int)i);
+            }
+        }
+        const size_t n = paths.size();
         std::string lastErr;
         for (size_t k = 0; k < n; ++k) {
             const std::string label =
@@ -198,14 +223,20 @@ bool LoadStudioStage(const StageAsset& stage, std::vector<StudioPackageModel>& o
             part.kind = ModelKind::Stage;
             part.mme = MmeChoice{MmeChoice::Auto, {}};   // M6a: stages default to Auto
             part.libraryId = stage.id;   // P5: a stage's material choice is keyed by its library id
+            part.stageManifest = manifest;
+            part.stagePart = partIndices[k];
+            part.stageVariant = variant;
             std::string err;
             const float f0 = 0.05f + 0.9f * (float)k / (float)n;
             const float f1 = 0.05f + 0.9f * (float)(k + 1) / (float)n;
-            if (!LoadModel(stage.parts[k], ModelRole::Stage, label, progress, f0, f1, part, &err, choice)) {
-                LOG_WARN("studio: stage part load failed: %s: %s", PathToUtf8(stage.parts[k]).c_str(), err.c_str());
+            if (!LoadModel(paths[k], ModelRole::Stage, label, progress, f0, f1, part, &err, choice)) {
+                LOG_WARN("studio: stage part load failed: %s: %s", PathToUtf8(paths[k]).c_str(), err.c_str());
                 lastErr = err;
                 continue;
             }
+            if (manifest && !manifest->materials.empty() && part.pmx)
+                ApplyStageMaterialRules(*manifest, variant, {}, 0.0, MatchStageMaterialRules(manifest->materials, *part.pmx),
+                                        *part.pmx, part.pbr);
             out.push_back(std::move(part));
         }
         if (out.empty() && n > 0) {
@@ -274,6 +305,38 @@ bool LoadStudioSong(const SongAsset& song, MotionData& dance, MotionData& camera
         return false;
     }
 }
+
+namespace {
+
+// S1b: the MMDX stage a project model's file belongs to (an installed or library stage folder above it). Null for an
+// ordinary model. `part` receives the model's index in the manifest's `models`.
+std::shared_ptr<const StageManifest> FindStageManifestFor(const std::filesystem::path& modelPath, int& part) {
+    part = -1;
+    if (modelPath.empty()) return nullptr;
+    const std::filesystem::path abs = std::filesystem::absolute(modelPath).lexically_normal();
+    std::filesystem::path dir = abs.parent_path();
+    for (int depth = 0; depth < 4 && !dir.empty(); ++depth) {
+        const std::filesystem::path json = dir / Utf8ToPath(kStageManifestName);
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(json, ec)) {
+            auto manifest = std::make_shared<StageManifest>();
+            std::string err;
+            if (LoadStageManifest(json, *manifest, err)) {
+                for (size_t i = 0; i < manifest->models.size(); ++i)
+                    if ((dir / Utf8ToPath(manifest->models[i].file)).lexically_normal() == abs) {
+                        part = (int)i;
+                        return manifest;
+                    }
+            }
+            return nullptr;
+        }
+        if (dir == dir.parent_path()) break;
+        dir = dir.parent_path();
+    }
+    return nullptr;
+}
+
+} // namespace
 
 bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, StudioPackage& out,
                               LoadProgress* progress, std::string* error) {
@@ -345,7 +408,13 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
             m.shader = pm.shader;
             m.material = pm.material;
             m.mme = pm.mme;
+            // S1b: an MMDX stage part keeps its manifest + variant (found from the file, like the loader does).
+            m.stageManifest = FindStageManifestFor(pm.path, m.stagePart);
+            m.stageVariant = pm.stageVariant;
             m.motion = std::move(pm.motion);
+            if (m.stageManifest && !m.stageManifest->materials.empty() && m.pmx)
+                ApplyStageMaterialRules(*m.stageManifest, m.stageVariant, {}, 0.0,
+                                        MatchStageMaterialRules(m.stageManifest->materials, *m.pmx), *m.pmx, m.pbr);
             if (m.pmx) {
                 m.motion.CanonicalizeNames(*m.pmx);
                 if (m.motion.modelName.empty()) m.motion.modelName = m.pmx->name;

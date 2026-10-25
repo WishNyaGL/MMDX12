@@ -112,14 +112,19 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 if (++listed > 16) { sel += " ..."; break; }
                 sel += " " + std::to_string(k.second);
             }
+            // S1b: the selected model's MMDX stage variant ("-" = not an MMDX stage part, "<default>" = the manifest's
+            // default variant).
+            std::string stageVariant = "-";
+            if (d.Selected() && d.Selected()->stageManifest)
+                stageVariant = d.Selected()->stageVariant.empty() ? "<default>" : d.Selected()->stageVariant;
             LOG_INFO("STUDIOSTATE frame=%d model=%d boneKeys=%zu morphKeys=%zu cameraKeys=%zu "
                      "lightKeys=%zu shadowKeys=%zu motionCam=%d shadowTrack=%d sceneLights=%zu "
-                     "selected=%zu selection=[%s ] "
+                     "selected=%zu selection=[%s ] stageVariant=%s "
                      "rows=%zu range=%d..%d loop=%d playing=%d physics=%d undo='%s' redo='%s' undoCount=%zu undoMB=%.1f "
                      "scroll=%.1f zoom=%.2f hoveredWindow=%s activeId=%08x",
                      d.Frame(), d.selectedModel, bones, morphs, d.camera.camera.size(), d.camera.light.size(),
                      d.camera.shadow.size(), (int)d.useMotionCamera, (int)d.useShadowTrack, d.lights.size(),
-                     d.selection.size(), sel.c_str(),
+                     d.selection.size(), sel.c_str(), stageVariant.c_str(),
                      d.selectedRows.size(), d.view.rangeStart, d.view.rangeEnd, (int)d.loop, (int)d.playing,
                      (int)d.physics, d.history.UndoName().c_str(), d.history.RedoName().c_str(), d.history.Count(),
                      d.history.Bytes() / 1048576.0, d.view.scrollFrame, d.view.pxPerFrame,
@@ -167,6 +172,15 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                     }
                 }
                 LOG_INFO("STUDIOPOSEBONES %s", changed.c_str());
+            }
+            // S1b: the selected model's MMDX stage variant (empty = not an MMDX stage part / the manifest's default)
+            if (m) {
+                const std::string variant = m->stageManifest
+                                                ? (m->stageVariant.empty() ? std::string("<default>") : m->stageVariant)
+                                                : std::string("-");
+                LOG_INFO("STUDIOSTAGE stage=%s part=%d variant=%s lights=%d", m->stageManifest ? m->stageManifest->id.c_str() : "-",
+                         m->stagePart, variant.c_str(),
+                         m->stageManifest ? (int)m->stageManifest->lights.size() : 0);
             }
             // P2.2: the selected model's physics bake state (driven bones + baked key count + the off flag)
             if (m) {

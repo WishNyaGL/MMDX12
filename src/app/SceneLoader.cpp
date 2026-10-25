@@ -11,6 +11,8 @@
 #include "asset/ImageLoader.h"
 #include "asset/ModelImport.h"
 #include "asset/MmeHints.h"
+#include "asset/StageMaterials.h"
+#include "asset/StageManifest.h"
 #include "asset/VmdMotion.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
@@ -130,6 +132,66 @@ static std::string LowerAscii(std::string s) {
     return s;
 }
 
+// Loads an MMDX stage's manifest (S1b): null when the stage has no `stage.json` or it does not parse. The manifest is
+// shared with the scene so the App can evaluate it every frame; the variant is resolved by the caller (ini / CLI).
+// A manifest that does not parse is a warning: the stage's parts still load, exactly like the library lists it.
+static std::shared_ptr<const StageManifest> LoadStageManifestFor(const StageAsset& stage) {
+    if (stage.manifestPath.empty()) return nullptr;
+    auto manifest = std::make_shared<StageManifest>();
+    std::string err;
+    if (!LoadStageManifest(stage.manifestPath, *manifest, err)) {
+        LOG_WARN("MMDX stage manifest failed: %s: %s", PathToUtf8(stage.manifestPath).c_str(), err.c_str());
+        return nullptr;
+    }
+    return manifest;
+}
+
+// The parts of an MMDX stage in manifest order (parts that fail to load stay out, with a warning). `partIndices`
+// receives each loaded part's index in `manifest.models`, parallel to the loaded parts.
+static std::vector<std::filesystem::path> MmdxStagePartPaths(const StageAsset& stage, const StageManifest& manifest,
+                                                             std::vector<int>& partIndices) {
+    std::vector<std::filesystem::path> paths;
+    partIndices.clear();
+    for (size_t i = 0; i < manifest.models.size(); ++i) {
+        const std::filesystem::path p = (stage.manifestPath.parent_path() / Utf8ToPath(manifest.models[i].file))
+                                            .lexically_normal();
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(p, ec)) {
+            LOG_WARN("MMDX stage part missing: %s", PathToUtf8(p).c_str());
+            continue;
+        }
+        paths.push_back(p);
+        partIndices.push_back((int)i);
+    }
+    return paths;
+}
+
+// The library's stage parts in `stage.parts` order (classic stages): the part index is the position.
+static std::vector<std::filesystem::path> ClassicStagePartPaths(const StageAsset& stage, std::vector<int>& partIndices) {
+    partIndices.clear();
+    for (size_t i = 0; i < stage.parts.size(); ++i) partIndices.push_back((int)i);
+    return stage.parts;
+}
+
+// Loads one stage part and applies its MMDX stage material rules (S1b) before the GPU upload. The binding (rule ->
+// material) is what the runtime reuses every frame.
+static bool LoadStagePartModel(const std::filesystem::path& path, LoadProgress* progress, float f0, float f1,
+                               const char* label, const MaterialChoice& choice, const StageManifest* manifest,
+                               const std::string& variant, LoadedModelCpu& part, StageMaterialBinding& binding) {
+    part.pmx = std::make_shared<PmxModel>();
+    std::string err;
+    if (!LoadModelFile(path, ModelRole::Stage, *part.pmx, &err)) {
+        LOG_WARN("stage part load failed: %s: %s", PathToUtf8(path).c_str(), err.c_str());
+        return false;
+    }
+    DecodeModelTextures(part, progress, f0, f1, label, choice);
+    if (manifest && !manifest->materials.empty()) {
+        binding = MatchStageMaterialRules(manifest->materials, *part.pmx);
+        ApplyStageMaterialRules(*manifest, variant, {}, 0.0, binding, *part.pmx, part.pbr);
+    }
+    return true;
+}
+
 static void LoadStageMotion(const SongAsset& song, ScenePackage& out) {
     if (out.stageParts.empty()) return;
     std::vector<std::filesystem::path> vmds = song.stageVmds;
@@ -219,7 +281,8 @@ static void LoadStageMotion(const SongAsset& song, ScenePackage& out) {
 
 bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, const SongAsset& song,
                       ScenePackage& out, LoadProgress* progress, std::string* error,
-                      const std::vector<PerformerCast>* formation, const MaterialChoiceFn& materialChoice) {
+                      const std::vector<PerformerCast>* formation, const MaterialChoiceFn& materialChoice,
+                      const std::string& stageManifestVariant) {
     const auto choiceFor = [&](const std::string& id, const std::filesystem::path& path) {
         return materialChoice ? materialChoice(id, path) : MaterialChoice{};
     };
@@ -349,24 +412,30 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
 
             // 3. Stage parts
             if (stage) {
-                const size_t n = stage->parts.size();
+                // S1b: an MMDX stage loads its manifest's parts (in manifest order) with its material rules applied.
+                out.stageManifest = LoadStageManifestFor(*stage);
+                out.stageVariant = stageManifestVariant;
+                std::vector<int> partIndices;
+                const std::vector<std::filesystem::path> paths =
+                    out.stageManifest ? MmdxStagePartPaths(*stage, *out.stageManifest, partIndices)
+                                      : ClassicStagePartPaths(*stage, partIndices);
+                const size_t n = paths.size();
                 for (size_t k = 0; k < n; ++k) {
-                    const std::filesystem::path& partPath = stage->parts[k];
+                    const std::filesystem::path& partPath = paths[k];
                     std::string label = stage->displayName +
                                         (n > 1 ? " " + std::to_string(k + 1) + "/" + std::to_string(n) : "");
                     if (progress) progress->SetStatus(Tr("스테이지 로드: ") + label);
 
                     LoadedModelCpu part;
-                    part.pmx = std::make_shared<PmxModel>();
-                    std::string err;
-                    if (!LoadModelFile(partPath, ModelRole::Stage, *part.pmx, &err)) {
-                        LOG_WARN("stage part load failed: %s: %s", PathToUtf8(partPath).c_str(), err.c_str());
-                        continue;
-                    }
+                    StageMaterialBinding binding;
                     float begin = (curUnit + (float)k / (float)std::max<size_t>(n, 1)) / totalUnits;
                     float end = (curUnit + (float)(k + 1) / (float)std::max<size_t>(n, 1)) / totalUnits;
-                    DecodeModelTextures(part, progress, begin, end, label.c_str(), choiceFor(stage->id, partPath));
+                    if (!LoadStagePartModel(partPath, progress, begin, end, label.c_str(),
+                                            choiceFor(stage->id, partPath), out.stageManifest.get(),
+                                            out.stageVariant, part, binding))
+                        continue;
                     out.stageParts.push_back(std::move(part));
+                    out.stagePartBindings.push_back(std::move(binding));
                 }
             }
 
@@ -432,24 +501,29 @@ bool LoadScenePackage(const CharacterAsset& character, const StageAsset* stage, 
 
         // 3. Stage parts.
         if (stage) {
-            const size_t n = stage->parts.size();
+            out.stageManifest = LoadStageManifestFor(*stage);
+            out.stageVariant = stageManifestVariant;
+            std::vector<int> partIndices;
+            const std::vector<std::filesystem::path> paths =
+                out.stageManifest ? MmdxStagePartPaths(*stage, *out.stageManifest, partIndices)
+                                  : ClassicStagePartPaths(*stage, partIndices);
+            const size_t n = paths.size();
             for (size_t k = 0; k < n; ++k) {
-                const std::filesystem::path& partPath = stage->parts[k];
+                const std::filesystem::path& partPath = paths[k];
                 std::string label = stage->displayName +
                                     (n > 1 ? " " + std::to_string(k + 1) + "/" + std::to_string(n) : "");
                 if (progress) progress->SetStatus(Tr("스테이지 로드: ") + label);
 
                 LoadedModelCpu part;
-                part.pmx = std::make_shared<PmxModel>();
-                std::string err;
-                if (!LoadModelFile(partPath, ModelRole::Stage, *part.pmx, &err)) {
-                    LOG_WARN("stage part load failed: %s: %s", PathToUtf8(partPath).c_str(), err.c_str());
-                    continue;
-                }
+                StageMaterialBinding binding;
                 float begin = 0.45f + 0.35f * (float)k / (float)std::max<size_t>(n, 1);
                 float end = 0.45f + 0.35f * (float)(k + 1) / (float)std::max<size_t>(n, 1);
-                DecodeModelTextures(part, progress, begin, end, label.c_str(), choiceFor(stage->id, partPath));
+                if (!LoadStagePartModel(partPath, progress, begin, end, label.c_str(),
+                                        choiceFor(stage->id, partPath), out.stageManifest.get(),
+                                        out.stageVariant, part, binding))
+                    continue;
                 out.stageParts.push_back(std::move(part));
+                out.stagePartBindings.push_back(std::move(binding));
             }
         }
 
