@@ -745,6 +745,7 @@ void App::StudioClearEditState() {
     d.selectedBones.clear();
     d.activeBone = -1;
     d.collapsed.clear();
+    d.expanded.clear();
     d.clipboard.clear();
     d.clipboardModel = -2;
     d.rowsKey = ~0ull;
@@ -852,6 +853,7 @@ void App::StudioSelectModel(int index) {
     d.selectedBones.clear();
     d.activeBone = -1;
     d.collapsed.clear();
+    d.expanded.clear();
     d.rowsKey = ~0ull;
 }
 

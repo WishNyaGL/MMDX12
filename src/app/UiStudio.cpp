@@ -857,47 +857,166 @@ void App::BuildStudioFrameView(FrameView& view) {
 }
 
 namespace {
+// The runtime row index scheme of RowKind::EffectParam / RowKind::WorldParam (never saved): every pack param component
+// has a stable index whether or not it has a track, so a row exists for it before it is keyed.
+//   pack param i, scalar (Float / Int / Bool): i * 4, track name "key"
+//   pack param i, Vec3: i * 4 + c (c 0..2), track "key#c"; Color: i * 4 + c (c 0..2 = R,G,B, 3 = A if `alpha`)
+//   a track whose name matches no pack param (pack missing / param removed): 0x100000 + n (n = its order among such
+//   tracks), name = the track name.
+constexpr uint32_t kOrphanParamIndexBase = 0x100000;
+// Is `name` the base key of pack param `i`, or one of its components ("key#c")? `comp` receives c (-1 for the base key).
+bool MatchPackParamName(const ShaderPackParam& sp, const std::string& name, int& comp) {
+    if (sp.key == name) { comp = -1; return true; }
+    if (name.size() > sp.key.size() + 1 && name.compare(0, sp.key.size(), sp.key) == 0 &&
+        name[sp.key.size()] == '#') {
+        comp = name[sp.key.size() + 1] - '0';
+        return comp >= 0 && comp <= 3;
+    }
+    return false;
+}
+// The components a pack param offers: 1 for a scalar, 3 for a Vec3, 3 (or 4 with alpha) for a Color.
+int EffectiveParamComponents(const ShaderPackParam& sp) {
+    if (sp.type == ShaderPackParamType::Vec3) return 3;
+    if (sp.type == ShaderPackParamType::Color) return sp.alpha ? 4 : 3;
+    return 1;
+}
+// The row index of the track `name` in the pack scheme; false when the name matches no pack param component (the pack
+// is missing, or the param was removed). A Vec3 / Color param is addressed through its components only.
+bool PackParamIndexOfTrack(const ShaderPack* pk, const std::string& name, uint32_t& index) {
+    if (!pk) return false;
+    for (uint32_t i = 0; i < (uint32_t)pk->params.size(); ++i) {
+        const ShaderPackParam& sp = pk->params[i];
+        int comp = -1;
+        if (!MatchPackParamName(sp, name, comp)) continue;
+        const int comps = EffectiveParamComponents(sp);
+        if (comps == 1) {
+            if (comp < 0) { index = i * 4; return true; }
+            continue;
+        }
+        if (comp < 0 || comp >= comps) continue;
+        index = i * 4 + (uint32_t)comp;
+        return true;
+    }
+    return false;
+}
+// The track name of pack param `i` component `comp` (comp -1 = the param's own scalar track).
+std::string PackParamTrackName(const ShaderPackParam& sp, int comp) {
+    if (comp < 0) return sp.key;
+    return sp.key + "#" + std::to_string(comp);
+}
+// The track name of a row index. `eff.tracks` only lists keyed params, but the name (and so the track) of a component
+// is known from the pack; the index is stable whether or not the track exists.
 std::string EffectParamNameOfIndex(const StudioEffect& eff, uint32_t pidx) {
     const ShaderPack* pk = ShaderPacks().Find(eff.entry.pack);
-    if (pk && pidx < pk->params.size()) return pk->params[pidx].key;
-    size_t offset = pk ? pk->params.size() : 0;
-    size_t extra = 0;
-    for (const auto& t : eff.tracks) {
-        if (pk) {
-            bool inPack = false;
-            for (const auto& sp : pk->params) {
-                if (sp.key == t.param) { inPack = true; break; }
-            }
-            if (inPack) continue;
+    if (pk) {
+        for (uint32_t i = 0; i < (uint32_t)pk->params.size(); ++i) {
+            const ShaderPackParam& sp = pk->params[i];
+            const uint32_t base = i * 4;
+            const int comps = EffectiveParamComponents(sp);
+            if (pidx < base || pidx >= base + (uint32_t)comps) continue;
+            return PackParamTrackName(sp, comps == 1 ? -1 : (int)(pidx - base));
         }
-        if (offset + extra == pidx) return t.param;
-        ++extra;
     }
-    if (!pk && pidx < eff.tracks.size()) return eff.tracks[pidx].param;
+    uint32_t n = 0;
+    for (const auto& t : eff.tracks) {
+        bool inPack = false;
+        if (pk) {
+            for (const ShaderPackParam& sp : pk->params) {
+                int comp = -1;
+                if (MatchPackParamName(sp, t.param, comp)) { inPack = true; break; }
+            }
+        }
+        if (inPack) continue;
+        if (kOrphanParamIndexBase + n == pidx) return t.param;
+        ++n;
+    }
     return {};
 }
 
 uint32_t EffectParamIndexOfName(const StudioEffect& eff, const std::string& paramName) {
     const ShaderPack* pk = ShaderPacks().Find(eff.entry.pack);
-    if (pk) {
-        for (uint32_t i = 0; i < (uint32_t)pk->params.size(); ++i) {
-            if (pk->params[i].key == paramName) return i;
-        }
-    }
-    uint32_t offset = pk ? (uint32_t)pk->params.size() : 0;
-    uint32_t extra = 0;
+    uint32_t index = 0;
+    if (PackParamIndexOfTrack(pk, paramName, index)) return index;
+    uint32_t n = 0;
     for (const auto& t : eff.tracks) {
+        bool inPack = false;
         if (pk) {
-            bool inPack = false;
-            for (const auto& sp : pk->params) {
-                if (sp.key == t.param) { inPack = true; break; }
+            for (const ShaderPackParam& sp : pk->params) {
+                int comp = -1;
+                if (MatchPackParamName(sp, t.param, comp)) { inPack = true; break; }
             }
-            if (inPack) continue;
         }
-        if (t.param == paramName) return offset + extra;
-        ++extra;
+        if (inPack) continue;
+        if (t.param == paramName) return kOrphanParamIndexBase + n;
+        ++n;
     }
     return UINT32_MAX;
+}
+
+// The pack param a track name belongs to ("key" or "key#c"), or nullptr when it matches no pack param.
+const ShaderPackParam* PackParamOfTrack(const ShaderPack* pk, const std::string& param) {
+    if (!pk) return nullptr;
+    for (const ShaderPackParam& sp : pk->params) {
+        int comp = -1;
+        if (MatchPackParamName(sp, param, comp)) return &sp;
+    }
+    return nullptr;
+}
+// A param track's value without keys: the effect's static value, else the pack default (alpha: defVec[3]).
+float ParamStaticValue(const StudioEffect& fx, const std::string& param) {
+    float def = 0.0f;
+    int comp = -1;
+    if (const size_t hash = param.find('#'); hash != std::string::npos && hash + 1 < param.size())
+        comp = param[hash + 1] - '0';
+    if (const ShaderPackParam* sp = PackParamOfTrack(ShaderPacks().Find(fx.entry.pack), param)) {
+        if (comp >= 0) def = sp->defVec[comp];
+        else if (sp->type == ShaderPackParamType::Bool) def = sp->defBool ? 1.0f : 0.0f;
+        else def = sp->def;
+    }
+    if (const auto it = fx.entry.params.find(param); it != fx.entry.params.end()) def = it->second;
+    return def;
+}
+// A key of this param track holds its value until the next one (Int / Bool components, as the inspector keyed them).
+bool ParamTrackStepped(const StudioEffect& fx, const std::string& param) {
+    if (param.find('#') != std::string::npos) return false;
+    const ShaderPackParam* sp = PackParamOfTrack(ShaderPacks().Find(fx.entry.pack), param);
+    return sp && (sp->type == ShaderPackParamType::Int || sp->type == ShaderPackParamType::Bool);
+}
+// A param track's keys, or nullptr when it has no track yet.
+EffectParamTrack* FindParamTrack(StudioEffect& fx, const std::string& param) {
+    for (EffectParamTrack& t : fx.tracks)
+        if (t.param == param) return &t;
+    return nullptr;
+}
+// The confirm modal / row label of a param: "<pack or entity name> · <param label>" like the timeline rows.
+std::string ParamRowLabel(const StudioEffect& fx, const std::string& entityName, const std::string& param) {
+    const ShaderPack* pk = ShaderPacks().Find(fx.entry.pack);
+    std::string label = param;
+    std::string baseKey = param;
+    std::string compSuffix;
+    if (const size_t hash = param.find('#'); hash != std::string::npos) {
+        baseKey = param.substr(0, hash);
+        compSuffix = param.substr(hash);
+    }
+    if (pk) {
+        for (const ShaderPackParam& sp : pk->params) {
+            if (sp.key != baseKey) continue;
+            if (!sp.label.Empty()) label = sp.label.Get(PackLanguage());
+            if (compSuffix.size() > 1) {
+                const int c = compSuffix[1] - '0';
+                if (sp.type == ShaderPackParamType::Color) {
+                    static const char* kCol[4] = {" · R", " · G", " · B", " · A"};
+                    if (c >= 0 && c < 4) label += kCol[c];
+                } else {
+                    static const char* kVec[3] = {" · X", " · Y", " · Z"};
+                    if (c >= 0 && c < 3) label += kVec[c];
+                }
+            }
+            break;
+        }
+    }
+    const std::string prefix = entityName.empty() ? (pk ? pk->name.Get(PackLanguage()) : fx.entry.pack) : entityName;
+    return prefix + " · " + label;
 }
 } // namespace
 
@@ -909,7 +1028,7 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
     const StudioDoc& d = *studio_;
     kind = RowKindOf(row);
     name.clear();
-    if (kind == RowKind::GraphLane) return false;  // graph lane rows carry no track / keys
+    if (kind == RowKind::GraphLane || kind == RowKind::GraphChannel) return false;  // graph rows carry no track / keys
     if (IsCameraKind(kind)) return d.selectedModel < 0;
     if (kind == RowKind::SceneLight) {
         // a light row is only offered through the camera target (the lights live next to the camera)
@@ -1801,6 +1920,64 @@ void App::StudioRowStopwatch(uint64_t rowId) {
                 }
             };
         }
+    } else if (kind == RowKind::EffectParam || kind == RowKind::WorldParam) {
+        const uint32_t uid = RowGroupOf(rowId);
+        StudioEffect* fx = kind == RowKind::WorldParam
+                                ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr)
+                                : d.FindEffect(uid);
+        if (!fx) return;
+        EffectParamTrack* tr = FindParamTrack(*fx, name);
+        const bool animated = tr && !tr->keys.empty();
+        if (!animated) {
+            std::vector<TrackState> before = {CaptureTrack(d, -1, kind, name)};
+            if (!tr) {
+                fx->tracks.push_back({name, {}});
+                tr = &fx->tracks.back();
+            }
+            const float val = EvaluateParamTrack(*tr, (float)frame, ParamStaticValue(*fx, name));
+            UpsertParamKey(*tr, EffectParamKey{frame, val, ParamTrackStepped(*fx, name)});
+            StudioPushTrackEdit(Tr("애니메이션 켜기"), before);
+            d.rowsKey = ~0ull;
+        } else {
+            const std::string label =
+                kind == RowKind::WorldParam
+                    ? ParamRowLabel(*fx, d.FindWorld(uid) ? d.FindWorld(uid)->name : std::string(), name)
+                    : ParamRowLabel(*fx, std::string(), name);
+            studioStopwatchLabel_ = label;
+            studioStopwatchOff_ = [this, &d, kind, uid, param = name] {
+                // the entity is looked up again (the list may have changed since the modal opened)
+                StudioEffect* target = kind == RowKind::WorldParam
+                                           ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr)
+                                           : d.FindEffect(uid);
+                if (!target) return;
+                const float value = ParamStaticValue(*target, param);
+                float current = value;
+                if (const EffectParamTrack* tr = FindParamTrack(*target, param))
+                    current = EvaluateParamTrack(*tr, (float)d.Frame(), value);
+                if (kind == RowKind::WorldParam) {
+                    std::vector<StudioWorld> before = d.worlds;
+                    StudioWorld* world = d.FindWorld(uid);
+                    if (!world) return;
+                    world->fx.entry.params[param] = current;
+                    auto& tracks = world->fx.tracks;
+                    tracks.erase(std::remove_if(tracks.begin(), tracks.end(),
+                                                [&](const EffectParamTrack& t) { return t.param == param; }),
+                                 tracks.end());
+                    d.history.Push(std::make_unique<WorldsCommand>(d, Tr("애니메이션 끄기"), before, d.worlds));
+                } else {
+                    std::vector<StudioEffect> before = d.effects;
+                    StudioEffect* eff = d.FindEffect(uid);
+                    if (!eff) return;
+                    eff->entry.params[param] = current;
+                    auto& tracks = eff->tracks;
+                    tracks.erase(std::remove_if(tracks.begin(), tracks.end(),
+                                                [&](const EffectParamTrack& t) { return t.param == param; }),
+                                 tracks.end());
+                    d.history.Push(std::make_unique<EffectsCommand>(d, Tr("애니메이션 끄기"), before, d.effects));
+                }
+                d.rowsKey = ~0ull;
+            };
+        }
     }
 }
 
@@ -1844,6 +2021,22 @@ void App::StudioRowKeyNav(uint64_t rowId, int dir) {
                     for (const LightKey& k : light->keys) { if (k.frame < frame) target = k.frame; else break; }
                 } else {
                     for (const LightKey& k : light->keys) { if (k.frame > frame) { target = k.frame; break; } }
+                }
+            }
+        } else if (kind == RowKind::EffectParam || kind == RowKind::WorldParam) {
+            const uint32_t uid = RowGroupOf(rowId);
+            const StudioEffect* fx = kind == RowKind::WorldParam
+                                         ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr)
+                                         : d.FindEffect(uid);
+            if (fx) {
+                for (const auto& t : fx->tracks) {
+                    if (t.param != name) continue;
+                    if (dir < 0) {
+                        for (const EffectParamKey& k : t.keys) { if (k.frame < frame) target = k.frame; else break; }
+                    } else {
+                        for (const EffectParamKey& k : t.keys) { if (k.frame > frame) { target = k.frame; break; } }
+                    }
+                    break;
                 }
             }
         }
@@ -1915,6 +2108,29 @@ void App::StudioRowKeyNav(uint64_t rowId, int dir) {
             studioLightChanged_ = true;
             StudioEndLightEdit(light->uid);
             d.rowsKey = ~0ull;
+        } else if (kind == RowKind::EffectParam || kind == RowKind::WorldParam) {
+            const uint32_t uid = RowGroupOf(rowId);
+            StudioEffect* fx = kind == RowKind::WorldParam
+                                   ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr)
+                                   : d.FindEffect(uid);
+            if (!fx) return;
+            const char* addName = kind == RowKind::WorldParam ? Tr("월드 키 등록") : Tr("효과 키 등록");
+            const char* delName = kind == RowKind::WorldParam ? Tr("월드 키 삭제") : Tr("효과 키 삭제");
+            EffectParamTrack* tr = FindParamTrack(*fx, name);
+            std::vector<TrackState> before = {CaptureTrack(d, -1, kind, name)};
+            if (tr && FindKey(tr->keys, frame)) {
+                EraseParamKeys(*tr, {(int32_t)frame});
+                StudioPushTrackEdit(delName, before);
+            } else {
+                if (!tr) {
+                    fx->tracks.push_back({name, {}});
+                    tr = &fx->tracks.back();
+                }
+                const float val = EvaluateParamTrack(*tr, (float)frame, ParamStaticValue(*fx, name));
+                UpsertParamKey(*tr, EffectParamKey{frame, val, ParamTrackStepped(*fx, name)});
+                StudioPushTrackEdit(addName, before);
+            }
+            d.rowsKey = ~0ull;
         }
     }
 }
@@ -1933,7 +2149,28 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
         StudioSeek(ev.seekFrame / (double)kMmdFps);
     }
     if (ev.toggleGroup) {
-        if (!d.collapsed.erase(ev.toggledRow)) d.collapsed.insert(ev.toggledRow);
+        // entity groups (default collapsed) and pack groups whose pack.json group is "collapsed": the open state lives in
+        // d.expanded; every other group keeps d.collapsed ("collapsed"). Decided by the row id (see MakeRowId).
+        const auto defaultCollapsed = [&](uint64_t id) {
+            if (RowKindOf(id) != RowKind::Group) return false;
+            const uint32_t groupWord = RowGroupOf(id);
+            const uint32_t index = RowIndexOf(id);
+            const uint32_t flag = groupWord & 0xC00000u;
+            if (flag != 0x400000u && flag != 0x800000u) return false;
+            if (index == 0) return true;  // the entity group itself
+            const uint32_t uid = groupWord & 0x3FFFFFu;
+            const StudioEffect* fx = flag == 0x400000u ? d.FindEffect(uid)
+                                     : (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr);
+            if (!fx) return false;
+            const ShaderPack* pk = ShaderPacks().Find(fx->entry.pack);
+            if (!pk || index - 1 >= pk->groups.size()) return false;
+            return pk->groups[index - 1].collapsed;
+        };
+        if (defaultCollapsed(ev.toggledRow)) {
+            if (!d.expanded.erase(ev.toggledRow)) d.expanded.insert(ev.toggledRow);
+        } else {
+            if (!d.collapsed.erase(ev.toggledRow)) d.collapsed.insert(ev.toggledRow);
+        }
         d.rowsKey = ~0ull;
     }
     if (ev.toggleGraph) {
@@ -1942,18 +2179,24 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
         d.rowsKey = ~0ull;
     }
     if (ev.graphChannel) {
-        // a lane's chip picks the shared channel (the inspector's segmented control follows); clamp to that row's count
-        int count = 6;
-        for (const TimelineRow& r : d.rows)
-            if (r.id == ev.graphChannelRow && !r.graphChannels.empty()) {
-                count = (int)r.graphChannels.size();
-                break;
-            }
-        d.curveChannel = std::clamp(ev.graphChannelIndex, 0, count - 1);
-        d.rowsKey = ~0ull;
+        // a channel row toggles ITS OWN lane (several can be open at once); a single channel row also picks the
+        // inspector's channel, so its segmented control follows. d.curveAllChannels is no longer driven from here.
+        const uint64_t laneRow = MakeRowId(RowKind::GraphChannel, (uint32_t)(ev.graphChannelRow & 0xFFFFFFu),
+                                          (uint32_t)ev.graphChannelIndex);
+        if (!d.graphLaneOpen.erase(laneRow)) d.graphLaneOpen.insert(laneRow);
+        if (ev.graphChannelIndex != kTimelineGraphAllChannels) {
+            int count = 6;
+            for (const TimelineRow& r : d.rows)
+                if (r.id == ev.graphChannelRow && !r.graphChannels.empty()) {
+                    count = (int)r.graphChannels.size();
+                    break;
+                }
+            d.curveChannel = std::clamp(ev.graphChannelIndex, 0, count - 1);
+        }
+        d.rowsKey = ~0ull;  // the lane rows sit under their channel row
     }
     if (ev.graphCurve) {
-        // a lane handle drag: write the bytes into the active channel (every channel when "apply to all" is on) of the
+        // a lane handle drag: write the bytes into the block's channel (every channel for the "all channels" lane) of the
         // key that owns the segment. A curve edit moves no key: no d.rowsKey.
         RowKind kind;
         std::string name;
@@ -1975,8 +2218,9 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
                     studioLaneCurveChanged_ = false;
                 }
                 const int channels = kind == RowKind::Bone ? 4 : 6;
-                const int c0 = d.curveAllChannels ? 0 : std::clamp(d.curveChannel, 0, channels - 1);
-                const int c1 = d.curveAllChannels ? channels : c0 + 1;
+                const int c0 = ev.graphCurveChannel == kTimelineGraphAllChannels ? 0
+                                                                                : std::clamp(ev.graphCurveChannel, 0, channels - 1);
+                const int c1 = ev.graphCurveChannel == kTimelineGraphAllChannels ? channels : c0 + 1;
                 bool differs = false;
                 for (int ch = c0; ch < c1; ++ch) {
                     uint8_t cur[4];
@@ -2173,21 +2417,44 @@ void App::StudioRebuildRows() {
         if (r.keys.size() < 2) return false;
         for (int i = 0; i < count; ++i) r.graphChannels.push_back({labels[i], BezierChannelColor(i)});
         r.graphOpen = d.graphOpen.count(r.id) != 0;
-        r.graphActive = std::clamp(d.curveChannel, 0, count - 1);
         return r.graphOpen;
     };
-    // Inserts the kTimelineGraphRows lane rows of an open graph right where they belong (call after pushing the parent
-    // row). A lane row is never a track: RowKind::GraphLane carries the parent id in `graphOf`; its group is the parent
-    // row id's low 24 bits and its index the graph index.
-    const auto pushLaneRows = [&](std::vector<TimelineRow>& out, uint64_t parentId) {
-        for (int i = 0; i < kTimelineGraphRows; ++i) {
-            TimelineRow lane;
-            lane.id = MakeRowId(RowKind::GraphLane, (uint32_t)(parentId & 0xFFFFFFu), (uint32_t)i);
-            lane.keysEditable = false;
-            lane.graphOf = parentId;
-            lane.graphIndex = i;
-            out.push_back(std::move(lane));
-        }
+    // Inserts the channel sub-rows of an open graph, and under every channel whose own lane is open (d.graphLaneOpen)
+    // its kTimelineGraphRows lane rows, right where they belong (call after pushing the parent row; `parent` is passed by
+    // value: the caller's vector may reallocate). Neither is a track: RowKind::GraphChannel rows carry the parent id in
+    // `graphOf` and the channel in `graphChannelIndex`; RowKind::GraphLane rows carry the parent id in `graphOf`, the
+    // block's channel in `graphLaneChannel` and the lane index in `graphIndex`. The lane rows' id group is the parent row
+    // id's low 24 bits, their index (channel << 8) | lane index. The first channel row is "모든 채널"
+    // (kTimelineGraphAllChannels: one easing curve for every channel).
+    const auto pushGraphRows = [&](std::vector<TimelineRow>& out, TimelineRow parent) {
+        const int channelCount = (int)parent.graphChannels.size();
+        const auto pushChannel = [&](int ch, const std::string& label, ImU32 dot) {
+            TimelineRow chan;
+            chan.id = MakeRowId(RowKind::GraphChannel, (uint32_t)(parent.id & 0xFFFFFFu), (uint32_t)ch);
+            chan.label = label;
+            chan.depth = parent.depth + 1;
+            chan.keysEditable = false;
+            chan.keys = parent.keys;
+            chan.graphOf = parent.id;
+            chan.graphChannelIndex = ch;
+            chan.dotColor = dot;
+            chan.graphOpen = d.graphLaneOpen.count(chan.id) != 0;
+            const bool laneOpen = chan.graphOpen;
+            out.push_back(std::move(chan));
+            if (!laneOpen) return;
+            for (int i = 0; i < kTimelineGraphRows; ++i) {
+                TimelineRow lane;
+                lane.id = MakeRowId(RowKind::GraphLane, (uint32_t)(parent.id & 0xFFFFFFu), (uint32_t)((ch << 8) | i));
+                lane.keysEditable = false;
+                lane.graphOf = parent.id;
+                lane.graphIndex = i;
+                lane.graphLaneChannel = ch;
+                out.push_back(std::move(lane));
+            }
+        };
+        pushChannel(kTimelineGraphAllChannels, Tr("모든 채널"), 0);
+        for (int ch = 0; ch < channelCount; ++ch)
+            pushChannel(ch, parent.graphChannels[(size_t)ch].label, parent.graphChannels[(size_t)ch].color);
     };
     if (d.selectedModel < 0) {
         TimelineRow r;
@@ -2197,8 +2464,10 @@ void App::StudioRebuildRows() {
         keysOf(r.id, d.camera.camera, r.keys);
         const char* const cameraChannels[] = {"X", "Y", "Z", Tr("회전"), Tr("거리"), Tr("시야")};
         const bool cameraGraph = fillGraph(r, cameraChannels, 6);
+        std::vector<TimelineRow> cameraGraphRows;
+        if (cameraGraph) pushGraphRows(cameraGraphRows, r);
         d.rows.push_back(std::move(r));
-        if (cameraGraph) pushLaneRows(d.rows, MakeRowId(RowKind::Camera, 0, 0));
+        for (auto& c : cameraGraphRows) d.rows.push_back(std::move(c));
         TimelineRow l;
         l.id = MakeRowId(RowKind::Light, 0, 0);
         l.label = Tr("조명");
@@ -2233,15 +2502,11 @@ void App::StudioRebuildRows() {
             d.rows.push_back(std::move(r));
         }
 
-        // effect parameters: a row group "화면 효과" under the camera target
-        bool hasAnyEffectKeys = false;
-        for (const auto& eff : d.effects) {
-            for (const auto& tr : eff.tracks) {
-                if (!tr.keys.empty()) { hasAnyEffectKeys = true; break; }
-            }
-            if (hasAnyEffectKeys) break;
-        }
-        if (hasAnyEffectKeys) {
+        // effect parameters: a row tree "화면 효과" under the camera target: one default-collapsed group per effect
+        // (label = pack name), one group per pack.json group that has params (label = group label), then the params
+        // (label = param label; a component "색 · R"). Params without a group and orphan keyed tracks sit directly
+        // under the effect, after its groups.
+        if (!d.effects.empty()) {
             TimelineRow group;
             group.id = MakeRowId(RowKind::Group, 0, 0);
             group.label = Tr("화면 효과");
@@ -2252,65 +2517,141 @@ void App::StudioRebuildRows() {
             std::vector<uint64_t>& childIds = d.groupChildren[group.id];
             std::set<int> summary;
             std::vector<TimelineRow> children;
+            // one entry per param component; `packGroup` = the pack.json group it belongs to (-1 = none / unknown)
+            struct ParamRow {
+                std::string param, label;
+                const EffectParamTrack* tr = nullptr;
+                int packGroup = -1;
+            };
             for (const auto& eff : d.effects) {
                 const ShaderPack* pk = ShaderPacks().Find(eff.entry.pack);
                 const std::string packName = pk ? pk->name.Get(PackLanguage()) : eff.entry.pack;
-                for (const auto& tr : eff.tracks) {
-                    if (tr.keys.empty()) continue;
-                    uint32_t pidx = EffectParamIndexOfName(eff, tr.param);
-                    if (pidx == UINT32_MAX) continue;
-                    TimelineRow r;
-                    r.depth = 1;
-                    r.id = MakeRowId(RowKind::EffectParam, eff.uid, pidx);
-                    std::string paramLabel = tr.param;
-                    if (pk) {
-                        std::string baseKey = tr.param;
-                        std::string compSuffix;
-                        size_t hashPos = tr.param.find('#');
-                        if (hashPos != std::string::npos) {
-                            baseKey = tr.param.substr(0, hashPos);
-                            compSuffix = tr.param.substr(hashPos);
-                        }
-                        for (const auto& sp : pk->params) {
-                            if (sp.key == baseKey) {
-                                if (!sp.label.Empty()) paramLabel = sp.label.Get(PackLanguage());
-                                if (compSuffix.size() > 1) {
-                                    int c = compSuffix[1] - '0';
-                                    if (sp.type == ShaderPackParamType::Color) {
-                                        static const char* kCol[4] = {" · R", " · G", " · B", " · A"};
-                                        if (c >= 0 && c < 4) paramLabel += kCol[c];
-                                    } else {
-                                        static const char* kVec[3] = {" · X", " · Y", " · Z"};
-                                        if (c >= 0 && c < 3) paramLabel += kVec[c];
-                                    }
-                                }
-                                break;
+                const uint32_t entityGroup = 0x400000u | eff.uid;
+                const auto trackOf = [&](const std::string& param) -> const EffectParamTrack* {
+                    for (const auto& t : eff.tracks)
+                        if (t.param == param) return &t;
+                    return nullptr;
+                };
+                static const char* kCol[4] = {" · R", " · G", " · B", " · A"};
+                static const char* kVec[3] = {" · X", " · Y", " · Z"};
+                std::vector<ParamRow> params;
+                const auto packGroupOf = [&](const std::string& groupId) {
+                    if (!pk) return -1;
+                    for (int gi = 0; gi < (int)pk->groups.size(); ++gi)
+                        if (pk->groups[(size_t)gi].id == groupId) return gi;
+                    return -1;
+                };
+                std::set<std::string> listed;  // pack params that have their rows (orphan tracks follow)
+                if (pk) {
+                    for (const ShaderPackParam& sp : pk->params) {
+                        listed.insert(sp.key);
+                        const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(PackLanguage());
+                        const int packGroup = packGroupOf(sp.group);
+                        const int comps = EffectiveParamComponents(sp);
+                        if (comps == 1) {
+                            params.push_back({sp.key, label, trackOf(sp.key), packGroup});
+                        } else {
+                            for (int c = 0; c < comps; ++c) {
+                                const std::string param = sp.key + "#" + std::to_string(c);
+                                params.push_back({param, label + (sp.type == ShaderPackParamType::Color ? kCol[c] : kVec[c]),
+                                                  trackOf(param), packGroup});
                             }
                         }
                     }
-                    r.label = packName + " · " + paramLabel;
+                }
+                // keyed tracks whose param matches no pack param (pack missing / param removed)
+                for (const auto& tr : eff.tracks) {
+                    if (listed.count(tr.param)) continue;
+                    bool inPack = false;
+                    if (pk) {
+                        for (const ShaderPackParam& sp : pk->params) {
+                            int comp = -1;
+                            if (MatchPackParamName(sp, tr.param, comp)) { inPack = true; break; }
+                        }
+                    }
+                    if (inPack) continue;
+                    params.push_back({tr.param, tr.param, &tr, -1});
+                }
+                const auto makeParamRow = [&](const ParamRow& pr, int depth) {
+                    TimelineRow r;
+                    r.depth = depth;
+                    r.id = MakeRowId(RowKind::EffectParam, eff.uid, EffectParamIndexOfName(eff, pr.param));
+                    r.label = pr.label;
                     r.selected = d.selectedRows.count(r.id) != 0;
                     r.tint = IM_COL32(100, 210, 210, 255);
-                    keysOf(r.id, tr.keys, r.keys);
-                    for (const auto& k : tr.keys) summary.insert(k.frame);
-                    childIds.push_back(r.id);
-                    if (group.expanded) children.push_back(std::move(r));
+                    r.hasStopwatch = true;
+                    r.animated = pr.tr && !pr.tr->keys.empty();
+                    if (pr.tr) keysOf(r.id, pr.tr->keys, r.keys);
+                    return r;
+                };
+                // the effect's own group row: default collapsed (d.expanded holds the ones the user opened)
+                TimelineRow ent;
+                ent.id = MakeRowId(RowKind::Group, entityGroup, 0);
+                ent.label = packName;
+                ent.depth = 1;
+                ent.isGroup = true;
+                ent.keysEditable = false;
+                ent.expanded = d.expanded.count(ent.id) != 0;
+                ent.selected = d.selectedRows.count(ent.id) != 0;
+                std::vector<uint64_t>& entChildren = d.groupChildren[ent.id];
+                std::set<int> entSummary;
+                std::vector<TimelineRow> entRows;
+                const bool entShow = group.expanded && ent.expanded;
+                // one group per pack.json group that has params (default collapsed = the group's own "collapsed")
+                for (int gi = 0; pk && gi < (int)pk->groups.size(); ++gi) {
+                    bool hasParam = false;
+                    for (const ParamRow& pr : params)
+                        if (pr.packGroup == gi) { hasParam = true; break; }
+                    if (!hasParam) continue;
+                    const ShaderPackGroup& pg = pk->groups[(size_t)gi];
+                    TimelineRow g;
+                    g.id = MakeRowId(RowKind::Group, entityGroup, 1 + (uint32_t)gi);
+                    g.label = pg.label.Empty() ? pg.id : pg.label.Get(PackLanguage());
+                    g.depth = 2;
+                    g.isGroup = true;
+                    g.keysEditable = false;
+                    g.expanded = pg.collapsed ? d.expanded.count(g.id) != 0 : !d.collapsed.count(g.id);
+                    g.selected = d.selectedRows.count(g.id) != 0;
+                    std::vector<uint64_t>& groupChildIds = d.groupChildren[g.id];
+                    std::set<int> groupSummary;
+                    std::vector<TimelineRow> groupRows;
+                    for (const ParamRow& pr : params) {
+                        if (pr.packGroup != gi) continue;
+                        TimelineRow r = makeParamRow(pr, 3);
+                        for (const TimelineKey& k : r.keys) { groupSummary.insert(k.frame); entSummary.insert(k.frame); }
+                        groupChildIds.push_back(r.id);
+                        entChildren.push_back(r.id);
+                        if (entShow && g.expanded) groupRows.push_back(std::move(r));
+                    }
+                    for (int f : groupSummary) g.keys.push_back({f, false});
+                    if (entShow) entRows.push_back(std::move(g));
+                    for (auto& r : groupRows) entRows.push_back(std::move(r));
                 }
+                // params without a group / with an unknown group, then the orphan keyed tracks: under the effect
+                for (const ParamRow& pr : params) {
+                    if (pr.packGroup >= 0) continue;
+                    TimelineRow r = makeParamRow(pr, 2);
+                    for (const TimelineKey& k : r.keys) entSummary.insert(k.frame);
+                    entChildren.push_back(r.id);
+                    if (entShow) entRows.push_back(std::move(r));
+                }
+                for (int f : entSummary) {
+                    ent.keys.push_back({f, false});
+                    summary.insert(f);
+                }
+                for (uint64_t c : entChildren) childIds.push_back(c);
+                if (group.expanded) children.push_back(std::move(ent));
+                for (auto& r : entRows) children.push_back(std::move(r));
             }
             for (int f : summary) group.keys.push_back({f, false});
             d.rows.push_back(std::move(group));
             for (auto& c : children) d.rows.push_back(std::move(c));
         }
 
-        // world parameters: a row group "월드" under the camera target
-        bool hasAnyWorldKeys = false;
-        for (const auto& world : d.worlds) {
-            for (const auto& tr : world.fx.tracks) {
-                if (!tr.keys.empty()) { hasAnyWorldKeys = true; break; }
-            }
-            if (hasAnyWorldKeys) break;
-        }
-        if (hasAnyWorldKeys) {
+        // world parameters: a row tree "월드" under the camera target (same structure as the effects): one
+        // default-collapsed group per world entity (label = its name, else the pack name), one group per pack.json
+        // group that has params, then the params
+        if (!d.worlds.empty()) {
             TimelineRow group;
             group.id = MakeRowId(RowKind::Group, 0, 1);
             group.label = Tr("월드");
@@ -2321,50 +2662,127 @@ void App::StudioRebuildRows() {
             std::vector<uint64_t>& childIds = d.groupChildren[group.id];
             std::set<int> summary;
             std::vector<TimelineRow> children;
+            struct ParamRow {
+                std::string param, label;
+                const EffectParamTrack* tr = nullptr;
+                int packGroup = -1;
+            };
             for (const auto& world : d.worlds) {
                 const ShaderPack* pk = ShaderPacks().Find(world.fx.entry.pack);
                 const std::string packName = pk ? pk->name.Get(PackLanguage()) : world.fx.entry.pack;
-                for (const auto& tr : world.fx.tracks) {
-                    if (tr.keys.empty()) continue;
-                    uint32_t pidx = EffectParamIndexOfName(world.fx, tr.param);
-                    if (pidx == UINT32_MAX) continue;
-                    TimelineRow r;
-                    r.depth = 1;
-                    r.id = MakeRowId(RowKind::WorldParam, world.uid, pidx);
-                    std::string paramLabel = tr.param;
-                    if (pk) {
-                        std::string baseKey = tr.param;
-                        std::string compSuffix;
-                        size_t hashPos = tr.param.find('#');
-                        if (hashPos != std::string::npos) {
-                            baseKey = tr.param.substr(0, hashPos);
-                            compSuffix = tr.param.substr(hashPos);
-                        }
-                        for (const auto& sp : pk->params) {
-                            if (sp.key == baseKey) {
-                                if (!sp.label.Empty()) paramLabel = sp.label.Get(PackLanguage());
-                                if (compSuffix.size() > 1) {
-                                    int c = compSuffix[1] - '0';
-                                    if (sp.type == ShaderPackParamType::Color) {
-                                        static const char* kCol[4] = {" · R", " · G", " · B", " · A"};
-                                        if (c >= 0 && c < 4) paramLabel += kCol[c];
-                                    } else {
-                                        static const char* kVec[3] = {" · X", " · Y", " · Z"};
-                                        if (c >= 0 && c < 3) paramLabel += kVec[c];
-                                    }
-                                }
-                                break;
+                const std::string entityLabel = world.name.empty() ? packName : world.name;
+                const uint32_t entityGroup = 0x800000u | world.uid;
+                const auto trackOf = [&](const std::string& param) -> const EffectParamTrack* {
+                    for (const auto& t : world.fx.tracks)
+                        if (t.param == param) return &t;
+                    return nullptr;
+                };
+                static const char* kCol[4] = {" · R", " · G", " · B", " · A"};
+                static const char* kVec[3] = {" · X", " · Y", " · Z"};
+                std::vector<ParamRow> params;
+                const auto packGroupOf = [&](const std::string& groupId) {
+                    if (!pk) return -1;
+                    for (int gi = 0; gi < (int)pk->groups.size(); ++gi)
+                        if (pk->groups[(size_t)gi].id == groupId) return gi;
+                    return -1;
+                };
+                std::set<std::string> listed;
+                if (pk) {
+                    for (const ShaderPackParam& sp : pk->params) {
+                        listed.insert(sp.key);
+                        const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(PackLanguage());
+                        const int packGroup = packGroupOf(sp.group);
+                        const int comps = EffectiveParamComponents(sp);
+                        if (comps == 1) {
+                            params.push_back({sp.key, label, trackOf(sp.key), packGroup});
+                        } else {
+                            for (int c = 0; c < comps; ++c) {
+                                const std::string param = sp.key + "#" + std::to_string(c);
+                                params.push_back({param, label + (sp.type == ShaderPackParamType::Color ? kCol[c] : kVec[c]),
+                                                  trackOf(param), packGroup});
                             }
                         }
                     }
-                    r.label = (world.name.empty() ? packName : world.name) + " · " + paramLabel;
+                }
+                for (const auto& tr : world.fx.tracks) {
+                    if (listed.count(tr.param)) continue;
+                    bool inPack = false;
+                    if (pk) {
+                        for (const ShaderPackParam& sp : pk->params) {
+                            int comp = -1;
+                            if (MatchPackParamName(sp, tr.param, comp)) { inPack = true; break; }
+                        }
+                    }
+                    if (inPack) continue;
+                    params.push_back({tr.param, tr.param, &tr, -1});
+                }
+                const auto makeParamRow = [&](const ParamRow& pr, int depth) {
+                    TimelineRow r;
+                    r.depth = depth;
+                    r.id = MakeRowId(RowKind::WorldParam, world.uid, EffectParamIndexOfName(world.fx, pr.param));
+                    r.label = pr.label;
                     r.selected = d.selectedRows.count(r.id) != 0;
                     r.tint = IM_COL32(150, 190, 240, 255);
-                    keysOf(r.id, tr.keys, r.keys);
-                    for (const auto& k : tr.keys) summary.insert(k.frame);
-                    childIds.push_back(r.id);
-                    if (group.expanded) children.push_back(std::move(r));
+                    r.hasStopwatch = true;
+                    r.animated = pr.tr && !pr.tr->keys.empty();
+                    if (pr.tr) keysOf(r.id, pr.tr->keys, r.keys);
+                    return r;
+                };
+                TimelineRow ent;
+                ent.id = MakeRowId(RowKind::Group, entityGroup, 0);
+                ent.label = entityLabel;
+                ent.depth = 1;
+                ent.isGroup = true;
+                ent.keysEditable = false;
+                ent.expanded = d.expanded.count(ent.id) != 0;
+                ent.selected = d.selectedRows.count(ent.id) != 0;
+                std::vector<uint64_t>& entChildren = d.groupChildren[ent.id];
+                std::set<int> entSummary;
+                std::vector<TimelineRow> entRows;
+                const bool entShow = group.expanded && ent.expanded;
+                for (int gi = 0; pk && gi < (int)pk->groups.size(); ++gi) {
+                    bool hasParam = false;
+                    for (const ParamRow& pr : params)
+                        if (pr.packGroup == gi) { hasParam = true; break; }
+                    if (!hasParam) continue;
+                    const ShaderPackGroup& pg = pk->groups[(size_t)gi];
+                    TimelineRow g;
+                    g.id = MakeRowId(RowKind::Group, entityGroup, 1 + (uint32_t)gi);
+                    g.label = pg.label.Empty() ? pg.id : pg.label.Get(PackLanguage());
+                    g.depth = 2;
+                    g.isGroup = true;
+                    g.keysEditable = false;
+                    g.expanded = pg.collapsed ? d.expanded.count(g.id) != 0 : !d.collapsed.count(g.id);
+                    g.selected = d.selectedRows.count(g.id) != 0;
+                    std::vector<uint64_t>& groupChildIds = d.groupChildren[g.id];
+                    std::set<int> groupSummary;
+                    std::vector<TimelineRow> groupRows;
+                    for (const ParamRow& pr : params) {
+                        if (pr.packGroup != gi) continue;
+                        TimelineRow r = makeParamRow(pr, 3);
+                        for (const TimelineKey& k : r.keys) { groupSummary.insert(k.frame); entSummary.insert(k.frame); }
+                        groupChildIds.push_back(r.id);
+                        entChildren.push_back(r.id);
+                        if (entShow && g.expanded) groupRows.push_back(std::move(r));
+                    }
+                    for (int f : groupSummary) g.keys.push_back({f, false});
+                    if (entShow) entRows.push_back(std::move(g));
+                    for (auto& r : groupRows) entRows.push_back(std::move(r));
                 }
+                for (const ParamRow& pr : params) {
+                    if (pr.packGroup >= 0) continue;
+                    TimelineRow r = makeParamRow(pr, 2);
+                    for (const TimelineKey& k : r.keys) entSummary.insert(k.frame);
+                    entChildren.push_back(r.id);
+                    if (entShow) entRows.push_back(std::move(r));
+                }
+                for (int f : entSummary) {
+                    ent.keys.push_back({f, false});
+                    summary.insert(f);
+                }
+                for (uint64_t c : entChildren) childIds.push_back(c);
+                if (group.expanded) children.push_back(std::move(ent));
+                for (auto& r : entRows) children.push_back(std::move(r));
             }
             for (int f : summary) group.keys.push_back({f, false});
             d.rows.push_back(std::move(group));
@@ -2453,10 +2871,9 @@ void App::StudioRebuildRows() {
             }
             r.selected = d.selectedRows.count(r.id) != 0 || (!it.morph && d.selectedBones.count(it.index));
             const bool graph = !it.morph && fillGraph(r, boneChannels, 4);
-            const uint64_t rowId = r.id;
             childIds.push_back(r.id);
             if (group.expanded) children.push_back(std::move(r));
-            if (graph && group.expanded) pushLaneRows(children, rowId);
+            if (graph && group.expanded) pushGraphRows(children, children.back());
         }
         for (int f : summary) group.keys.push_back({f, false});
         d.rows.push_back(std::move(group));
@@ -3148,6 +3565,7 @@ void App::StudioSelectWorld(uint32_t uid) {
     d.selectedBones.clear();
     d.activeBone = -1;
     d.collapsed.clear();
+    d.expanded.clear();
     d.rowsKey = ~0ull;
 }
 
@@ -3349,6 +3767,12 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
         Text(cdl, Font::Semibold, size::Small, c, p.ink2, buf);
         ImGui::Dummy(ImVec2(w, Dp(26.0f)));
     }
+    // After Effects model: the inspector's VALUE fields always mean the playhead. A selected key that sits elsewhere
+    // shows only its track, frame and interpolation (its value fields stay hidden): never an off-screen key edit.
+    const bool keyAwayFromPlayhead = first->second != d.Frame();
+    // the key's fields disappear (playback moved off the key): close a dangling key-section edit. A live field drag
+    // (camera values, effect params) shares studioKeyEdit_ and keeps an item active: leave that one alone.
+    if (keyAwayFromPlayhead && studioKeyEdit_ && !studioKeyLive_ && !ImGui::IsAnyItemActive()) StudioEndKeyEdit();
     const SceneLight* sceneLight = kind == RowKind::SceneLight ? d.FindLight(LightUidOfTrack(name)) : nullptr;
     const char* trackName = kind == RowKind::Camera ? Tr("카메라")
                             : kind == RowKind::Light ? Tr("조명")
@@ -3358,22 +3782,31 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
          kind == RowKind::SceneLight ? (sceneLight ? sceneLight->name : std::string())
                                      : IsCameraKind(kind) ? std::string(trackName) : name);
     line(Tr("프레임"), std::to_string(first->second));
-    if (IsCameraKind(kind)) {
+    if (IsCameraKind(kind) && !keyAwayFromPlayhead) {
         ImGui::Dummy(ImVec2(w, Dp(4.0f)));
-        // the camera panel hides its "camera values" section while a camera key is selected: these are the only fields
+        // a camera key at the playhead: the camera panel left its "camera values" section to these fields
         if (DrawStudioCameraKeyFields(w, kind, first->second)) {  // light / shadow: no curves
             ImGui::EndChild();
             return;
         }
     }
+    if (IsCameraKind(kind) && keyAwayFromPlayhead && kind != RowKind::Camera) {
+        // light / shadow / focus keys have no interpolation controls: only their track and frame show here
+        ImGui::EndChild();
+        return;
+    }
     if (kind == RowKind::Accessory) {  // accessory keys have no curve editor (linear / stepped only)
+        if (keyAwayFromPlayhead) {  // the key's values are not the playhead's: only its track and frame show
+            ImGui::EndChild();
+            return;
+        }
         DrawStudioAccessoryKeyFields(w, first->second);
         ImGui::EndChild();
         return;
     }
     if (kind == RowKind::SceneLight) {  // light keys: their values are editable here (one key at a time)
         SceneLight* light = sceneLight ? const_cast<SceneLight*>(sceneLight) : nullptr;
-        LightKey* k = light ? FindKey(light->keys, first->second) : nullptr;
+        LightKey* k = keyAwayFromPlayhead ? nullptr : (light ? FindKey(light->keys, first->second) : nullptr);
         if (k) {
             LightValues& v = k->v;
             const auto beginLightKeyEdit = [&] {
@@ -3513,6 +3946,7 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
         }
         if (pkKey) {
             float val = pkKey->value;
+            if (!keyAwayFromPlayhead) {
             ImGui::Dummy(ImVec2(w, Dp(4.0f)));
             const auto row = [&](const char* lbl, auto&& widget) {
                 const ImVec2 c = ImGui::GetCursorScreenPos();
@@ -3556,6 +3990,7 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
                 pkKey->value = val;
                 studioKeyChanged_ = true;
                 d.rowsKey = ~0ull;
+            }
             }
             bool stepped = pkKey->stepped;
             if (Switch("##effparamstepped", Tr("계단식 보간"), &stepped, Tr("다음 키까지 현재 값을 유지합니다"))) {
@@ -3955,10 +4390,6 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
             d.view.scrollFrame = std::max(0.0f, f - visible * (d.playing ? 0.08f : 0.4f));
     }
     d.followFrame = d.Frame();
-    // The lane's active channel follows d.curveChannel: the inspector's segmented control (and the lane's own chips)
-    // both write it, so mirror it into the rows each frame (a curve edit moves no key, rows are not rebuilt).
-    for (TimelineRow& r : d.rows)
-        if (!r.graphChannels.empty()) r.graphActive = std::clamp(d.curveChannel, 0, (int)r.graphChannels.size() - 1);
     // The lane's editable segment, filled from live key data every frame (no row rebuild needed): the key selected on
     // this row (when exactly one is selected and it is not the row's first key) or, else, the segment [a, b) holding the
     // playhead (at or after the last key: the last segment; before the first key: none).
@@ -3974,6 +4405,7 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
     }
     for (TimelineRow& r : d.rows) {
         r.graphSegFrom = r.graphSegTo = -1;
+        r.graphCurvesDiffer = false;
         if (r.graphChannels.empty()) continue;
         const RowKind kind = RowKindOf(r.id);
         const std::vector<CameraKf>* cameraKeys = nullptr;
@@ -4017,9 +4449,17 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
         const int a = frameAt(from), b = frameAt(to);
         if (b <= a) continue;
         if (cameraKeys && b - a <= 1) continue;  // a one-frame camera gap is a cut: nothing to edit
-        const int active = std::clamp(r.graphActive, 0, (int)r.graphChannels.size() - 1);
-        if (boneKeys) GetBoneCurve((*boneKeys)[to].interp, active, r.graphCurve);
-        else GetCameraCurve((*cameraKeys)[to].interp, active, r.graphCurve);
+        // every channel's bytes of the segment (each graph lane block shows / edits its own channel's curve)
+        r.graphCurves.assign(r.graphChannels.size(), {});
+        for (int ch = 0; ch < (int)r.graphChannels.size(); ++ch) {
+            uint8_t c[4];
+            if (boneKeys) GetBoneCurve((*boneKeys)[to].interp, ch, c);
+            else GetCameraCurve((*cameraKeys)[to].interp, ch, c);
+            r.graphCurves[(size_t)ch] = {c[0], c[1], c[2], c[3]};
+        }
+        r.graphCurvesDiffer = false;  // "모든 채널" shows channel 0's curve; a drag writes it to every channel
+        for (size_t ch = 1; ch < r.graphCurves.size(); ++ch)
+            if (r.graphCurves[ch] != r.graphCurves[0]) r.graphCurvesDiffer = true;
         r.graphSegFrom = a;
         r.graphSegTo = b;
     }

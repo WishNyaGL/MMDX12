@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <string>
 
 namespace mmdx::studio {
@@ -19,9 +20,29 @@ using namespace ui;
 constexpr float kGraphLaneFps = 30.0f;
 
 // A curve handle's position: the normalised curve point (x, y) 0..127 inside the segment's handle box, whose top-left
-// corner is the previous key (xa, ya) and whose far vertical edge is `farY` (>= ya: the box going up from ya).
+// corner is the previous key (xa, ya) and whose far vertical edge is `farY` (above or below ya).
 ImVec2 GraphHandlePoint(float xa, float xb, float ya, float farY, uint8_t x, uint8_t y) {
     return ImVec2(xa + (xb - xa) * ((float)x / 127.0f), ya + (farY - ya) * ((float)y / 127.0f));
+}
+
+// The eased progress of a curve: a cubic Bezier from (0,0) to (1,1) through (b0,b1)/127 and (b2,b3)/127 (MMD's
+// interpolation curve, drawn by the handle box of the value sub-lane). Bytes with x == y on both points are linear.
+float EaseCurve(const uint8_t b[4], float x) {
+    const float x1 = (float)b[0] / 127.0f, y1 = (float)b[1] / 127.0f;
+    const float x2 = (float)b[2] / 127.0f, y2 = (float)b[3] / 127.0f;
+    if (b[0] == b[1] && b[2] == b[3]) return std::clamp(x, 0.0f, 1.0f);
+    if (x <= 0.0f) return 0.0f;
+    if (x >= 1.0f) return 1.0f;
+    // x(t) is monotonic for control points in [0,1]: bisect for t, then return y(t).
+    float lo = 0.0f, hi = 1.0f, t = x;
+    for (int i = 0; i < 16; ++i) {
+        t = 0.5f * (lo + hi);
+        const float it = 1.0f - t;
+        const float bx = 3.0f * it * it * t * x1 + 3.0f * it * t * t * x2 + t * t * t;
+        if (bx < x) lo = t; else hi = t;
+    }
+    const float it = 1.0f - t;
+    return 3.0f * it * it * t * y1 + 3.0f * it * t * t * y2 + t * t * t;
 }
 
 int GetMinSelectedFrame(const std::vector<TimelineRow>& rows) {
@@ -195,75 +216,98 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     bool leftReleased = ImGui::IsMouseReleased(0);
 
     // --- graph lanes: geometry shared by the hit tests and the drawing. A lane row carries its parent's id in
-    // `graphOf` and its position (0..kTimelineGraphRows-1) in `graphIndex`; the caller places the block right after
-    // the parent row, so the parent is `rowIndex - graphIndex - 1`.
-    const auto laneParentOf = [&](int rowIndex) -> int {
+    // `graphOf`, its block's channel in `graphLaneChannel` and its position (0..kTimelineGraphRows-1) in `graphIndex`.
+    // A BLOCK is the kTimelineGraphRows lane rows of one (parent, channel): they sit directly under their channel row,
+    // and several blocks of one parent can be open at once. A block is always found by (graphOf, graphLaneChannel) and
+    // its cache entry is keyed by its first lane row index (never by the parent alone).
+    const auto laneIndexOfRow = [&](uint64_t rowId) -> int {
+        for (int ri = 0; ri < (int)rows.size(); ++ri)
+            if (rows[ri].id == rowId) return ri;
+        return -1;
+    };
+    // The first lane row of the block `rowIndex` belongs to (-1: `rowIndex` is not a lane row).
+    const auto laneBlockFirst = [&](int rowIndex) -> int {
         if (rowIndex < 0 || rowIndex >= (int)rows.size()) return -1;
-        const TimelineRow& r = rows[rowIndex];
-        if (r.graphOf == 0 || r.graphIndex < 0 || r.graphIndex >= kTimelineGraphRows) return -1;
-        const int parent = rowIndex - r.graphIndex - 1;
-        if (parent < 0 || parent >= (int)rows.size() || rows[parent].id != r.graphOf) return -1;
-        return parent;
-    };
-    const auto laneTopOf = [&](int parentIndex) -> float {
-        return contentY - view.scrollY + (parentIndex + 1) * rowHeight;
-    };
-    // Chip rects of a lane block: one per channel, wrapped, kept in the label column's left half (the value sub-lane's
-    // centre holds "값" and its right edge the min / max numbers). Width 0 = the chip did not fit.
-    const auto chipRectsOf = [&](int parentIndex) -> std::vector<ImRect> {
-        std::vector<ImRect> out;
-        if (parentIndex < 0 || parentIndex >= (int)rows.size()) return out;
-        const auto& chans = rows[parentIndex].graphChannels;
-        out.resize(chans.size(), ImRect(0, 0, 0, 0));
-        if (chans.empty()) return out;
-        const float valueTop = laneTopOf(parentIndex), valueBottom = valueTop + 3.0f * rowHeight;
-        const float chipH = Dp(13.0f), gap = Dp(3.0f);
-        const float xStart = bb.Min.x + Dp(6.0f), xMax = bb.Min.x + colWidth * 0.5f - Dp(18.0f);
-        float x = xStart, y = valueTop + Dp(3.0f);
-        for (size_t i = 0; i < chans.size(); ++i) {
-            const float textW = TextSize(Font::Regular, size::Caption - 1.0f, chans[i].label.c_str()).x;
-            const float w = Dp(9.0f) + textW + Dp(8.0f);
-            if (x > xStart && x + w > xMax) { x = xStart; y += chipH + gap; }
-            if (y + chipH > valueBottom - Dp(2.0f)) break;
-            out[i] = ImRect(ImVec2(x, y), ImVec2(x + w, y + chipH));
-            x += w + Dp(3.0f);
+        const TimelineRow& r = rows[(size_t)rowIndex];
+        if (r.graphOf == 0 || r.graphChannelIndex >= 0) return -1;
+        if (r.graphIndex < 0 || r.graphIndex >= kTimelineGraphRows) return -1;
+        int first = rowIndex;
+        while (first > 0) {
+            const TimelineRow& prev = rows[(size_t)(first - 1)];
+            if (prev.graphOf != r.graphOf || prev.graphLaneChannel != r.graphLaneChannel) break;
+            --first;
         }
-        return out;
+        return first;
+    };
+    const auto laneTopOf = [&](int firstIndex) -> float {
+        if (firstIndex < 0 || firstIndex >= (int)rows.size()) return 0.0f;
+        return contentY - view.scrollY + (float)firstIndex * rowHeight;
     };
 
     // --- a lane block's plot, sampled at most once per frame and shared by the handle hit tests and the drawing. The
-    // pointer stays valid for the rest of the call (the cache is reserved up front).
+    // pointer stays valid for the rest of the call (std::map: stable addresses).
     struct LanePlot {
         bool ok = false;
+        uint64_t parent = 0;                                    // the row the block belongs to
+        int channel = -1;                                        // the block's channel (kTimelineGraphAllChannels = all)
+        std::array<uint8_t, 4> curve{};                           // the block's curve bytes of the segment
+        int segFrom = -1, segTo = -1;                             // the parent's segment the samples were taken with
         float scrollFrame = 0.0f, pxPerFrame = 0.0f, scrollY = 0.0f;   // the view these geometry + samples were taken in
         float blockTop = 0.0f, valueTop = 0.0f, valueBottom = 0.0f, speedTop = 0.0f, speedBottom = 0.0f;
         float x0 = 0.0f, x1 = 0.0f, plotX0 = 0.0f;
         float vmin = 0.0f, vmax = 1.0f, dataMin = 0.0f, dataMax = 0.0f, speedMax = 1.0f, speedPeak = 0.0f;
         int sampleCount = 0;
         std::vector<float> frames, activeVals;
+        // "all channels" block: every channel's samples with its own min / max (each drawn normalised, alpha ~0.35)
+        std::vector<std::vector<float>> ghosts;
+        std::vector<float> ghostMin, ghostMax;
     };
-    std::vector<LanePlot> lanePlots(rows.size());  // one per row index (stable addresses); re-sampled when the view moved
+    std::map<int, LanePlot> lanePlots;  // block (first lane row index) -> plot; re-sampled when the view moved
     // A value -> y inside a block's value sub-lane (the single source of the lane curve and the handle mapping).
     const auto laneValueY = [](const LanePlot& plot, float v) {
         return plot.valueBottom - Dp(2.0f) -
                (v - plot.vmin) / (plot.vmax - plot.vmin) * (plot.valueBottom - plot.valueTop - Dp(4.0f));
     };
-    const auto lanePlotOf = [&](int parentIndex) -> const LanePlot* {
-        if (parentIndex < 0 || parentIndex >= (int)rows.size()) return nullptr;
-        LanePlot& out = lanePlots[(size_t)parentIndex];
-        if (out.ok && out.scrollFrame == view.scrollFrame && out.pxPerFrame == view.pxPerFrame && out.scrollY == view.scrollY)
-            return &out;
+    const auto lanePlotOf = [&](int firstIndex) -> const LanePlot* {
+        if (firstIndex < 0 || firstIndex >= (int)rows.size()) return nullptr;
+        const auto cached = lanePlots.find(firstIndex);
+        // a plot is valid for one view; the editable segment / curve bytes of its row can change without a view move
+        const auto fresh = [&](const LanePlot& p) {
+            if (!p.ok || p.scrollFrame != view.scrollFrame || p.pxPerFrame != view.pxPerFrame || p.scrollY != view.scrollY)
+                return false;
+            const int parentIndex = laneIndexOfRow(p.parent);
+            if (parentIndex < 0) return false;
+            const TimelineRow& parent = rows[(size_t)parentIndex];
+            if (p.segFrom != parent.graphSegFrom || p.segTo != parent.graphSegTo) return false;
+            if (parent.graphCurves.empty()) return true;
+            return p.curve == parent.graphCurves[(size_t)std::clamp(p.channel == kTimelineGraphAllChannels ? 0 : p.channel, 0,
+                                                                  (int)parent.graphCurves.size() - 1)];
+        };
+        if (cached != lanePlots.end() && fresh(cached->second)) return &cached->second;
+        LanePlot& out = lanePlots[firstIndex];
         out = LanePlot{};
         if (!view.graphSample) return &out;
-        const TimelineRow& parent = rows[parentIndex];
-        if (parent.graphChannels.empty()) return &out;
-        const int active = std::clamp(parent.graphActive, 0, (int)parent.graphChannels.size() - 1);
+        const TimelineRow& laneRow = rows[(size_t)firstIndex];
+        const int parentIndex = laneIndexOfRow(laneRow.graphOf);
+        if (parentIndex < 0) return &out;
+        const TimelineRow& parent = rows[(size_t)parentIndex];
+        const int ch = laneRow.graphLaneChannel;
+        if (ch != kTimelineGraphAllChannels && (ch < 0 || ch >= (int)parent.graphChannels.size())) return &out;
+        out.parent = parent.id;
+        out.channel = ch;
+        out.segFrom = parent.graphSegFrom;
+        out.segTo = parent.graphSegTo;
+        // no segment (no curve bytes yet): the lane still draws its value curve, the easing falls back to linear
+        out.curve = {20, 20, 107, 107};
+        if (!parent.graphCurves.empty())
+            out.curve = parent.graphCurves[(size_t)std::clamp(ch == kTimelineGraphAllChannels ? 0 : ch, 0,
+                                                              (int)parent.graphCurves.size() - 1)];
         out.scrollFrame = view.scrollFrame;
         out.pxPerFrame = view.pxPerFrame;
         out.scrollY = view.scrollY;
-        out.blockTop = laneTopOf(parentIndex);
+        out.blockTop = laneTopOf(firstIndex);
         out.valueTop = out.blockTop;
-        out.valueBottom = out.blockTop + 3.0f * rowHeight;
+        out.valueBottom = out.blockTop + 2.5f * rowHeight;
         out.speedTop = out.valueBottom;
         out.speedBottom = out.blockTop + (float)kTimelineGraphRows * rowHeight;
         const float framesPerPx = 1.0f / std::max(view.pxPerFrame * Dpi(), 0.0001f);
@@ -272,32 +316,64 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
         out.sampleCount = std::clamp((int)std::ceil(keyAreaW / Dp(2.0f)), 2, 2048);
         out.frames.resize((size_t)out.sampleCount);
         out.activeVals.resize((size_t)out.sampleCount);
-        for (int i = 0; i < out.sampleCount; ++i) {
-            const float f = fA + (fB - fA) * (float)i / (float)(out.sampleCount - 1);
-            out.frames[(size_t)i] = f;
-            out.activeVals[(size_t)i] = view.graphSample(parent.id, active, f);
+        for (int i = 0; i < out.sampleCount; ++i)
+            out.frames[(size_t)i] = fA + (fB - fA) * (float)i / (float)(out.sampleCount - 1);
+        float speedMax = 0.0f;
+        if (ch == kTimelineGraphAllChannels) {
+            // all channels: each channel is a ghost (normalised by its own min / max at draw time) and the value
+            // sub-lane's own curve is the representative easing (channel 0's bytes) across the editable segment only
+            const int from = parent.graphSegFrom, to = parent.graphSegTo;
+            const float span = (float)(to - from);
+            for (int i = 0; i < out.sampleCount; ++i) {
+                const float f = out.frames[(size_t)i];
+                const float x = span > 0.0f ? (f - (float)from) / span : (f >= (float)to ? 1.0f : 0.0f);
+                out.activeVals[(size_t)i] = EaseCurve(out.curve.data(), std::clamp(x, 0.0f, 1.0f));
+            }
+            out.ghosts.resize(parent.graphChannels.size());
+            out.ghostMin.assign(parent.graphChannels.size(), 0.0f);
+            out.ghostMax.assign(parent.graphChannels.size(), 1.0f);
+            for (int c = 0; c < (int)parent.graphChannels.size(); ++c) {
+                std::vector<float>& vals = out.ghosts[(size_t)c];
+                vals.resize((size_t)out.sampleCount);
+                float cmin = 0.0f, cmax = 0.0f;
+                for (int i = 0; i < out.sampleCount; ++i) {
+                    vals[(size_t)i] = view.graphSample(parent.id, c, out.frames[(size_t)i]);
+                    if (i == 0) { cmin = cmax = vals[0]; }
+                    else { cmin = std::min(cmin, vals[(size_t)i]); cmax = std::max(cmax, vals[(size_t)i]); }
+                }
+                if (cmax - cmin < 1e-4f) { cmin -= 0.5f; cmax += 0.5f; }  // flat channel: a straight line mid-lane
+                out.ghostMin[(size_t)c] = cmin;
+                out.ghostMax[(size_t)c] = cmax;
+            }
+            out.dataMin = 0.0f;  // printed as 0% / 100%
+            out.dataMax = 1.0f;
+            out.vmin = 0.0f;
+            out.vmax = 1.0f;
+        } else {
+            for (int i = 0; i < out.sampleCount; ++i)
+                out.activeVals[(size_t)i] = view.graphSample(parent.id, ch, out.frames[(size_t)i]);
+            float vmin = out.activeVals[0], vmax = out.activeVals[0];
+            for (float v : out.activeVals) { vmin = std::min(vmin, v); vmax = std::max(vmax, v); }
+            out.dataMin = vmin;
+            out.dataMax = vmax;  // printed next to the sub-lane (the plot range is padded)
+            if (vmax - vmin < 1e-4f) {  // flat: pad around the value
+                const float mid = (vmin + vmax) * 0.5f, pad = std::max(std::abs(mid) * 0.1f, 0.5f);
+                vmin = mid - pad;
+                vmax = mid + pad;
+            } else {
+                const float pad = (vmax - vmin) * 0.1f;
+                vmin -= pad;
+                vmax += pad;
+            }
+            out.vmin = vmin;
+            out.vmax = vmax;
         }
-        float vmin = out.activeVals[0], vmax = out.activeVals[0], speedMax = 0.0f;
-        for (float v : out.activeVals) { vmin = std::min(vmin, v); vmax = std::max(vmax, v); }
-        out.dataMin = vmin;
-        out.dataMax = vmax;  // printed next to the sub-lane (the plot range is padded)
         for (int i = 1; i < out.sampleCount; ++i) {
             const float df = out.frames[(size_t)i] - out.frames[(size_t)(i - 1)];
             if (df > 0.0f) speedMax = std::max(speedMax, std::abs(out.activeVals[(size_t)i] - out.activeVals[(size_t)(i - 1)]) / df);
         }
         speedMax *= kGraphLaneFps;  // frames -> per second
         out.speedPeak = speedMax;   // printed at the speed lane's left edge (before the min span guard)
-        if (vmax - vmin < 1e-4f) {  // flat: pad around the value
-            const float mid = (vmin + vmax) * 0.5f, pad = std::max(std::abs(mid) * 0.1f, 0.5f);
-            vmin = mid - pad;
-            vmax = mid + pad;
-        } else {
-            const float pad = (vmax - vmin) * 0.1f;
-            vmin -= pad;
-            vmax += pad;
-        }
-        out.vmin = vmin;
-        out.vmax = vmax;
         if (speedMax < 1e-3f) speedMax = 1.0f;  // min span guard
         out.speedMax = speedMax;
         out.x0 = std::max(keyAreaX, bb.Min.x);
@@ -309,47 +385,61 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
 
     // The editable segment's handle box of a lane block: P1 / P2 map the curve bytes 0..127 through the box from the
     // previous key (xa, ya) to the key that owns the bytes (xb, yb). A flat segment (< Dp(36) tall) uses a box of that
-    // height going UP from ya, so its handles stay draggable.
+    // height in the value's direction (see laneHandlesOf), so its handles stay draggable.
     struct LaneHandles {
         bool ok = false;
         float xa = 0.0f, xb = 0.0f, ya = 0.0f, yb = 0.0f, boxY1 = 0.0f;
+        bool padded = false;   // boxY1 != yb: the box is not the drawn value curve's (flat segment / all channels)
         ImVec2 p1{0, 0}, p2{0, 0};
     };
-    const auto laneHandlesOf = [&](const LanePlot& plot, const TimelineRow& parent) -> LaneHandles {
+    const auto laneHandlesOf = [&](const LanePlot& plot) -> LaneHandles {
         LaneHandles res;
-        if (!plot.ok || !view.graphSample || !parent.graphOpen) return res;  // handles only exist while the lane is open
+        if (!plot.ok || !view.graphSample) return res;
+        const int parentIndex = laneIndexOfRow(plot.parent);
+        if (parentIndex < 0) return res;
+        const TimelineRow& parent = rows[(size_t)parentIndex];
         if (parent.graphSegFrom < 0 || parent.graphSegTo <= parent.graphSegFrom) return res;
-        const int active = std::clamp(parent.graphActive, 0, (int)parent.graphChannels.size() - 1);
         res.xa = plot.plotX0 + (float)parent.graphSegFrom * view.pxPerFrame * Dpi();
         res.xb = plot.plotX0 + (float)parent.graphSegTo * view.pxPerFrame * Dpi();
-        res.ya = laneValueY(plot, view.graphSample(parent.id, active, (float)parent.graphSegFrom));
-        res.yb = laneValueY(plot, view.graphSample(parent.id, active, (float)parent.graphSegTo));
-        res.boxY1 = std::abs(res.yb - res.ya) < Dp(36.0f) ? res.ya - Dp(36.0f) : res.yb;
-        res.p1 = GraphHandlePoint(res.xa, res.xb, res.ya, res.boxY1, parent.graphCurve[0], parent.graphCurve[1]);
-        res.p2 = GraphHandlePoint(res.xa, res.xb, res.ya, res.boxY1, parent.graphCurve[2], parent.graphCurve[3]);
+        if (plot.channel == kTimelineGraphAllChannels) {
+            // all channels: the channels have different units, so the box is the easing curve itself (time -> 0..1
+            // progress) over the value sub-lane's full height, going up
+            res.ya = plot.valueBottom - Dp(4.0f);
+            res.yb = res.boxY1 = plot.valueTop + Dp(4.0f);
+        } else {
+            res.ya = laneValueY(plot, view.graphSample(plot.parent, plot.channel, (float)parent.graphSegFrom));
+            res.yb = laneValueY(plot, view.graphSample(plot.parent, plot.channel, (float)parent.graphSegTo));
+            // A (nearly) flat segment gets a taller box so its handles stay draggable. It points the way the value
+            // moves (a falling value = a box going down), so a handle drag moves the curve the same way; only an
+            // exactly flat segment goes up. The far corner is then not the end key: `padded` draws the easing there.
+            // The grown box stays inside the value sub-lane (a flat curve sits mid-lane: a full Dp(36) would clip P2).
+            if (std::abs(res.yb - res.ya) < Dp(36.0f))
+                res.boxY1 = std::clamp(res.ya + (res.yb > res.ya + 0.01f ? Dp(36.0f) : -Dp(36.0f)),
+                                       plot.valueTop + Dp(5.0f), plot.valueBottom - Dp(5.0f));
+            else
+                res.boxY1 = res.yb;
+        }
+        res.padded = res.boxY1 != res.yb;
+        res.p1 = GraphHandlePoint(res.xa, res.xb, res.ya, res.boxY1, plot.curve[0], plot.curve[1]);
+        res.p2 = GraphHandlePoint(res.xa, res.xb, res.ya, res.boxY1, plot.curve[2], plot.curve[3]);
         res.ok = true;
         return res;
     };
     // Mouse position -> the dragged handle's bytes (the other handle keeps its bytes).
-    const auto laneDragBytes = [&](const TimelineRow& parent, const LaneHandles& h, ImVec2 mouse, uint8_t out[4]) {
-        for (int i = 0; i < 4; ++i) out[i] = parent.graphCurve[i];
+    const auto laneDragBytes = [&](const LanePlot& plot, const LaneHandles& h, ImVec2 mouse, uint8_t out[4]) {
+        for (int i = 0; i < 4; ++i) out[i] = plot.curve[(size_t)i];
         const float u = h.xb != h.xa ? (mouse.x - h.xa) / (h.xb - h.xa) : 0.0f;
         const float v = h.boxY1 != h.ya ? (mouse.y - h.ya) / (h.boxY1 - h.ya) : 0.0f;
         const int i = view.graphDrag == 1 ? 0 : 2;
         out[i] = (uint8_t)std::clamp((int)std::lround(u * 127.0f), 0, 127);
         out[i + 1] = (uint8_t)std::clamp((int)std::lround(v * 127.0f), 0, 127);
     };
-    const auto laneIndexOfRow = [&](uint64_t rowId) -> int {
-        for (int ri = 0; ri < (int)rows.size(); ++ri)
-            if (rows[ri].id == rowId) return ri;
-        return -1;
-    };
-    // The handle under the mouse of the lane block at `parentIndex` (1 = P1, 2 = P2, 0 = none), inside the clip only.
-    const auto laneHandleUnderMouse = [&](int parentIndex, const LanePlot*& plotOut) -> int {
+    // The handle under the mouse of the lane block whose first lane row is `firstIndex` (1 = P1, 2 = P2, 0 = none).
+    const auto laneHandleUnderMouse = [&](int firstIndex, const LanePlot*& plotOut) -> int {
         plotOut = nullptr;
-        const LanePlot* plot = lanePlotOf(parentIndex);
+        const LanePlot* plot = lanePlotOf(firstIndex);
         if (!plot || !plot->ok) return 0;
-        const LaneHandles h = laneHandlesOf(*plot, rows[parentIndex]);
+        const LaneHandles h = laneHandlesOf(*plot);
         if (!h.ok) return 0;
         if (mousePos.x < plot->x0 || mousePos.x > plot->x1) return 0;
         if (mousePos.y < std::max(contentY, plot->valueTop) || mousePos.y > std::min(bb.Max.y - sbH, plot->valueBottom)) return 0;
@@ -369,16 +459,18 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     // moved: a plain click on a handle must not rewrite the curve (nor start an undo step).
     const auto laneEmitDrag = [&](bool end) {
         if (view.graphDrag == 0) return;
-        const int parentIndex = laneIndexOfRow(view.graphDragRow);
-        const LanePlot* plot = parentIndex >= 0 ? lanePlotOf(parentIndex) : nullptr;
+        const int firstIndex = laneIndexOfRow(view.graphDragRow);
+        const LanePlot* plot = firstIndex >= 0 ? lanePlotOf(firstIndex) : nullptr;
         if (view.graphDragMoved && plot) {
-            const LaneHandles h = laneHandlesOf(*plot, rows[parentIndex]);
-            if (h.ok) {
+            const LaneHandles h = laneHandlesOf(*plot);
+            const int parentIndex = laneIndexOfRow(plot->parent);
+            if (h.ok && parentIndex >= 0) {
                 uint8_t bytes[4];
-                laneDragBytes(rows[parentIndex], h, mousePos, bytes);
+                laneDragBytes(*plot, h, mousePos, bytes);
                 ev.graphCurve = true;
-                ev.graphCurveRow = rows[parentIndex].id;
-                ev.graphCurveFrame = rows[parentIndex].graphSegTo;
+                ev.graphCurveRow = plot->parent;
+                ev.graphCurveChannel = plot->channel;
+                ev.graphCurveFrame = rows[(size_t)parentIndex].graphSegTo;
                 for (int i = 0; i < 4; ++i) ev.graphCurveBytes[i] = bytes[i];
             }
         }
@@ -417,24 +509,19 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
             if (rowIndex >= 0 && rowIndex < (int)rows.size()) {
                 const auto& row = rows[rowIndex];
                 RowControlRects cr = controlRects(rowIndex);
-                // a graph lane row's label does nothing (lane rows are not selectable)
-                const int laneParent = laneParentOf(rowIndex);
-                bool chipHit = false;
-                if (laneParent >= 0) {
-                    const std::vector<ImRect> chips = chipRectsOf(laneParent);
-                    for (size_t i = 0; i < chips.size(); ++i) {
-                        if (chips[i].GetWidth() > 0.0f && chips[i].Contains(mousePos)) {
-                            ev.graphChannel = true;
-                            ev.graphChannelRow = rows[laneParent].id;
-                            ev.graphChannelIndex = (int)i;
-                            changed = true;
-                            chipHit = true;
-                            break;
-                        }
-                    }
+                // a graph lane row's label does nothing (lane rows are not selectable); a channel row's label toggles
+                // that channel's own lane
+                const bool laneRow = laneBlockFirst(rowIndex) >= 0;
+                bool channelHit = false;
+                if (row.graphChannelIndex >= 0 && row.graphOf != 0) {
+                    ev.graphChannel = true;
+                    ev.graphChannelRow = row.graphOf;
+                    ev.graphChannelIndex = row.graphChannelIndex;
+                    changed = true;
+                    channelHit = true;
                 }
-                if (chipHit) {
-                    // the chip consumed the click
+                if (channelHit) {
+                    // the channel row consumed the click
                 } else if (cr.hasGraph && cr.graph.Contains(mousePos)) {
                     ev.toggleGraph = true;
                     ev.toggleGraphRow = row.id;
@@ -466,7 +553,7 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                     ev.toggleGroup = true;
                     ev.toggledRow = row.id;
                     changed = true;
-                } else if (laneParent >= 0) {
+                } else if (laneRow) {
                     // a lane row's label is not a row: no selection change
                 } else {
                     ev.rowClick = true;
@@ -481,14 +568,11 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
             }
         } else if (mousePos.x >= keyAreaX && mousePos.y >= contentY && mousePos.y < bb.Max.y - sbH) {
             int rowIndex = (int)((mousePos.y - contentY + view.scrollY) / rowHeight);
-            // A lane handle (P1 / P2) starts a curve drag before any key / box / playhead drag is considered.
-            int handleParent = rowIndex;
-            if (rowIndex >= 0 && rowIndex < (int)rows.size()) {
-                const int laneParent = laneParentOf(rowIndex);
-                if (laneParent >= 0) handleParent = laneParent;
-            }
+            // A lane handle (P1 / P2) starts a curve drag before any key / box / playhead drag is considered. The
+            // handle belongs to the block (parent, channel) of the lane row under the mouse.
+            const int handleBlock = laneBlockFirst(rowIndex);
             const LanePlot* handlePlot = nullptr;
-            const int handleHit = handleParent >= 0 && handleParent < (int)rows.size() ? laneHandleUnderMouse(handleParent, handlePlot) : 0;
+            const int handleHit = handleBlock >= 0 ? laneHandleUnderMouse(handleBlock, handlePlot) : 0;
             if (handleHit != 0) {
                 if (ImGui::IsMouseDoubleClicked(0)) {
                     // reset the segment to linear and end the gesture at once (any drag started by the first click ends
@@ -497,15 +581,17 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                     view.graphDrag = 0;
                     view.graphDragRow = 0;
                     view.graphDragMoved = false;
+                    const int parentIndex = laneIndexOfRow(handlePlot->parent);
                     ev.graphCurve = true;
-                    ev.graphCurveRow = rows[handleParent].id;
-                    ev.graphCurveFrame = rows[handleParent].graphSegTo;
+                    ev.graphCurveRow = handlePlot->parent;
+                    ev.graphCurveChannel = handlePlot->channel;
+                    ev.graphCurveFrame = parentIndex >= 0 ? rows[(size_t)parentIndex].graphSegTo : 0;
                     for (int i = 0; i < 4; ++i) ev.graphCurveBytes[i] = linear[i];
                     ev.graphCurveEnd = true;
                     changed = true;
                 } else {
                     view.graphDrag = handleHit;
-                    view.graphDragRow = rows[handleParent].id;
+                    view.graphDragRow = rows[(size_t)handleBlock].id;
                     view.graphDragMoved = false;
                     view.dragMode = 0;
                     laneEmitDrag(false);
@@ -542,9 +628,10 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                 }
             }
             if (!hitKey && handleHit == 0) {
-                const bool laneRow = laneParentOf(rowIndex) >= 0;
-                if (laneRow) {
-                    // graph lanes are read-only: no box select, no key insert
+                const bool graphChildRow = rowIndex >= 0 && rowIndex < (int)rows.size() &&
+                                           (laneBlockFirst(rowIndex) >= 0 || rows[(size_t)rowIndex].graphChannelIndex >= 0);
+                if (graphChildRow) {
+                    // graph lanes and their channel rows are read-only: no box select, no key insert
                 } else if (ImGui::IsMouseDoubleClicked(0)) {
                     if (rowIndex >= 0 && rowIndex < (int)rows.size()) {
                         const auto& r = rows[rowIndex];
@@ -565,10 +652,12 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     }
 
     if (pressed && io.MouseClicked[1]) {
-        if (mousePos.x >= keyAreaX && mousePos.y >= contentY && mousePos.y < bb.Max.y - sbH &&
-            laneParentOf((int)((mousePos.y - contentY + view.scrollY) / rowHeight)) < 0) {
+        const int ctxRow = (int)((mousePos.y - contentY + view.scrollY) / rowHeight);
+        const bool ctxGraphChild = ctxRow >= 0 && ctxRow < (int)rows.size() &&
+                                   (laneBlockFirst(ctxRow) >= 0 || rows[(size_t)ctxRow].graphChannelIndex >= 0);
+        if (mousePos.x >= keyAreaX && mousePos.y >= contentY && mousePos.y < bb.Max.y - sbH && !ctxGraphChild) {
             // key area: the host's key menu; a key under the mouse that is not selected becomes the selection
-            // (graph lane rows are read-only: no menu)
+            // (graph lane / channel rows are read-only: no menu)
             const int rowIndex = (int)((mousePos.y - contentY + view.scrollY) / rowHeight);
             ev.contextMenu = true;
             ev.contextFrame = std::max(0, (int)std::round((mousePos.x - originX) / (view.pxPerFrame * Dpi()) + view.scrollFrame));
@@ -770,13 +859,9 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     // Hover over a lane handle: the hand cursor.
     if (hovered && view.graphDrag == 0 && !leftDown) {
         const int rowIndex = (int)((mousePos.y - contentY + view.scrollY) / rowHeight);
-        int parentIndex = rowIndex;
-        if (rowIndex >= 0 && rowIndex < (int)rows.size()) {
-            const int laneParent = laneParentOf(rowIndex);
-            if (laneParent >= 0) parentIndex = laneParent;
-        }
+        const int hoverBlock = laneBlockFirst(rowIndex);
         const LanePlot* hoverPlot = nullptr;
-        if (parentIndex >= 0 && parentIndex < (int)rows.size() && laneHandleUnderMouse(parentIndex, hoverPlot) != 0)
+        if (hoverBlock >= 0 && laneHandleUnderMouse(hoverBlock, hoverPlot) != 0)
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     }
 
@@ -800,6 +885,10 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
         if (r.selected) {
             dl->AddRectFilled(rmin, ImVec2(keyAreaX, rmax.y), p.accentSoft);
         }
+        // a channel row whose own lane is open is highlighted like a selected row
+        if (r.graphChannelIndex >= 0 && r.graphOpen) {
+            dl->AddRectFilled(rmin, ImVec2(keyAreaX, rmax.y), p.accentSoft);
+        }
 
         if (r.tint) dl->AddRectFilled(ImVec2(rmin.x, rmin.y + Dp(4.0f)), ImVec2(rmin.x + Dp(3.0f), rmax.y - Dp(4.0f)), r.tint, Dp(1.5f));
         float labelX = bb.Min.x + Dp(4.0f) + r.depth * Dp(14.0f);
@@ -807,12 +896,17 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
             Icon(dl, r.expanded ? icon::CaretDown : icon::CaretRight, 13.0f, ImVec2(labelX + Dp(8.0f), rowY + rowHeight * 0.5f), p.ink);
             labelX += Dp(16.0f);
         }
+        if (r.dotColor) {  // a graph channel row: its curve colour
+            dl->AddCircleFilled(ImVec2(labelX + Dp(4.0f), rowY + rowHeight * 0.5f), Dp(3.0f), r.dotColor);
+            labelX += Dp(12.0f);
+        }
         RowControlRects cr = controlRects(ri);
         float textRight = keyAreaX - Dp(4.0f);
         if (cr.hasStopwatch || cr.hasGraph) {
             textRight = cr.leftBound - Dp(4.0f);
         }
         ImU32 textCol = r.selected ? p.accentInk : p.ink;
+        if (r.graphChannelIndex >= 0) textCol = r.graphOpen ? p.accentInk : p.ink2;
         TextEllipsis(dl, r.isGroup ? Font::Semibold : Font::Regular, size::Small,
                      ImVec2(labelX, rowY + (rowHeight - Dp(size::Small * 1.25f)) * 0.5f), textRight, textCol, r.label.c_str());
 
@@ -890,30 +984,32 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     // horizontal scrollbar). Only graphIndex 0 draws; the other lane rows of the block are plain backgrounds.
     if (view.graphSample && !rows.empty()) {
         const float clipTop = contentY, clipBottom = bb.Max.y - sbH;
-        // A block draws when ANY of its kTimelineGraphRows rows is visible: start below the first visible row by up to
-        // a whole block so a scrolled-out first lane row still resolves its block.
-        const int laneFirst = std::max(0, firstRow - (kTimelineGraphRows - 1));
-        uint64_t lastBlock = 0;
+        // One block = the kTimelineGraphRows lane rows of one (parent, channel); blocks draw once, from their first
+        // lane row. The scan starts at the parent of the first visible row so a block scrolled partly out still draws.
+        int laneFirst = std::max(0, firstRow);
+        while (laneFirst > 0 && rows[(size_t)(laneFirst - 1)].graphOf != 0) --laneFirst;
+        std::vector<int> drawnBlocks;  // a block draws once, from the row where its scan first reaches it
         for (int ri = laneFirst; ri <= lastRow; ++ri) {
-            const TimelineRow& lane = rows[ri];
-            if (lane.graphOf == 0) continue;
-            if (lane.graphIndex < 0 || lane.graphIndex >= kTimelineGraphRows) continue;
-            const int parentIndex = laneParentOf(ri);
+            const int blockFirst = laneBlockFirst(ri);
+            if (blockFirst < 0) continue;
+            if (std::find(drawnBlocks.begin(), drawnBlocks.end(), blockFirst) != drawnBlocks.end()) continue;
+            drawnBlocks.push_back(blockFirst);
+            const LanePlot* lanePlot = lanePlotOf(blockFirst);  // resamples when the view moved since the hit tests
+            if (!lanePlot || !lanePlot->ok) continue;
+            const int parentIndex = laneIndexOfRow(lanePlot->parent);
             if (parentIndex < 0) continue;
-            const TimelineRow& parent = rows[parentIndex];
-            if (parent.id == lastBlock) continue;  // one block spans kTimelineGraphRows consecutive rows
-            lastBlock = parent.id;
+            const TimelineRow& parent = rows[(size_t)parentIndex];
             const auto& chans = parent.graphChannels;
-            if (chans.empty()) continue;
-            const int active = std::clamp(parent.graphActive, 0, (int)chans.size() - 1);
+            const int ch = lanePlot->channel;
+            const bool allChannels = ch == kTimelineGraphAllChannels;
+            if (!allChannels && (ch < 0 || ch >= (int)chans.size())) continue;
+            const ImU32 chanColor = allChannels ? p.accent : chans[(size_t)ch].color;
 
-            const float blockTop = laneTopOf(parentIndex);
-            const float valueTop = blockTop, valueBottom = blockTop + 3.0f * rowHeight;
-            const float speedTop = valueBottom, speedBottom = blockTop + (float)kTimelineGraphRows * rowHeight;
+            const float blockTop = lanePlot->blockTop;
+            const float valueTop = lanePlot->valueTop, valueBottom = lanePlot->valueBottom;
+            const float speedTop = lanePlot->speedTop, speedBottom = lanePlot->speedBottom;
             if (speedBottom < clipTop || valueTop > clipBottom) continue;  // scrolled out entirely
 
-            const LanePlot* lanePlot = lanePlotOf(parentIndex);  // resamples when the view moved since the hit tests
-            if (!lanePlot || !lanePlot->ok) continue;
             const int sampleCount = lanePlot->sampleCount;
             const std::vector<float>& frames = lanePlot->frames;
             const std::vector<float>& activeVals = lanePlot->activeVals;
@@ -936,78 +1032,94 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
 
             // value curves stay inside the value sub-lane (and the key area: never over the ruler / scrollbar)
             dl->PushClipRect(ImVec2(x0, std::max(clipTop, valueTop)), ImVec2(x1, std::min(clipBottom, valueBottom)), true);
-            // the other channels, dimmed: each normalised to its own min / max over the visible frames (shape only, full
-            // lane height) so a flat active channel does not push them off the lane
-            for (int ch = 0; ch < (int)chans.size(); ++ch) {
-                if (ch == active || chans[(size_t)ch].color == 0) continue;
-                std::vector<float> vals((size_t)sampleCount);
-                float cmin = 0.0f, cmax = 0.0f;
-                for (int i = 0; i < sampleCount; ++i) {
-                    vals[(size_t)i] = view.graphSample(parent.id, ch, frames[(size_t)i]);
-                    if (i == 0) { cmin = cmax = vals[0]; }
-                    else { cmin = std::min(cmin, vals[(size_t)i]); cmax = std::max(cmax, vals[(size_t)i]); }
-                }
-                if (cmax - cmin < 1e-4f) { cmin -= 0.5f; cmax += 0.5f; }  // flat channel: a straight line mid-lane
+            if (allChannels) {
+                // every channel, dimmed: each normalised to its own min / max over the visible frames (shape only,
+                // full lane height) so a flat channel does not push the others off the lane.
                 const float ghostTop = valueTop + Dp(2.0f), ghostBottom = valueBottom - Dp(2.0f);
-                const auto yGhost = [&](float v) {
-                    return ghostBottom - (v - cmin) / (cmax - cmin) * (ghostBottom - ghostTop);
-                };
-                std::vector<ImVec2> pts;
-                pts.reserve((size_t)sampleCount);
-                for (int i = 0; i < sampleCount; ++i) pts.push_back(ImVec2(xOf(frames[(size_t)i]), yGhost(vals[(size_t)i])));
-                dl->AddPolyline(pts.data(), (int)pts.size(), WithAlpha(chans[(size_t)ch].color, 0.35f), 0, Dp(1.5f));
-            }
-            // the active channel's value curve
-            {
+                for (int c = 0; c < (int)chans.size(); ++c) {
+                    if (chans[(size_t)c].color == 0) continue;
+                    const std::vector<float>& vals = lanePlot->ghosts[(size_t)c];
+                    const float cmin = lanePlot->ghostMin[(size_t)c], cmax = lanePlot->ghostMax[(size_t)c];
+                    const auto yGhost = [&](float v) {
+                        return ghostBottom - (v - cmin) / (cmax - cmin) * (ghostBottom - ghostTop);
+                    };
+                    std::vector<ImVec2> pts;
+                    pts.reserve((size_t)sampleCount);
+                    for (int i = 0; i < sampleCount; ++i) pts.push_back(ImVec2(xOf(frames[(size_t)i]), yGhost(vals[(size_t)i])));
+                    dl->AddPolyline(pts.data(), (int)pts.size(), WithAlpha(chans[(size_t)c].color, 0.35f), 0, Dp(1.5f));
+                }
+            } else {
+                // a single channel's value curve, from its own (padded) range
                 std::vector<ImVec2> pts;
                 pts.reserve((size_t)sampleCount);
                 for (int i = 0; i < sampleCount; ++i) pts.push_back(ImVec2(xOf(frames[(size_t)i]), yOf(activeVals[(size_t)i])));
-                dl->AddPolyline(pts.data(), (int)pts.size(), chans[(size_t)active].color, 0, Dp(1.5f));
-                // a small filled dot on the active curve at each of the parent row's key frames
+                dl->AddPolyline(pts.data(), (int)pts.size(), chanColor, 0, Dp(1.5f));
+                // a small filled dot on the curve at each of the parent row's key frames
                 for (const TimelineKey& k : parent.keys) {
                     const float kx = xOf((float)k.frame);
                     if (kx < x0 - Dp(2.0f) || kx > x1 + Dp(2.0f)) continue;
-                    dl->AddCircleFilled(ImVec2(kx, yOf(view.graphSample(parent.id, active, (float)k.frame))), Dp(2.5f),
-                                        chans[(size_t)active].color);
+                    dl->AddCircleFilled(ImVec2(kx, yOf(view.graphSample(parent.id, ch, (float)k.frame))), Dp(2.5f), chanColor);
                 }
             }
             // the editable segment's Bezier handles, on top of the curves
             {
-                const LaneHandles h = laneHandlesOf(*lanePlot, parent);
+                const LaneHandles h = laneHandlesOf(*lanePlot);
                 if (h.ok) {
-                    const ImU32 col = chans[(size_t)active].color;
-                    const bool drag1 = view.graphDrag == 1 && view.graphDragRow == parent.id;
-                    const bool drag2 = view.graphDrag == 2 && view.graphDragRow == parent.id;
+                    const bool drag1 = view.graphDrag == 1 && view.graphDragRow == rows[(size_t)blockFirst].id;
+                    const bool drag2 = view.graphDrag == 2 && view.graphDragRow == rows[(size_t)blockFirst].id;
                     ImVec2 p1 = h.p1, p2 = h.p2;
                     if (drag1 || drag2) {
                         // while dragging, the handle sits on the bytes the drag reports (not the row's previous frame)
                         uint8_t bytes[4];
-                        laneDragBytes(parent, h, mousePos, bytes);
+                        laneDragBytes(*lanePlot, h, mousePos, bytes);
                         const ImVec2 q = GraphHandlePoint(h.xa, h.xb, h.ya, h.boxY1, bytes[drag1 ? 0 : 2], bytes[drag1 ? 1 : 3]);
                         (drag1 ? p1 : p2) = q;
                     }
                     dl->AddRect(ImVec2(std::min(h.xa, h.xb), std::min(h.ya, h.boxY1)),
                                 ImVec2(std::max(h.xa, h.xb), std::max(h.ya, h.boxY1)), WithAlpha(p.line, 0.6f));
-                    dl->AddLine(ImVec2(h.xa, h.ya), p1, WithAlpha(col, 0.6f), Dp(1.0f));
-                    dl->AddLine(ImVec2(h.xb, h.yb), p2, WithAlpha(col, 0.6f), Dp(1.0f));
+                    // each handle hangs off its own end of the box (the previous key / the far corner)
+                    dl->AddLine(ImVec2(h.xa, h.ya), p1, WithAlpha(chanColor, 0.6f), Dp(1.0f));
+                    dl->AddLine(ImVec2(h.xb, h.boxY1), p2, WithAlpha(chanColor, 0.6f), Dp(1.0f));
+                    // "all channels": the box is the representative easing curve itself (time -> 0..1 progress) from
+                    // (from, 0 %) to (to, 100 %), drawn bold under its handles
+                    if (allChannels) {
+                        dl->AddBezierCubic(ImVec2(h.xa, h.ya), p1, p2, ImVec2(h.xb, h.boxY1), chanColor, Dp(2.0f));
+                    } else if (h.padded) {
+                        // a box that is not the drawn value curve's shows the easing the handles shape (MMD's Bezier
+                        // from (0,0) to (1,1) through P1 / P2)
+                        dl->AddBezierCubic(ImVec2(h.xa, h.ya), p1, p2, ImVec2(h.xb, h.boxY1), WithAlpha(chanColor, 0.5f), Dp(1.0f));
+                    }
                     const LanePlot* hoverPlot = nullptr;
-                    const int hoverHandle = view.graphDrag == 0 ? laneHandleUnderMouse(parentIndex, hoverPlot) : 0;
+                    const int hoverHandle = view.graphDrag == 0 ? laneHandleUnderMouse(blockFirst, hoverPlot) : 0;
                     const float r = Dp(4.5f), rHover = Dp(6.0f);
                     const float r1 = drag1 || hoverHandle == 1 ? rHover : r;
                     const float r2 = drag2 || hoverHandle == 2 ? rHover : r;
-                    dl->AddCircleFilled(p1, r1, col);
+                    dl->AddCircleFilled(p1, r1, chanColor);
                     dl->AddCircle(p1, r1, p.surface);
-                    dl->AddCircleFilled(p2, r2, col);
+                    dl->AddCircleFilled(p2, r2, chanColor);
                     dl->AddCircle(p2, r2, p.surface);
                 }
             }
+            if (allChannels && parent.graphCurvesDiffer)
+                Text(dl, Font::Regular, size::Caption, ImVec2(x0 + Dp(6.0f), valueTop + Dp(2.0f)), p.ink2,
+                     Tr("채널마다 곡선이 달라요 · 드래그하면 모두 같아져요"));
             dl->PopClipRect();
-            // speed curve (|d value / d frame| in units per second), auto-scaled from 0, inside its own sub-lane
+            // speed curve (|d value / d frame| in units per second), auto-scaled from 0, inside its own sub-lane.
+            // "All channels": the representative easing's speed, inside the editable segment only (nothing outside).
             dl->PushClipRect(ImVec2(x0, std::max(clipTop, speedTop)), ImVec2(x1, std::min(clipBottom, speedBottom)), true);
             {
                 std::vector<ImVec2> pts;
                 pts.reserve((size_t)sampleCount);
+                const auto flushSpeed = [&] {
+                    if (pts.size() >= 2) dl->AddPolyline(pts.data(), (int)pts.size(), p.warn, 0, Dp(1.5f));
+                    pts.clear();
+                };
                 for (int i = 0; i < sampleCount; ++i) {
+                    const float f = frames[(size_t)i];
+                    if (allChannels && (parent.graphSegFrom < 0 || f < (float)parent.graphSegFrom || f > (float)parent.graphSegTo)) {
+                        flushSpeed();
+                        continue;
+                    }
                     float s = 0.0f;
                     if (i == 0) {
                         const float df = frames[1] - frames[0];
@@ -1016,19 +1128,23 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                         const float df = frames[(size_t)i] - frames[(size_t)(i - 1)];
                         s = df > 0.0f ? std::abs(activeVals[(size_t)i] - activeVals[(size_t)(i - 1)]) / df : 0.0f;
                     }
-                    pts.push_back(ImVec2(xOf(frames[(size_t)i]), ySpeed(s * kGraphLaneFps)));
+                    pts.push_back(ImVec2(xOf(f), ySpeed(s * kGraphLaneFps)));
                 }
-                dl->AddPolyline(pts.data(), (int)pts.size(), p.warn, 0, Dp(1.5f));
+                flushSpeed();
             }
             dl->PopClipRect();
 
-            // label column: sub-lane names, min / max numbers, channel chips
+            // label column: sub-lane names, min / max numbers
             dl->PushClipRect(ImVec2(bb.Min.x, std::max(clipTop, blockTop)), ImVec2(keyAreaX, std::min(clipBottom, speedBottom)), true);
             const float captionH = Dp(size::Caption * 1.25f);
             const float colMid = bb.Min.x + colWidth * 0.5f;
             char vminBuf[32], vmaxBuf[32], smaxBuf[32];
             std::snprintf(vminBuf, sizeof(vminBuf), "%.1f", dataMin);
             std::snprintf(vmaxBuf, sizeof(vmaxBuf), "%.1f", dataMax);
+            if (allChannels) {  // the easing curve: progress from the previous key's value to the next one's
+                std::snprintf(vminBuf, sizeof(vminBuf), "0%%");
+                std::snprintf(vmaxBuf, sizeof(vmaxBuf), "100%%");
+            }
             std::snprintf(smaxBuf, sizeof(smaxBuf), "%.1f/s", speedPeak);
             const float numRight = keyAreaX - Dp(4.0f);
             Text(dl, Font::Regular, size::Caption, ImVec2(numRight - TextSize(Font::Regular, size::Caption, vmaxBuf).x, valueTop + Dp(1.0f)),
@@ -1037,24 +1153,10 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                  p.ink3, vminBuf);
             Text(dl, Font::Regular, size::Caption, ImVec2(numRight - TextSize(Font::Regular, size::Caption, smaxBuf).x, speedTop + Dp(1.0f)),
                  p.ink3, smaxBuf);
-            const std::vector<ImRect> chips = chipRectsOf(parentIndex);
-            float chipsRight = bb.Min.x + Dp(6.0f);
-            for (size_t i = 0; i < chips.size(); ++i) {
-                const ImRect& chip = chips[i];
-                if (chip.GetWidth() <= 0.0f) continue;
-                chipsRight = std::max(chipsRight, chip.Max.x);
-                const bool sel = (int)i == active;
-                dl->AddRectFilled(chip.Min, chip.Max, sel ? p.accentSoft : WithAlpha(p.ink, 0.05f), Dp(3.0f));
-                if (sel) dl->AddRect(chip.Min, chip.Max, WithAlpha(p.accent, 0.7f), Dp(3.0f));
-                dl->AddCircleFilled(ImVec2(chip.Min.x + Dp(5.5f), (chip.Min.y + chip.Max.y) * 0.5f), Dp(2.5f),
-                                    chans[i].color ? chans[i].color : p.ink3);
-                Text(dl, Font::Regular, size::Caption - 1.0f, ImVec2(chip.Min.x + Dp(9.0f), chip.Min.y + Dp(1.0f)),
-                     sel ? p.accentInk : p.ink2, chans[i].label.c_str());
-            }
-            {   // "값" centred in the label column between the chips and the numbers, "속력" in the speed sub-lane
-                const char* valueLabel = Tr("값");
+            {   // "값" centred in the label column between the numbers, "속력" in the speed sub-lane
+                const char* valueLabel = allChannels ? Tr("진행도") : Tr("값");
                 const float vw = TextSize(Font::Regular, size::Caption, valueLabel).x;
-                const float left = chipsRight + Dp(4.0f), right = numRight - Dp(34.0f);
+                const float left = bb.Min.x + Dp(4.0f), right = numRight - Dp(34.0f);
                 const float vx = std::clamp(colMid - vw * 0.5f, left, std::max(left, right - vw));
                 Text(dl, Font::Regular, size::Caption, ImVec2(vx, (valueTop + valueBottom - captionH) * 0.5f), p.ink3, valueLabel);
                 const char* speedLabel = Tr("속력");

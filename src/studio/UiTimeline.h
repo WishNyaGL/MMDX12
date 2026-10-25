@@ -1,5 +1,6 @@
 #pragma once
 #include "imgui.h"
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -9,14 +10,19 @@ namespace mmdx::studio {
 
 // The caller inserts this many consecutive "lane rows" right after a row whose graph is open; the widget draws
 // one value / speed graph lane across their combined height. Row heights stay fixed (no variable rows).
-inline constexpr int kTimelineGraphRows = 5;
+// A block = the kTimelineGraphRows lane rows of one (parent, channel): the value sub-lane is 2.5 rows tall and the
+// speed sub-lane 1.5 rows.
+inline constexpr int kTimelineGraphRows = 4;
+// `graphChannelIndex` of the "all channels" row (listed first among the channel rows): one easing curve for every channel.
+inline constexpr int kTimelineGraphAllChannels = 64;
 
 struct TimelineKey {
     int frame = 0;
     bool selected = false;
 };
 
-// One channel offered by a row's graph lane (label shown on its chip, curve colour).
+// One channel offered by a row's graph lane (its name is the label of its channel sub-row, its curve colour the row's
+// dot and the curve).
 struct TimelineGraphChannel {
     std::string label;   // UTF-8
     ImU32 color = 0;
@@ -35,18 +41,24 @@ struct TimelineRow {
     bool animated = false;
     std::vector<TimelineKey> keys;  // sorted by frame ascending
     // Graph lane (read-only value / speed curves). Non-empty graphChannels = this row offers a graph; the caller
-    // inserts kTimelineGraphRows lane rows after it while graphOpen is set.
+    // inserts one channel sub-row per channel and, under every channel whose lane is open, kTimelineGraphRows lane
+    // rows. A channel row sets graphOpen while ITS lane is shown.
     std::vector<TimelineGraphChannel> graphChannels;
-    bool graphOpen = false;      // caller state: the lane rows below this row are shown
-    int graphActive = 0;         // active channel index into graphChannels
-    uint64_t graphOf = 0;        // lane rows: parent row id (0 = not a lane row)
+    bool graphOpen = false;      // caller state: the channel rows below this row (parent) / this channel's lane is shown
+    bool graphCurvesDiffer = false;  // the all-channels lane: the segment's channels hold different curves (a drag unifies them)
+    uint64_t graphOf = 0;        // channel / lane rows: parent row id (0 = not a child row)
     int graphIndex = 0;          // lane rows: 0..kTimelineGraphRows-1 within the block
-    // Editable segment of the lane (refreshed by the caller every frame, like graphActive): the frames of the two keys
-    // whose arriving segment the handles edit (-1 = none).
+    int graphLaneChannel = -1;   // lane rows: the channel of their block (-1 = not a lane row,
+                                 // kTimelineGraphAllChannels = the "all channels" block)
+    int graphChannelIndex = -1;  // channel rows: >= 0 = the channel this row stands for (-1 = not a channel row,
+                                 // kTimelineGraphAllChannels = the "all channels" row)
+    ImU32 dotColor = 0;          // channel rows: the channel's colour dot (0 = none)
+    // Editable segment of the lane (refreshed by the caller every frame): the frames of the two keys whose arriving
+    // segment the handles edit (-1 = none). Shared by every lane block of the row.
     int graphSegFrom = -1, graphSegTo = -1;
-    // The active channel's curve bytes of that segment. The caller writes them (the undo step and StudioHandleTimeline
-    // read them back); the widget keeps them in step with its own handle drag.
-    uint8_t graphCurve[4] = {};
+    // The curve bytes of that segment, one per channel (index into graphChannels; the caller fills them each frame).
+    // The "all channels" block draws / edits channel 0's bytes; the widget keeps them in step with its handle drag.
+    std::vector<std::array<uint8_t, 4>> graphCurves;
 };
 
 // UI state owned by the caller (persisted between frames).
@@ -67,8 +79,8 @@ struct TimelineView {
     float boxAnchorFrame = 0.0f;         // box select anchor as a frame (content coordinates: stays put while the view auto-scrolls)
     float boxAnchorY = 0.0f;             // box select anchor as content px below the rows area's top (content coordinates)
     uint64_t scrollToRow = 0;            // caller writes a row id: the widget scrolls it into view on the next call, then resets it to 0 (0 = no request; unknown id is just reset)
-    int graphDrag = 0;                   // transient handle drag: 0 none, 1 = P1, 2 = P2 (lane parent id in graphDragRow)
-    uint64_t graphDragRow = 0;           // lane parent row of the handle being dragged
+    int graphDrag = 0;                   // transient handle drag: 0 none, 1 = P1, 2 = P2
+    uint64_t graphDragRow = 0;           // the dragged block's first lane row id
     bool graphDragMoved = false;         // ... and the pointer moved since the press (a plain click edits nothing)
     // Set by the caller each frame before calling Timeline(): value of `row`'s `channel` at a fractional frame
     // (the caller owns the interpretation). Used only to draw the graph lanes.
@@ -95,9 +107,11 @@ struct TimelineEvents {
     bool contextMenu = false; int contextFrame = 0; uint64_t contextRow = 0;  // right click in the key area (row 0 = none)
     bool contextOnRuler = false;                       // the context menu event came from the ruler: contextRow = 0, contextFrame = frame under the mouse
     bool toggleGraph = false; uint64_t toggleGraphRow = 0;   // the graph icon of a parent row was clicked
-    bool graphChannel = false; uint64_t graphChannelRow = 0; int graphChannelIndex = 0;  // a channel chip was clicked (parent row + index)
+    bool graphChannel = false; uint64_t graphChannelRow = 0; int graphChannelIndex = 0;  // a channel row's label was clicked (parent row + index): that channel's lane toggles
     // a lane handle (P1 / P2) was dragged or double clicked: the new bytes of the segment's curve
-    bool graphCurve = false; uint64_t graphCurveRow = 0; int graphCurveFrame = 0; uint8_t graphCurveBytes[4] = {};
+    // (`graphCurveChannel` = the block's channel, kTimelineGraphAllChannels = every channel)
+    bool graphCurve = false; uint64_t graphCurveRow = 0; int graphCurveChannel = 0; int graphCurveFrame = 0;
+    uint8_t graphCurveBytes[4] = {};
     bool graphCurveEnd = false;   // the handle drag ended this frame (one undo step)
 };
 

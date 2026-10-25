@@ -166,14 +166,19 @@ void App::DrawStudioCameraPanel(float w) {
     // a full-width widget with a square icon button at the right end of the row
     const float btn = 34.0f, bw = Dp(btn), keyW = 84.0f;
     char buf[160];
-    // A camera key is being edited: its fields and curves follow, so the light / shadow sections shrink to their
-    // switches (their values and key buttons come back when no camera key is selected).
+    // A camera key sits at the playhead: its fields and curves follow, so the light / shadow sections shrink to their
+    // switches (their values and key buttons come back when no key is at the playhead). A key that is NOT at the
+    // playhead keeps the full panel: the "카메라 값" fields always mean the playhead (After Effects), and the key's own
+    // values are not editable from here (the inspector says so).
     bool compact = false;
     {
         RowKind kind;
         std::string name;
         for (const KeyId& k : d.selection)
-            if (StudioTrackOfRow(k.first, kind, name)) { compact = kind == RowKind::Camera; break; }
+            if (StudioTrackOfRow(k.first, kind, name)) {
+                compact = kind == RowKind::Camera && k.second == d.Frame();
+                break;
+            }
     }
 
     // --- view: motion / free camera, key from the view, path overlay
@@ -229,7 +234,7 @@ void App::DrawStudioCameraPanel(float w) {
     }
 
     // --- the camera at the playhead: always editable (auto-key keys the edit), key state like an AE/Blender property.
-    // While a camera key is selected the key section below edits it instead (one set of fields, no ID clash).
+    // While a camera key sits at the playhead the key section below edits it instead (one set of fields, no ID clash).
     if (!compact) {
         separator(8.0f);
         const bool keyed = FindKey(d.camera.camera, d.Frame()) != nullptr;

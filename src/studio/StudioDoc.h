@@ -80,10 +80,20 @@ struct StudioModel {
 // Timeline row ids: kind in the top byte, then a 24-bit group and a 32-bit index. Light is the camera VMD's light
 // track; SceneLight is the keys of one scene light (SceneLight.h): MakeRowId(RowKind::SceneLight, 0, light uid).
 // Focus is the studio's depth-of-field focus track (camera MotionData::focus, saved in the project, not in VMD).
-enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11, GraphLane = 12 };
+enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11, GraphLane = 12, GraphChannel = 13 };
 // GraphLane rows are the kTimelineGraphRows rows of an open value / speed graph lane: never a track, no keys. Their id
-// group is the parent row's low 24 bits and their index the lane index (0..kTimelineGraphRows-1); `TimelineRow::graphOf`
-// carries the parent id.
+// group is the parent row's low 24 bits and their index the block's channel in the high byte, the lane index
+// (0..kTimelineGraphRows-1) in the low byte: MakeRowId(GraphLane, parentLow24, (channel << 8) | laneIndex);
+// `TimelineRow::graphOf` carries the parent id and `graphLaneChannel` the block's channel (kTimelineGraphAllChannels
+// for the "all channels" lane). A block = the lane rows of one (parent, channel) and sits directly under its channel row.
+// GraphChannel rows are the channel sub-rows of an open graph (one per channel, printed right after the parent): never a
+// track, no keys of their own (they show the parent's keys dimmed). Their id group is the parent's low 24 bits and their
+// index the channel; `TimelineRow::graphOf` carries the parent id and `graphChannelIndex` the channel.
+// Group rows of the effect / world trees (RowKind::Group): the category groups are MakeRowId(Group, 0, 0) ("화면 효과")
+// and MakeRowId(Group, 0, 1) ("월드"); an entity group is MakeRowId(Group, 0x400000 | uid, 0) (effect) or
+// MakeRowId(Group, 0x800000 | uid, 0) (world); a pack.json group of that entity is the same group word with the index
+// 1 + its index in the pack's `groups` ("params without a group" sit directly under the entity). Model display-frame
+// groups are MakeRowId(Group, displayFrameIndex, 0) and never set the 0x400000 / 0x800000 bits.
 inline uint64_t MakeRowId(RowKind k, uint32_t group, uint32_t index) {
     return ((uint64_t)k << 56) | ((uint64_t)(group & 0xFFFFFF) << 32) | index;
 }
@@ -236,7 +246,9 @@ struct StudioDoc {
     int followFrame = -1;             // frame the timeline last scrolled to show (follows playback and seeks)
     std::set<KeyId> selection;
     std::set<uint64_t> collapsed;     // collapsed group rows (per selected model; cleared on switch)
-    std::set<uint64_t> graphOpen;     // rows whose value / speed graph lane is open (not saved to the project)
+    std::set<uint64_t> expanded;      // default-collapsed groups the user opened (entity / pack group rows; cleared with `collapsed`)
+    std::set<uint64_t> graphOpen;     // rows whose value / speed graph lanes are shown (not saved to the project)
+    std::set<uint64_t> graphLaneOpen; // channel rows whose own graph lane is open (not saved; cleared like graphOpen)
     std::vector<ClipboardKey> clipboard;
     int clipboardModel = -2;          // model the clipboard came from (-1 camera, -2 empty)
     int curveChannel = 3;             // inspector: bone 0..3 (X,Y,Z,R), camera 0..5

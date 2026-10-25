@@ -634,9 +634,11 @@ void App::DrawStudioStopwatchConfirm() {
 }
 
 
-// The keyable typed params of a studio effect / world (docs/effect_ecosystem.md): one slider / switch per pack param
-// with a key diamond at the playhead, under the pack's collapsible groups. `uid` addresses the keyed tracks
-// (EffectParamTrackName / WorldParamTrackName for `kind`). True = a static value or a key changed this frame.
+// The keyable typed params of a studio effect / world (docs/effect_ecosystem.md): one plain full-width slider / switch
+// / colour field per pack param, under the pack's collapsible groups (the stopwatch and the key navigation live on the
+// timeline rows: DrawKeyableParams keys a param when the value is edited and auto-key is on, as it always did).
+// `uid` addresses the keyed tracks (EffectParamTrackName / WorldParamTrackName for `kind`). True = a static value or a
+// key changed this frame.
 bool App::DrawKeyableParams(const ShaderPack& pk, studio::StudioEffect& fx, uint32_t uid, studio::RowKind kind,
                             const char* idPrefix) {
     using namespace ui;
@@ -648,90 +650,9 @@ bool App::DrawKeyableParams(const ShaderPack& pk, studio::StudioEffect& fx, uint
     const auto trackName = [&](const std::string& key) {
         return kind == RowKind::WorldParam ? WorldParamTrackName(uid, key) : EffectParamTrackName(uid, key);
     };
-    const char* keyAddName = kind == RowKind::WorldParam ? Tr("월드 키 등록") : Tr("효과 키 등록");
-    const char* keyDelName = kind == RowKind::WorldParam ? Tr("월드 키 삭제") : Tr("효과 키 삭제");
-
-// ◀ ▶: the nearest key of `tr` before / after the playhead (-1 when none)
-const auto keyAround = [](const EffectParamTrack* tr, int frame, bool prev) -> int {
-    if (!tr) return -1;
-    int found = -1;
-    if (prev) {
-        for (const EffectParamKey& k : tr->keys) { if (k.frame < frame) found = k.frame; else break; }
-    } else {
-        for (const EffectParamKey& k : tr->keys) { if (k.frame > frame) { found = k.frame; break; } }
-    }
-    return found;
-};
-const auto jumpKey = [&](const EffectParamTrack* tr, int dir) {
-    const int target = keyAround(tr, d.Frame(), dir < 0);
-    if (target < 0) return;
-    StudioSetPlaying(false);
-    StudioSeek(target / (double)kMmdFps);
-};
-
-// stopwatch OFF → OFF confirm: the playhead value becomes the constant and the whole track is removed. One undo step
-// through the EffectsCommand / WorldsCommand snapshot, since the constant value is not part of a TrackState.
-const auto stopwatchOff = [&](const char* displayName, const std::vector<std::string>& keys, const std::vector<float>& values) {
-    studioStopwatchLabel_ = displayName;
-    studioStopwatchOff_ = [this, &d, &fx, kind, keys, values] {
-        if (kind == RowKind::WorldParam) {
-            std::vector<StudioWorld> before = d.worlds;
-            for (size_t i = 0; i < keys.size(); ++i) {
-                fx.entry.params[keys[i]] = values[i];
-                for (size_t t = 0; t < fx.tracks.size(); ++t)
-                    if (fx.tracks[t].param == keys[i]) { fx.tracks.erase(fx.tracks.begin() + (long)t); break; }
-            }
-            d.history.Push(std::make_unique<WorldsCommand>(d, Tr("애니메이션 끄기"), before, d.worlds));
-        } else {
-            std::vector<StudioEffect> before = d.effects;
-            for (size_t i = 0; i < keys.size(); ++i) {
-                fx.entry.params[keys[i]] = values[i];
-                for (size_t t = 0; t < fx.tracks.size(); ++t)
-                    if (fx.tracks[t].param == keys[i]) { fx.tracks.erase(fx.tracks.begin() + (long)t); break; }
-            }
-            d.history.Push(std::make_unique<EffectsCommand>(d, Tr("애니메이션 끄기"), before, d.effects));
-        }
-        d.rowsKey = ~0ull;
-    };
-};
-
-// The stopwatch of one param row (+ only when animated: the key diamond and ◀ ▶). `keys` / `trs` / `values` hold one
-// entry per component (the RGB of a color param shares one stopwatch). OFF→ON keys the current value at the playhead.
-// Returns `animated` (the caller widens the following widget accordingly).
-auto drawStopwatch = [&](const char* id, const char* displayName, const std::vector<std::string>& keys,
-                         EffectParamTrack** trs, int count, std::vector<float> values, bool stepped, bool keyedHere,
-                         EffectParamTrack* navTrack, auto&& toggle) -> bool {
-    bool animated = false;
-    for (int i = 0; i < count; ++i) if (trs[i] && !trs[i]->keys.empty()) { animated = true; break; }
-    if (Stopwatch(id, animated)) {
-        if (!animated) {
-            std::vector<TrackState> before;
-            for (const std::string& k : keys) before.push_back(CaptureTrack(d, -1, kind, trackName(k)));
-            for (int i = 0; i < count && i < (int)keys.size(); ++i) {
-                if (!trs[i]) { fx.tracks.push_back({keys[(size_t)i], {}}); trs[i] = &fx.tracks.back(); }
-                UpsertParamKey(*trs[i], EffectParamKey{d.Frame(), values[(size_t)i], stepped});
-            }
-            StudioPushTrackEdit(Tr("애니메이션 켜기"), before);
-            d.rowsKey = ~0ull;
-            changed = true;
-        } else {
-            stopwatchOff(displayName, keys, values);
-        }
-        return animated;
-    }
-    if (!animated) return false;
-    ImGui::SameLine(0.0f, 0.0f);
-    const int nav = KeyNav("##keynav", keyAround(navTrack, d.Frame(), true) >= 0, keyedHere,
-                           keyAround(navTrack, d.Frame(), false) >= 0);
-    if (nav == -1) jumpKey(navTrack, -1);
-    else if (nav == 1) jumpKey(navTrack, 1);
-    else if (nav == 2) toggle();
-    return true;
-};
 
 auto drawStudioParam = [&](const ShaderPackParam& sp, size_t k) {
     ImGui::PushID((int)k);
-    const float navW = Dp(3.0f * 22.0f * 0.8f);  // ◀ ◆ ▶ (only drawn when animated)
     const float availW = ImGui::GetContentRegionAvail().x;
     const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(lang);
     const std::string sid = std::string(idPrefix) + "_" + sp.key;
@@ -742,25 +663,8 @@ auto drawStudioParam = [&](const ShaderPackParam& sp, size_t k) {
         EffectParamTrack* tr = nullptr;
         for (auto& t : fx.tracks) { if (t.param == sp.key) { tr = &t; break; } }
         const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
+        const bool animated = tr && !tr->keys.empty();
         float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
-        const auto toggle = [&] {
-            std::vector<TrackState> before = {CaptureTrack(d, -1, kind, trackName(sp.key))};
-            if (keyed) {
-                EraseParamKeys(*tr, {(int32_t)d.Frame()});
-                StudioPushTrackEdit(keyDelName, before);
-            } else {
-                if (!tr) { fx.tracks.push_back({sp.key, {}}); tr = &fx.tracks.back(); }
-                UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, false});
-                StudioPushTrackEdit(keyAddName, before);
-            }
-            d.rowsKey = ~0ull;
-            changed = true;
-        };
-        const bool animated = drawStopwatch("##stopwatch", label.c_str(), {sp.key}, &tr, 1, {curVal}, false, keyed, tr, toggle);
-        if (animated) ImGui::SameLine(0.0f, 0.0f);
-
-        ImGui::SameLine(0.0f, Dp(4.0f));   // right after the stopwatch / key diamond (indent-safe)
-        ImGui::SetNextItemWidth(availW - Dp(22.0f) - (animated ? navW : 0.0f) - Dp(4.0f));
         float v = curVal;
         const char* fmt = sp.step > 0.0f ? (sp.step >= 1.0f ? "%.0f" : "%.2f") : "%.2f";
         if (SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, fmt)) {
@@ -788,26 +692,8 @@ auto drawStudioParam = [&](const ShaderPackParam& sp, size_t k) {
         float staticVal = fx.entry.params.count(sp.key) ? fx.entry.params[sp.key] : sp.def;
         EffectParamTrack* tr = nullptr;
         for (auto& t : fx.tracks) { if (t.param == sp.key) { tr = &t; break; } }
-        const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
+        const bool animated = tr && !tr->keys.empty();
         float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
-        const auto toggle = [&] {
-            std::vector<TrackState> before = {CaptureTrack(d, -1, kind, trackName(sp.key))};
-            if (keyed) {
-                EraseParamKeys(*tr, {(int32_t)d.Frame()});
-                StudioPushTrackEdit(keyDelName, before);
-            } else {
-                if (!tr) { fx.tracks.push_back({sp.key, {}}); tr = &fx.tracks.back(); }
-                UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, true});
-                StudioPushTrackEdit(keyAddName, before);
-            }
-            d.rowsKey = ~0ull;
-            changed = true;
-        };
-        const bool animated = drawStopwatch("##stopwatch", label.c_str(), {sp.key}, &tr, 1, {curVal}, true, keyed, tr, toggle);
-        if (animated) ImGui::SameLine(0.0f, 0.0f);
-
-        ImGui::SameLine(0.0f, Dp(4.0f));   // right after the stopwatch / key diamond (indent-safe)
-        ImGui::SetNextItemWidth(availW - Dp(22.0f) - (animated ? navW : 0.0f) - Dp(4.0f));
         float v = curVal;
         if (SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, "%.0f")) {
             v = std::round(v);
@@ -834,26 +720,8 @@ auto drawStudioParam = [&](const ShaderPackParam& sp, size_t k) {
         float staticVal = fx.entry.params.count(sp.key) ? fx.entry.params[sp.key] : (sp.defBool ? 1.0f : 0.0f);
         EffectParamTrack* tr = nullptr;
         for (auto& t : fx.tracks) { if (t.param == sp.key) { tr = &t; break; } }
-        const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
+        const bool animated = tr && !tr->keys.empty();
         float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
-        const auto toggle = [&] {
-            std::vector<TrackState> before = {CaptureTrack(d, -1, kind, trackName(sp.key))};
-            if (keyed) {
-                EraseParamKeys(*tr, {(int32_t)d.Frame()});
-                StudioPushTrackEdit(keyDelName, before);
-            } else {
-                if (!tr) { fx.tracks.push_back({sp.key, {}}); tr = &fx.tracks.back(); }
-                UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, true});
-                StudioPushTrackEdit(keyAddName, before);
-            }
-            d.rowsKey = ~0ull;
-            changed = true;
-        };
-        const bool animated = drawStopwatch("##stopwatch", label.c_str(), {sp.key}, &tr, 1, {curVal}, true, keyed, tr, toggle);
-        if (animated) ImGui::SameLine(0.0f, 0.0f);
-
-        ImGui::SameLine(0.0f, Dp(4.0f));   // right after the stopwatch / key diamond (indent-safe)
-        ImGui::SetNextItemWidth(availW - Dp(22.0f) - (animated ? navW : 0.0f) - Dp(4.0f));
         bool b = (curVal > 0.5f);
         if (Switch(sid.c_str(), label.c_str(), &b)) {
             float v = b ? 1.0f : 0.0f;
@@ -883,38 +751,9 @@ auto drawStudioParam = [&](const ShaderPackParam& sp, size_t k) {
             keyedComp[c] = trComp[c] && FindKey(trComp[c]->keys, d.Frame()) != nullptr;
             curValComp[c] = trComp[c] ? EvaluateParamTrack(*trComp[c], (float)d.Frame(), staticVal) : staticVal;
         }
-        const bool allRgbKeyed = keyedComp[0] && keyedComp[1] && keyedComp[2];
         const bool rgbAnimated = (trComp[0] && !trComp[0]->keys.empty()) || (trComp[1] && !trComp[1]->keys.empty()) ||
                                  (trComp[2] && !trComp[2]->keys.empty());
-        const auto rgbToggle = [&] {
-            std::vector<TrackState> before;
-            for (int c = 0; c < 3; ++c) {
-                before.push_back(CaptureTrack(d, -1, kind, trackName(sp.key + "#" + std::to_string(c))));
-            }
-            if (allRgbKeyed) {
-                for (int c = 0; c < 3; ++c) if (trComp[c]) EraseParamKeys(*trComp[c], {(int32_t)d.Frame()});
-                StudioPushTrackEdit(keyDelName, before);
-            } else {
-                for (int c = 0; c < 3; ++c) {
-                    std::string tc = sp.key + "#" + std::to_string(c);
-                    if (!trComp[c]) { fx.tracks.push_back({tc, {}}); trComp[c] = &fx.tracks.back(); }
-                    UpsertParamKey(*trComp[c], EffectParamKey{d.Frame(), curValComp[c], false});
-                }
-                StudioPushTrackEdit(keyAddName, before);
-            }
-            d.rowsKey = ~0ull;
-            changed = true;
-        };
-        {
-            std::vector<std::string> keys = {sp.key + "#0", sp.key + "#1", sp.key + "#2"};
-            EffectParamTrack* trs[3] = {trComp[0], trComp[1], trComp[2]};
-            std::vector<float> vals = {curValComp[0], curValComp[1], curValComp[2]};
-            drawStopwatch("##stopwatch", label.c_str(), keys, trs, 3, vals, false, allRgbKeyed, trComp[0], rgbToggle);
-            trComp[0] = trs[0]; trComp[1] = trs[1]; trComp[2] = trs[2];
-        }
-
-        if (rgbAnimated) ImGui::SameLine(0.0f, 0.0f);
-        const float itemW = availW - Dp(22.0f) - (rgbAnimated ? navW : 0.0f) - Dp(4.0f);
+        const float itemW = availW;
         const ImVec2 cpos = ImGui::GetCursorScreenPos();
         TextEllipsis(dl, Font::Regular, size::Small, ImVec2(cpos.x, cpos.y + Dp(4.0f)), cpos.x + itemW * 0.4f, p.ink2, label.c_str());
         ImGui::SetCursorScreenPos(ImVec2(cpos.x + itemW * 0.4f, cpos.y));
@@ -934,33 +773,12 @@ auto drawStudioParam = [&](const ShaderPackParam& sp, size_t k) {
             changed = true;
         }
         if (sp.alpha) {
-            const auto aToggle = [&] {
-                std::string tc = sp.key + "#3";
-                std::vector<TrackState> before = {CaptureTrack(d, -1, kind, trackName(tc))};
-                if (keyedComp[3]) {
-                    EraseParamKeys(*trComp[3], {(int32_t)d.Frame()});
-                    StudioPushTrackEdit(keyDelName, before);
-                } else {
-                    if (!trComp[3]) { fx.tracks.push_back({tc, {}}); trComp[3] = &fx.tracks.back(); }
-                    UpsertParamKey(*trComp[3], EffectParamKey{d.Frame(), curValComp[3], false});
-                    StudioPushTrackEdit(keyAddName, before);
-                }
-                d.rowsKey = ~0ull;
-                changed = true;
-            };
             std::string alphaLabel = label + " " + Tr("불투명도");
-            std::vector<std::string> keys = {sp.key + "#3"};
-            EffectParamTrack* trs1[1] = {trComp[3]};
-            const bool aAnimated = drawStopwatch("##stopwatcha", alphaLabel.c_str(), keys, trs1, 1, {curValComp[3]}, false,
-                                                 keyedComp[3], trComp[3], aToggle);
-            trComp[3] = trs1[0];
-            if (aAnimated) ImGui::SameLine(0.0f, 0.0f);
-            ImGui::SameLine(0.0f, Dp(4.0f));   // right after the stopwatch / key diamond (indent-safe)
-            ImGui::SetNextItemWidth(availW - Dp(22.0f) - (aAnimated ? navW : 0.0f) - Dp(4.0f));
+            ImGui::SetNextItemWidth(availW);
             float a = curValComp[3];
             if (SliderRow((sid + "_a").c_str(), alphaLabel.c_str(), &a, 0.0f, 1.0f, "%.2f")) {
                 std::string tc = sp.key + "#3";
-                if (aAnimated || d.autoKey || keyedComp[3]) {
+                if (rgbAnimated || d.autoKey || keyedComp[3]) {
                     if (!trComp[3]) { fx.tracks.push_back({tc, {}}); trComp[3] = &fx.tracks.back(); }
                     UpsertParamKey(*trComp[3], EffectParamKey{d.Frame(), a, false});
                     studioKeyChanged_ = true;
@@ -988,27 +806,9 @@ auto drawStudioParam = [&](const ShaderPackParam& sp, size_t k) {
             float staticVal = fx.entry.params.count(tc) ? fx.entry.params[tc] : defVal;
             EffectParamTrack* tr = nullptr;
             for (auto& t : fx.tracks) { if (t.param == tc) { tr = &t; break; } }
-            const bool keyed = tr && FindKey(tr->keys, d.Frame()) != nullptr;
+            const bool animated = tr && !tr->keys.empty();
             float curVal = tr ? EvaluateParamTrack(*tr, (float)d.Frame(), staticVal) : staticVal;
-            const auto toggle = [&] {
-                std::vector<TrackState> before = {CaptureTrack(d, -1, kind, trackName(tc))};
-                if (keyed) {
-                    EraseParamKeys(*tr, {(int32_t)d.Frame()});
-                    StudioPushTrackEdit(keyDelName, before);
-                } else {
-                    if (!tr) { fx.tracks.push_back({tc, {}}); tr = &fx.tracks.back(); }
-                    UpsertParamKey(*tr, EffectParamKey{d.Frame(), curVal, false});
-                    StudioPushTrackEdit(keyAddName, before);
-                }
-                d.rowsKey = ~0ull;
-                changed = true;
-            };
             std::string clabel = label + kAxes[c];
-            const bool animated = drawStopwatch("##stopwatch", clabel.c_str(), {tc}, &tr, 1, {curVal}, false, keyed, tr, toggle);
-            if (animated) ImGui::SameLine(0.0f, 0.0f);
-
-            ImGui::SameLine(0.0f, Dp(4.0f));   // right after the stopwatch / key diamond (indent-safe)
-            ImGui::SetNextItemWidth(availW - Dp(22.0f) - (animated ? navW : 0.0f) - Dp(4.0f));
             std::string csid = sid + "_" + std::to_string(c);
             float v = curVal;
             const char* fmt = sp.step > 0.0f ? (sp.step >= 1.0f ? "%.0f" : "%.2f") : "%.2f";

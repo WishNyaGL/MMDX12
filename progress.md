@@ -2391,3 +2391,35 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - Verified: build, ui-script captures of the lane, camera handle drag at max zoom (keys 2 frames apart) + Ctrl+Z restored it.
   NOT verified: handle double-click reset, bone-row handle drag (test motions are baked: a key per frame), live inspector sync,
   the "apply to all channels" path, DLSS quad view.
+
+## 2026-10-25 - Studio inspector / timeline UX: playhead-only value fields, effect / world param rows, per-channel graph lanes
+- Report: (1) a selected camera key at frame 98 kept its values in the inspector while playing / scrubbing to 144, so
+  editing them changed an off-screen key; (2) the effect / world properties still had the stopwatch + key navigation
+  (regression of the timeline-controls move); (3) graph lane channel chips should be AE-style rows; follow-ups: the
+  Bezier handles felt wrong, an "all channels" path in the lane, rows grouped like AE, one lane per channel.
+- Inspector (After Effects model): value fields always mean the playhead. The camera panel stays full (live "카메라 값")
+  unless the selected camera key IS at the playhead; a selected key elsewhere shows only track, frame and interpolation
+  controls (no value fields for camera / light / shadow / focus / scene light / accessory / effect / world param keys).
+  A first version added a notice + "키로 이동" button; removed on request (the frame row says it; a key click seeks).
+  Review fix: the dangling key-edit close must skip live field drags (`studioKeyLive_`, `IsAnyItemActive`).
+- Effect / world params: `DrawKeyableParams` is plain sliders; every keyable component has a timeline row with stopwatch /
+  key nav (`StudioRowStopwatch` / `StudioRowKeyNav` handle EffectParam / WorldParam). Row index scheme (runtime only):
+  pack param i -> `i * 4 + component`, orphan tracks `0x100000 + n`. Rows nest: category (화면 효과 / 월드) > entity group
+  (`MakeRowId(Group, 0x400000|uid or 0x800000|uid, 0)`, default collapsed via `StudioDoc::expanded`) > pack.json group
+  (index 1 + group index, default = the group's `collapsed`) > params (no "pack · " prefix).
+- Graph lanes: graph icon shows channel rows (`RowKind::GraphChannel`: 모든 채널, X, Y, Z, 회전[, 거리, 시야]); each
+  channel row toggles ITS OWN lane (`StudioDoc::graphLaneOpen`, several open at once; lane row index `(ch << 8) | i`,
+  `TimelineRow::graphLaneChannel`). Single channel = only that channel's value / speed / handles; "모든 채널" = channel
+  shapes normalised + the bold easing (0..100 %) and its speed inside the editable segment, drags write every channel
+  (`TimelineEvents::graphCurveChannel`). Per-channel bytes `TimelineRow::graphCurves`. `kTimelineGraphRows` 4 (value
+  2.5 rows, speed 1.5).
+- Bezier handle fix: a flat segment's grown handle box always went UP, so on a falling segment the handles moved opposite
+  to the curve and P2 hung off the wrong corner. The box now grows in the value's direction (clamped inside the lane),
+  P2 hangs off the box corner, and a padded box draws the easing preview.
+- Workers: opencode deepseek (`default` + `--review full`): run 1 (inspector, params, channel rows, 13 min); run 2
+  stopped OVER-EXPLORING (looking for a Bezier evaluator) and resumed with a decision note (local `EaseCurve` in the
+  widget), 12 min. Claude did the handle fix, the all-channels mode v1, review fixes and the notice removal.
+- Verified (ui-script captures, captures/studio/qa2): live camera values with an off-playhead key selected, key section
+  without value fields, three lanes open at once, all-channels drag (Y follows), world tree with pack groups.
+  NOT verified: single-channel handle drag in the new block structure, a falling flat segment, effect ("화면 효과")
+  tree capture, stopwatch off confirm on param rows, pack groups with "collapsed": true.

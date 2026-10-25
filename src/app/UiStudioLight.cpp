@@ -57,6 +57,7 @@ void App::StudioSelectLight(uint32_t uid) {
     d.selectedBones.clear();
     d.activeBone = -1;
     d.collapsed.clear();
+    d.expanded.clear();
     d.rowsKey = ~0ull;
 }
 
