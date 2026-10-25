@@ -431,7 +431,6 @@ void App::UpdateStudio(double dt) {
     }
     StudioPollJobs();
     StudioPollBake();
-    StudioPollMocap();
     StudioAutosave(false, false);
     StudioPumpColliders();
     if (d.playing) {
@@ -3102,7 +3101,6 @@ void App::DrawStudio() {
     DrawStudioLightPresetConfirm();
     DrawStudioStopwatchConfirm();   // stopwatch off: "키프레임을 모두 지웁니다"
     DrawStudioBakeDialog();    // P2.2: the physics bake options / progress modal
-    DrawStudioMocapDialog();
     DrawVideoRenderDialog();   // the render dialog (top bar render menu); starting it leaves for Screen::Offline
     if (screen_ != Screen::Studio) return;
     DrawToast();

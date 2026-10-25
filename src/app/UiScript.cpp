@@ -700,47 +700,6 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 return false;
             }
         }
-    } else if (cmd == "studiomocap") {  // studiomocap <video> [start end] [nohands] [noface]
-        if (!studio_) {
-            if (outError) *outError = "Studio is not active";
-            return false;
-        }
-        if (args.empty()) {
-            if (outError) *outError = "studiomocap requires a video path";
-            return false;
-        }
-        const std::filesystem::path videoPath = Utf8ToPath(args[0]);
-        double start = 0.0;
-        double end = -1.0;
-        bool hands = true;
-        bool face = true;
-
-        size_t nextArg = 1;
-        if (args.size() >= 3 && (std::isdigit((unsigned char)args[1][0]) || args[1][0] == '-' || args[1][0] == '+')) {
-            start = std::atof(args[1].c_str());
-            end = std::atof(args[2].c_str());
-            nextArg = 3;
-        }
-        for (size_t i = nextArg; i < args.size(); ++i) {
-            if (args[i] == "nohands") hands = false;
-            else if (args[i] == "noface") face = false;
-        }
-
-        const int atFrame = studio_->Frame();
-        if (StudioStartMocap(videoPath, start, end, hands, face, 0.5f, atFrame)) {
-            while (studioMocapRunning_) {
-                StudioPollMocap();
-                if (studioMocapRunning_) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-            if (!studioMocapLastError_.empty()) {
-                if (outError) *outError = studioMocapLastError_;
-                return false;
-            }
-        } else {
-            LOG_WARN("ui script: studiomocap could not start");
-            if (outError) *outError = studioMocapLastError_.empty() ? "Mocap could not start" : studioMocapLastError_;
-            return false;
-        }
     } else if (cmd == "studiomaterial") {  // studiomaterial <default|ray> [emd path] (selected studio model)
         studio::StudioModel* m = studio_ ? studio_->Selected() : nullptr;
         if (m && !args.empty()) {

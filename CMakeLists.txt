@@ -97,17 +97,6 @@ target_link_libraries(mmdx_render PUBLIC
   ${EXT}/xess/lib/libxess.lib delayimp)
 target_link_options(mmdx_render INTERFACE /DELAYLOAD:libxess.dll)
 
-# mocap: video -> landmarks (MediaPipe ONNX models through a runtime-loaded onnxruntime.dll) -> MMD motion.
-# Headers vendored in external/onnxruntime/include; the DLL and models come from tools/fetch_sdks.ps1.
-file(GLOB MOCAP_SRC CONFIGURE_DEPENDS src/mocap/*.cpp)
-if(NOT MOCAP_SRC)
-  set(MOCAP_SRC ${CMAKE_SOURCE_DIR}/cmake/empty.cpp)
-endif()
-add_library(mmdx_mocap STATIC ${MOCAP_SRC})
-target_include_directories(mmdx_mocap PUBLIC ${CMAKE_SOURCE_DIR}/src PRIVATE ${EXT}/onnxruntime/include)
-target_compile_definitions(mmdx_mocap PRIVATE ORT_API_MANUAL_INIT)
-target_link_libraries(mmdx_mocap PUBLIC mmdx_core mmdx_anim)
-
 # app: window, screens, audio, benchmark, leaderboard
 file(GLOB APP_SRC CONFIGURE_DEPENDS src/app/*.cpp src/audio/*.cpp src/studio/*.cpp)
 if(NOT APP_SRC)
@@ -115,7 +104,7 @@ if(NOT APP_SRC)
 endif()
 add_library(mmdx_app STATIC ${APP_SRC})
 target_include_directories(mmdx_app PUBLIC ${EXT}/miniaudio)
-target_link_libraries(mmdx_app PUBLIC mmdx_core mmdx_anim mmdx_mocap mmdx_render imgui winhttp mfplat mfreadwrite mfuuid)
+target_link_libraries(mmdx_app PUBLIC mmdx_core mmdx_anim mmdx_render imgui winhttp mfplat mfreadwrite mfuuid)
 
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/main.cpp)
   add_executable(MMDX12 WIN32 src/main.cpp)
@@ -144,16 +133,11 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/src/main.cpp)
       message(WARNING "${dll} not found in ${SDK_BIN}/x64: ray tracing will be unavailable")
     endif()
   endforeach()
-  file(GLOB SDK_DLLS CONFIGURE_DEPENDS ${EXT}/dlss/bin/*.dll ${EXT}/xess/bin/*.dll ${EXT}/ffx/bin/*.dll ${EXT}/onnxruntime/bin/*.dll)
+  file(GLOB SDK_DLLS CONFIGURE_DEPENDS ${EXT}/dlss/bin/*.dll ${EXT}/xess/bin/*.dll ${EXT}/ffx/bin/*.dll)
   list(APPEND RUNTIME_DLLS ${SDK_DLLS})
   add_custom_target(copy_runtime_dlls ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RUNTIME_DLLS} ${CMAKE_BINARY_DIR}/bin)
   add_dependencies(MMDX12 copy_runtime_dlls)
-  # mocap models (fetched; absent = the video motion capture reports them missing)
-  add_custom_target(copy_mocap_models ALL
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${EXT}/mocap/models ${CMAKE_BINARY_DIR}/bin/mocap
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${EXT}/mocap/models ${CMAKE_BINARY_DIR}/bin/mocap)
-  add_dependencies(MMDX12 copy_mocap_models)
 endif()
 
 # ---- tools -----------------------------------------------------------------
@@ -187,14 +171,6 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/shader_choice_test.cpp)
   add_executable(shader_choice_test tools/shader_choice_test.cpp src/app/Settings.cpp)
   target_include_directories(shader_choice_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(shader_choice_test PRIVATE mmdx_render)
-endif()
-if(EXISTS ${CMAKE_SOURCE_DIR}/tools/mocap_probe.cpp)
-  add_executable(mocap_probe tools/mocap_probe.cpp)
-  target_link_libraries(mocap_probe PRIVATE mmdx_mocap)
-endif()
-if(EXISTS ${CMAKE_SOURCE_DIR}/tools/mocap_solver_test.cpp)
-  add_executable(mocap_solver_test tools/mocap_solver_test.cpp)
-  target_link_libraries(mocap_solver_test PRIVATE mmdx_mocap)
 endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tools/rest_pose_test.cpp)
   add_executable(rest_pose_test tools/rest_pose_test.cpp)

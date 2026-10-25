@@ -2423,3 +2423,18 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   without value fields, three lanes open at once, all-channels drag (Y follows), world tree with pack groups.
   NOT verified: single-channel handle drag in the new block structure, a falling flat segment, effect ("화면 효과")
   tree capture, stopwatch off confirm on param rows, pack groups with "collapsed": true.
+
+## 2026-10-25 - Removed video motion capture
+
+**Why**: the "영상에서 모션 만들기" results were too poor to keep (anime renders: hands ~30 %, face ~45 % of frames), so the feature was removed instead of tuned.
+
+### Done
+- Deleted `src/mocap/` (MocapExtractor / MocapSolver / OrtRuntime), `app/UiStudioMocap.cpp`, `tools/mocap_probe.cpp`, `tools/mocap_solver_test.cpp`,
+  the vendored `external/onnxruntime/` headers, the `mmdx_mocap` library, the `copy_mocap_models` target and the onnxruntime DLL copy.
+- App: the studio model menu item, the mocap state in `App.h` (and its `StudioModal()` terms), the poll / dialog calls and the `studiomocap` ui-script command are gone; mocap strings removed from the En / Ja / Zh tables.
+- `tools/fetch_sdks.ps1` no longer downloads ONNX Runtime or the MediaPipe models; `package_release.ps1` drops the `mocap/` folder, the ONNX Runtime / MediaPipe licenses and `mocap-sources.txt` (smaller release zip). `.gitignore` and CLAUDE.md cleaned.
+- Implementation by an opencode worker (deepseek 4.1 1017, low); Claude reviewed the diff, cleaned CLAUDE.md, rebuilt from a fresh configure and smoke-ran the studio (no `[E]` / `[W]`).
+
+### Notes
+- Old `build*/bin` dirs may still hold `onnxruntime.dll` and `bin/mocap/` from earlier builds; `package_release.ps1` copies `bin/*.dll`, so package from a clean bin (`build/bin` was cleaned).
+- A reset build dir needs `build.ninja` deleted too: build.cmd only configures when `build.ninja` is missing.

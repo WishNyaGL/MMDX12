@@ -20,7 +20,6 @@
 #include "asset/MaterialChoice.h"
 #include "asset/RayMaterial.h"
 #include "asset/VmdMotion.h"
-#include "mocap/MocapSolver.h"
 #include "audio/AudioPlayer.h"
 #include "audio/BeatAnalysis.h"
 #include "render/ColorLut.h"
@@ -731,34 +730,6 @@ private:
     bool studioBakeDialogOpen_ = false;
     int studioBakeOptStart_ = 0, studioBakeOptEnd_ = 0, studioBakeOptStep_ = 1;
     bool studioBakeOptSelectedOnly_ = false, studioBakeOptTurnOff_ = true;
-    // --- mocap from video (UiStudioMocap.cpp): extract landmarks and retarget to character
-    void StudioOpenMocapDialog();
-    bool StudioStartMocap(const std::filesystem::path& video, double start, double end, bool hands, bool face,
-                          float smoothing, int atFrame);
-    void StudioPollMocap();
-    void DrawStudioMocapDialog();
-    bool studioMocapDialogOpen_ = false;
-    std::filesystem::path studioMocapOptVideo_;
-    double studioMocapOptDuration_ = 0.0;
-    float studioMocapOptStartSec_ = 0.0f;
-    float studioMocapOptEndSec_ = 0.0f;
-    bool studioMocapOptHands_ = true;
-    bool studioMocapOptFace_ = true;
-    float studioMocapOptSmoothing_ = 0.5f;
-    int studioMocapOptAtFrame_ = 0;
-    bool studioMocapAvailable_ = true;
-    std::string studioMocapAvailReason_;
-    bool studioMocapRunning_ = false;
-    uint32_t studioMocapModelUid_ = 0;
-    int studioMocapAtFrame_ = 0;
-    double studioMocapStartWall_ = 0.0;
-    VmdMotion studioMocapResult_;
-    mocap::SolveReport studioMocapReport_;
-    std::string studioMocapError_;
-    std::string studioMocapLastError_;
-    std::atomic<bool> studioMocapCancel_{false};
-    std::atomic<float> studioMocapProgress_{0.0f};
-    std::future<bool> studioMocapFuture_;
     void DrawStudioPropPanel(float w);                // inspector: prop parent / bone / offset
     void DrawStudioUnsavedPrompt();
     void DrawStudioProjectMenu();                     // top bar file menu (new / open / recent / save as)
@@ -780,7 +751,7 @@ private:
                            const char* idPrefix);
     void DrawStudioHelp();                            // shortcut overlay (? key / top bar button)
     bool StudioModal() const { return videoDialogOpen_ || studioHelpOpen_ || studioLeaveConfirm_ || studioLightPresetPending_ >= 0 ||
-                                       studioStopwatchOff_ || studioBakeDialogOpen_ || studioBakeRunning_ || studioMocapDialogOpen_ || studioMocapRunning_; }
+                                       studioStopwatchOff_ || studioBakeDialogOpen_ || studioBakeRunning_; }
 
     // --- scripted UI input for tests (UiScript.cpp) and MCP
     void PumpUiScript();  // before ImGui::NewFrame: feeds the events due at framesInScene_
