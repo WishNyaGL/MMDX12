@@ -60,6 +60,13 @@ void PoseFromFree(const DirectX::XMFLOAT3& target, float yaw, float pitch, float
     k.fovDeg = (uint32_t)std::lround(fov);
     k.perspective = true;
 }
+
+// S3: stage param track helpers (defined with the other row-name helpers further down; both unnamed namespace blocks
+// are the same namespace, so these declarations are enough for the inspector panel above them).
+EffectParamTrack* FindStageParamTrack(studio::StudioStage& stage, const std::string& param);
+const EffectParamTrack* FindStageParamTrack(const studio::StudioStage& stage, const std::string& param);
+std::string StageParamName(const StageParam& sp, int comp);
+bool StageParamTrackStepped(const studio::StudioStage& stage, const std::string& param);
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -111,7 +118,7 @@ bool App::FinishStudioLoad() {
         sm->mme = m.mme;
         sm->stageManifest = m.stageManifest;
         sm->stagePart = m.stagePart;
-        sm->stageVariant = m.stageVariant;
+        sm->stageUid = m.stageUid;
         if (m.stageManifest && m.pmx)
             sm->stageBinding = MatchStageMaterialRules(m.stageManifest->materials, *m.pmx);
         sm->uid = doc->nextUid++;
@@ -157,6 +164,20 @@ bool App::FinishStudioLoad() {
         }
     }
 
+    // S3: the project's MMDX stage entities (their uids are saved: part models / lights refer to them). Assigned before
+    // the consolidation, so a stage's own parts join it instead of becoming a second entity.
+    doc->stages = pkg.stages;
+    doc->nextStageUid = 1;
+    for (auto& stage : doc->stages) doc->nextStageUid = std::max(doc->nextStageUid, stage.uid + 1);
+    // S3: one stage entity per MMDX stage (a library scene / a version <= 3 project: its parts share a manifest, the
+    // variant came per part)
+    std::map<uint32_t, std::string> legacyVariants;
+    for (size_t i = 0; i < pkg.models.size() && i < remap.size(); ++i) {
+        const StudioPackageModel& m = pkg.models[i];
+        if (remap[i] < 0 || !m.stageManifest || m.stageVariant.empty()) continue;
+        legacyVariants[(uint32_t)doc->models[(size_t)remap[i]]->uid] = m.stageVariant;
+    }
+    StudioConsolidateStages(*doc, legacyVariants);
     doc->camera = std::move(pkg.camera);
     // a light track that only repeats MMD's defaults says nothing (and would override the lighting): dropped, as in play mode
     if (IsDefaultLightTrack(doc->camera.light)) doc->camera.light.clear();
@@ -305,6 +326,9 @@ void App::StudioEnter(std::unique_ptr<StudioDoc> doc) {
     studioCamPath_.clear();  // cached per camera evaluator version, which restarts with the document
     studioCamKeys_.clear();
     studioKeyEdit_ = false;
+    studioStageDragging_ = false;   // a stage panel gesture does not outlive its document
+    studioStageBefore_.clear();
+    studioStageOpen_.clear();
     studioLastBind_ = 0;
     studioLeaveConfirm_ = false;
     studioPending_ = StudioAction::None;
@@ -761,26 +785,101 @@ LightAnchors App::StudioBuildLightAnchors() const {
 }
 
 void App::StudioApplyStageTargets() {
-    // S1b: every MMDX stage part in the document shares its manifest; the rules resolve once per manifest per frame and
-    // each part applies them to its own materials. Stage lights are ordinary scene lights here (copied on add).
+    // S3: every MMDX stage entity is evaluated once per frame at the timeline time: its param overrides (base values with
+    // the keyed values at this frame) go through the pure evaluator, its material targets into the parts' GPU models and
+    // its light targets onto the scene lights that came from it (tagged: SceneLight::stageUid / stageLightName).
     StudioDoc& d = *studio_;
+    if (d.stages.empty()) return;
     const uint64_t frame = ctx_.FrameNumber();
-    for (size_t i = 0; i < d.models.size(); ++i) {
-        const StudioModel& m = *d.models[i];
-        if (!m.stageManifest || !m.gpu || m.stageManifest->materials.empty()) continue;
-        // gather the parts of this manifest still in the document (they were all added together)
-        std::vector<StageModelOverridePart> parts;
-        for (const auto& other : d.models) {
-            if (!other->stageManifest || other->stageManifest.get() != m.stageManifest.get() || !other->gpu) continue;
-            StageModelOverridePart p;
-            p.part = other->stagePart;
-            p.gpu = other->gpu.get();
-            p.binding = &other->stageBinding;   // resolved once when the part entered the document
-            parts.push_back(p);
+    const float timelineFrame = (float)(d.time * kMmdFps);
+    for (StudioStage& stage : d.stages) {
+        if (!stage.manifest) continue;
+        const StudioStageOverrides ov = StageOverridesAt(stage, timelineFrame);
+        const StageEvalResult eval = EvaluateStage(*stage.manifest, stage.variant, ov.values, d.time, ov.skipCues);
+        for (const std::string& w : eval.warnings) LOG_WARN("studio: stage %s: %s", stage.stageId.c_str(), w.c_str());
+        // materials: one rule list per stage per frame, applied to every part of this stage in the document
+        if (!stage.manifest->materials.empty()) {
+            const std::vector<StageMaterialRule> rules = ResolvedStageMaterialRules(*stage.manifest, eval);
+            for (const auto& mp : d.models) {
+                const StudioModel& m = *mp;
+                if (m.stageUid != stage.uid || !m.gpu) continue;
+                ApplyStageMaterialList(*m.gpu, m.stagePart, m.stageBinding, rules, frame);
+            }
         }
-        ApplyStageMaterialTargets(*m.stageManifest, m.stageVariant, d.time, frame, parts);
-        break;   // one pass per manifest (all its parts are in `parts`)
+        // lights: reset the fields a binding drives to the manifest's value, then replay the frame's assignments
+        for (SceneLight& l : d.lights) {
+            if (l.stageUid != stage.uid || l.stageLightName.empty()) continue;
+            const std::set<std::string> driven = StageDrivenLightFields(*stage.manifest, l.stageLightName);
+            if (driven.empty()) continue;
+            if (const SceneLight* src = stage.manifest->FindLight(l.stageLightName)) {
+                if (driven.count("enabled")) l.enabled = src->enabled;
+                if (driven.count("intensity")) l.v.intensity = src->v.intensity;
+                if (driven.count("range")) l.v.range = src->v.range;
+                if (driven.count("coneOuter")) l.v.coneOuter = src->v.coneOuter;
+                if (driven.count("coneInner")) l.v.coneInner = src->v.coneInner;
+                if (driven.count("shadowSoftness")) l.shadowSoftness = src->shadowSoftness;
+                if (driven.count("shadowDensity")) l.shadowDensity = src->shadowDensity;
+                if (driven.count("rimStrength")) l.rimStrength = src->rimStrength;
+                if (driven.count("swayPhase")) l.swayPhase = src->swayPhase;
+                if (driven.count("color")) l.v.color = src->v.color;
+                if (driven.count("rimColor")) l.rimColor = src->rimColor;
+                if (driven.count("shadowColor")) l.shadowColor = src->shadowColor;
+                if (driven.count("position")) l.v.position = src->v.position;
+                if (driven.count("aim")) l.v.aim = src->v.aim;
+                if (driven.count("direction")) l.v.direction = src->v.direction;
+                if (driven.count("size")) l.v.size = src->v.size;
+                if (driven.count("vmdLink")) l.vmdLink = src->vmdLink;
+            }
+            for (const StageAssignment& a : eval.targets) {
+                const StageTargetSpec spec = ResolveStageTarget(*stage.manifest, a.target);
+                if (!spec.ok || spec.kind != StageTargetSpec::Kind::Lights || spec.owner != l.stageLightName) continue;
+                ApplyStageLightField(l, spec.field, a.value);
+            }
+        }
     }
+}
+
+void App::StudioConsolidateStages(StudioDoc& d, const std::map<uint32_t, std::string>& legacyVariants) {
+    // S3: the parts that share a manifest belong to one stage entity. A project brings its entities (and the parts'
+    // stageUid); a library scene / a specifically added stage gets one here, keeping the variant the package carried
+    // (S1b's per-part "stageVariant", also what a version <= 3 project stored).
+    std::map<const StageManifest*, uint32_t> byManifest;
+    for (const StudioStage& s : d.stages)
+        if (s.manifest) byManifest.emplace(s.manifest.get(), s.uid);
+    // a project entity whose stage.json could not be read adopts a part's manifest (the loader finds one from the file)
+    for (const auto& mp : d.models) {
+        StudioModel& m = *mp;
+        if (!m.stageManifest || m.stageUid == 0) continue;
+        if (StudioStage* s = d.FindStage(m.stageUid); s && !s->manifest) s->manifest = m.stageManifest;
+    }
+    for (const auto& mp : d.models) {
+        StudioModel& m = *mp;
+        if (!m.stageManifest) {
+            m.stageUid = 0;
+            continue;
+        }
+        const auto known = byManifest.find(m.stageManifest.get());
+        if (m.stageUid != 0 && d.FindStage(m.stageUid)) {
+            if (known == byManifest.end()) byManifest.emplace(m.stageManifest.get(), m.stageUid);
+            continue;
+        }
+        if (known != byManifest.end()) {
+            m.stageUid = known->second;
+            continue;
+        }
+        StudioStage stage;
+        stage.uid = d.nextStageUid++;
+        stage.manifest = m.stageManifest;
+        stage.manifestPath = m.stageManifest->manifestPath;
+        stage.stageId = !m.libraryId.empty() ? m.libraryId : m.stageManifest->id;
+        const auto lv = legacyVariants.find(m.uid);
+        if (lv != legacyVariants.end()) stage.variant = lv->second;
+        d.stages.push_back(std::move(stage));
+        byManifest[m.stageManifest.get()] = d.stages.back().uid;
+        m.stageUid = d.stages.back().uid;
+    }
+    // A stage entity is only created here for parts that are in the document, so a created one never dangles. A project's
+    // entity is kept even when all its parts failed to load: its overrides survive a round trip.
 }
 
 void App::StudioSetStageVariant(int model, const std::string& variantId) {
@@ -788,13 +887,341 @@ void App::StudioSetStageVariant(int model, const std::string& variantId) {
     StudioDoc& d = *studio_;
     if (model < 0 || model >= (int)d.models.size()) return;
     StudioModel& m = *d.models[model];
-    if (!m.stageManifest) return;
-    m.stageVariant = variantId;
-    // every part of the same stage takes the variant (one stage = one variant), still one undoable project edit
-    for (auto& other : d.models)
-        if (other->stageManifest.get() == m.stageManifest.get()) other->stageVariant = variantId;
-    // the part's records return to the manifest's rule values for the new variant on the next frame
+    StudioStage* stage = d.StageOfModel(m);
+    if (!stage) return;
+    if (stage->variant == variantId) return;
+    std::vector<StudioStage> before = d.stages;
+    stage->variant = variantId;
+    // the parts' records return to the manifest's rule values for the new variant on the next frame
+    d.history.Push(std::make_unique<StagesCommand>(d, Tr("스테이지 배리언트"), std::move(before), d.stages));
     ++d.projectVersion;
+}
+
+// ---------------------------------------------------------------------------
+// S3: stage entity inspector (variant, params, cue import, per-param reset)
+// ---------------------------------------------------------------------------
+
+// One param edit: the base value when the param is not keyed and auto-key is off, else a key at the playhead (the
+// timeline's rule for effect params). `comp` = a colour component (-1: the whole value). The caller brackets a gesture
+// with StudioBeginStageEdit / StudioEndStageEdit (one undo step per gesture) — the list may be replaced by the push,
+// so the stage is looked up again here.
+void App::StudioStageParamEdit(uint32_t stageUid, const StageParam& param, int comp, float value, bool keyIt) {
+    StudioDoc& d = *studio_;
+    StudioStage* stage = d.FindStage(stageUid);
+    if (!stage) return;
+    const std::string key = param.key;
+    const std::string trackName = StageParamName(param, comp);
+    const int frame = d.Frame();
+    const StageValue clamped = param.type == StageParamType::Color
+                                   ? ClampStageParamValue(param, StageValue::Color([&] {
+                                         auto it = stage->base.find(key);
+                                         DirectX::XMFLOAT4 c = it != stage->base.end() ? it->second.AsColor() : param.defColor;
+                                         switch (std::clamp(comp, 0, 3)) {
+                                         case 0: c.x = value; break;
+                                         case 1: c.y = value; break;
+                                         case 2: c.z = value; break;
+                                         default: c.w = value; break;
+                                         }
+                                         return c;
+                                     }()))
+                                   : ClampStageParamValue(param, StageValue::Number(value));
+    const bool hasTrack = FindStageParamTrack(*stage, trackName) != nullptr;
+    if (keyIt || d.autoKey || hasTrack) {
+        // auto-key on / the param is already keyed: the edit becomes a key at the playhead
+        if (!hasTrack) stage->tracks.push_back({trackName, {}});
+        EffectParamTrack* tr = FindStageParamTrack(*stage, trackName);
+        if (!tr) return;
+        float v = value;
+        if (param.type != StageParamType::Color) v = clamped.AsNumber();
+        else if (comp >= 0) {
+            const DirectX::XMFLOAT4 c = clamped.AsColor();
+            v = comp == 0 ? c.x : comp == 1 ? c.y : comp == 2 ? c.z : c.w;
+        }
+        UpsertParamKey(*tr, EffectParamKey{frame, v, StageParamTrackStepped(*stage, trackName)});
+        // a keyed param must not also take the manifest cue over it
+        stage->cuesOff.insert(key);
+        d.rowsKey = ~0ull;
+        return;
+    }
+    stage->base[key] = clamped;
+    d.rowsKey = ~0ull;
+}
+
+// One undo step per stage param gesture (a slider drag, a colour pick, a combo pick).
+void App::StudioBeginStageEdit() {
+    if (studioStageDragging_ || !studio_) return;
+    studioStageBefore_ = studio_->stages;
+    studioStageDragging_ = true;
+}
+
+void App::StudioEndStageEdit(const char* name) {
+    if (!studioStageDragging_ || !studio_) return;
+    studioStageDragging_ = false;
+    StudioDoc& d = *studio_;
+    if (d.stages == studioStageBefore_) {
+        studioStageBefore_.clear();
+        return;
+    }
+    d.history.Push(std::make_unique<StagesCommand>(d, name, std::move(studioStageBefore_), d.stages));
+    studioStageBefore_.clear();
+    ++d.projectVersion;
+}
+
+// The stage's param surface: one row per param (float slider / int / bool / colour / enum combo), grouped by the
+// manifest's `groups`, with the param's reset button and the "큐를 키로 가져오기" import.
+void App::DrawStudioStageParams(float w, uint32_t stageUid) {
+    using namespace ui;
+    const Palette& p = P();
+    StudioDoc& d = *studio_;
+    ImDrawList* cdl = ImGui::GetWindowDrawList();
+    const StudioStage* stage = d.FindStage(stageUid);
+    if (!stage || !stage->manifest) return;
+    // the manifest is held here: an edit pushes a StagesCommand which replaces the stages list
+    const std::shared_ptr<const StageManifest> manifest = stage->manifest;
+    const StageManifest& man = *manifest;
+    if (man.params.empty()) return;
+
+    // A value at the playhead: the keyed track's value, else the base value (else the param default). The stage is
+    // looked up again every call: an edit pushes a StagesCommand, which replaces the list (a held pointer would dangle).
+    const auto currentOf = [&](const std::string& trackName) {
+        const StudioStage* st = d.FindStage(stageUid);
+        if (!st) return 0.0f;
+        const float staticVal = StageParamStaticValue(*st, trackName);
+        if (const EffectParamTrack* tr = FindStageParamTrack(*st, trackName))
+            return EvaluateParamTrack(*tr, (float)d.Frame(), staticVal);
+        return staticVal;
+    };
+    const auto resetRow = [&](const StageParam& sp) {
+        ImGui::PushID(sp.key.c_str());
+        if (IconButton("##stagereset", icon::ArrowCcw, Tr("이 파라미터 초기화 (배리언트 / 기본값)"), false, 24.0f)) {
+            StudioStage* target = d.FindStage(stageUid);
+            if (target) {
+                std::vector<StudioStage> before = d.stages;
+                if (ResetStageParam(*target, sp.key)) {
+                    d.history.Push(std::make_unique<StagesCommand>(d, Tr("스테이지 파라미터 초기화"), std::move(before),
+                                                                   d.stages));
+                    ++d.projectVersion;
+                    d.rowsKey = ~0ull;
+                }
+            }
+        }
+        ImGui::PopID();
+    };
+    const auto drawParam = [&](const StageParam& sp) {
+        const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(StageLanguage());
+        const std::string sid = "##stageparam_" + sp.key;
+        const auto edit = [&](int comp, float value) {
+            StudioBeginStageEdit();
+            StudioStageParamEdit(stageUid, sp, comp, value, false);
+        };
+        ImGui::PushID(sp.key.c_str());
+        const ImVec2 rowTop = ImGui::GetCursorScreenPos();
+        // the reset button sits in a narrow gutter left of the row (so it never collides with the widget or its value)
+        ImGui::Indent(Dp(24.0f));
+        switch (sp.type) {
+        case StageParamType::Float: {
+            const std::string tn = StageParamName(sp, -1);
+            float v = currentOf(tn);
+            const bool changed = SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, "%.3f");
+            if (ImGui::IsItemActivated()) StudioBeginStageEdit();   // the gesture's "before" is this frame's list
+            if (changed) edit(-1, v);
+            if (ImGui::IsItemDeactivated()) StudioEndStageEdit(Tr("스테이지 파라미터"));
+            break;
+        }
+        case StageParamType::Int: {
+            const std::string tn = StageParamName(sp, -1);
+            float v = std::round(currentOf(tn));
+            const bool changed = SliderRow(sid.c_str(), label.c_str(), &v, sp.min, sp.max, "%.0f");
+            if (ImGui::IsItemActivated()) StudioBeginStageEdit();
+            if (changed) edit(-1, std::round(v));
+            if (ImGui::IsItemDeactivated()) StudioEndStageEdit(Tr("스테이지 파라미터"));
+            break;
+        }
+        case StageParamType::Bool: {
+            const std::string tn = StageParamName(sp, -1);
+            bool b = currentOf(tn) > 0.5f;
+            const bool changed = Switch(sid.c_str(), label.c_str(), &b);
+            if (ImGui::IsItemActivated()) StudioBeginStageEdit();
+            if (changed) edit(-1, b ? 1.0f : 0.0f);
+            if (ImGui::IsItemDeactivated()) StudioEndStageEdit(Tr("스테이지 파라미터"));
+            break;
+        }
+        case StageParamType::Color: {
+            float rgb[3] = {currentOf(StageParamName(sp, 0)), currentOf(StageParamName(sp, 1)),
+                            currentOf(StageParamName(sp, 2))};
+            const ImVec2 cpos = ImGui::GetCursorScreenPos();
+            const float rowW = ImGui::GetContentRegionAvail().x;
+            TextEllipsis(cdl, Font::Regular, size::Small, ImVec2(cpos.x, cpos.y + Dp(4.0f)), cpos.x + rowW * 0.4f,
+                         p.ink2, label.c_str());
+            ImGui::SetCursorScreenPos(ImVec2(cpos.x + rowW * 0.4f, cpos.y));
+            ImGui::SetNextItemWidth(rowW - rowW * 0.4f);
+            bool activated = false, deactivated = false;
+            const bool changed = ColorField(sid.c_str(), rgb, &activated, &deactivated);
+            if (activated) StudioBeginStageEdit();
+            if (changed) {
+                for (int c = 0; c < 3; ++c) edit(c, rgb[c]);
+            }
+            if (deactivated) StudioEndStageEdit(Tr("스테이지 파라미터"));
+            break;
+        }
+        case StageParamType::Enum: {
+            const std::string tn = StageParamName(sp, -1);
+            const int cur = (int)std::lround(currentOf(tn));
+            const int idx = sp.options.empty() ? -1 : std::clamp(cur, 0, (int)sp.options.size() - 1);
+            const std::string item = idx >= 0 && !sp.options[(size_t)idx].label.Empty()
+                                         ? sp.options[(size_t)idx].label.Get(StageLanguage())
+                                         : (idx >= 0 ? sp.options[(size_t)idx].value : label);
+            const ImVec2 cpos = ImGui::GetCursorScreenPos();
+            const float rowW = ImGui::GetContentRegionAvail().x;
+            TextEllipsis(cdl, Font::Regular, size::Small, ImVec2(cpos.x, cpos.y + Dp(4.0f)), cpos.x + rowW * 0.4f,
+                         p.ink2, label.c_str());
+            ImGui::SetCursorScreenPos(ImVec2(cpos.x + rowW * 0.4f, cpos.y));
+            ImGui::SetNextItemWidth(rowW - rowW * 0.4f);
+            StudioBeginStageEdit();
+            if (ImGui::BeginCombo(sid.c_str(), item.c_str())) {
+                for (size_t i = 0; i < sp.options.size(); ++i) {
+                    const StageParamOption& o = sp.options[i];
+                    const std::string ol = o.label.Empty() ? o.value : o.label.Get(StageLanguage());
+                    if (ImGui::Selectable(ol.c_str(), (int)i == idx)) {
+                        StudioStageParamEdit(stageUid, sp, -1, (float)i, false);
+                        StudioEndStageEdit(Tr("스테이지 파라미터"));
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            StudioEndStageEdit(Tr("스테이지 파라미터"));
+            break;
+        }
+        }
+        ImGui::Unindent(Dp(24.0f));
+        const ImVec2 after = ImGui::GetCursorScreenPos();
+        ImGui::SetCursorScreenPos(ImVec2(rowTop.x, rowTop.y + Dp(1.0f)));
+        resetRow(sp);
+        ImGui::SetCursorScreenPos(after);
+        ImGui::PopID();
+    };
+
+    std::vector<const StageParam*> ungrouped;
+    std::map<std::string, std::vector<const StageParam*>> grouped;
+    for (const StageParam& sp : man.params) {
+        const bool known = std::any_of(man.groups.begin(), man.groups.end(),
+                                       [&](const StageParamGroup& g) { return g.id == sp.group; });
+        if (sp.group.empty() || !known) ungrouped.push_back(&sp);
+        else grouped[sp.group].push_back(&sp);
+    }
+    for (const StageParam* sp : ungrouped) drawParam(*sp);
+    for (const StageParamGroup& g : man.groups) {
+        const auto it = grouped.find(g.id);
+        if (it == grouped.end() || it->second.empty()) continue;
+        const std::string gl = g.label.Empty() ? g.id : g.label.Get(StageLanguage());
+        const float gw = ImGui::GetContentRegionAvail().x;
+        const ImVec2 gp = ImGui::GetCursorScreenPos();
+        ImGui::PushID(g.id.c_str());
+        ImGui::InvisibleButton("##stagegroup", ImVec2(gw, Dp(28.0f)));
+        const bool hovered = ImGui::IsItemHovered();
+        static std::map<ImGuiID, bool> open;   // UI-only open state (the manifest's "collapsed" seeds it)
+        const ImGuiID gid = ImGui::GetItemID();
+        const bool isOpen = open.emplace(gid, !g.collapsed).first->second;
+        if (ImGui::IsItemClicked()) open[gid] = !isOpen;
+        if (hovered) cdl->AddRectFilled(gp, ImVec2(gp.x + gw, gp.y + Dp(28.0f)), WithAlpha(p.ink, 0.05f), Dp(6.0f));
+        Icon(cdl, isOpen ? icon::CaretDown : icon::CaretRight, 12.0f, ImVec2(gp.x + Dp(6.0f), gp.y + Dp(14.0f)), p.ink3);
+        TextEllipsis(cdl, Font::Semibold, size::Caption, ImVec2(gp.x + Dp(20.0f), gp.y + Dp(7.0f)), gp.x + gw, p.ink2,
+                     gl.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(gp.x, gp.y + Dp(28.0f)));
+        if (isOpen) {
+            ImGui::Indent(Dp(10.0f));
+            for (const StageParam* sp : it->second) drawParam(*sp);
+            ImGui::Unindent(Dp(10.0f));
+        }
+        ImGui::PopID();
+    }
+}
+
+void App::DrawStudioStagePanel(float w) {
+    using namespace ui;
+    StudioDoc& d = *studio_;
+    const Palette& p = P();
+    ImDrawList* cdl = ImGui::GetWindowDrawList();
+    StudioModel* m = d.Selected();
+    StudioStage* stage = m ? d.StageOfModel(*m) : nullptr;
+    if (!stage) return;
+    const uint32_t stageUid = stage->uid;
+    ImGui::PushID((int)stageUid);
+    ImGui::Dummy(ImVec2(w, Dp(6.0f)));
+    // the manifest is held here: an edit pushes a StagesCommand which replaces the stages list (the old `stage` dangles)
+    const std::shared_ptr<const StageManifest> manifest = stage->manifest;
+    const StageManifest* man = manifest.get();
+    const std::string name = man ? man->DisplayName(StageLanguage()) : stage->stageId;
+    // the inspector's label row (its `line` lambda lives in DrawStudioInspector)
+    const auto labelRow = [&](const char* label, const std::string& value) {
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        Text(cdl, Font::Regular, size::Small, c, p.ink3, label);
+        TextEllipsis(cdl, Font::Regular, size::Small, ImVec2(c.x + Dp(96.0f), c.y), c.x + w, p.ink, value.c_str());
+        ImGui::Dummy(ImVec2(w, Dp(22.0f)));
+    };
+    labelRow(Tr("스테이지"), name);
+    if (!man) {
+        ImGui::PopID();
+        return;
+    }
+
+    // variant combo (the stage's own; the parts share it). Applying one replaces the stages list: leave this frame.
+    if (man->variants.size() >= 2) {
+        std::string current = stage->variant;
+        if (current.empty() && man->DefaultVariant()) current = man->DefaultVariant()->id;
+        int selected = -1;
+        for (size_t i = 0; i < man->variants.size(); ++i)
+            if (man->variants[i].id == current) selected = (int)i;
+        if (selected < 0) selected = 0;
+        std::string label = man->variants[(size_t)selected].label.Get(StageLanguage());
+        if (label.empty()) label = man->variants[(size_t)selected].id;
+        std::string picked;   // the variant clicked this frame (applied after the combo closes)
+        ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+        labelRow(Tr("스테이지 배리언트"), label);
+        ImGui::SetNextItemWidth(w);
+        if (ImGui::BeginCombo("##stagevariant", label.c_str())) {
+            for (size_t i = 0; i < man->variants.size(); ++i) {
+                const StageVariant& v = man->variants[i];
+                std::string item = v.label.Get(StageLanguage());
+                if (item.empty()) item = v.id;
+                if (ImGui::Selectable(item.c_str(), (int)i == selected)) picked = v.id;
+            }
+            ImGui::EndCombo();
+        }
+        if (!picked.empty()) {
+            StudioSetStageVariant(d.selectedModel, picked);
+            ImGui::PopID();
+            return;
+        }
+    }
+
+    if (!man->params.empty()) {
+        ImGui::Dummy(ImVec2(w, Dp(8.0f)));
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("파라미터"));
+        ImGui::Dummy(ImVec2(w, Dp(20.0f)));
+        // cue import: the manifest's own light show becomes keyable project tracks (one undo step)
+        if (!man->cues.empty()) {
+            size_t cueKeys = 0;
+            for (const StageCue& cue : man->cues) cueKeys += cue.keys.size();
+            char cueLabel[96];
+            std::snprintf(cueLabel, sizeof(cueLabel), "%s (%d)", Tr("큐를 키로 가져오기"), (int)cueKeys);
+            if (Button("##stageimportcues", cueLabel, icon::DownloadSimple, ButtonKind::Secondary, ImVec2(w / Dpi(), 32.0f))) {
+                std::vector<StudioStage> before = d.stages;
+                if (StudioStage* target = d.FindStage(stageUid); target && ImportStageCues(*target)) {
+                    d.history.Push(std::make_unique<StagesCommand>(d, Tr("큐를 키로 가져오기"), std::move(before), d.stages));
+                    ++d.projectVersion;
+                    d.rowsKey = ~0ull;
+                    toast_ = {Tr("큐를 키로 가져왔어요"), name, {}, false, timeSeconds_ + 4.0};
+                    ImGui::PopID();
+                    return;
+                }
+            }
+            ImGui::Dummy(ImVec2(w, Dp(6.0f)));
+        }
+        DrawStudioStageParams(w, stageUid);
+    }
+    ImGui::PopID();
 }
 
 void App::BuildStudioFrameView(FrameView& view) {
@@ -1034,6 +1461,17 @@ EffectParamTrack* FindParamTrack(StudioEffect& fx, const std::string& param) {
         if (t.param == param) return &t;
     return nullptr;
 }
+// S3: the same for a stage's keyed params.
+EffectParamTrack* FindStageParamTrack(StudioStage& stage, const std::string& param) {
+    for (EffectParamTrack& t : stage.tracks)
+        if (t.param == param) return &t;
+    return nullptr;
+}
+const EffectParamTrack* FindStageParamTrack(const StudioStage& stage, const std::string& param) {
+    for (const EffectParamTrack& t : stage.tracks)
+        if (t.param == param) return &t;
+    return nullptr;
+}
 // The confirm modal / row label of a param: "<pack or entity name> · <param label>" like the timeline rows.
 std::string ParamRowLabel(const StudioEffect& fx, const std::string& entityName, const std::string& param) {
     const ShaderPack* pk = ShaderPacks().Find(fx.entry.pack);
@@ -1063,6 +1501,91 @@ std::string ParamRowLabel(const StudioEffect& fx, const std::string& entityName,
     }
     const std::string prefix = entityName.empty() ? (pk ? pk->name.Get(PackLanguage()) : fx.entry.pack) : entityName;
     return prefix + " · " + label;
+}
+
+// ---- S3: stage param rows (RowKind::StageParam) ----
+// The manifest params take the pack scheme: param i scalar -> i * 4, a colour -> i * 4 + c (c 0..3), so a row exists
+// for every component before it is keyed. A track that matches no manifest param (the stage changed): 0x100000 + n.
+int StageParamComponents(const StageParam& sp) { return sp.type == StageParamType::Color ? 4 : 1; }
+// Is `name` stage param `sp` itself, or one of its colour components ("key#c")? `comp` receives c (-1 for the key).
+bool MatchStageParamName(const StageParam& sp, const std::string& name, int& comp) {
+    if (sp.key == name) { comp = -1; return true; }
+    if (sp.type != StageParamType::Color) return false;
+    if (name.size() != sp.key.size() + 2 || name.compare(0, sp.key.size(), sp.key) != 0 || name[sp.key.size()] != '#')
+        return false;
+    comp = name[sp.key.size() + 1] - '0';
+    return comp >= 0 && comp <= 3;
+}
+std::string StageParamName(const StageParam& sp, int comp) {
+    if (comp < 0) return sp.key;
+    return sp.key + "#" + std::to_string(comp);
+}
+// The row index of the track `name` in the stage scheme (see above); false when it matches no manifest param.
+bool StageParamIndexOfTrack(const StudioStage& stage, const std::string& name, uint32_t& index) {
+    if (!stage.manifest) return false;
+    for (uint32_t i = 0; i < (uint32_t)stage.manifest->params.size(); ++i) {
+        const StageParam& sp = stage.manifest->params[i];
+        int comp = -1;
+        if (!MatchStageParamName(sp, name, comp)) continue;
+        if (comp >= 0 && comp >= StageParamComponents(sp)) continue;
+        index = i * 4 + (uint32_t)std::max(0, comp);
+        return true;
+    }
+    return false;
+}
+std::string StageParamNameOfIndex(const StudioStage& stage, uint32_t pidx) {
+    if (stage.manifest) {
+        for (uint32_t i = 0; i < (uint32_t)stage.manifest->params.size(); ++i) {
+            const StageParam& sp = stage.manifest->params[i];
+            const uint32_t base = i * 4;
+            if (pidx < base || pidx >= base + (uint32_t)StageParamComponents(sp)) continue;
+            return StageParamName(sp, StageParamComponents(sp) == 1 ? -1 : (int)(pidx - base));
+        }
+    }
+    uint32_t n = 0;
+    for (const EffectParamTrack& t : stage.tracks) {
+        uint32_t known = 0;
+        if (StageParamIndexOfTrack(stage, t.param, known)) continue;   // a manifest param: its rows are its own
+        if (kOrphanParamIndexBase + n == pidx) return t.param;
+        ++n;
+    }
+    return {};
+}
+uint32_t StageParamIndexOfName(const StudioStage& stage, const std::string& paramName) {
+    uint32_t index = 0;
+    if (StageParamIndexOfTrack(stage, paramName, index)) return index;
+    uint32_t n = 0;
+    for (const EffectParamTrack& t : stage.tracks) {
+        uint32_t known = 0;
+        if (StageParamIndexOfTrack(stage, t.param, known)) continue;
+        if (t.param == paramName) return kOrphanParamIndexBase + n;
+        ++n;
+    }
+    return UINT32_MAX;
+}
+// A key of a stage param track holds its value until the next one (int / bool / enum, and colours no).
+bool StageParamTrackStepped(const StudioStage& stage, const std::string& param) {
+    int comp = -1;
+    const std::string key = StageParamBaseKey(param, comp);
+    if (!stage.manifest) return false;
+    const StageParam* sp = stage.manifest->FindParam(key);
+    return sp && sp->type != StageParamType::Float && sp->type != StageParamType::Color;
+}
+// The label of a stage param track ("· R" for a colour component), for a row / confirm modal.
+std::string StageParamLabel(const StudioStage& stage, const std::string& param) {
+    int comp = -1;
+    const std::string key = StageParamBaseKey(param, comp);
+    std::string label = key;
+    if (stage.manifest) {
+        if (const StageParam* sp = stage.manifest->FindParam(key)) {
+            if (!sp->label.Empty()) label = sp->label.Get(StageLanguage());
+        }
+    }
+    if (comp >= 0) {
+        static const char* kCol[4] = {" · R", " · G", " · B", " · A"};
+        label += kCol[comp];
+    }
+    return label;
 }
 } // namespace
 
@@ -1103,6 +1626,17 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
         const std::string param = EffectParamNameOfIndex(world->fx, pidx);
         if (param.empty()) return false;
         name = WorldParamTrackName(uid, param);
+        return true;
+    }
+    if (kind == RowKind::StageParam) {
+        if (d.selectedModel >= 0) return false;   // the stage rows sit under the camera target, like the world rows
+        const uint32_t uid = RowGroupOf(row);
+        const uint32_t pidx = RowIndexOf(row);
+        const StudioStage* stage = d.FindStage(uid);
+        if (!stage) return false;
+        const std::string param = StageParamNameOfIndex(*stage, pidx);
+        if (param.empty()) return false;
+        name = StageParamTrackName(uid, param);
         return true;
     }
     if (d.selectedModel < 0 || d.selectedModel >= (int)d.models.size()) return false;
@@ -1313,6 +1847,20 @@ void App::StudioInsertKeys(const std::vector<uint64_t>& rows, int frame) {
                     UpsertParamKey(*tr, EffectParamKey{frame, val, false});
                 }
             }
+        } else if (kind == RowKind::StageParam) {
+            uint32_t stageUid = 0;
+            std::string param;
+            if (ParseStageParamTrackName(name, stageUid, param)) {
+                if (StudioStage* stage = d.FindStage(stageUid)) {
+                    EffectParamTrack* tr = FindStageParamTrack(*stage, param);
+                    if (!tr) {
+                        stage->tracks.push_back({param, {}});
+                        tr = &stage->tracks.back();
+                    }
+                    const float val = EvaluateParamTrack(*tr, (float)frame, StageParamStaticValue(*stage, param));
+                    UpsertParamKey(*tr, EffectParamKey{frame, val, StageParamTrackStepped(*stage, param)});
+                }
+            }
         } else if (kind == RowKind::Bone) {
             auto& track = d.models[d.selectedModel]->motion.bones[name];
             BoneKf k;
@@ -1374,6 +1922,13 @@ std::vector<int> App::StudioRowFrames(uint64_t row) const {
                     if (t.param == param) { add(t.keys); break; }
                 }
             }
+        }
+    } else if (kind == RowKind::StageParam) {
+        uint32_t stageUid = 0;
+        std::string param;
+        if (ParseStageParamTrackName(name, stageUid, param)) {
+            if (const StudioStage* stage = d.FindStage(stageUid))
+                if (const EffectParamTrack* t = FindStageParamTrack(*stage, param)) add(t->keys);
         }
     } else if (d.selectedModel < d.models.size()) {
         const MotionData& m = d.models[d.selectedModel]->motion;
@@ -1438,6 +1993,14 @@ void App::StudioSelectAll() {
                 }
             }
         }
+        for (const auto& stage : d.stages) {
+            for (const auto& tr : stage.tracks) {
+                if (!tr.keys.empty()) {
+                    const uint32_t pidx = StageParamIndexOfName(stage, tr.param);
+                    if (pidx != UINT32_MAX) all.insert(MakeRowId(RowKind::StageParam, stage.uid, pidx));
+                }
+            }
+        }
     }
     for (const auto& [group, children] : d.groupChildren) all.insert(group);
     for (uint64_t row : StudioExpandRows(all))
@@ -1493,6 +2056,18 @@ void App::StudioDeleteSelected(const char* undoName) {
                             EraseParamKeys(t, fvec);
                             break;
                         }
+                    }
+                }
+            }
+        }
+        else if (kind == RowKind::StageParam) {
+            uint32_t stageUid = 0;
+            std::string param;
+            if (ParseStageParamTrackName(track.second, stageUid, param)) {
+                if (StudioStage* stage = d.FindStage(stageUid)) {
+                    if (EffectParamTrack* t = FindStageParamTrack(*stage, param)) {
+                        std::vector<int32_t> fvec(fs.begin(), fs.end());
+                        EraseParamKeys(*t, fvec);
                     }
                 }
             }
@@ -1566,6 +2141,22 @@ void App::StudioCopySelected() {
                                 }
                             }
                             break;
+                        }
+                    }
+                }
+            }
+        } else if (kind == RowKind::StageParam) {
+            uint32_t stageUid = 0;
+            std::string param;
+            if (ParseStageParamTrackName(name, stageUid, param)) {
+                if (const StudioStage* stage = d.FindStage(stageUid)) {
+                    if (const EffectParamTrack* t = FindStageParamTrack(*stage, param)) {
+                        for (const auto& pk : t->keys) {
+                            if (pk.frame == k.second) {
+                                c.stageParam = pk;
+                                found = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -1699,6 +2290,22 @@ void App::StudioPaste(bool curvesOnly, bool mirrored) {
                 }
             }
         }
+        else if (kind == RowKind::StageParam) {
+            uint32_t stageUid = 0;
+            std::string param;
+            if (ParseStageParamTrackName(name, stageUid, param)) {
+                if (StudioStage* stage = d.FindStage(stageUid)) {
+                    EffectParamTrack* tr = FindStageParamTrack(*stage, param);
+                    if (!tr) {
+                        stage->tracks.push_back({param, {}});
+                        tr = &stage->tracks.back();
+                    }
+                    EffectParamKey pk = c.stageParam;
+                    pk.frame = f;
+                    UpsertParamKey(*tr, pk);
+                }
+            }
+        }
         else if (kind == RowKind::Bone) { BoneKf k = c.bone; k.frame = f; UpsertKey(d.models[d.selectedModel]->motion.bones[name], k); }
         else { MorphKf k = c.morph; k.frame = f; UpsertKey(d.models[d.selectedModel]->motion.morphs[name], k); }
         pasted.insert({row, f});
@@ -1776,6 +2383,13 @@ void App::StudioShiftFrames(bool remove) {
                             if (t.param == param) { apply(t.keys); break; }
                         }
                     }
+                }
+            } else if (kind == RowKind::StageParam) {
+                uint32_t stageUid = 0;
+                std::string param;
+                if (ParseStageParamTrackName(name, stageUid, param)) {
+                    if (StudioStage* stage = d.FindStage(stageUid))
+                        if (EffectParamTrack* t = FindStageParamTrack(*stage, param)) apply(t->keys);
                 }
             } else {
                 MotionData& m = d.models[d.selectedModel]->motion;
@@ -2024,6 +2638,62 @@ void App::StudioRowStopwatch(uint64_t rowId) {
                 d.rowsKey = ~0ull;
             };
         }
+    } else if (kind == RowKind::StageParam) {
+        // S3: a stage param's stopwatch (its row's keys are the project's override of the stage's own cue track)
+        const uint32_t uid = RowGroupOf(rowId);
+        StudioStage* stage = d.FindStage(uid);
+        if (!stage) return;
+        EffectParamTrack* tr = FindStageParamTrack(*stage, name);
+        const bool animated = tr && !tr->keys.empty();
+        if (!animated) {
+            std::vector<TrackState> before = {CaptureTrack(d, -1, kind, name)};
+            if (!tr) {
+                stage->tracks.push_back({name, {}});
+                tr = &stage->tracks.back();
+            }
+            const float val = EvaluateParamTrack(*tr, (float)frame, StageParamStaticValue(*stage, name));
+            UpsertParamKey(*tr, EffectParamKey{frame, val, StageParamTrackStepped(*stage, name)});
+            StudioPushTrackEdit(Tr("애니메이션 켜기"), before);
+            d.rowsKey = ~0ull;
+        } else {
+            studioStopwatchLabel_ = StageParamLabel(*stage, name);
+            studioStopwatchOff_ = [this, &d, uid, param = name] {
+                // the stage is looked up again (the list may have changed since the modal opened); its last value
+                // becomes the base value so the pose at the playhead is kept
+                StudioStage* target = d.FindStage(uid);
+                if (!target) return;
+                const EffectParamTrack* tr = FindStageParamTrack(*target, param);
+                if (!tr) return;
+                const float current = EvaluateParamTrack(*tr, (float)d.Frame(), StageParamStaticValue(*target, param));
+                std::vector<StudioStage> before = d.stages;
+                int comp = -1;
+                const std::string key = StageParamBaseKey(param, comp);
+                if (const StageParam* p = target->manifest ? target->manifest->FindParam(key) : nullptr) {
+                    StageValue v = p->DefaultValue();
+                    const auto base = target->base.find(key);
+                    if (base != target->base.end()) v = base->second;
+                    if (comp >= 0) {
+                        DirectX::XMFLOAT4 c = v.AsColor();
+                        switch (comp) {
+                        case 0: c.x = current; break;
+                        case 1: c.y = current; break;
+                        case 2: c.z = current; break;
+                        default: c.w = current; break;
+                        }
+                        v = StageValue::Color(c);
+                    } else {
+                        v = StageValue::Number(current);
+                    }
+                    target->base[key] = ClampStageParamValue(*p, v);
+                }
+                auto& tracks = target->tracks;
+                tracks.erase(std::remove_if(tracks.begin(), tracks.end(),
+                                            [&](const EffectParamTrack& t) { return t.param == param; }),
+                             tracks.end());
+                d.history.Push(std::make_unique<StagesCommand>(d, Tr("애니메이션 끄기"), std::move(before), d.stages));
+                d.rowsKey = ~0ull;
+            };
+        }
     }
 }
 
@@ -2083,6 +2753,18 @@ void App::StudioRowKeyNav(uint64_t rowId, int dir) {
                         for (const EffectParamKey& k : t.keys) { if (k.frame > frame) { target = k.frame; break; } }
                     }
                     break;
+                }
+            }
+        } else if (kind == RowKind::StageParam) {
+            const StudioStage* stage = d.FindStage(RowGroupOf(rowId));
+            if (stage) {
+                const EffectParamTrack* t = FindStageParamTrack(*stage, name);
+                if (t) {
+                    if (dir < 0) {
+                        for (const EffectParamKey& k : t->keys) { if (k.frame < frame) target = k.frame; else break; }
+                    } else {
+                        for (const EffectParamKey& k : t->keys) { if (k.frame > frame) { target = k.frame; break; } }
+                    }
                 }
             }
         }
@@ -2177,6 +2859,25 @@ void App::StudioRowKeyNav(uint64_t rowId, int dir) {
                 StudioPushTrackEdit(addName, before);
             }
             d.rowsKey = ~0ull;
+        } else if (kind == RowKind::StageParam) {
+            const uint32_t uid = RowGroupOf(rowId);
+            StudioStage* stage = d.FindStage(uid);
+            if (!stage) return;
+            EffectParamTrack* tr = FindStageParamTrack(*stage, name);
+            std::vector<TrackState> before = {CaptureTrack(d, -1, kind, name)};
+            if (tr && FindKey(tr->keys, frame)) {
+                EraseParamKeys(*tr, {(int32_t)frame});
+                StudioPushTrackEdit(Tr("스테이지 키 삭제"), before);
+            } else {
+                if (!tr) {
+                    stage->tracks.push_back({name, {}});
+                    tr = &stage->tracks.back();
+                }
+                const float val = EvaluateParamTrack(*tr, (float)frame, StageParamStaticValue(*stage, name));
+                UpsertParamKey(*tr, EffectParamKey{frame, val, StageParamTrackStepped(*stage, name)});
+                StudioPushTrackEdit(Tr("스테이지 키 등록"), before);
+            }
+            d.rowsKey = ~0ull;
         }
     }
 }
@@ -2202,9 +2903,14 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
             const uint32_t groupWord = RowGroupOf(id);
             const uint32_t index = RowIndexOf(id);
             const uint32_t flag = groupWord & 0xC00000u;
-            if (flag != 0x400000u && flag != 0x800000u) return false;
+            if (flag != 0x400000u && flag != 0x800000u && flag != 0xC00000u) return false;
             if (index == 0) return true;  // the entity group itself
             const uint32_t uid = groupWord & 0x3FFFFFu;
+            if (flag == 0xC00000u) {   // S3: a stage entity's manifest `groups` entry ("collapsed")
+                const StudioStage* stage = d.FindStage(uid);
+                if (!stage || !stage->manifest || index - 1 >= stage->manifest->groups.size()) return false;
+                return stage->manifest->groups[index - 1].collapsed;
+            }
             const StudioEffect* fx = flag == 0x400000u ? d.FindEffect(uid)
                                      : (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr);
             if (!fx) return false;
@@ -2335,7 +3041,8 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
             d.rowAnchor = id;
             if (RowKindOf(id) == RowKind::SceneLight) StudioSelectLight(RowIndexOf(id));
             else if (IsCameraKind(RowKindOf(id)) || RowKindOf(id) == RowKind::EffectParam ||
-                     RowKindOf(id) == RowKind::WorldParam) d.selectedLightUid = 0;
+                     RowKindOf(id) == RowKind::WorldParam || RowKindOf(id) == RowKind::StageParam)
+                d.selectedLightUid = 0;
         }
         // bone rows also pick the bones for the viewport (the clicked one gets the gizmo)
         d.selectedBones.clear();
@@ -2433,6 +3140,14 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
                             }
                         }
                     }
+                }
+            }
+            else if (kind == RowKind::StageParam) {
+                uint32_t stageUid = 0;
+                std::string param;
+                if (ParseStageParamTrackName(track.second, stageUid, param)) {
+                    if (StudioStage* stage = d.FindStage(stageUid))
+                        if (EffectParamTrack* t = FindStageParamTrack(*stage, param)) MoveKeyFrames(t->keys, fs, ev.moveDelta);
                 }
             }
             else if (kind == RowKind::Bone) MoveKeyFrames(d.models[d.selectedModel]->motion.bones[track.second], fs, ev.moveDelta);
@@ -2817,6 +3532,133 @@ void App::StudioRebuildRows() {
                 }
                 for (const ParamRow& pr : params) {
                     if (pr.packGroup >= 0) continue;
+                    TimelineRow r = makeParamRow(pr, 2);
+                    for (const TimelineKey& k : r.keys) entSummary.insert(k.frame);
+                    entChildren.push_back(r.id);
+                    if (entShow) entRows.push_back(std::move(r));
+                }
+                for (int f : entSummary) {
+                    ent.keys.push_back({f, false});
+                    summary.insert(f);
+                }
+                for (uint64_t c : entChildren) childIds.push_back(c);
+                if (group.expanded) children.push_back(std::move(ent));
+                for (auto& r : entRows) children.push_back(std::move(r));
+            }
+            for (int f : summary) group.keys.push_back({f, false});
+            d.rows.push_back(std::move(group));
+            for (auto& c : children) d.rows.push_back(std::move(c));
+        }
+
+        // S3: stage parameters: a row tree "스테이지" (group word 0, index 2) with one default-collapsed group per stage
+        // entity, one group per manifest `groups` entry that has params, then the params (colours per component).
+        if (!d.stages.empty()) {
+            TimelineRow group;
+            group.id = MakeRowId(RowKind::Group, 0, 2);
+            group.label = Tr("스테이지");
+            group.isGroup = true;
+            group.keysEditable = false;
+            group.expanded = !d.collapsed.count(group.id);
+            group.selected = d.selectedRows.count(group.id) != 0;
+            std::vector<uint64_t>& childIds = d.groupChildren[group.id];
+            std::set<int> summary;
+            std::vector<TimelineRow> children;
+            struct StageRow {
+                std::string param, label;
+                const EffectParamTrack* tr = nullptr;
+                int stageGroup = -1;
+            };
+            for (const StudioStage& stage : d.stages) {
+                if (!stage.manifest) continue;
+                const StageManifest& man = *stage.manifest;
+                const std::string entityLabel = man.DisplayName(StageLanguage());
+                const uint32_t entityGroup = 0xC00000u | stage.uid;
+                const auto trackOf = [&](const std::string& param) -> const EffectParamTrack* {
+                    return FindStageParamTrack(stage, param);
+                };
+                static const char* kCol[4] = {" · R", " · G", " · B", " · A"};
+                std::vector<StageRow> params;
+                const auto stageGroupOf = [&](const std::string& groupId) {
+                    for (int gi = 0; gi < (int)man.groups.size(); ++gi)
+                        if (man.groups[(size_t)gi].id == groupId) return gi;
+                    return -1;
+                };
+                std::set<std::string> listed;
+                for (const StageParam& sp : man.params) {
+                    listed.insert(sp.key);
+                    const std::string label = sp.label.Empty() ? sp.key : sp.label.Get(StageLanguage());
+                    const int stageGroup = stageGroupOf(sp.group);
+                    const int comps = StageParamComponents(sp);
+                    if (comps == 1) {
+                        params.push_back({sp.key, label, trackOf(sp.key), stageGroup});
+                    } else {
+                        for (int c = 0; c < comps; ++c) {
+                            const std::string param = StageParamName(sp, c);
+                            params.push_back({param, label + kCol[c], trackOf(param), stageGroup});
+                        }
+                    }
+                }
+                for (const EffectParamTrack& tr : stage.tracks) {
+                    if (listed.count(tr.param)) continue;
+                    uint32_t known = 0;
+                    if (StageParamIndexOfTrack(stage, tr.param, known)) continue;
+                    params.push_back({tr.param, tr.param, &tr, -1});
+                }
+                const auto makeParamRow = [&](const StageRow& pr, int depth) {
+                    TimelineRow r;
+                    r.depth = depth;
+                    r.id = MakeRowId(RowKind::StageParam, stage.uid, StageParamIndexOfName(stage, pr.param));
+                    r.label = pr.label;
+                    r.selected = d.selectedRows.count(r.id) != 0;
+                    r.tint = IM_COL32(190, 160, 240, 255);
+                    r.hasStopwatch = true;
+                    r.animated = pr.tr && !pr.tr->keys.empty();
+                    if (pr.tr) keysOf(r.id, pr.tr->keys, r.keys);
+                    return r;
+                };
+                TimelineRow ent;
+                ent.id = MakeRowId(RowKind::Group, entityGroup, 0);
+                ent.label = entityLabel;
+                ent.depth = 1;
+                ent.isGroup = true;
+                ent.keysEditable = false;
+                ent.expanded = d.expanded.count(ent.id) != 0;
+                ent.selected = d.selectedRows.count(ent.id) != 0;
+                std::vector<uint64_t>& entChildren = d.groupChildren[ent.id];
+                std::set<int> entSummary;
+                std::vector<TimelineRow> entRows;
+                const bool entShow = group.expanded && ent.expanded;
+                for (int gi = 0; gi < (int)man.groups.size(); ++gi) {
+                    bool hasParam = false;
+                    for (const StageRow& pr : params)
+                        if (pr.stageGroup == gi) { hasParam = true; break; }
+                    if (!hasParam) continue;
+                    const StageParamGroup& sg = man.groups[(size_t)gi];
+                    TimelineRow g;
+                    g.id = MakeRowId(RowKind::Group, entityGroup, 1 + (uint32_t)gi);
+                    g.label = sg.label.Empty() ? sg.id : sg.label.Get(StageLanguage());
+                    g.depth = 2;
+                    g.isGroup = true;
+                    g.keysEditable = false;
+                    g.expanded = sg.collapsed ? d.expanded.count(g.id) != 0 : !d.collapsed.count(g.id);
+                    g.selected = d.selectedRows.count(g.id) != 0;
+                    std::vector<uint64_t>& groupChildIds = d.groupChildren[g.id];
+                    std::set<int> groupSummary;
+                    std::vector<TimelineRow> groupRows;
+                    for (const StageRow& pr : params) {
+                        if (pr.stageGroup != gi) continue;
+                        TimelineRow r = makeParamRow(pr, 3);
+                        for (const TimelineKey& k : r.keys) { groupSummary.insert(k.frame); entSummary.insert(k.frame); }
+                        groupChildIds.push_back(r.id);
+                        entChildren.push_back(r.id);
+                        if (entShow && g.expanded) groupRows.push_back(std::move(r));
+                    }
+                    for (int f : groupSummary) g.keys.push_back({f, false});
+                    if (entShow) entRows.push_back(std::move(g));
+                    for (auto& r : groupRows) entRows.push_back(std::move(r));
+                }
+                for (const StageRow& pr : params) {
+                    if (pr.stageGroup >= 0) continue;
                     TimelineRow r = makeParamRow(pr, 2);
                     for (const TimelineKey& k : r.keys) entSummary.insert(k.frame);
                     entChildren.push_back(r.id);
@@ -3416,18 +4258,16 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
     group(0, "##grp_scene", Tr("장면"));
     if (studioOutlinerOpen_[0]) {
         row(-1, icon::VideoCamera, Tr("카메라 VMD"), sub, nullptr);
-        // characters first (they are what gets animated), then props, then stage parts
-        for (int pass = 0; pass < 3; ++pass) {
-            const ModelKind kind = pass == 0 ? ModelKind::Character : pass == 1 ? ModelKind::Prop : ModelKind::Stage;
+        // characters first (they are what gets animated), then props
+        for (int pass = 0; pass < 2; ++pass) {
+            const ModelKind kind = pass == 0 ? ModelKind::Character : ModelKind::Prop;
             for (int i = 0; i < (int)d.models.size(); ++i) {
                 StudioModel& m = *d.models[i];
                 if (m.kind != kind) continue;
                 size_t keys = 0;
                 for (const auto& [n, k] : m.motion.bones) keys += k.size();
                 for (const auto& [n, k] : m.motion.morphs) keys += k.size();
-                if (m.IsStage()) {
-                    std::snprintf(sub, sizeof(sub), "%s", Tr("스테이지"));
-                } else if (m.IsProp()) {
+                if (m.IsProp()) {
                     const int pi = m.attach.parent >= 0 ? d.IndexOfUid((uint32_t)m.attach.parent) : -1;
                     if (pi >= 0)
                         std::snprintf(sub, sizeof(sub), "%s · %s%s%s", Tr("소품"), d.models[pi]->name.c_str(),
@@ -3437,8 +4277,128 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
                 } else {
                     std::snprintf(sub, sizeof(sub), Tr("키 %d개"), (int)keys);
                 }
-                const char* glyph = m.IsStage() ? icon::Mountains : m.IsProp() ? icon::Cube : icon::PersonSimple;
+                const char* glyph = m.IsProp() ? icon::Cube : icon::PersonSimple;
                 row(i, glyph, m.name.c_str(), sub, &m.visible);
+            }
+        }
+        // S3: an MMDX stage is ONE row (its entity's name) with its parts as children, collapsed by default. Selecting
+        // it selects its first part (so the inspector shows the stage panel); the eye acts on the whole stage.
+        {
+            std::set<uint32_t> drawn;
+            for (int i = 0; i < (int)d.models.size(); ++i) {
+                StudioModel& m0 = *d.models[i];
+                if (!m0.IsStage()) continue;
+                const StudioStage* st = d.StageOfModel(m0);
+                const uint32_t key = st ? st->uid : m0.uid;   // an ungrouped part is its own row
+                if (!drawn.insert(key).second) continue;
+                int first = -1;
+                size_t parts = 0, keys = 0;
+                bool visible = false;
+                for (int k = 0; k < (int)d.models.size(); ++k) {
+                    StudioModel& mk = *d.models[k];
+                    if (!mk.IsStage()) continue;
+                    const StudioStage* sk = d.StageOfModel(mk);
+                    const uint32_t kw = sk ? sk->uid : mk.uid;
+                    if (kw != key) continue;
+                    if (first < 0) first = k;
+                    ++parts;
+                    visible = visible || mk.visible;
+                    for (const auto& [n, b] : mk.motion.bones) keys += b.size();
+                    for (const auto& [n, b] : mk.motion.morphs) keys += b.size();
+                }
+                if (first < 0) continue;
+                StudioModel& m = *d.models[(size_t)first];
+                const std::string name = st && st->manifest ? st->manifest->DisplayName(StageLanguage()) : m.name;
+                const bool open = studioStageOpen_.count(key) != 0;
+                ImGui::PushID("stage");
+                ImGui::PushID((int)key);
+                ImDrawList* cdl = ImGui::GetWindowDrawList();
+                const ImVec2 a = ImGui::GetCursorScreenPos();
+                const float w = ImGui::GetContentRegionAvail().x;
+                const ImVec2 b(a.x + w, a.y + rowH);
+                const bool selected = d.selectedModel >= 0 && d.Selected() &&
+                                      d.Selected()->IsStage() &&
+                                      ((d.StageOfModel(*d.Selected()) ? d.StageOfModel(*d.Selected())->uid : d.Selected()->uid) == key);
+                ImGui::InvisibleButton("##row", ImVec2(w - Dp(76.0f), rowH));
+                uiprobe::Info(ImGui::GetItemID(), "##row", name.c_str());   // MCP ui_click by name
+                const bool hovered = ImGui::IsItemHovered();
+                // the caret sits in the row's left edge (drawn after the row background, which fills over it)
+                const bool onCaret = hovered && ImGui::GetIO().MousePos.x < a.x + Dp(26.0f);
+                if (ImGui::IsItemClicked() && onCaret) {
+                    if (!studioStageOpen_.erase(key)) studioStageOpen_.insert(key);
+                } else if (ImGui::IsItemClicked()) {
+                    StudioSelectModel(first);
+                }
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) menuFor = first;
+                const bool rowHot = hovered || ImGui::IsMouseHoveringRect(a, b);
+                const ImVec2 ra(a.x + Dp(8.0f), a.y + Dp(2.0f)), rb(b.x - Dp(8.0f), b.y - Dp(2.0f));
+                if (selected) cdl->AddRectFilled(ra, rb, p.accentSoft, Dp(8.0f));
+                else if (rowHot) cdl->AddRectFilled(ra, rb, WithAlpha(p.ink, 0.05f), Dp(8.0f));
+                const ImU32 fg = selected ? p.accentInk : p.ink;
+                Icon(cdl, open ? icon::CaretDown : icon::CaretRight, 12.0f, ImVec2(a.x + Dp(20.0f), a.y + rowH * 0.5f),
+                     selected ? p.accentInk : p.ink3);
+                Icon(cdl, icon::Mountains, 16.0f, ImVec2(a.x + Dp(44.0f), a.y + rowH * 0.5f), selected ? p.accentInk : p.ink2);
+                char stageSub[96];
+                std::snprintf(stageSub, sizeof(stageSub), "%s · %d%s", Tr("스테이지"), (int)parts, Tr("부품"));
+                const float tx = a.x + Dp(62.0f), maxX = b.x - Dp(78.0f);
+                TextEllipsis(cdl, Font::Semibold, size::Small, ImVec2(tx, a.y + Dp(4.0f)), maxX, fg, name.c_str());
+                TextEllipsis(cdl, Font::Regular, size::Caption, ImVec2(tx, a.y + Dp(21.0f)), maxX, p.ink3, stageSub);
+                if (rowHot || selected) {
+                    ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(76.0f), a.y + Dp(6.0f)));
+                    if (IconButton("##more", icon::DotsThree, Tr("모델 메뉴"), false, 28.0f)) menuFor = first;
+                }
+                ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(44.0f), a.y + Dp(6.0f)));
+                if (IconButton("##vis", visible ? icon::Eye : icon::EyeSlash, visible ? Tr("숨기기") : Tr("보이기"), false, 28.0f)) {
+                    for (auto& mk : d.models) {
+                        if (!mk->IsStage()) continue;
+                        const StudioStage* sk = d.StageOfModel(*mk);
+                        const uint32_t kw = sk ? sk->uid : mk->uid;
+                        if (kw != key) continue;
+                        mk->visible = !visible;
+                    }
+                    ++d.projectVersion;
+                }
+                ImGui::SetCursorScreenPos(ImVec2(a.x, b.y));
+                ImGui::Dummy(ImVec2(w, 0.0f));
+                // the parts, indented (nothing when collapsed)
+                if (open) {
+                    for (int k = first; k < (int)d.models.size(); ++k) {
+                        StudioModel& part = *d.models[k];
+                        if (!part.IsStage()) continue;
+                        const StudioStage* sk = d.StageOfModel(part);
+                        if ((sk ? sk->uid : part.uid) != key) continue;
+                        const int pi = k;
+                        ImGui::PushID(pi);
+                        ImDrawList* pdl = ImGui::GetWindowDrawList();
+                        const ImVec2 pa = ImGui::GetCursorScreenPos();
+                        const float pw = ImGui::GetContentRegionAvail().x;
+                        const ImVec2 pb(pa.x + pw, pa.y + Dp(32.0f));
+                        const bool psel = d.selectedModel == pi;
+                        ImGui::SetCursorScreenPos(ImVec2(pa.x + Dp(28.0f), pa.y));
+                        ImGui::InvisibleButton("##partrow", ImVec2(pw - Dp(28.0f + 76.0f), Dp(32.0f)));
+                        uiprobe::Info(ImGui::GetItemID(), "##partrow", part.name.c_str());
+                        const bool phover = ImGui::IsItemHovered();
+                        if (ImGui::IsItemClicked()) StudioSelectModel(pi);
+                        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) menuFor = pi;
+                        const ImVec2 pra(pa.x + Dp(24.0f), pa.y + Dp(1.0f)), prb(pb.x - Dp(8.0f), pb.y - Dp(1.0f));
+                        if (psel) pdl->AddRectFilled(pra, prb, p.accentSoft, Dp(6.0f));
+                        else if (phover) pdl->AddRectFilled(pra, prb, WithAlpha(p.ink, 0.05f), Dp(6.0f));
+                        Icon(pdl, icon::Cube, 12.0f, ImVec2(pa.x + Dp(42.0f), pa.y + Dp(16.0f)), p.ink3);
+                        TextEllipsis(pdl, Font::Regular, size::Small, ImVec2(pa.x + Dp(56.0f), pa.y + Dp(8.0f)),
+                                     pb.x - Dp(50.0f), psel ? p.accentInk : p.ink2, part.name.c_str());
+                        ImGui::SetCursorScreenPos(ImVec2(pb.x - Dp(40.0f), pa.y + Dp(2.0f)));
+                        if (IconButton("##pvis", part.visible ? icon::Eye : icon::EyeSlash,
+                                       part.visible ? Tr("숨기기") : Tr("보이기"), false, 24.0f)) {
+                            part.visible = !part.visible;
+                            ++d.projectVersion;
+                        }
+                        ImGui::SetCursorScreenPos(ImVec2(pa.x, pb.y));
+                        ImGui::Dummy(ImVec2(pw, 0.0f));
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::PopID();
+                ImGui::PopID();
             }
         }
         // the audio track last (offset / replace / remove from its menu)
@@ -3736,30 +4696,8 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
         ImGui::Dummy(ImVec2(w, Dp(28.0f)));
         if (m) {
             line(Tr("본 / 모프"), std::to_string(m->pmx->bones.size()) + " / " + std::to_string(m->pmx->morphs.size()));
-            // S1b: an MMDX stage part's variant (one combo; the stage's parts share it). Saved in the project.
-            if (m->stageManifest && m->stageManifest->variants.size() >= 2) {
-                const StageManifest& man = *m->stageManifest;
-                std::string current = m->stageVariant;
-                if (current.empty() && man.DefaultVariant()) current = man.DefaultVariant()->id;
-                int selected = -1;
-                for (size_t i = 0; i < man.variants.size(); ++i)
-                    if (man.variants[i].id == current) selected = (int)i;
-                if (selected < 0) selected = 0;
-                std::string label = man.variants[(size_t)selected].label.Get(StageLanguage());
-                if (label.empty()) label = man.variants[(size_t)selected].id;
-                ImGui::Dummy(ImVec2(w, Dp(4.0f)));
-                line(Tr("스테이지 배리언트"), label);
-                ImGui::SetNextItemWidth(w);
-                if (ImGui::BeginCombo("##stagevariant", label.c_str())) {
-                    for (size_t i = 0; i < man.variants.size(); ++i) {
-                        const StageVariant& v = man.variants[i];
-                        std::string item = v.label.Get(StageLanguage());
-                        if (item.empty()) item = v.id;
-                        if (ImGui::Selectable(item.c_str(), (int)i == selected)) StudioSetStageVariant(d.selectedModel, v.id);
-                    }
-                    ImGui::EndCombo();
-                }
-            }
+            // S3: an MMDX stage part shows its stage entity's panel (variant, params, cues imported as keys, resets).
+            if (d.StageOfModel(*m)) DrawStudioStagePanel(w);
             if (m->IsProp()) DrawStudioPropPanel(w);
             else DrawStudioPlacePanel(w);
             // P2.2: per-model physics off (saved in the project; baked keys play instead of physics)
@@ -4067,6 +5005,89 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
                     kind == RowKind::WorldParam ? WorldParamTrackName(effectUid, param)
                                                 : EffectParamTrackName(effectUid, param))};
                 pkKey->stepped = stepped;
+                StudioPushTrackEdit(Tr("보간 변경"), before);
+                d.rowsKey = ~0ull;
+            }
+        }
+        ImGui::EndChild();
+        return;
+    }
+    if (kind == RowKind::StageParam) {
+        // S3: the selected stage param key's value (one undoable TrackEditCommand per gesture, like an effect param)
+        uint32_t stageUid = 0;
+        std::string param;
+        ParseStageParamTrackName(name, stageUid, param);
+        StudioStage* stage = d.FindStage(stageUid);
+        if (!stage) {
+            ImGui::EndChild();
+            return;
+        }
+        int comp = -1;
+        const std::string key = StageParamBaseKey(param, comp);
+        const StageParam* sp = stage->manifest ? stage->manifest->FindParam(key) : nullptr;
+        std::string paramLabel = StageParamLabel(*stage, param);
+        if (sp && !sp->group.empty() && stage->manifest) {
+            for (const StageParamGroup& g : stage->manifest->groups)
+                if (g.id == sp->group) {
+                    const std::string gl = g.label.Empty() ? g.id : g.label.Get(StageLanguage());
+                    paramLabel = gl + " · " + paramLabel;
+                    break;
+                }
+        }
+        line(Tr("스테이지"), stage->manifest ? stage->manifest->DisplayName(StageLanguage()) : stage->stageId);
+        line(Tr("파라미터"), paramLabel);
+        EffectParamKey* skKey = nullptr;
+        if (EffectParamTrack* tr = FindStageParamTrack(*stage, param))
+            for (EffectParamKey& k : tr->keys)
+                if (k.frame == first->second) { skKey = &k; break; }
+        if (skKey) {
+            float val = skKey->value;
+            const StageParamType type = sp ? sp->type : StageParamType::Float;
+            float pmin = 0.0f, pmax = 1.0f;
+            if (sp && type != StageParamType::Color) { pmin = sp->min; pmax = sp->max; }
+            const auto row = [&](const char* lbl, auto&& widget) {
+                const ImVec2 c = ImGui::GetCursorScreenPos();
+                Text(cdl, Font::Regular, size::Small, ImVec2(c.x, c.y + Dp(5.0f)), p.ink3, lbl);
+                ImGui::SetCursorScreenPos(ImVec2(c.x + Dp(64.0f), c.y));
+                ImGui::SetNextItemWidth(w - Dp(64.0f));
+                PushFont(Font::Regular, size::Small);
+                bool ch = widget();
+                PopFont();
+                if (ImGui::IsItemActivated()) {
+                    studioKeyBefore_ = {CaptureTrack(d, -1, kind, name)};
+                    studioKeyEdit_ = true;
+                    studioKeyChanged_ = false;
+                }
+                if (ImGui::IsItemDeactivated()) StudioEndKeyEdit();
+                ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+                return ch;
+            };
+            bool valChanged = false;
+            if (type == StageParamType::Bool) {
+                bool b = (val > 0.5f);
+                if (row(Tr("값"), [&] { return Switch("##stageparambool", Tr("켬"), &b); })) {
+                    val = b ? 1.0f : 0.0f;
+                    valChanged = true;
+                }
+            } else if (type == StageParamType::Int || type == StageParamType::Enum) {
+                if (row(Tr("값"), [&] { return ImGui::SliderFloat("##stageparamval", &val, pmin, pmax, "%.0f"); })) {
+                    val = std::round(val);
+                    valChanged = true;
+                }
+            } else {
+                if (row(Tr("값"), [&] { return ImGui::SliderFloat("##stageparamval", &val, pmin, pmax, "%.3f"); })) {
+                    valChanged = true;
+                }
+            }
+            if (valChanged && !keyAwayFromPlayhead) {
+                skKey->value = val;
+                studioKeyChanged_ = true;
+                d.rowsKey = ~0ull;
+            }
+            bool stepped = skKey->stepped;
+            if (Switch("##stageparamstepped", Tr("계단식 보간"), &stepped, Tr("다음 키까지 현재 값을 유지합니다"))) {
+                std::vector<TrackState> before = {CaptureTrack(d, -1, kind, name)};
+                skKey->stepped = stepped;
                 StudioPushTrackEdit(Tr("보간 변경"), before);
                 d.rowsKey = ~0ull;
             }
@@ -4429,6 +5450,7 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
                 case RowKind::Accessory: r.tint = IM_COL32(120, 200, 160, 255); break;
                 case RowKind::EffectParam: r.tint = IM_COL32(100, 210, 210, 255); break;
                 case RowKind::WorldParam: r.tint = IM_COL32(150, 190, 240, 255); break;
+                case RowKind::StageParam: r.tint = IM_COL32(190, 160, 240, 255); break;
                 default: break;
             }
         }
@@ -4703,25 +5725,31 @@ void App::DrawStudioKeyMenu() {
         bool hasEffectKeys = false;
         bool allStepped = true;
         for (const KeyId& k : d.selection) {
-            if (RowKindOf(k.first) == RowKind::EffectParam || RowKindOf(k.first) == RowKind::WorldParam) {
-                hasEffectKeys = true;
-                uint32_t uid = RowGroupOf(k.first);
-                uint32_t pidx = RowIndexOf(k.first);
-                const StudioEffect* eff = RowKindOf(k.first) == RowKind::WorldParam
+            const RowKind rk = RowKindOf(k.first);
+            if (rk != RowKind::EffectParam && rk != RowKind::WorldParam && rk != RowKind::StageParam) continue;
+            hasEffectKeys = true;
+            uint32_t uid = RowGroupOf(k.first);
+            uint32_t pidx = RowIndexOf(k.first);
+            std::string param;
+            const EffectParamTrack* tr = nullptr;
+            if (rk == RowKind::StageParam) {
+                const StudioStage* stage = d.FindStage(uid);
+                if (!stage) continue;
+                param = StageParamNameOfIndex(*stage, pidx);
+                tr = FindStageParamTrack(*stage, param);
+            } else {
+                const StudioEffect* eff = rk == RowKind::WorldParam
                     ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr) : d.FindEffect(uid);
-                if (eff) {
-                    std::string param = EffectParamNameOfIndex(*eff, pidx);
-                    for (const auto& t : eff->tracks) {
-                        if (t.param == param) {
-                            for (const auto& pk : t.keys) {
-                                if (pk.frame == k.second) {
-                                    if (!pk.stepped) allStepped = false;
-                                    break;
-                                }
-                            }
-                            break;
-                        }
-                    }
+                if (!eff) continue;
+                param = EffectParamNameOfIndex(*eff, pidx);
+                for (const auto& t : eff->tracks)
+                    if (t.param == param) { tr = &t; break; }
+            }
+            if (!tr) continue;
+            for (const auto& pk : tr->keys) {
+                if (pk.frame == k.second) {
+                    if (!pk.stepped) allStepped = false;
+                    break;
                 }
             }
         }
@@ -4731,24 +5759,28 @@ void App::DrawStudioKeyMenu() {
                 std::vector<TrackState> before = StudioCaptureSelectedTracks();
                 const bool newStepped = !allStepped;
                 for (const KeyId& k : d.selection) {
-                    if (RowKindOf(k.first) != RowKind::EffectParam && RowKindOf(k.first) != RowKind::WorldParam)
+                    const RowKind rk = RowKindOf(k.first);
+                    if (rk != RowKind::EffectParam && rk != RowKind::WorldParam && rk != RowKind::StageParam)
                         continue;
                     uint32_t uid = RowGroupOf(k.first);
                     uint32_t pidx = RowIndexOf(k.first);
-                    StudioEffect* eff = RowKindOf(k.first) == RowKind::WorldParam
-                        ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr) : d.FindEffect(uid);
-                    if (eff) {
-                        std::string param = EffectParamNameOfIndex(*eff, pidx);
-                        for (auto& t : eff->tracks) {
-                            if (t.param == param) {
-                                for (auto& pk : t.keys) {
-                                    if (pk.frame == k.second) {
-                                        pk.stepped = newStepped;
-                                        break;
-                                    }
-                                }
-                                break;
-                            }
+                    EffectParamTrack* tr = nullptr;
+                    if (rk == RowKind::StageParam) {
+                        StudioStage* stage = d.FindStage(uid);
+                        if (!stage) continue;
+                        tr = FindStageParamTrack(*stage, StageParamNameOfIndex(*stage, pidx));
+                    } else {
+                        StudioEffect* eff = rk == RowKind::WorldParam
+                            ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr) : d.FindEffect(uid);
+                        if (!eff) continue;
+                        for (auto& t : eff->tracks)
+                            if (t.param == EffectParamNameOfIndex(*eff, pidx)) { tr = &t; break; }
+                    }
+                    if (!tr) continue;
+                    for (auto& pk : tr->keys) {
+                        if (pk.frame == k.second) {
+                            pk.stepped = newStepped;
+                            break;
                         }
                     }
                 }

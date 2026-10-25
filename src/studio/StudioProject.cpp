@@ -46,6 +46,31 @@ bool StudioWorld::operator==(const StudioWorld& o) const {
     return name == o.name && fx == o.fx && place == o.place;
 }
 
+size_t StudioStage::ApproxBytes() const {
+    size_t bytes = sizeof(StudioStage) + stageId.size() + variant.size();
+    for (const auto& [k, v] : base) bytes += k.size() + sizeof(StageValue);
+    for (const EffectParamTrack& t : tracks)
+        bytes += sizeof(EffectParamTrack) + t.param.size() + t.keys.capacity() * sizeof(EffectParamKey);
+    for (const std::string& c : cuesOff) bytes += sizeof(std::string) + c.size();
+    return bytes;
+}
+
+bool StudioStage::operator==(const StudioStage& o) const {
+    if (stageId != o.stageId || manifestPath != o.manifestPath || variant != o.variant || base != o.base ||
+        cuesOff != o.cuesOff || tracks.size() != o.tracks.size())
+        return false;
+    for (size_t i = 0; i < tracks.size(); ++i) {
+        const EffectParamTrack& a = tracks[i];
+        const EffectParamTrack& b = o.tracks[i];
+        if (a.param != b.param || a.keys.size() != b.keys.size()) return false;
+        for (size_t k = 0; k < a.keys.size(); ++k)
+            if (a.keys[k].frame != b.keys[k].frame || a.keys[k].value != b.keys[k].value ||
+                a.keys[k].stepped != b.keys[k].stepped)
+                return false;
+    }
+    return true;
+}
+
 namespace {
 
 // ASCII-only lowercase (multibyte UTF-8 bytes are never folded): for the case-insensitive
@@ -115,6 +140,34 @@ DirectX::XMFLOAT3 ReadVec3(const nlohmann::json& j, const char* key, DirectX::XM
 const nlohmann::json* ObjectAt(const nlohmann::json& j, const char* key) {
     const auto it = j.find(key);
     return it != j.end() && it->is_object() ? &*it : nullptr;
+}
+
+// ---- S3: stage param values (a number, or [r,g,b(,a)] for a colour; an enum is its option index) ----
+nlohmann::json StageValueJson(const StageValue& v) {
+    if (v.type == StageValue::Type::Color) return nlohmann::json::array({v.x, v.y, v.z, v.w});
+    if (v.type == StageValue::Type::Text) return v.text;
+    return v.x;
+}
+
+bool ReadStageValue(const nlohmann::json& j, StageValue& out) {
+    if (j.is_number()) {
+        out = StageValue::Number(j.get<float>());
+        return true;
+    }
+    if (j.is_boolean()) {
+        out = StageValue::Number(j.get<bool>() ? 1.0f : 0.0f);
+        return true;
+    }
+    if (j.is_array() && j.size() >= 3 && j.size() <= 4) {
+        float c[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        for (size_t i = 0; i < j.size(); ++i) {
+            if (!j[i].is_number()) return false;
+            c[i] = j[i].get<float>();
+        }
+        out = StageValue::Color(DirectX::XMFLOAT4{c[0], c[1], c[2], c[3]});
+        return true;
+    }
+    return false;
 }
 
 // ---- scene lights (editor "lights", version 2; the JSON itself: asset/SceneLightJson.h) ----
@@ -471,7 +524,9 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                 }
             }
             // S1b: the variant chosen for an MMDX stage, saved as the model's "stageVariant" (absent = the default).
-            if (!m.stageVariant.empty()) jm["stageVariant"] = m.stageVariant;
+            // Version 4: the variant lives on the stage entity instead; only the part's stage uid is written.
+            if (m.stageUid != 0) jm["stageUid"] = m.stageUid;
+            else if (!m.stageVariant.empty()) jm["stageVariant"] = m.stageVariant;
             // P5: the per-model PBR material source (Default is not written); the .emd path is relative to the project.
             // Written for every kind (character, stage, prop).
             if (m.material.ray) {
@@ -578,6 +633,33 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                 worlds.push_back(std::move(jw));
             }
             j["worlds"] = std::move(worlds);
+        }
+        // Version 4: MMDX stage entities (variant / base values / keyed params / cues off; the installed stage is never
+        // written, so this array is the whole override state).
+        {
+            nlohmann::json stages = nlohmann::json::array();
+            for (const StudioStage& st : data.stages) {
+                nlohmann::json js;
+                js["uid"] = st.uid;
+                js["stageId"] = st.stageId;
+                js["path"] = RelPath(st.manifest ? st.manifest->manifestPath : st.manifestPath, dir);
+                js["variant"] = st.variant;
+                nlohmann::json base = nlohmann::json::object();
+                for (const auto& [k, v] : st.base) base[k] = StageValueJson(v);
+                js["base"] = std::move(base);
+                nlohmann::json tracks = nlohmann::json::array();
+                for (const EffectParamTrack& t : st.tracks) {
+                    nlohmann::json keys = nlohmann::json::array();
+                    for (const EffectParamKey& k : t.keys) keys.push_back({k.frame, k.value, k.stepped ? 1 : 0});
+                    tracks.push_back({{"param", t.param}, {"keys", std::move(keys)}});
+                }
+                js["tracks"] = std::move(tracks);
+                nlohmann::json cues = nlohmann::json::array();
+                for (const std::string& c : st.cuesOff) cues.push_back(c);
+                js["cuesOff"] = std::move(cues);
+                stages.push_back(std::move(js));
+            }
+            j["stages"] = std::move(stages);
         }
         if (data.audioPath.empty()) {
             j["audio"] = nullptr;
@@ -709,6 +791,7 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
 
         // old JSON index -> out.models index; -1 = skipped (bad entry / unknown kind)
         std::map<int, int> remap;
+        std::map<uint32_t, uint32_t> stageUidRemap;  // a repeated stage uid -> its fresh one (part models / lights)
         if (j.contains("models") && j["models"].is_array()) {
             const nlohmann::json& arr = j["models"];
             for (size_t idx = 0; idx < arr.size(); ++idx) {
@@ -771,8 +854,10 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                         if (!emd.empty()) pm.material.emd = PathToUtf8(ResolvePath(emd, dir));
                     }
                 }
-                // S1b: an MMDX stage part's saved variant (absent = the manifest's default variant)
+                // S1b: an MMDX stage part's saved variant (absent = the manifest's default variant); version 4 files
+                // carry the stage entity uid instead and the variant in "stages".
                 pm.stageVariant = ReadString(m, "stageVariant", "");
+                pm.stageUid = (uint32_t)std::max(0, ReadInt(m, "stageUid", 0));
                 // M6a: the per-model MME choice (absent = characters None / stages Auto)
                 pm.mme = kind == ModelKind::Stage ? MmeChoice{MmeChoice::Auto, {}} : MmeChoice{};
                 if (m.contains("mme") && m["mme"].is_object()) {
@@ -962,6 +1047,65 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
             }
         }
 
+        // Version 4: MMDX stage entities. The manifest itself is resolved by the loader (from `path`), so a project can
+        // be read (and round-tripped) without the stage folder being present.
+        if (version >= 4 && j.contains("stages") && j["stages"].is_array()) {
+            for (const auto& js : j["stages"]) {
+                if (!js.is_object()) {
+                    if (warnings) warnings->push_back("malformed stage entry skipped");
+                    continue;
+                }
+                StudioStage st;
+                st.uid = (uint32_t)std::max(0, ReadInt(js, "uid", 0));
+                st.stageId = ReadString(js, "stageId", "");
+                st.manifestPath = ResolvePath(ReadString(js, "path", ""), dir);
+                st.variant = ReadString(js, "variant", "");
+                if (js.contains("base") && js["base"].is_object()) {
+                    for (const auto& [k, v] : js["base"].items()) {
+                        StageValue value;
+                        if (ReadStageValue(v, value)) st.base[k] = value;
+                    }
+                }
+                if (js.contains("tracks") && js["tracks"].is_array()) {
+                    for (const auto& jt : js["tracks"]) {
+                        if (!jt.is_object()) continue;
+                        EffectParamTrack t;
+                        t.param = ReadString(jt, "param", "");
+                        if (t.param.empty()) continue;
+                        if (jt.contains("keys") && jt["keys"].is_array()) {
+                            for (const auto& jk : jt["keys"]) {
+                                if (!jk.is_array() || jk.size() < 2 || !jk[0].is_number() || !jk[1].is_number())
+                                    continue;
+                                EffectParamKey k;
+                                k.frame = jk[0].get<int32_t>();
+                                k.value = jk[1].get<float>();
+                                k.stepped = jk.size() >= 3 && jk[2].is_number() && jk[2].get<int>() != 0;
+                                UpsertParamKey(t, k);
+                            }
+                        }
+                        st.tracks.push_back(std::move(t));
+                    }
+                }
+                if (js.contains("cuesOff") && js["cuesOff"].is_array()) {
+                    for (const auto& c : js["cuesOff"])
+                        if (c.is_string()) st.cuesOff.insert(c.get<std::string>());
+                }
+                out.stages.push_back(std::move(st));
+            }
+            // the uids identify the stages (part models / lights refer to them): a missing, zero or repeated one gets a
+            // fresh uid (the references are remapped once the lights are read, at the end of this function)
+            uint32_t nextUid = 1;
+            for (const StudioStage& st : out.stages) nextUid = std::max(nextUid, st.uid + 1);
+            std::set<uint32_t> used;
+            for (StudioStage& st : out.stages) {
+                if (st.uid == 0 || !used.insert(st.uid).second) {
+                    const uint32_t old = st.uid;
+                    st.uid = nextUid++;
+                    if (old != 0) stageUidRemap[old] = st.uid;
+                }
+            }
+        }
+
         // The editor state. A version 1 file's lighting (a source choice + spot rig, or only "useLightTrack") is converted
         // to scene lights, also when the file has no editor object (the old default: the VMD track, Studio preset).
         ProjectEditor ed;  // defaults, then overwrite what the file carries
@@ -1081,6 +1225,19 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                 const auto ai = remap.find((int)k.parentUid - 1);
                 k.parentUid = ai == remap.end() || ai->second < 0 ? 0 : (uint32_t)(ai->second + 1);
             }
+        }
+        // S3: a stage reference no stage has becomes 0 (a freestanding MMDX stage part / an ordinary scene light)
+        {
+            std::set<uint32_t> stageUids;
+            for (const StudioStage& st : out.stages) stageUids.insert(st.uid);
+            const auto fix = [&](uint32_t& uid) {
+                if (uid == 0) return;
+                const auto it = stageUidRemap.find(uid);
+                if (it != stageUidRemap.end()) uid = it->second;
+                if (!stageUids.count(uid)) uid = 0;
+            };
+            for (ProjectModel& pm : out.models) fix(pm.stageUid);
+            for (SceneLight& l : out.editor.lights) fix(l.stageUid);
         }
         return true;
     } catch (const std::exception& e) {

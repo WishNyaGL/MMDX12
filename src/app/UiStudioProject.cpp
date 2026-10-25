@@ -181,7 +181,7 @@ ProjectData App::StudioProjectData() const {
         pm.shader = m.shader;
         pm.material = m.material;
         pm.mme = m.mme;
-        pm.stageVariant = m.stageVariant;   // S1b: an MMDX stage part's variant (the stage's parts share it)
+        pm.stageUid = m.stageUid;   // S3: the stage entity the part belongs to (variant / overrides live there)
         if (m.IsProp()) {
             pm.attach = m.attach;
             pm.attach.parent = m.attach.parent >= 0 ? d.IndexOfUid((uint32_t)m.attach.parent) : -1;  // uid -> index
@@ -213,6 +213,7 @@ ProjectData App::StudioProjectData() const {
     pd.mmePost = d.mmePost;   // M6b: the project's own MME post stack
     pd.effects = d.effects;   // Version 3: the project's own effect stack
     pd.worlds = d.worlds;     // Version 3: the project's world entities
+    pd.stages = d.stages;     // Version 4: the project's MMDX stage entities
     ProjectEditor& e = pd.editor;
     e.frame = d.Frame();
     e.selectedModel = d.selectedModel;
@@ -424,9 +425,11 @@ void App::StudioAddModelFile(ModelKind kind, const std::filesystem::path& file, 
             if (!material) choice = ResolveMaterialChoice(replaceLibraryId, studio_->models[(size_t)at]->path);
         }
     }
-    // S1b: a replaced MMDX stage part keeps its manifest / variant, and its material rules apply on this worker.
+    // S1b: a replaced MMDX stage part keeps its manifest / variant, and its material rules apply on this worker. S3: the
+    // variant lives on the stage entity, so the part keeps that entity's uid instead.
     std::shared_ptr<const StageManifest> stageManifest;
     int stagePart = -1;
+    uint32_t stageUid = 0;
     std::string stageVariant;
     if (replaceUid && studio_) {
         const int at = studio_->IndexOfUid(replaceUid);
@@ -434,11 +437,12 @@ void App::StudioAddModelFile(ModelKind kind, const std::filesystem::path& file, 
             const StudioModel& old = *studio_->models[(size_t)at];
             stageManifest = old.stageManifest;
             stagePart = old.stagePart;
-            stageVariant = old.stageVariant;
+            stageUid = old.stageUid;
+            if (const StudioStage* stage = studio_->StageOfModel(old)) stageVariant = stage->variant;
         }
     }
     job->future = std::async(std::launch::async, [j, kind, file, label, choice, replaceLibraryId, stageManifest,
-                                                  stagePart, stageVariant] {
+                                                  stagePart, stageUid, stageVariant] {
         const bool ok = LoadStudioModel(file, kind, label, j->models[0], &j->progress, &j->error, choice);
         if (!ok) return false;
         StudioPackageModel& m = j->models[0];
@@ -446,7 +450,7 @@ void App::StudioAddModelFile(ModelKind kind, const std::filesystem::path& file, 
         if (stageManifest) {
             m.stageManifest = stageManifest;
             m.stagePart = stagePart;
-            m.stageVariant = stageVariant;
+            m.stageUid = stageUid;
             if (!stageManifest->materials.empty() && m.pmx)
                 ApplyStageMaterialRules(*stageManifest, stageVariant, {}, 0.0,
                                         MatchStageMaterialRules(stageManifest->materials, *m.pmx), *m.pmx, m.pbr);
@@ -681,6 +685,7 @@ void App::StudioPollJobs() {
             }
             UploadBatch batch(ctx_);
             int first = -1, insertedAfter = 0;
+            uint32_t firstUid = d.nextUid;
             for (StudioPackageModel& pm : job.models) {
                 if (targetGone) continue;
                 const bool fxOnly = pm.kind == ModelKind::Effect && !pm.pmx;
@@ -692,7 +697,7 @@ void App::StudioPollJobs() {
                 sm->mme = pm.mme;
                 sm->stageManifest = pm.stageManifest;
                 sm->stagePart = pm.stagePart;
-                sm->stageVariant = pm.stageVariant;
+                sm->stageUid = pm.stageUid;
                 if (pm.stageManifest && pm.pmx)
                     sm->stageBinding = MatchStageMaterialRules(pm.stageManifest->materials, *pm.pmx);
                 sm->defaultPackTextureFolder = pm.defaultPackTextureFolder;
@@ -729,8 +734,23 @@ void App::StudioPollJobs() {
                 d.physicsFrame = -1.0f;
                 if (d.models[(size_t)first]->kind != ModelKind::Stage && !replaced) StudioSelectModel(first);
                 if (!replaced) toast_ = {Tr("모델을 추가했어요"), job.label, {}, false, timeSeconds_ + 3.0};
-                // S1b: a freshly added MMDX stage with a light rig replaces the scene's lights with it, as ONE step.
-                if (!replaced) StudioApplyStageLightRig(job.models);
+                // S3: the parts that came in together (a library stage) join one stage entity; a replaced part keeps its
+                // own. Then a freshly added MMDX stage with a light rig replaces the scene's lights with it, as ONE step.
+                if (!replaced) {
+                    // the doc uids of the parts this job added (their stage uid is only known after the consolidation)
+                    std::vector<uint32_t> added;
+                    for (size_t i = 0; i < d.models.size(); ++i)
+                        if (d.models[i]->uid >= firstUid) added.push_back(d.models[i]->uid);
+                    StudioConsolidateStages(d, {});
+                    uint32_t newStage = 0;
+                    for (uint32_t uid : added) {
+                        const int at = d.IndexOfUid(uid);
+                        if (at < 0) continue;
+                        const uint32_t su = d.models[(size_t)at]->stageUid;
+                        if (su) { newStage = su; break; }
+                    }
+                    if (newStage) StudioApplyStageLightRig(newStage);
+                }
                 LOG_INFO("studio: added %s (%d models)", job.label.c_str(), (int)d.models.size());
                 // a dropped VMD / VPD with one new model waits for it: apply now that the model is in the document
                 if (!replaced && !job.queuedDrops.empty()) ApplyQueuedDrops(first, job.queuedDrops);
@@ -757,6 +777,43 @@ void App::StudioRemoveModel(int index) {
     ctx_.WaitForGpu();
     const uint32_t uid = d.models[(size_t)index]->uid;
     const std::string name = d.models[(size_t)index]->name;
+    // S3: removing a part of an MMDX stage removes the whole stage (its parts, its entity and its own rig lights)
+    const uint32_t stageUid = d.models[(size_t)index]->stageUid;
+    if (stageUid != 0) {
+        const StudioStage* stage = d.FindStage(stageUid);
+        const std::string stageName = stage ? (stage->manifest ? stage->manifest->DisplayName(StageLanguage())
+                                                              : stage->stageId)
+                                            : name;
+        std::set<uint32_t> partUids;
+        std::set<int> propParents;
+        for (auto& m : d.models) {
+            if (m->stageUid != stageUid) continue;
+            partUids.insert(m->uid);
+            propParents.insert((int)m->uid);
+        }
+        for (auto& m : d.models)
+            if (m->IsProp() && propParents.count(m->attach.parent)) m->attach.parent = -1;
+        d.models.erase(std::remove_if(d.models.begin(), d.models.end(),
+                                      [&](const auto& m) { return partUids.count(m->uid) != 0; }),
+                       d.models.end());
+        d.lights.erase(std::remove_if(d.lights.begin(), d.lights.end(),
+                                      [&](const SceneLight& l) { return l.stageUid == stageUid; }),
+                       d.lights.end());
+        d.stages.erase(std::remove_if(d.stages.begin(), d.stages.end(),
+                                      [&](const StudioStage& s) { return s.uid == stageUid; }),
+                       d.stages.end());
+        studioStageOpen_.erase(stageUid);
+        for (auto& job : studioJobs_)
+            if (partUids.count(job->targetUid)) job->targetUid = 0;
+        StudioClearEditState();
+        d.selectedModel = -1;
+        ++d.projectVersion;
+        toast_ = {Tr("스테이지를 제거했어요"), stageName + "  ·  " + Tr("실행 취소 기록을 비웠어요"), {}, false,
+                  timeSeconds_ + 4.0};
+        LOG_INFO("studio: removed stage %s (%d parts, %d models left)", stageName.c_str(), (int)partUids.size(),
+                 (int)d.models.size());
+        return;
+    }
     d.models.erase(d.models.begin() + index);
     for (auto& m : d.models)
         if (m->IsProp() && m->attach.parent == (int)uid) m->attach.parent = -1;  // stays where it is, in the world
@@ -791,6 +848,8 @@ void App::StudioClearEditState() {
     studioGizmoShown_ = false;
     studioKeyEdit_ = false;
     studioPoseFieldEdit_ = false;
+    studioStageDragging_ = false;   // the snapshot refers to a stages list an undo clears
+    studioStageBefore_.clear();
 }
 
 bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* note) {
@@ -827,10 +886,11 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
     m.libraryId = pm.libraryId;
     m.path = pm.pmx->sourcePath;
     m.pmx = pm.pmx;
-    // S1b: a replaced MMDX stage part keeps its manifest / variant (the same file re-read keeps them too)
+    // S1b: a replaced MMDX stage part keeps its manifest / stage (the same file re-read keeps them too); S3: the
+    // variant lives on the stage entity the part refers to.
     m.stageManifest = pm.stageManifest;
     m.stagePart = pm.stagePart;
-    m.stageVariant = pm.stageVariant;
+    m.stageUid = pm.stageUid;
     m.stageBinding = pm.stageManifest ? MatchStageMaterialRules(pm.stageManifest->materials, *pm.pmx)
                                       : StageMaterialBinding{};
     m.inst = std::make_unique<ModelInstance>(pm.pmx);

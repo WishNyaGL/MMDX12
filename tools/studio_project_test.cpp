@@ -339,7 +339,7 @@ static void TestEffects() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 3, "effect project format is version 3");
+        Check(!j.is_discarded() && j.value("version", 0) == 4, "effect project format is version 4");
         Check(j.contains("effects") && j["effects"].is_array() && j["effects"].size() == 2 &&
                   j["effects"][0]["pack"] == "hoyo_toon_v2" && j["effects"][1]["enabled"] == false &&
                   j["effects"][0]["textureFolder"] == "F:/tex/effect" && j["effects"][0]["tracks"].size() == 2 &&
@@ -384,7 +384,7 @@ static void TestWorlds() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 3, "world project format is version 3");
+        Check(!j.is_discarded() && j.value("version", 0) == 4, "world project format is version 4");
         Check(j.contains("worlds") && j["worlds"].is_array() && j["worlds"].size() == 1 &&
                   j["worlds"][0]["name"] == "snow field" && j["worlds"][0]["pack"] == "snow" &&
                   j["worlds"][0]["enabled"] == false && j["worlds"][0]["tracks"].size() == 1 &&
@@ -414,6 +414,104 @@ static void TestWorlds() {
         warnings.clear();
         Check(LoadProject(legacy, l2, &err, &warnings), "LoadProject without worlds", "%s", err.c_str());
         Check(l2.worlds.empty(), "absent worlds key = no worlds");
+    }
+}
+
+static void TestStages() {
+    const std::filesystem::path projDir = kTemp / "stages";
+    const std::filesystem::path projFile = projDir / "stages.mmdxproj";
+    ProjectData data;
+    // S3: one stage entity with a variant, a base value, a keyed colour component and a cue the project replaced
+    data.stages.resize(1);
+    StudioStage& st = data.stages[0];
+    st.uid = 3;
+    st.stageId = "stages:cyclorama";
+    st.variant = "dusk";
+    st.base["keyIntensity"] = StageValue::Number(1.25f);
+    st.base["coveColor"] = StageValue::Color(XMFLOAT4{0.1f, 0.2f, 0.3f, 1.0f});
+    EffectParamTrack track;
+    track.param = "coveColor#2";
+    track.keys = {{0, 0.25f, false}, {30, 0.75f, true}};
+    st.tracks.push_back(track);
+    st.cuesOff.insert("keyIntensity");
+    // a part model referring to it (the reference is a uid, and is remapped only when the id is repeated / missing)
+    ProjectModel pm;
+    pm.name = "cove";
+    pm.kind = ModelKind::Stage;
+    pm.path = kTemp / "stages" / "cove.pmx";
+    pm.stageUid = 3;
+    data.models.push_back(pm);
+    std::string err;
+    Check(SaveProject(projFile, data, &err), "SaveProject with stages", "%s", err.c_str());
+    {
+        std::ifstream in(projFile, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+        Check(!j.is_discarded() && j.value("version", 0) == 4, "stage project format is version 4");
+        Check(j.contains("stages") && j["stages"].is_array() && j["stages"].size() == 1 &&
+                  j["stages"][0]["uid"] == 3 && j["stages"][0]["stageId"] == "stages:cyclorama" &&
+                  j["stages"][0]["variant"] == "dusk" && j["stages"][0]["base"].is_object() &&
+                  j["stages"][0]["base"]["keyIntensity"] == 1.25f &&
+                  j["stages"][0]["base"]["coveColor"].size() == 4 &&
+                  j["stages"][0]["tracks"].size() == 1 && j["stages"][0]["tracks"][0]["param"] == "coveColor#2" &&
+                  j["stages"][0]["tracks"][0]["keys"].size() == 2 &&
+                  j["stages"][0]["tracks"][0]["keys"][1][2] == 1 &&
+                  j["stages"][0]["cuesOff"].size() == 1 && j["stages"][0]["cuesOff"][0] == "keyIntensity",
+              "stages are written as uid / stageId / path / variant / base / tracks / cuesOff");
+        Check(j["models"][0]["stageUid"] == 3, "a part model writes its stage uid");
+    }
+    ProjectData loaded;
+    std::vector<std::string> warnings;
+    Check(LoadProject(projFile, loaded, &err, &warnings), "LoadProject with stages", "%s", err.c_str());
+    Check(loaded.stages.size() == data.stages.size(), "stage count kept");
+    if (loaded.stages.size() == data.stages.size()) {
+        Check(loaded.stages[0] == data.stages[0], "stages round-trip exactly (ignoring uid)");
+        Check(loaded.stages[0].uid == 3, "a saved stage uid survives (the parts refer to it)");
+        Check(loaded.stages[0].base.at("coveColor").type == StageValue::Type::Color &&
+                  Near(loaded.stages[0].base.at("coveColor").x, 0.1f) &&
+                  loaded.stages[0].tracks[0].keys[1].stepped,
+              "a colour base value and a stepped key are kept");
+    }
+    Check(loaded.models.size() == 1 && loaded.models[0].stageUid == 3, "a part model keeps its stage uid");
+    // a repeated uid gets a fresh one and the references follow it
+    {
+        const std::filesystem::path dup = kTemp / "stages" / "dup.mmdxproj";
+        std::ofstream f(dup);
+        f << "{\"format\":\"mmdx12-studio-project\",\"version\":4,\"models\":[{\"name\":\"a\",\"kind\":\"stage\","
+             "\"path\":\"a.pmx\",\"stageUid\":5},{\"name\":\"b\",\"kind\":\"stage\",\"path\":\"b.pmx\",\"stageUid\":5}],"
+             "\"camera\":null,\"audio\":null,\"stages\":[{\"uid\":5,\"stageId\":\"x\",\"path\":\"s/stage.json\"},"
+             "{\"uid\":5,\"stageId\":\"y\",\"path\":\"t/stage.json\"}]}";
+        f.close();
+        ProjectData d2;
+        warnings.clear();
+        Check(LoadProject(dup, d2, &err, &warnings), "LoadProject with a repeated stage uid", "%s", err.c_str());
+        Check(d2.stages.size() == 2 && d2.stages[0].uid != d2.stages[1].uid, "a repeated stage uid becomes unique");
+        Check(d2.models.size() == 2 && d2.models[1].stageUid == d2.stages[1].uid, "the part of the second stage follows it");
+    }
+    // a version 3 file: no stages, the part's "stageVariant" is read (converted to an entity by the studio loader)
+    {
+        const std::filesystem::path legacy = kTemp / "stages" / "legacy.mmdxproj";
+        std::ofstream f(legacy);
+        f << "{\"format\":\"mmdx12-studio-project\",\"version\":3,\"models\":[{\"name\":\"a\",\"kind\":\"stage\","
+             "\"path\":\"a.pmx\",\"stageVariant\":\"dusk\"}],\"camera\":null,\"audio\":null}";
+        f.close();
+        ProjectData l2;
+        warnings.clear();
+        Check(LoadProject(legacy, l2, &err, &warnings), "LoadProject (version 3) with stages", "%s", err.c_str());
+        Check(l2.stages.empty() && l2.models.size() == 1 && l2.models[0].stageVariant == "dusk",
+              "a version 3 part keeps its stageVariant for the loader to convert");
+    }
+    // a reference to a stage the file does not declare becomes 0
+    {
+        const std::filesystem::path orphan = kTemp / "stages" / "orphan.mmdxproj";
+        std::ofstream f(orphan);
+        f << "{\"format\":\"mmdx12-studio-project\",\"version\":4,\"models\":[{\"name\":\"a\",\"kind\":\"stage\","
+             "\"path\":\"a.pmx\",\"stageUid\":9}],\"camera\":null,\"audio\":null,\"stages\":[]}";
+        f.close();
+        ProjectData l3;
+        warnings.clear();
+        Check(LoadProject(orphan, l3, &err, &warnings), "LoadProject with an orphan stage reference", "%s", err.c_str());
+        Check(!l3.models.empty() && l3.models[0].stageUid == 0, "a reference to no declared stage becomes 0");
     }
 }
 
@@ -763,7 +861,7 @@ static void TestSceneLightFile() {
         text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     }
     const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-    Check(kProjectFormatVersion == 3 && !j.is_discarded() && j.value("version", 0) == 3, "project format version is 3");
+    Check(kProjectFormatVersion == 4 && !j.is_discarded() && j.value("version", 0) == 4, "project format version is 4");
     const nlohmann::json& e = j["editor"];
     Check(e.contains("lights") && e["lights"].is_array() && e["lights"].size() == 8 && !e.contains("lighting") &&
               !e.contains("useLightTrack"),
@@ -926,7 +1024,7 @@ static void TestAreaLightProject() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 3, "area light project format is version 3");
+        Check(!j.is_discarded() && j.value("version", 0) == 4, "area light project format is version 4");
         const nlohmann::json& l = j["editor"]["lights"][0];
         Check(l["kind"] == "area", "area light JSON kind is \"area\"");
         Check(l["values"].contains("size") && l["values"]["size"].is_array() && l["values"]["size"].size() == 2 &&
@@ -1432,6 +1530,7 @@ int main() {
     TestRoundTrip();
     TestEffects();
     TestWorlds();
+    TestStages();
     TestAspectProject();
     TestSceneLightFile();
     TestSceneLightReading();

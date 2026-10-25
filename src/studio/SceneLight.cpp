@@ -113,7 +113,8 @@ bool SceneLight::operator==(const SceneLight& o) const {
            Same(skyZenith, o.skyZenith) && Same(skyHorizon, o.skyHorizon) && Same(groundColor, o.groundColor) &&
            shadow == o.shadow && shadowSoftness == o.shadowSoftness && shadowDensity == o.shadowDensity &&
            Same(shadowColor, o.shadowColor) && falloff == o.falloff && affectDiffuse == o.affectDiffuse &&
-           affectSpecular == o.affectSpecular && viewportVisible == o.viewportVisible;
+           affectSpecular == o.affectSpecular && viewportVisible == o.viewportVisible && stageUid == o.stageUid &&
+           stageLightName == o.stageLightName;
 }
 
 LightValues SampleLightValues(const SceneLight& light, int frame) {

@@ -118,6 +118,8 @@ void App::StudioPoseForRender(float frame) {
         if (!reset) physicsDt = df / kMmdFps;
     }
     d.physicsFrame = frame;
+    // S3: the stage targets at the rendered frame (materials + the stage rig lights), before the models' UpdateMaterials
+    StudioApplyStageTargets();
     if (d.cameraEvalVersion != d.cameraVersion) {
         d.cameraEval = d.camera.camera.empty() ? nullptr : CameraMotion::Create(d.camera.ToVmd());
         d.cameraEvalVersion = d.cameraVersion;

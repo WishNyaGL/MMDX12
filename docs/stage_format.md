@@ -404,10 +404,21 @@ warning; the stage still loads its other parts.
   scene's default then (an ordinary preset chosen for other stages is kept). It renders `lights` through
   `BuildSceneLighting` exactly like the studio does. Without a stage rig the entry is hidden, and the Studio preset is
   the fallback.
-* **Studio**: adding an MMDX stage that has lights replaces the project's scene lights with the stage's rig as ONE
-  undoable step (`LightsCommand`, toast). They are ordinary scene lights afterwards (S3 replaces this with overrides).
-  The stage's material targets run every frame at the timeline time; the variant is the inspector's
-  "스테이지 배리언트" combo, saved per model in the project as `"stageVariant"`.
+* **Studio**: adding an MMDX stage creates ONE stage entity (`studio::StudioStage`, `StudioDoc::stages`); its parts stay
+  models (`StudioModel::stageManifest / stagePart / stageUid`) and the outliner shows the stage as one row with its parts
+  as children (collapsed by default; remove / visibility act on the whole stage). Adding a stage that has lights replaces
+  the project's scene lights with its rig as ONE undoable step (`LightsCommand`, toast); those lights are tagged with the
+  stage (`SceneLight::stageUid` / `stageLightName`, saved in the project) and the fields a binding drives (`lights.<name>.
+  <field>`) are shown read-only in the light inspector ("스테이지 파라미터가 제어").
+  Every frame (editor, offline still / video) the studio evaluates each stage at the timeline time — base values (the
+  user's overriding the variant), the project's keyed params at that frame, then the manifest's cues for the params it
+  did not key (`StageOverridesAt` → `EvaluateStage(.., skipCues)`) — and replays the material targets into the parts'
+  GPU models (`ApplyStageMaterialList`) and the light targets onto its tagged lights (`ApplyStageLightField`).
+  The inspector's "스테이지" panel edits the variant, every param (per the manifest `groups`), imports the manifest cues
+  as keys ("큐를 키로 가져오기": those params leave the cue layer, `StudioStage::cuesOff`) and resets one param; params
+  are keyed on the timeline (`RowKind::StageParam`, category "스테이지" next to "월드").
+  The installed stage is never written: the variant, param base values, keyed params and `cuesOff` are saved in the
+  project as `"stages"` (version 4) and the parts / lights refer to them by `stageUid`.
 * **Variant**: the lobby's select screen ("셰이더" tab) shows a combo when the selected stage has >= 2 variants, saved as
   `stageVariant=<variant id>|<stage id>` in `mmdx12.ini`; `--stage-variant <id>` wins for one run. Empty = the
   manifest's `defaultVariant`.

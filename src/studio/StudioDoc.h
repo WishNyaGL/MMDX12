@@ -56,12 +56,12 @@ struct StudioModel {
     ShaderChoice shader;           // characters: shader pack (render/ShaderPack.h); empty = the default shading
     MmeChoice mme;                 // M6a: MME object effect choice; characters default None, stages Auto
     MaterialChoice material;       // P5: per-material PBR source (Default / Ray-MMD + optional explicit .emd)
-    // S1b: a part of an MMDX stage keeps the shared manifest, its index in `manifest->models` and the variant chosen for
-    // the stage (empty = the manifest's default). The runtime rebuilds the rule -> material binding from it; the variant
-    // is saved in the project as the model's "stageVariant".
+    // S1b: a part of an MMDX stage keeps the shared manifest, its index in `manifest->models` and (S3) the stage entity
+    // it belongs to. The runtime rebuilds the rule -> material binding from it; the stage's variant and param overrides
+    // live in StudioDoc::stages (StudioStage), the project saves them there.
     std::shared_ptr<const StageManifest> stageManifest;
     int stagePart = -1;            // index in manifest->models (-1 = not an MMDX stage part)
-    std::string stageVariant;
+    uint32_t stageUid = 0;         // the StudioDoc::stages entity this part belongs to (0 = none)
     StageMaterialBinding stageBinding;   // rule -> material map (resolved when the part enters the document)
     std::shared_ptr<const PmxModel> pmx;
     std::unique_ptr<ModelInstance> inst;
@@ -89,7 +89,7 @@ struct StudioModel {
 // Timeline row ids: kind in the top byte, then a 24-bit group and a 32-bit index. Light is the camera VMD's light
 // track; SceneLight is the keys of one scene light (SceneLight.h): MakeRowId(RowKind::SceneLight, 0, light uid).
 // Focus is the studio's depth-of-field focus track (camera MotionData::focus, saved in the project, not in VMD).
-enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11, GraphLane = 12, GraphChannel = 13 };
+enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11, GraphLane = 12, GraphChannel = 13, StageParam = 14 };
 // GraphLane rows are the kTimelineGraphRows rows of an open value / speed graph lane: never a track, no keys. Their id
 // group is the parent row's low 24 bits and their index the block's channel in the high byte, the lane index
 // (0..kTimelineGraphRows-1) in the low byte: MakeRowId(GraphLane, parentLow24, (channel << 8) | laneIndex);
@@ -103,6 +103,9 @@ enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light
 // MakeRowId(Group, 0x800000 | uid, 0) (world); a pack.json group of that entity is the same group word with the index
 // 1 + its index in the pack's `groups` ("params without a group" sit directly under the entity). Model display-frame
 // groups are MakeRowId(Group, displayFrameIndex, 0) and never set the 0x400000 / 0x800000 bits.
+// S3: the stage tree uses the same scheme: the category group is MakeRowId(Group, 0, 2) ("스테이지"), an entity group
+// MakeRowId(Group, 0xC00000 | stage uid, 0) and a manifest `groups` entry the same group word with the index 1 + its
+// index in the manifest's `groups`.
 inline uint64_t MakeRowId(RowKind k, uint32_t group, uint32_t index) {
     return ((uint64_t)k << 56) | ((uint64_t)(group & 0xFFFFFF) << 32) | index;
 }
@@ -138,6 +141,14 @@ inline bool ParseWorldParamTrackName(const std::string& name, uint32_t& uid, std
     return ParseEffectParamTrackName(name, uid, param);
 }
 
+// The track name of a StageParam row: "<stage uid>:<param key>" (a colour param keys per component, "<key>#0..3").
+inline std::string StageParamTrackName(uint32_t uid, const std::string& param) {
+    return std::to_string(uid) + ":" + param;
+}
+inline bool ParseStageParamTrackName(const std::string& name, uint32_t& uid, std::string& param) {
+    return ParseEffectParamTrackName(name, uid, param);
+}
+
 // The row that represents a bone/morph track in the key selection: a bone listed in two display frames has two rows,
 // but its keys are selected through the first one only (CanonicalRow), so counts and edits see each key once.
 uint64_t CanonicalRow(const StudioModel& m, RowKind kind, uint32_t index);
@@ -156,7 +167,7 @@ struct ClipboardKey {
     uint64_t row = 0;
     int offset = 0;  // frame relative to the first copied key
     BoneKf bone; MorphKf morph; CameraKf camera; LightKf light; ShadowKf shadow; LightKey sceneLight; FocusKf focus;
-    AccessoryKf accessory; EffectParamKey effectParam; EffectParamKey worldParam;
+    AccessoryKf accessory; EffectParamKey effectParam; EffectParamKey worldParam; EffectParamKey stageParam;
 };
 
 struct StudioDoc {
@@ -197,6 +208,9 @@ struct StudioDoc {
     // Version 3: world entities (StudioWorld above), keyable like effects. Saved in the project.
     std::vector<StudioWorld> worlds;
     uint32_t nextWorldUid = 1;
+    // S3: one entity per MMDX stage (StudioStage): variant, param base values and keyed params are project overrides.
+    std::vector<StudioStage> stages;
+    uint32_t nextStageUid = 1;
     StudioEffect* FindEffect(uint32_t uid) {
         for (StudioEffect& e : effects)
             if (e.uid == uid) return &e;
@@ -209,6 +223,15 @@ struct StudioDoc {
         return nullptr;
     }
     const StudioWorld* FindWorld(uint32_t uid) const { return const_cast<StudioDoc*>(this)->FindWorld(uid); }
+    StudioStage* FindStage(uint32_t uid) {
+        for (StudioStage& s : stages)
+            if (s.uid == uid) return &s;
+        return nullptr;
+    }
+    const StudioStage* FindStage(uint32_t uid) const { return const_cast<StudioDoc*>(this)->FindStage(uid); }
+    // The stage entity a model is a part of (nullptr for an ordinary model).
+    StudioStage* StageOfModel(const StudioModel& m) { return m.stageUid ? FindStage(m.stageUid) : nullptr; }
+    const StudioStage* StageOfModel(const StudioModel& m) const { return const_cast<StudioDoc*>(this)->StageOfModel(m); }
     bool Dirty() const { return history.Version() != savedVersion || projectVersion != savedProjectVersion; }
     uint64_t ChangeStamp() const { return history.Version() + (projectVersion << 32); }
     void MarkSaved() { savedVersion = history.Version(); savedProjectVersion = projectVersion; }
@@ -310,9 +333,9 @@ struct StudioDoc {
 // every operation (move, delete, paste, curve, insert) trivially reversible.
 struct TrackState {
     int model = -1;                // -1 camera
-    RowKind kind = RowKind::Bone;  // Bone, Morph, Camera, Light, Shadow, Focus, SceneLight or EffectParam
-    std::string name;              // bone/morph name (scene light: LightTrackName, effect param: EffectParamTrackName); unused for the camera
-    uint32_t uid = 0;              // SceneLight: the light's uid; EffectParam: the effect's uid
+    RowKind kind = RowKind::Bone;  // Bone, Morph, Camera, Light, Shadow, Focus, SceneLight, EffectParam, WorldParam or StageParam
+    std::string name;              // bone/morph name (scene light: LightTrackName, effect / world / stage param: their track name); unused for the camera
+    uint32_t uid = 0;              // SceneLight: the light's uid; EffectParam / WorldParam: the entity's uid
     bool existed = false;          // the track existed (absent tracks are erased again)
     std::vector<BoneKf> bones;
     std::vector<MorphKf> morphs;
@@ -324,6 +347,7 @@ struct TrackState {
     std::vector<AccessoryKf> accessories;
     std::vector<EffectParamKey> effectParamKeys;
     std::vector<EffectParamKey> worldParamKeys;
+    std::vector<EffectParamKey> stageParamKeys;
     bool staticFlag = false;       // Bone/Morph: the track was flagged constant (MotionData::staticBones/staticMorphs)
 
     size_t Bytes() const {
@@ -332,14 +356,36 @@ struct TrackState {
                shadows.capacity() * sizeof(ShadowKf) + focuses.capacity() * sizeof(FocusKf) +
                lightKeys.capacity() * sizeof(LightKey) + accessories.capacity() * sizeof(AccessoryKf) +
                effectParamKeys.capacity() * sizeof(EffectParamKey) +
-               worldParamKeys.capacity() * sizeof(EffectParamKey);
+               worldParamKeys.capacity() * sizeof(EffectParamKey) +
+               stageParamKeys.capacity() * sizeof(EffectParamKey);
     }
 };
 // A SceneLight track is addressed by its uid (`name` = LightTrackName(uid)): restoring one whose light no longer
 // exists does nothing; an emptied key list keeps the light (its base values drive it again).
 // An EffectParam track is addressed by its uid and param key (`name` = EffectParamTrackName(uid, param)).
+// A StageParam track is addressed by the stage's uid and param key (`name` = StageParamTrackName(uid, param)).
 TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::string& name);
 void RestoreTrack(StudioDoc& doc, const TrackState& s);
+
+// ---- S3: studio stage param values (pure; docs/stage_format.md "Studio") ----
+// The base param key of a track name ("key" -> "key"; "key#c" -> "key", comp = c; comp = -1 otherwise).
+std::string StageParamBaseKey(const std::string& name, int& comp);
+// One component of a stage track without keys: the stage's base value, else the param's default (component c of a
+// colour; 0 for an unknown param).
+float StageParamStaticValue(const StudioStage& stage, const std::string& name);
+// The stage's param overrides at `frame`: `base` with every keyed component's value at `frame` on top, and the params
+// whose manifest cue is skipped (cuesOff plus every param that has a track).
+struct StudioStageOverrides {
+    StageParamValues values;
+    std::set<std::string> skipCues;
+};
+StudioStageOverrides StageOverridesAt(const StudioStage& stage, float frame);
+// Turns the manifest's cue tracks into keyable param tracks (colours per component) and marks those params cuesOff, so
+// the project's keys replace the stage's own light show. True = something was imported. One StagesCommand step is the
+// caller's business.
+bool ImportStageCues(StudioStage& stage);
+// Drops a param's base value and every one of its tracks (the variant / default drives it again).
+bool ResetStageParam(StudioStage& stage, const std::string& key);
 
 // Adds, removes, reorders or edits scene lights (undoable): holds the whole list before and after. Preset
 // application is one of these. Key edits of a light go through TrackEditCommand instead.
@@ -412,8 +458,30 @@ private:
     std::vector<StudioWorld> before_, after_;
 };
 
-class TrackEditCommand : public Command {
+// S3: adds, removes or edits MMDX stage entities (variant, param base values, keyed params, cues off) — the edit is
+// one undo step over the whole list. Key edits of a stage go through TrackEditCommand instead.
+class StagesCommand : public Command {
 public:
+    StagesCommand(StudioDoc& doc, std::string name, std::vector<StudioStage> before, std::vector<StudioStage> after)
+        : doc_(doc), name_(std::move(name)), before_(std::move(before)), after_(std::move(after)) {}
+    void Do() override { doc_.stages = after_; doc_.rowsKey = ~0ull; }
+    void Undo() override { doc_.stages = before_; doc_.rowsKey = ~0ull; }
+    std::string Name() const override { return name_; }
+    size_t Bytes() const override {
+        const auto list = [](const std::vector<StudioStage>& v) {
+            size_t n = 0;
+            for (const StudioStage& s : v) n += s.ApproxBytes();
+            return n;
+        };
+        return sizeof(*this) + name_.size() + list(before_) + list(after_);
+    }
+private:
+    StudioDoc& doc_;
+    std::string name_;
+    std::vector<StudioStage> before_, after_;
+};
+
+class TrackEditCommand : public Command {public:
     TrackEditCommand(StudioDoc& doc, std::string name, std::vector<TrackState> before, std::vector<TrackState> after)
         : doc_(doc), name_(std::move(name)), before_(std::move(before)), after_(std::move(after)) {}
     void Do() override { for (const auto& s : after_) RestoreTrack(doc_, s); }
@@ -547,11 +615,12 @@ struct StudioPackageModel {
     ShaderChoice shader;                     // characters: shader pack
     MmeChoice mme;                           // M6a: MME object effect choice
     MaterialChoice material;                 // P5: per-material PBR source (Default / Ray-MMD)
-    // S1b: an MMDX stage part carries its manifest (shared with its siblings) and its index in manifest->models; the
-    // studio keeps the variant per part so a project round trip restores it.
+    // S1b: an MMDX stage part carries its manifest (shared with its siblings) and its index in manifest->models; S3 adds
+    // the stage entity uid the part belongs to (the package's `stages` carry the variant / overrides).
     std::shared_ptr<const StageManifest> stageManifest;
     int stagePart = -1;
-    std::string stageVariant;
+    uint32_t stageUid = 0;
+    std::string stageVariant;                // a version <= 3 project's per-part variant (converted to a StudioStage)
     MotionData motion;                       // names canonicalised to pmx
 };
 struct StudioPackage {
@@ -577,6 +646,8 @@ struct StudioPackage {
     std::vector<StudioEffect> effects;
     // Version 3: the project's world entities (StudioWorld).
     std::vector<StudioWorld> worlds;
+    // Version 4: the project's MMDX stage entities (StudioStage; a version <= 3 file's part variants become these).
+    std::vector<StudioStage> stages;
     PmmEffectSettings pmmEffects;            // .pmm import: MME controller mapping (App applies it)
     int pmmWidth = 0, pmmHeight = 0;         // .pmm import: output resolution (aspect preset)
     float pmmFps = 0.0f;                     // .pmm import: preferred fps (informational)

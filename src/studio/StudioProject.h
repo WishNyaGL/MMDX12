@@ -6,6 +6,7 @@
 // target, so a crash mid-save never leaves a half-written project.
 // Independent of the App and the renderer (unit-tested by tools/studio_project_test.cpp).
 #include "asset/MaterialChoice.h"
+#include "asset/StageManifest.h"
 #include "render/ShaderPack.h"
 #include "studio/SceneLight.h"
 #include "studio/StudioEffects.h"
@@ -13,6 +14,8 @@
 #include <DirectXMath.h>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -22,7 +25,10 @@ namespace mmdx::studio {
 // spot rig ("lighting", "useLightTrack"); LoadProject converts them to scene lights.
 // Version 3: the studio's effect stack ("effects": pack, enabled, params, texture folder, keyed params). Version 1 / 2
 // files load with no effects. Older builds reject version 3.
-inline constexpr int kProjectFormatVersion = 3;
+// Version 4: MMDX stage entities ("stages": variant, param base values, keyed params, the params whose manifest cue the
+// project replaced) and a part model's / light's "stageUid". A version 3 file's per-part "stageVariant" becomes one
+// StudioStage per stage (StudioLoader). Older builds reject version 4.
+inline constexpr int kProjectFormatVersion = 4;
 inline constexpr const char* kProjectFormatName = "mmdx12-studio-project";
 inline constexpr const wchar_t* kProjectExtension = L".mmdxproj";
 
@@ -59,6 +65,22 @@ struct StudioWorld {
     bool operator==(const StudioWorld& o) const;   // ignores uid
 };
 
+// One MMDX stage in the studio (docs/stage_format.md "Studio"): one entity per loaded stage, whose parts stay models
+// (StudioModel::stageManifest / stagePart / stageUid). The installed stage is never written: the variant, the param base
+// values and the keyed params are this project's overrides. Pure data, saved in the .mmdxproj ("stages").
+struct StudioStage {
+    uint32_t uid = 0;                          // StudioDoc::nextStageUid, saved (part models / lights refer to it)
+    std::shared_ptr<const StageManifest> manifest;   // the parsed stage.json (null when it could not be read)
+    std::string stageId;                       // library id of the stage folder (empty = the manifest's own id)
+    std::filesystem::path manifestPath;        // its stage.json (saved relative to the project folder)
+    std::string variant;                       // variant id (empty = the manifest's default)
+    StageParamValues base;                     // the user's base values (absent key = the variant / default)
+    std::vector<EffectParamTrack> tracks;      // one track per keyed param component ("key" / "key#0..3" for a colour)
+    std::set<std::string> cuesOff;             // params whose manifest cue the user replaced (imported / keyed)
+    size_t ApproxBytes() const;
+    bool operator==(const StudioStage& o) const;   // ignores uid
+};
+
 struct ProjectModel {    std::string name;                  // outliner label (UTF-8)
     ModelKind kind = ModelKind::Character;
     std::filesystem::path path;        // model file, absolute
@@ -71,7 +93,9 @@ struct ProjectModel {    std::string name;                  // outliner label (U
     ShaderChoice shader;               // characters: shader pack ("shader", absent = the default shading)
     MmeChoice mme;                     // M6a: MME object effect choice ("mme", absent = characters None / stages Auto)
     MaterialChoice material;           // P5: per-material PBR source ("material", absent = Default)
-    std::string stageVariant;          // S1b: an MMDX stage part's variant ("stageVariant", absent = the default)
+    std::string stageVariant;          // S1b: an MMDX stage part's variant ("stageVariant", absent = the default; read
+                                       // for version <= 3 files, converted to its StudioStage on load)
+    uint32_t stageUid = 0;             // S3: the StudioStage the model is a part of (0 = not an MMDX stage part)
     MotionData motion;                 // its keys; motion.modelName is written as the VMD header model name
 };
 
@@ -154,6 +178,8 @@ struct ProjectData {
     std::vector<StudioEffect> effects;
     // Version 3: placed world entities ("worlds"). Empty = none.
     std::vector<StudioWorld> worlds;
+    // Version 4: the project's MMDX stage entities ("stages"). Empty = none.
+    std::vector<StudioStage> stages;
     std::filesystem::path recoveryOf;  // autosave (recovery) files only: the project it belongs to (empty: never saved)
 };
 

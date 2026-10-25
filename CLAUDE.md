@@ -48,7 +48,12 @@ progress.md is the session log. Read its latest entry first.
   when the stage has lights) and `materials.*` targets go through `GpuModel::SetPbrOverrides`. Installed stages live in
   `<exe>/stages/<id>/` with the id prefix `stages:`; the lobby saves the variant as `stageVariant=<id>|<stage id>` and
   `--stage-variant <id>` overrides one run (`studioaddlib stage <substr>` works for them, `studiostate` logs
-  `stageVariant=`).
+  `stageVariant=`). In the studio an MMDX stage is ONE entity (`studio::StudioStage`: the parts still load as models,
+  `StudioModel::stageUid`) whose variant, param base values, keyed params (`RowKind::StageParam`, category "스테이지") and
+  imported cue tracks are saved in the project ("stages", format version 4) and never in the installed stage; its rig
+  lights are scene lights tagged with the stage and are replayed every frame (editor and offline), the fields a binding
+  drives are read-only in the light inspector. Script: `studiostageparam` / `studiostagekey` / `studiostagecues`,
+  `studiostate` logs one `STUDIOSTAGE` line per stage.
 - No debugger is installed (no cdb). For crashes, use the dbghelp `CrashFilter` in `tools/render_smoke.cpp`.
 - Visual verification without a human: render a frame headlessly, then Read the PNG. First read "Running MMDX12.exe from the CLI" below.
   - Play scene: `MMDX12.exe --character <s> --stage <s|none> --song <s> --autoplay --seek <sec> --frames N --capture out.png`

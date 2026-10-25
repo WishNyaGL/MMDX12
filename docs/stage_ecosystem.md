@@ -51,7 +51,7 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S1b | App integration: play + studio load MMDX stages, manifest lights as "스테이지 조명", material overrides, lobby variant picker | done 2026-10-25 |
 | S2a | glTF material / light import: transmission, ior, volume, emissive_strength, clearcoat (approx.), texture_transform, KHR_lights_punctual | done 2026-10-25 |
 | S2b | Mesh dielectrics: transmissive materials refract in RT / PT / offline GI (thin + volume), raster approximation | done 2026-10-26 |
-| S3 | Studio stage entity: outliner group, overrides saved in the project, keyable stage params (timeline rows) | |
+| S3 | Studio stage entity: outliner group, overrides saved in the project, keyable stage params (timeline rows) | done 2026-10-26 |
 | S4 | Camera entities: N cameras with own tracks, an active-camera switch track, VMD export flattens cuts | |
 | S5 | Screens: N screen surfaces, sources none / image / video / camera feed, multi-video decode, feed render pass | |
 | S6 | Stage-bundled packs: screen packs (new type), surface packs on stage materials, world packs on sockets | |

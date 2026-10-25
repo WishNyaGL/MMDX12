@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,14 @@ private:
     std::vector<studio::SceneLight> gltfLights_;   // S2a KHR_lights_punctual of the parts (manifest.gltfLights)
     uint64_t appliedFrame_ = ~0ull;   // the frame `lights_` / the material targets were last applied for
 };
+
+// Replays one `lights.<name>.<field>` assignment onto a scene light (the value is already remapped / scaled). False
+// for a field a binding cannot drive. The studio and the runtime share it: a stage's rig lights in the studio are
+// ordinary scene lights, tagged with the stage they came from (SceneLight::stageUid / stageLightName).
+bool ApplyStageLightField(studio::SceneLight& l, const std::string& field, const StageValue& v);
+// The manifest light fields any binding drives for the light called `name` (`lights.<name>.<field>`), i.e. the fields
+// the studio shows read-only on that light.
+std::set<std::string> StageDrivenLightFields(const StageManifest& manifest, const std::string& name);
 
 // Applies one part's resolved rule values to its GPU model (`GpuModel::SetPbrOverrides`, changed values only). The
 // studio and play mode share it; a manifest's rules come from `ResolvedStageMaterialRules(manifest, eval)`.

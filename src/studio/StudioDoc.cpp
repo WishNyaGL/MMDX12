@@ -131,6 +131,24 @@ TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::stri
         }
         return s;
     }
+    if (kind == RowKind::StageParam) {
+        uint32_t stageUid = 0;
+        std::string param;
+        if (ParseStageParamTrackName(name, stageUid, param)) {
+            s.uid = stageUid;
+            const StudioStage* stage = doc.FindStage(stageUid);
+            if (stage) {
+                for (const EffectParamTrack& t : stage->tracks) {
+                    if (t.param == param) {
+                        s.existed = true;
+                        s.stageParamKeys = t.keys;
+                        break;
+                    }
+                }
+            }
+        }
+        return s;
+    }
     MotionData& m = doc.models[model]->motion;
     if (kind == RowKind::Bone) {
         auto it = m.bones.find(name);
@@ -207,6 +225,25 @@ void RestoreTrack(StudioDoc& doc, const TrackState& s) {
         }
         return;
     }
+    if (s.kind == RowKind::StageParam) {
+        uint32_t stageUid = 0;
+        std::string param;
+        if (ParseStageParamTrackName(s.name, stageUid, param)) {
+            if (StudioStage* stage = doc.FindStage(stageUid)) {
+                auto it = std::find_if(stage->tracks.begin(), stage->tracks.end(),
+                                       [&](const EffectParamTrack& t) { return t.param == param; });
+                if (s.stageParamKeys.empty()) {
+                    if (it != stage->tracks.end()) stage->tracks.erase(it);
+                } else if (it != stage->tracks.end()) {
+                    it->keys = s.stageParamKeys;
+                } else {
+                    stage->tracks.push_back({param, s.stageParamKeys});
+                }
+                doc.rowsKey = ~0ull;
+            }
+        }
+        return;
+    }
     if (s.model >= 0 && s.model < (int)doc.models.size()) {
         MotionData& m = doc.models[s.model]->motion;
         // A track that ends up empty is removed, so an undone insert leaves no empty track behind.
@@ -225,6 +262,134 @@ void RestoreTrack(StudioDoc& doc, const TrackState& s) {
         }
     }
     doc.TouchModel(s.model);  // scene light rows returned above
+}
+
+// ---------------------------------------------------------------------------
+// S3: studio stage param values
+// ---------------------------------------------------------------------------
+
+std::string StageParamBaseKey(const std::string& name, int& comp) {
+    comp = -1;
+    const size_t hash = name.find('#');
+    if (hash == std::string::npos) return name;
+    if (hash + 1 >= name.size() || hash + 2 != name.size()) return name;   // "key#0".."key#3" only
+    const char c = name[hash + 1];
+    if (c < '0' || c > '3') return name;
+    comp = c - '0';
+    return name.substr(0, hash);
+}
+
+namespace {
+// The component `comp` of a colour value, or the number for a scalar.
+float StageComponent(const StageValue& v, int comp) {
+    if (comp < 0) return v.x;
+    const DirectX::XMFLOAT4 c = v.AsColor();
+    switch (comp) {
+    case 0: return c.x;
+    case 1: return c.y;
+    case 2: return c.z;
+    default: return c.w;
+    }
+}
+void SetStageComponent(StageValue& v, int comp, float value) {
+    if (comp < 0) { v = StageValue::Number(value); return; }
+    DirectX::XMFLOAT4 c = v.AsColor();
+    switch (comp) {
+    case 0: c.x = value; break;
+    case 1: c.y = value; break;
+    case 2: c.z = value; break;
+    default: c.w = value; break;
+    }
+    v = StageValue::Color(c);
+}
+} // namespace
+
+float StageParamStaticValue(const StudioStage& stage, const std::string& name) {
+    int comp = -1;
+    const std::string key = StageParamBaseKey(name, comp);
+    if (stage.manifest) {
+        if (const StageParam* p = stage.manifest->FindParam(key)) {
+            const auto it = stage.base.find(key);
+            const StageValue base = it != stage.base.end() ? it->second : p->DefaultValue();
+            return StageComponent(base, comp);
+        }
+    }
+    return 0.0f;
+}
+
+StudioStageOverrides StageOverridesAt(const StudioStage& stage, float frame) {
+    StudioStageOverrides out;
+    out.values = stage.base;
+    for (const EffectParamTrack& t : stage.tracks) {
+        int comp = -1;
+        const std::string key = StageParamBaseKey(t.param, comp);
+        out.skipCues.insert(key);   // a keyed param replaces the stage's own cue track
+        if (!stage.manifest) continue;
+        const StageParam* p = stage.manifest->FindParam(key);
+        if (!p) continue;           // a param the manifest no longer declares: the track is kept, unused
+        const float value = EvaluateParamTrack(t, frame, StageParamStaticValue(stage, t.param));
+        if (p->type == StageParamType::Color) {
+            if (comp < 0) continue;   // a colour is keyed per component ("key#0..3")
+            auto it = out.values.find(key);
+            StageValue v = it != out.values.end() ? it->second : p->DefaultValue();
+            SetStageComponent(v, comp, value);
+            out.values[key] = ClampStageParamValue(*p, v);
+        } else {
+            out.values[key] = ClampStageParamValue(*p, StageValue::Number(value));
+        }
+    }
+    for (const std::string& key : stage.cuesOff) out.skipCues.insert(key);
+    return out;
+}
+
+bool ImportStageCues(StudioStage& stage) {
+    if (!stage.manifest || stage.manifest->cues.empty()) return false;
+    bool any = false;
+    for (const StageCue& cue : stage.manifest->cues) {
+        const StageParam* p = stage.manifest->FindParam(cue.param);
+        if (!p || cue.keys.empty()) continue;
+        // the cue's own curve wins over keys the user had on this param: the cue becomes the keyed track
+        stage.tracks.erase(std::remove_if(stage.tracks.begin(), stage.tracks.end(),
+                                          [&](const EffectParamTrack& t) {
+                                              int comp = -1;
+                                              return StageParamBaseKey(t.param, comp) == cue.param;
+                                          }),
+                           stage.tracks.end());
+        const int comps = p->type == StageParamType::Color ? 4 : 1;
+        for (int c = 0; c < comps; ++c) {
+            EffectParamTrack track;
+            track.param = comps == 1 ? cue.param : cue.param + "#" + std::to_string(c);
+            for (const StageCueKey& k : cue.keys) {
+                const StageValue v = ClampStageParamValue(*p, k.value);
+                EffectParamKey key;
+                key.frame = k.frame;
+                key.value = StageComponent(v, comps == 1 ? -1 : c);
+                // an int / bool / enum cue, or a stepped one, holds its keys (as the timeline's stepped keys do)
+                key.stepped = cue.stepped || p->type == StageParamType::Int || p->type == StageParamType::Bool ||
+                              p->type == StageParamType::Enum;
+                UpsertParamKey(track, key);
+            }
+            stage.tracks.push_back(std::move(track));
+        }
+        stage.cuesOff.insert(cue.param);
+        stage.base.erase(cue.param);   // a stored base value would win over the imported keys at frames without a key
+        any = true;
+    }
+    return any;
+}
+
+bool ResetStageParam(StudioStage& stage, const std::string& key) {
+    bool changed = stage.base.erase(key) != 0;
+    const size_t before = stage.tracks.size();
+    stage.tracks.erase(std::remove_if(stage.tracks.begin(), stage.tracks.end(),
+                                      [&](const EffectParamTrack& t) {
+                                          int comp = -1;
+                                          return StageParamBaseKey(t.param, comp) == key;
+                                      }),
+                       stage.tracks.end());
+    changed |= stage.tracks.size() != before;
+    changed |= stage.cuesOff.erase(key) != 0;
+    return changed;
 }
 
 } // namespace mmdx::studio

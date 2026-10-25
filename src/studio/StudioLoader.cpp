@@ -369,6 +369,22 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
         out.mmePost = pd.mmePost;
         out.effects = pd.effects;
         out.worlds = pd.worlds;
+        // Version 4: the MMDX stage entities. Their manifest comes from the saved (relative) stage.json; a missing file
+        // leaves it null and the part models' own manifests fill it in (FinishStudioLoad).
+        out.stages = pd.stages;
+        for (StudioStage& st : out.stages) {
+            if (st.manifestPath.empty()) continue;
+            auto manifest = std::make_shared<StageManifest>();
+            std::string merr;
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(st.manifestPath, ec) ||
+                !LoadStageManifest(st.manifestPath, *manifest, merr)) {
+                out.warnings.push_back(Tr("스테이지 파일을 찾을 수 없습니다: ") + PathToUtf8(st.manifestPath));
+                continue;
+            }
+            st.manifest = manifest;
+            if (st.stageId.empty()) st.stageId = manifest->id;
+        }
 
         const size_t n = pd.models.size();
         std::vector<int> remap(n, -1);
@@ -408,9 +424,11 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
             m.shader = pm.shader;
             m.material = pm.material;
             m.mme = pm.mme;
-            // S1b: an MMDX stage part keeps its manifest + variant (found from the file, like the loader does).
+            // S1b: an MMDX stage part keeps its manifest + variant (found from the file, like the loader does). S3: the
+            // variant lives on the stage entity ("stages"), which the project carries with its uid.
             m.stageManifest = FindStageManifestFor(pm.path, m.stagePart);
             m.stageVariant = pm.stageVariant;
+            m.stageUid = pm.stageUid;
             m.motion = std::move(pm.motion);
             if (m.stageManifest && !m.stageManifest->materials.empty() && m.pmx)
                 ApplyStageMaterialRules(*m.stageManifest, m.stageVariant, {}, 0.0,

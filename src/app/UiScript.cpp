@@ -113,10 +113,10 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 sel += " " + std::to_string(k.second);
             }
             // S1b: the selected model's MMDX stage variant ("-" = not an MMDX stage part, "<default>" = the manifest's
-            // default variant).
+            // default variant; S3: the variant is the stage entity's).
             std::string stageVariant = "-";
-            if (d.Selected() && d.Selected()->stageManifest)
-                stageVariant = d.Selected()->stageVariant.empty() ? "<default>" : d.Selected()->stageVariant;
+            if (const studio::StudioStage* selStage = d.Selected() ? d.StageOfModel(*d.Selected()) : nullptr)
+                stageVariant = selStage->variant.empty() ? "<default>" : selStage->variant;
             LOG_INFO("STUDIOSTATE frame=%d model=%d boneKeys=%zu morphKeys=%zu cameraKeys=%zu "
                      "lightKeys=%zu shadowKeys=%zu motionCam=%d shadowTrack=%d sceneLights=%zu "
                      "selected=%zu selection=[%s ] stageVariant=%s "
@@ -173,19 +173,28 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 }
                 LOG_INFO("STUDIOPOSEBONES %s", changed.c_str());
             }
-            // S1b: the selected model's MMDX stage variant (empty = not an MMDX stage part / the manifest's default)
+            // S1b: the selected model's MMDX stage variant (not an MMDX stage part = "-"; the stage entity's variant,
+            // "<default>" when the manifest's default drives it)
             if (m) {
-                const std::string variant = m->stageManifest
-                                                ? (m->stageVariant.empty() ? std::string("<default>") : m->stageVariant)
+                const studio::StudioStage* selStage = d.StageOfModel(*m);
+                const std::string variant = selStage
+                                                ? (selStage->variant.empty() ? std::string("<default>") : selStage->variant)
                                                 : std::string("-");
                 // S2a: the rig size is the manifest's lights plus the part's glTF ones ("gltfLights": true).
                 const int gltfLights = m->stageManifest && m->stageManifest->gltfLights && m->pmx
                                            ? (int)m->pmx->importedLights.size()
                                            : 0;
-                LOG_INFO("STUDIOSTAGE stage=%s part=%d variant=%s lights=%d gltfLights=%d",
-                         m->stageManifest ? m->stageManifest->id.c_str() : "-", m->stagePart, variant.c_str(),
+                LOG_INFO("STUDIOSTAGE stage=%s part=%d uid=%u variant=%s lights=%d gltfLights=%d",
+                         m->stageManifest ? m->stageManifest->id.c_str() : "-", m->stagePart, m->stageUid,
+                         variant.c_str(),
                          (m->stageManifest ? (int)m->stageManifest->lights.size() : 0) + gltfLights, gltfLights);
             }
+            // S3: one STUDIOSTAGE line per stage entity (uid, library id, variant, base / track / cuesOff counts)
+            for (const studio::StudioStage& st : d.stages)
+                LOG_INFO("STUDIOSTAGE uid=%u id=%s variant=%s base=%zu tracks=%zu cuesOff=%zu",
+                         st.uid, st.stageId.c_str(),
+                         st.variant.empty() ? std::string("<default>").c_str() : st.variant.c_str(),
+                         st.base.size(), st.tracks.size(), st.cuesOff.size());
             // P2.2: the selected model's physics bake state (driven bones + baked key count + the off flag)
             if (m) {
                 size_t bakedKeys = 0;
@@ -894,6 +903,99 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 studio::UpsertParamKey(*tr, studio::EffectParamKey{frame, val, stepped});
                 StudioPushTrackEdit(Tr("월드 키 등록"), before);
                 studio_->rowsKey = ~0ull;
+            }
+        }
+    } else if (cmd == "studiostageparam") {  // studiostageparam <stage index> <param key>[#c] <value>
+        if (studio_ && args.size() >= 3) {
+            size_t idx = (size_t)std::atoi(args[0].c_str());
+            if (idx < studio_->stages.size()) {
+                studio::StudioStage& stage = studio_->stages[idx];
+                const std::string name = args[1];
+                int comp = -1;
+                const std::string key = studio::StageParamBaseKey(name, comp);
+                const StageParam* param = stage.manifest ? stage.manifest->FindParam(key) : nullptr;
+                if (!param) {
+                    LOG_WARN("studio: studiostageparam: unknown param \"%s\"", key.c_str());
+                } else {
+                    std::vector<studio::StudioStage> before = studio_->stages;
+                    studio::StudioStage* st = studio_->FindStage(stage.uid);
+                    if (!st) return true;
+                    auto value = param->DefaultValue();
+                    const auto base = st->base.find(key);
+                    if (base != st->base.end()) value = base->second;
+                    if (param->type == StageParamType::Color) {
+                        if (comp < 0) comp = 0;   // a colour is set per component (the manifest's rgba shape)
+                        DirectX::XMFLOAT4 c = value.AsColor();
+                        const int comps = (int)args.size() - 2;
+                        for (int i = 0; i < 4 && i < comps; ++i) {
+                            const float v = (float)std::atof(args[(size_t)(2 + i)].c_str());
+                            switch (i) {
+                            case 0: c.x = v; break;
+                            case 1: c.y = v; break;
+                            case 2: c.z = v; break;
+                            default: c.w = v; break;
+                            }
+                        }
+                        value = StageValue::Color(c);
+                    } else if (param->type == StageParamType::Enum && !param->options.empty()) {
+                        // an enum takes the option's index or its "value" string
+                        const std::string& a = args[2];
+                        bool numeric = !a.empty() && std::all_of(a.begin(), a.end(), [](char ch) { return std::isdigit((unsigned char)ch) || ch == '-' || ch == '+'; });
+                        float v = numeric ? (float)std::atof(a.c_str()) : 0.0f;
+                        if (!numeric) {
+                            for (size_t i = 0; i < param->options.size(); ++i)
+                                if (param->options[i].value == a) { v = (float)i; break; }
+                        }
+                        value = StageValue::Number(v);
+                    } else {
+                        value = StageValue::Number((float)std::atof(args[2].c_str()));
+                    }
+                    st->base[key] = ClampStageParamValue(*param, value);
+                    studio_->history.Push(std::make_unique<studio::StagesCommand>(*studio_, Tr("스테이지 파라미터"),
+                                                                                  std::move(before), studio_->stages));
+                    ++studio_->projectVersion;
+                    studio_->rowsKey = ~0ull;
+                }
+            }
+        }
+    } else if (cmd == "studiostagekey") {  // studiostagekey <stage index> <param key[#c]> <frame> <value> [stepped]
+        if (studio_ && args.size() >= 4) {
+            size_t idx = (size_t)std::atoi(args[0].c_str());
+            if (idx < studio_->stages.size()) {
+                studio::StudioStage& stage = studio_->stages[idx];
+                const std::string param = args[1];
+                int frame = std::atoi(args[2].c_str());
+                float val = (float)std::atof(args[3].c_str());
+                bool stepped = args.size() > 4 &&
+                               (args[4] == "1" || ToLowerAscii(args[4]) == "stepped" || ToLowerAscii(args[4]) == "true");
+                std::vector<studio::TrackState> before = {studio::CaptureTrack(*studio_, -1, studio::RowKind::StageParam,
+                                                                               studio::StageParamTrackName(stage.uid, param))};
+                studio::StudioStage* st = studio_->FindStage(stage.uid);
+                studio::EffectParamTrack* tr = nullptr;
+                for (auto& t : st->tracks) {
+                    if (t.param == param) { tr = &t; break; }
+                }
+                if (!tr) {
+                    st->tracks.push_back({param, {}});
+                    tr = &st->tracks.back();
+                }
+                studio::UpsertParamKey(*tr, studio::EffectParamKey{frame, val, stepped});
+                StudioPushTrackEdit(Tr("스테이지 키 등록"), before);
+                studio_->rowsKey = ~0ull;
+            }
+        }
+    } else if (cmd == "studiostagecues") {  // studiostagecues <stage index>: the manifest's cue tracks become keys
+        if (studio_ && !args.empty()) {
+            const size_t idx = (size_t)std::atoi(args[0].c_str());
+            if (idx < studio_->stages.size()) {
+                std::vector<studio::StudioStage> before = studio_->stages;
+                studio::StudioStage* st = studio_->FindStage(studio_->stages[idx].uid);
+                if (st && studio::ImportStageCues(*st)) {
+                    studio_->history.Push(std::make_unique<studio::StagesCommand>(*studio_, Tr("큐를 키로 가져오기"),
+                                                                                  std::move(before), studio_->stages));
+                    ++studio_->projectVersion;
+                    studio_->rowsKey = ~0ull;
+                }
             }
         }
     } else if (cmd == "look") {  // look <id>: applies a look pack and saves the settings like a UI change

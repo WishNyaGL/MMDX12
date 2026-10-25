@@ -97,7 +97,8 @@ StageValue ApplyStageBinding(const StageBinding& binding, const StageValue& in) 
 }
 
 StageEvalResult EvaluateStage(const StageManifest& manifest, const std::string& variantId,
-                              const StageParamValues& overrides, double timeSeconds) {
+                              const StageParamValues& overrides, double timeSeconds,
+                              const std::set<std::string>& skipCues) {
     StageEvalResult result;
     const StageVariant* variant = variantId.empty() ? manifest.DefaultVariant() : manifest.FindVariant(variantId);
     if (!variantId.empty() && !variant)
@@ -111,13 +112,14 @@ StageEvalResult EvaluateStage(const StageManifest& manifest, const std::string& 
             if (p) result.params[key] = ClampStageParamValue(*p, value);
         }
 
-    // 2. cue tracks at `time`
+    // 2. cue tracks at `time` (a param the caller keyed itself keeps its override)
     for (const StageCue& cue : manifest.cues) {
         const StageParam* p = manifest.FindParam(cue.param);
         if (!p) {
             result.warnings.push_back("cue track for unknown param \"" + cue.param + "\"");
             continue;
         }
+        if (skipCues.count(cue.param)) continue;
         StageValue value;
         if (SampleStageCue(cue, *p, timeSeconds, value)) result.params[cue.param] = ClampStageParamValue(*p, value);
     }

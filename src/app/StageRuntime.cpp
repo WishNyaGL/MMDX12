@@ -2,33 +2,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <set>
 
 namespace mmdx {
 
 namespace {
-
-// Replays one `lights.<name>.<field>` assignment onto the rig light (`v` is the already-remapped value).
-bool AssignLightField(studio::SceneLight& l, const std::string& field, const StageValue& v) {
-    const DirectX::XMFLOAT3 vec{v.x, v.y, v.z};
-    if (field == "enabled") { l.enabled = v.AsNumber() > 0.5f; return true; }
-    if (field == "intensity") { l.v.intensity = v.AsNumber(); return true; }
-    if (field == "range") { l.v.range = v.AsNumber(); return true; }
-    if (field == "coneOuter") { l.v.coneOuter = v.AsNumber(); return true; }
-    if (field == "coneInner") { l.v.coneInner = v.AsNumber(); return true; }
-    if (field == "shadowSoftness") { l.shadowSoftness = v.AsNumber(); return true; }
-    if (field == "shadowDensity") { l.shadowDensity = v.AsNumber(); return true; }
-    if (field == "rimStrength") { l.rimStrength = v.AsNumber(); return true; }
-    if (field == "swayPhase") { l.swayPhase = v.AsNumber(); return true; }
-    if (field == "color") { l.v.color = vec; return true; }
-    if (field == "rimColor") { l.rimColor = vec; return true; }
-    if (field == "shadowColor") { l.shadowColor = vec; return true; }
-    if (field == "position") { l.v.position = vec; return true; }
-    if (field == "aim") { l.v.aim = vec; return true; }
-    if (field == "direction") { l.v.direction = vec; return true; }
-    if (field == "size") { l.v.size = {v.x, v.y}; return true; }
-    if (field == "vmdLink") { l.vmdLink = v.AsNumber() > 0.5f; return true; }
-    return false;
-}
 
 uint64_t HashMix(uint64_t h, uint64_t v) {
     h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
@@ -65,6 +43,39 @@ uint64_t HashMaterialRules(const std::vector<StageMaterialRule>& rules) {
 }
 
 } // namespace
+
+bool ApplyStageLightField(studio::SceneLight& l, const std::string& field, const StageValue& v) {
+    const DirectX::XMFLOAT3 vec{v.x, v.y, v.z};
+    if (field == "enabled") { l.enabled = v.AsNumber() > 0.5f; return true; }
+    if (field == "intensity") { l.v.intensity = v.AsNumber(); return true; }
+    if (field == "range") { l.v.range = v.AsNumber(); return true; }
+    if (field == "coneOuter") { l.v.coneOuter = v.AsNumber(); return true; }
+    if (field == "coneInner") { l.v.coneInner = v.AsNumber(); return true; }
+    if (field == "shadowSoftness") { l.shadowSoftness = v.AsNumber(); return true; }
+    if (field == "shadowDensity") { l.shadowDensity = v.AsNumber(); return true; }
+    if (field == "rimStrength") { l.rimStrength = v.AsNumber(); return true; }
+    if (field == "swayPhase") { l.swayPhase = v.AsNumber(); return true; }
+    if (field == "color") { l.v.color = vec; return true; }
+    if (field == "rimColor") { l.rimColor = vec; return true; }
+    if (field == "shadowColor") { l.shadowColor = vec; return true; }
+    if (field == "position") { l.v.position = vec; return true; }
+    if (field == "aim") { l.v.aim = vec; return true; }
+    if (field == "direction") { l.v.direction = vec; return true; }
+    if (field == "size") { l.v.size = {v.x, v.y}; return true; }
+    if (field == "vmdLink") { l.vmdLink = v.AsNumber() > 0.5f; return true; }
+    return false;
+}
+
+std::set<std::string> StageDrivenLightFields(const StageManifest& manifest, const std::string& name) {
+    std::set<std::string> out;
+    if (name.empty()) return out;
+    for (const StageBinding& b : manifest.bindings) {
+        const StageTargetSpec spec = ResolveStageTarget(manifest, b.target);
+        if (!spec.ok || spec.kind != StageTargetSpec::Kind::Lights || spec.owner != name) continue;
+        out.insert(spec.field);
+    }
+    return out;
+}
 
 void ApplyStageMaterialList(GpuModel& gpu, int part, const StageMaterialBinding& binding,
                             const std::vector<StageMaterialRule>& rules, uint64_t frame) {
@@ -126,7 +137,7 @@ const std::vector<studio::SceneLight>& StageRuntime::Apply(double timeSeconds, u
             if (!spec.ok || spec.kind != StageTargetSpec::Kind::Lights) continue;   // screens / packs / env: ignored
             for (studio::SceneLight& l : lights_)
                 if (l.name == spec.owner) {
-                    AssignLightField(l, spec.field, a.value);
+                    ApplyStageLightField(l, spec.field, a.value);
                     break;
                 }
         }

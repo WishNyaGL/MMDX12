@@ -622,11 +622,26 @@ private:
     void StudioDeleteLight(uint32_t uid);
     void StudioApplyLightPreset(int presetIndex);
     // S1b: an MMDX stage with a light rig replaces the project's lights with it (one LightsCommand step + a toast).
-    void StudioApplyStageLightRig(const std::vector<studio::StudioPackageModel>& loadedParts);
-    // S1b: the studio's per-frame MMDX stage targets (material values; the rig is a copy in the scene lights).
+    // S3: the rig lights are tagged with the stage (SceneLight::stageUid / stageLightName) and the stage's light targets
+    // are replayed onto them every frame.
+    void StudioApplyStageLightRig(uint32_t stageUid);
+    // S1b: the studio's per-frame MMDX stage targets (material values + light values on the stage's own rig lights).
     void StudioApplyStageTargets();
+    // S3: one StudioStage per stage entity for the parts that have none yet (`legacyVariants`: model uid -> the S1b
+    // per-part variant a version <= 3 project / the library carried). Project stages already come as entities.
+    void StudioConsolidateStages(studio::StudioDoc& doc, const std::map<uint32_t, std::string>& legacyVariants);
+    // S3: inspector panel of the selected model's stage (variant combo, params, "큐를 키로 가져오기", per-param reset).
+    void DrawStudioStagePanel(float w);
+    void DrawStudioStageParams(float w, uint32_t stageUid);
+    // S3: one stage param edit (base value, or a key at the playhead when `keyIt`); one StagesCommand per gesture.
+    void StudioStageParamEdit(uint32_t stageUid, const StageParam& param, int comp, float value, bool keyIt);
+    void StudioBeginStageEdit();
+    void StudioEndStageEdit(const char* name);
+    std::vector<studio::StudioStage> studioStageBefore_;   // a stage panel edit / drag started from this list
+    bool studioStageDragging_ = false;
     // S1b: the variant of the selected / given MMDX stage model (inspector combo); pushes one undoable step.
     void StudioSetStageVariant(int model, const std::string& variantId);
+    std::set<uint32_t> studioStageOpen_;               // outliner stage rows the user opened (parts shown; not saved)
     void StudioViewportLightHandles(bool hovered);
     bool StudioScriptLightGizmoPoint(const std::string& part, ImVec2& out) const;
     LightAnchors StudioBuildLightAnchors() const;

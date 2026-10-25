@@ -92,6 +92,9 @@ nlohmann::json SceneLightToJson(const SceneLight& l) {
     j["affectDiffuse"] = l.affectDiffuse;
     j["affectSpecular"] = l.affectSpecular;
     j["viewportVisible"] = l.viewportVisible;
+    // S3: studio only (a stage.json light has neither): the stage the light came from and its manifest name.
+    if (l.stageUid != 0) j["stageUid"] = l.stageUid;
+    if (!l.stageLightName.empty()) j["stageLight"] = l.stageLightName;
     nlohmann::json keys = nlohmann::json::array();
     for (const LightKey& k : l.keys) keys.push_back({{"frame", k.frame}, {"values", LightValuesJson(k.v)}});
     j["keys"] = std::move(keys);
@@ -134,6 +137,8 @@ bool SceneLightFromJson(const nlohmann::json& jl, SceneLight& l, std::vector<std
     l.affectDiffuse = ReadBool(jl, "affectDiffuse", l.affectDiffuse);
     l.affectSpecular = ReadBool(jl, "affectSpecular", l.affectSpecular);
     l.viewportVisible = ReadBool(jl, "viewportVisible", l.viewportVisible);
+    l.stageUid = (uint32_t)std::max(0, ReadInt(jl, "stageUid", 0));
+    l.stageLightName = ReadString(jl, "stageLight", "");
     const auto keysIt = jl.find("keys");
     if (keysIt != jl.end() && keysIt->is_array()) {
         for (const nlohmann::json& jk : *keysIt) {

@@ -95,6 +95,12 @@ struct SceneLight {
     bool affectSpecular = true;
     bool viewportVisible = true;      // editor only: the gizmo and icon in the viewport; no effect on the render
 
+    // S3 (project files only; a stage.json light leaves both 0 / empty): the MMDX stage the light came from and the
+    // manifest light name its `lights.<name>.<field>` targets address. The studio replays that stage's light targets
+    // onto the fields a binding drives (docs/stage_format.md "Studio"); a stage.json light is identified by its order.
+    uint32_t stageUid = 0;
+    std::string stageLightName;
+
     bool operator==(const SceneLight& o) const;   // every field, exact
     size_t ApproxBytes() const { return sizeof(SceneLight) + name.size() + keys.capacity() * sizeof(LightKey); }
 };

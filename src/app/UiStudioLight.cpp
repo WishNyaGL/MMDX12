@@ -162,35 +162,37 @@ void App::StudioApplyLightPreset(int presetIndex) {
     d.rowsKey = ~0ull;
 }
 
-// S1b: an MMDX stage that ships a light rig replaces the project's lights with it, in ONE undoable step. The lights
-// become ordinary scene lights (S3 turns them into real stage overrides). S2a: when the manifest says "gltfLights",
-// the parts' KHR_lights_punctual lights are appended first, named after their glTF nodes.
-void App::StudioApplyStageLightRig(const std::vector<studio::StudioPackageModel>& loadedParts) {
+// S1b: an MMDX stage that ships a light rig replaces the project's lights with it, in ONE undoable step. S3: the lights
+// are ordinary scene lights tagged with the stage they came from (SceneLight::stageUid) and the manifest light name their
+// bindings address (stageLightName), so the per-frame stage targets can drive them. S2a: when the manifest says
+// "gltfLights", the parts' KHR_lights_punctual lights are appended first, named after their glTF nodes.
+void App::StudioApplyStageLightRig(uint32_t stageUid) {
     if (!studio_) return;
     StudioDoc& d = *studio_;
-    std::shared_ptr<const StageManifest> manifest;
-    for (const studio::StudioPackageModel& part : loadedParts)
-        if (part.stageManifest && (!part.stageManifest->lights.empty() || part.stageManifest->gltfLights)) {
-            manifest = part.stageManifest;
-            break;
-        }
-    if (!manifest) return;
+    StudioStage* stage = d.FindStage(stageUid);
+    if (!stage || !stage->manifest) return;
+    const std::shared_ptr<const StageManifest> manifest = stage->manifest;
+    if (manifest->lights.empty() && !manifest->gltfLights) return;
     std::vector<SceneLight> before = d.lights;
     std::vector<SceneLight> after = manifest->lights;
     if (manifest->gltfLights) {
         std::vector<std::string> taken;
         for (const SceneLight& l : after) taken.push_back(l.name);
-        for (const studio::StudioPackageModel& part : loadedParts)
-            if (part.pmx && part.stageManifest.get() == manifest.get()) {
-                std::vector<SceneLight> added = PartGltfLights(*manifest, *part.pmx, taken);
-                after.insert(after.end(), added.begin(), added.end());
-            }
+        for (const auto& mp : d.models) {
+            const StudioModel& m = *mp;
+            if (m.stageUid != stageUid || !m.pmx) continue;
+            std::vector<SceneLight> added = PartGltfLights(*manifest, *m.pmx, taken);
+            for (const SceneLight& l : added) taken.push_back(l.name);
+            after.insert(after.end(), added.begin(), added.end());
+        }
     }
     if (after.empty()) return;
     for (SceneLight& l : after) {
         l.uid = d.nextLightUid++;   // the stage's order is its identity; uids are per project
         if (l.name.empty()) l.name = LightKindName(l.kind);
         l.viewportVisible = true;
+        l.stageUid = stageUid;
+        l.stageLightName = l.name;
     }
     d.history.Push(std::make_unique<LightsCommand>(d, Tr("스테이지 조명"), before, after));
     d.selectedLightUid = 0;
@@ -414,14 +416,33 @@ void App::DrawStudioLightInspector(float w) {
         return changed;
     };
 
+    // S3: the fields of this light a stage binding drives: read-only here (the stage's params own them)
+    std::set<std::string> stageDriven;
+    if (light->stageUid != 0 && !light->stageLightName.empty())
+        if (const StudioStage* st = d.FindStage(light->stageUid); st && st->manifest)
+            stageDriven = StageDrivenLightFields(*st->manifest, light->stageLightName);
+    const auto stageOwns = [&](const char* field) { return stageDriven.count(field) != 0; };
+    const auto stageNote = [&] {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+        PushFont(Font::Regular, size::Caption);
+        ImGui::TextWrapped("%s", Tr("스테이지 파라미터가 제어"));
+        PopFont();
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+    };
+
     // Helper for editing a keyable field according to Keyed Edit Rule
-    auto keyedEdit = [&](const char* label, auto&& widget, auto&& apply) {
+    auto keyedEdit = [&](const char* label, auto&& widget, auto&& apply, const char* field = nullptr) {
         const int frame = d.Frame();
         LightKey* k = FindKey(light->keys, frame);
         const bool isKeyed = (k != nullptr);
         const bool willKey = isKeyed || !light->keys.empty() || d.autoKey;
-
+        const bool locked = field && stageOwns(field);
+        if (locked) ImGui::BeginDisabled(true);
         bool changed = row(label, [&] { return widget(); });
+        if (locked) ImGui::EndDisabled();
 
         if (ImGui::IsItemActivated()) {
             StudioBeginLightEdit(light->uid, willKey);
@@ -449,8 +470,11 @@ void App::DrawStudioLightInspector(float w) {
     };
 
     // Helper for editing a continuous base property
-    auto basePropEdit = [&](const char* label, auto&& widget, auto&& apply) {
+    auto basePropEdit = [&](const char* label, auto&& widget, auto&& apply, const char* field = nullptr) {
+        const bool locked = field && stageOwns(field);
+        if (locked) ImGui::BeginDisabled(true);
         bool changed = row(label, [&] { return widget(); });
+        if (locked) ImGui::EndDisabled();
         if (ImGui::IsItemActivated()) {
             StudioBeginLightEdit(light->uid, false);
         }
@@ -484,6 +508,8 @@ void App::DrawStudioLightInspector(float w) {
             ImGui::Dummy(ImVec2(1.0f, Dp(22.0f)));
             ImGui::Dummy(ImVec2(w, Dp(4.0f)));
         }
+        // S3: a light that came from an MMDX stage rig: the fields its bindings drive belong to the stage's params
+        if (!stageDriven.empty()) stageNote();
     }
 
     // Rename (undoable)
@@ -562,28 +588,28 @@ void App::DrawStudioLightInspector(float w) {
             float dir[3] = {cur.direction.x, cur.direction.y, cur.direction.z};
             keyedEdit(Tr("방향"),
                 [&] { return ImGui::DragFloat3("##sundir", dir, 0.01f, -1.0f, 1.0f, "%.2f"); },
-                [&](LightValues& v) { v.direction = {dir[0], dir[1], dir[2]}; });
+                [&](LightValues& v) { v.direction = {dir[0], dir[1], dir[2]}; }, "direction");
 
             float col[3] = {cur.color.x, cur.color.y, cur.color.z};
             keyedEdit(Tr("색"),
                 [&] { return ui::ColorField("##suncol", col); },
-                [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; });
+                [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; }, "color");
         }
 
         float intensity = cur.intensity;
         keyedEdit(Tr("강도"),
             [&] { return ImGui::DragFloat("##sunintensity", &intensity, 0.02f, 0.0f, 100.0f, "%.2f"); },
-            [&](LightValues& v) { v.intensity = std::max(0.0f, intensity); });
+            [&](LightValues& v) { v.intensity = std::max(0.0f, intensity); }, "intensity");
 
         float rimStr = light->rimStrength;
         basePropEdit(Tr("림 강도"),
             [&] { return ImGui::DragFloat("##rimstr", &rimStr, 0.01f, 0.0f, 10.0f, "%.2f"); },
-            [&](SceneLight& l) { l.rimStrength = std::max(0.0f, rimStr); });
+            [&](SceneLight& l) { l.rimStrength = std::max(0.0f, rimStr); }, "rimStrength");
 
         float rimCol[3] = {light->rimColor.x, light->rimColor.y, light->rimColor.z};
         basePropEdit(Tr("림 색"),
             [&] { return ui::ColorField("##rimcol", rimCol); },
-            [&](SceneLight& l) { l.rimColor = {rimCol[0], rimCol[1], rimCol[2]}; });
+            [&](SceneLight& l) { l.rimColor = {rimCol[0], rimCol[1], rimCol[2]}; }, "rimColor");
 
         bool vmdLink = light->vmdLink;
         if (Switch("##vmdlink", Tr("VMD 연동"), &vmdLink, Tr("카메라 VMD의 조명 키를 따릅니다"))) {
@@ -600,22 +626,22 @@ void App::DrawStudioLightInspector(float w) {
         float pos[3] = {cur.position.x, cur.position.y, cur.position.z};
         keyedEdit(Tr("위치"),
             [&] { return ImGui::DragFloat3("##pointpos", pos, 0.1f, 0.0f, 0.0f, "%.1f"); },
-            [&](LightValues& v) { v.position = {pos[0], pos[1], pos[2]}; });
+            [&](LightValues& v) { v.position = {pos[0], pos[1], pos[2]}; }, "position");
 
         float col[3] = {cur.color.x, cur.color.y, cur.color.z};
         keyedEdit(Tr("색"),
             [&] { return ui::ColorField("##pointcol", col); },
-            [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; });
+            [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; }, "color");
 
         float intensity = cur.intensity;
         keyedEdit(Tr("강도"),
             [&] { return ImGui::DragFloat("##pointintensity", &intensity, 0.05f, 0.0f, 1000.0f, "%.2f"); },
-            [&](LightValues& v) { v.intensity = std::max(0.0f, intensity); });
+            [&](LightValues& v) { v.intensity = std::max(0.0f, intensity); }, "intensity");
 
         float range = cur.range;
         keyedEdit(Tr("범위"),
             [&] { return ImGui::DragFloat("##pointrange", &range, 0.5f, 0.1f, 10000.0f, "%.1f"); },
-            [&](LightValues& v) { v.range = std::max(0.1f, range); });
+            [&](LightValues& v) { v.range = std::max(0.1f, range); }, "range");
 
     } else if (light->kind == LightKind::Spot) {
         // Aim mode: 수동 / 타겟 / 자동 스윙
@@ -694,28 +720,28 @@ void App::DrawStudioLightInspector(float w) {
             float aim[3] = {cur.aim.x, cur.aim.y, cur.aim.z};
             keyedEdit(Tr("조준점"),
                 [&] { return ImGui::DragFloat3("##spotaim", aim, 0.1f, 0.0f, 0.0f, "%.1f"); },
-                [&](LightValues& v) { v.aim = {aim[0], aim[1], aim[2]}; });
+                [&](LightValues& v) { v.aim = {aim[0], aim[1], aim[2]}; }, "aim");
         }
 
         float pos[3] = {cur.position.x, cur.position.y, cur.position.z};
         keyedEdit(Tr("위치"),
             [&] { return ImGui::DragFloat3("##spotpos", pos, 0.1f, 0.0f, 0.0f, "%.1f"); },
-            [&](LightValues& v) { v.position = {pos[0], pos[1], pos[2]}; });
+            [&](LightValues& v) { v.position = {pos[0], pos[1], pos[2]}; }, "position");
 
         float col[3] = {cur.color.x, cur.color.y, cur.color.z};
         keyedEdit(Tr("색"),
             [&] { return ui::ColorField("##spotcol", col); },
-            [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; });
+            [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; }, "color");
 
         float intensity = cur.intensity;
         keyedEdit(Tr("강도"),
             [&] { return ImGui::DragFloat("##spotintensity", &intensity, 0.05f, 0.0f, 1000.0f, "%.2f"); },
-            [&](LightValues& v) { v.intensity = std::max(0.0f, intensity); });
+            [&](LightValues& v) { v.intensity = std::max(0.0f, intensity); }, "intensity");
 
         float range = cur.range;
         keyedEdit(Tr("범위"),
             [&] { return ImGui::DragFloat("##spotrange", &range, 0.5f, 0.1f, 10000.0f, "%.1f"); },
-            [&](LightValues& v) { v.range = std::max(0.1f, range); });
+            [&](LightValues& v) { v.range = std::max(0.1f, range); }, "range");
 
         float outerDeg = DirectX::XMConvertToDegrees(cur.coneOuter);
         float innerDeg = DirectX::XMConvertToDegrees(cur.coneInner);
@@ -727,45 +753,45 @@ void App::DrawStudioLightInspector(float w) {
                 if (curIn > outerDeg) curIn = outerDeg;
                 v.coneOuter = DirectX::XMConvertToRadians(outerDeg);
                 v.coneInner = DirectX::XMConvertToRadians(curIn);
-            });
+            }, "coneOuter");
         keyedEdit(Tr("내부 각도"),
             [&] { return ImGui::DragFloat("##coneinner", &innerDeg, 0.2f, 0.5f, outerDeg, "%.1f°"); },
             [&](LightValues& v) {
                 float curOut = DirectX::XMConvertToDegrees(v.coneOuter);
                 innerDeg = std::clamp(innerDeg, 0.5f, curOut);
                 v.coneInner = DirectX::XMConvertToRadians(innerDeg);
-            });
+            }, "coneInner");
 
     } else if (light->kind == LightKind::Area) {
         float pos[3] = {cur.position.x, cur.position.y, cur.position.z};
         keyedEdit(Tr("위치"),
             [&] { return ImGui::DragFloat3("##areapos", pos, 0.1f, 0.0f, 0.0f, "%.1f"); },
-            [&](LightValues& v) { v.position = {pos[0], pos[1], pos[2]}; });
+            [&](LightValues& v) { v.position = {pos[0], pos[1], pos[2]}; }, "position");
 
         float aim[3] = {cur.aim.x, cur.aim.y, cur.aim.z};
         keyedEdit(Tr("조준점"),
             [&] { return ImGui::DragFloat3("##areaaim", aim, 0.1f, 0.0f, 0.0f, "%.1f"); },
-            [&](LightValues& v) { v.aim = {aim[0], aim[1], aim[2]}; });
+            [&](LightValues& v) { v.aim = {aim[0], aim[1], aim[2]}; }, "aim");
 
         float sz[2] = {cur.size.x, cur.size.y};
         keyedEdit(Tr("크기"),
             [&] { return ImGui::DragFloat2("##areasize", sz, 0.2f, 0.1f, 10000.0f, "%.1f"); },
-            [&](LightValues& v) { v.size = {std::max(0.01f, sz[0]), std::max(0.01f, sz[1])}; });
+            [&](LightValues& v) { v.size = {std::max(0.01f, sz[0]), std::max(0.01f, sz[1])}; }, "size");
 
         float col[3] = {cur.color.x, cur.color.y, cur.color.z};
         keyedEdit(Tr("색"),
             [&] { return ui::ColorField("##areacol", col); },
-            [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; });
+            [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; }, "color");
 
         float intensity = cur.intensity;
         keyedEdit(Tr("강도"),
             [&] { return ImGui::DragFloat("##areaintensity", &intensity, 0.05f, 0.0f, 1000.0f, "%.2f"); },
-            [&](LightValues& v) { v.intensity = std::max(0.0f, intensity); });
+            [&](LightValues& v) { v.intensity = std::max(0.0f, intensity); }, "intensity");
 
         float range = cur.range;
         keyedEdit(Tr("범위"),
             [&] { return ImGui::DragFloat("##arearange", &range, 0.5f, 0.1f, 10000.0f, "%.1f"); },
-            [&](LightValues& v) { v.range = std::max(0.1f, range); });
+            [&](LightValues& v) { v.range = std::max(0.1f, range); }, "range");
 
     } else if (light->kind == LightKind::Ambient) {
         float zenith[3] = {light->skyZenith.x, light->skyZenith.y, light->skyZenith.z};
@@ -811,18 +837,18 @@ void App::DrawStudioLightInspector(float w) {
             float softness = light->shadowSoftness;
             basePropEdit(Tr("부드러움"),
                 [&] { return ImGui::SliderFloat("##softness", &softness, 0.0f, 1.0f, "%.2f"); },
-                [&](SceneLight& l) { l.shadowSoftness = std::clamp(softness, 0.0f, 1.0f); });
+                [&](SceneLight& l) { l.shadowSoftness = std::clamp(softness, 0.0f, 1.0f); }, "shadowSoftness");
         }
 
         float density = light->shadowDensity * 100.0f;
         basePropEdit(Tr("농도"),
             [&] { return ImGui::SliderFloat("##density", &density, 0.0f, 100.0f, "%.0f %%"); },
-            [&](SceneLight& l) { l.shadowDensity = std::clamp(density / 100.0f, 0.0f, 1.0f); });
+            [&](SceneLight& l) { l.shadowDensity = std::clamp(density / 100.0f, 0.0f, 1.0f); }, "shadowDensity");
 
         float shadowCol[3] = {light->shadowColor.x, light->shadowColor.y, light->shadowColor.z};
         basePropEdit(Tr("그림자 색"),
             [&] { return ui::ColorField("##shadowcol", shadowCol); },
-            [&](SceneLight& l) { l.shadowColor = {shadowCol[0], shadowCol[1], shadowCol[2]}; });
+            [&](SceneLight& l) { l.shadowColor = {shadowCol[0], shadowCol[1], shadowCol[2]}; }, "shadowColor");
 
         if (light->kind == LightKind::Point) {
             ImGui::Dummy(ImVec2(w, Dp(4.0f)));

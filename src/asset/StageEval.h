@@ -11,6 +11,7 @@
 #include "asset/StageManifest.h"
 
 #include <json.hpp>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -29,8 +30,11 @@ struct StageEvalResult {
 
 // `variantId` empty = the manifest's default variant. `overrides` cover the variant (project overrides). `time` is
 // the song time in seconds; cues are 30 fps frames. Negative time is clamped to 0.
+// `skipCues` names params whose manifest cue track is not applied (the studio keyed the param itself or imported its
+// cue: the project's keys replace the stage's own light show for it).
 StageEvalResult EvaluateStage(const StageManifest& manifest, const std::string& variantId,
-                              const StageParamValues& overrides, double timeSeconds);
+                              const StageParamValues& overrides, double timeSeconds,
+                              const std::set<std::string>& skipCues = {});
 
 // One param value from typed JSON: a number for float / int / bool (0|1) / enum (an option's "value" string, or its
 // index), an array of 3..4 numbers for color. False (with `error`) for a type mismatch. Shared by the manifest parser
