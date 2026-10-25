@@ -170,63 +170,88 @@ void App::DrawAppBar(int activeNav) {
     ImGui::SetNextWindowSize(ImVec2(Dp(360.0f), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(16.0f), Dp(14.0f)));
     if (ImGui::BeginPopup("##settingspopup")) {
-        const auto save = [&]() { settings_.Save(settingsPath_); };
+        // Save only when a value actually changed (checkbox toggled, numeric field commit, key rebind, reset).
+        // Never save unconditionally every frame while the popup is open.
+        bool changed = false;
+        const auto saveIfChanged = [&]() { if (changed) { settings_.Save(settingsPath_); changed = false; } };
+
+        const float popupW = ImGui::GetContentRegionAvail().x;
+        const float availH = ImGui::GetIO().DisplaySize.y - ImGui::GetWindowPos().y - Dp(96.0f);
+        const float bodyH = std::clamp(availH, Dp(220.0f), Dp(620.0f));
+
+        // Scrollable body; the reset button stays pinned in a footer below it (always visible).
+        ImGui::BeginChild("##settingsbody", ImVec2(popupW, bodyH), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
 
         ImGui::SeparatorText(Tr("언어"));
         {
+            // Two-column grid with explicit positions (guaranteed alignment regardless of SameLine behaviour).
             const Language langs[] = {Language::Auto, Language::Korean, Language::English, Language::Japanese,
                                     Language::Chinese};
-            for (const Language l : langs) {
-                const std::string label = l == Language::Auto ? std::string(Tr("시스템 언어")) + "  (" +
-                                                                    LanguageName(DetectSystemLanguage()) + ")"
-                                                              : std::string(LanguageName(l));
+            const float innerW = ImGui::GetContentRegionAvail().x;
+            const float colGap = Dp(8.0f), rowGap = Dp(6.0f);
+            const float chipH = Dp(34.0f);
+            const float colW = (innerW - colGap) * 0.5f;
+            const int cols = 2;
+            const int rows = 3;  // 5 items in 2 columns -> 3 rows
+            const ImVec2 origin = ImGui::GetCursorScreenPos();
+            for (int i = 0; i < 5; ++i) {
+                const int col = i % cols, row = i / cols;
+                const Language l = langs[i];
+                std::string label = LanguageName(l);
+                if (l == Language::Auto) label += "  (" + std::string(LanguageName(DetectSystemLanguage())) + ")";
+                ImGui::SetCursorScreenPos(ImVec2(origin.x + col * (colW + colGap), origin.y + row * (chipH + rowGap)));
                 if (Chip((std::string("##lang") + std::to_string((int)l)).c_str(), label.c_str(), nullptr,
-                         settings_.language == (int)l, -1.0f)) {
+                         settings_.language == (int)l, colW / Dpi())) {
                     settings_.language = (int)l;
                     SetLanguage(l);
-                    save();
-                    ImGui::CloseCurrentPopup();
+                    changed = true;
                 }
-                Gap(4.0f);
             }
+            ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rows * (chipH + rowGap)));
         }
 
-        // A slider row that also accepts a typed value (a number field to the right of the slider).
-        const auto speedRow = [&](const char* label, float* v, float vmin, float vmax) {
+        // A labelled row: label on the left, a uniform slider + typed input on the right (all clamped to avail width).
+        const auto speedRow = [&](const char* label, float* v, float vmin, float vmax) -> bool {
+            const float rowAvail = ImGui::GetContentRegionAvail().x;
+            const float labelW = std::min(rowAvail * 0.42f, Dp(170.0f));
+            const float ctrlW = rowAvail - labelW - Dp(6.0f);
+            const float inputW = Dp(62.0f);
+            const float slideW = ctrlW - inputW - Dp(4.0f);
             ImGui::Text("%s", Tr(label));
-            ImGui::SameLine();
-            const float avail = ImGui::GetContentRegionAvail().x;
-            ImGui::SetNextItemWidth(avail - Dp(72.0f));
-            ImGui::SliderFloat(("##sl_" + std::string(label)).c_str(), v, vmin, vmax, "%.2f");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(Dp(64.0f));
-            ImGui::InputFloat(("##in_" + std::string(label)).c_str(), v, 0.05f, 0.1f, "%.2f");
+            ImGui::SameLine(0, Dp(6.0f));
+            ImGui::SetNextItemWidth(std::max(slideW, Dp(40.0f)));
+            bool changedRow = ImGui::SliderFloat(("##sl_" + std::string(label)).c_str(), v, vmin, vmax, "%.2f");
+            changedRow |= ImGui::IsItemDeactivatedAfterEdit();
+            ImGui::SameLine(0, Dp(4.0f));
+            ImGui::SetNextItemWidth(inputW);
+            changedRow |= ImGui::InputFloat(("##in_" + std::string(label)).c_str(), v, 0.0f, 0.0f, "%.2f");
+            changedRow |= ImGui::IsItemDeactivatedAfterEdit();
             *v = std::clamp(*v, vmin, vmax);
+            return changedRow;
         };
 
         ImGui::SeparatorText(Tr("카메라"));
-        ImGui::Checkbox(Tr("가로 축 반전"), &settings_.cameraInvertX);
-        ImGui::Checkbox(Tr("세로 축 반전"), &settings_.cameraInvertY);
-        speedRow(Tr("회전 감도"), &settings_.cameraRotateSpeed, 0.05f, 10.0f);
-        speedRow(Tr("이동 감도"), &settings_.cameraPanSpeed, 0.05f, 10.0f);
-        speedRow(Tr("줌 감도"), &settings_.cameraZoomSpeed, 0.05f, 10.0f);
-        speedRow(Tr("화각 감도"), &settings_.cameraFovSpeed, 0.05f, 10.0f);
-        speedRow(Tr("비행 속도"), &settings_.cameraFlySpeed, 0.05f, 20.0f);
+        changed |= ImGui::Checkbox(Tr("가로 축 반전"), &settings_.cameraInvertX);
+        changed |= ImGui::Checkbox(Tr("세로 축 반전"), &settings_.cameraInvertY);
+        changed |= speedRow(Tr("회전 감도"), &settings_.cameraRotateSpeed, 0.05f, 10.0f);
+        changed |= speedRow(Tr("이동 감도"), &settings_.cameraPanSpeed, 0.05f, 10.0f);
+        changed |= speedRow(Tr("줌 감도"), &settings_.cameraZoomSpeed, 0.05f, 10.0f);
+        changed |= speedRow(Tr("화각 감도"), &settings_.cameraFovSpeed, 0.05f, 10.0f);
+        changed |= speedRow(Tr("비행 속도"), &settings_.cameraFlySpeed, 0.05f, 20.0f);
 
         ImGui::SeparatorText(Tr("편집"));
-        speedRow(Tr("Ctrl 정밀도"), &settings_.editorPrecisionFactor, 0.01f, 1.0f);
+        changed |= speedRow(Tr("Ctrl 정밀도"), &settings_.editorPrecisionFactor, 0.01f, 1.0f);
         ui::Tooltip(Tr("기즈모를 드래그할 때 Ctrl을 누르면 이 배율만큼 정밀하게 이동·회전합니다."));
 
         ImGui::SeparatorText(Tr("인터페이스"));
-        ImGui::Checkbox(Tr("본·모프 영문 이름 표시"), &settings_.showEnglishNames);
+        changed |= ImGui::Checkbox(Tr("본·모프 영문 이름 표시"), &settings_.showEnglishNames);
         ui::Tooltip(Tr("PMX에 영어 이름이 있으면 목록과 툴팁에서 표시합니다 (내부 식별자는 그대로)."));
-        speedRow(Tr("본 오버레이 크기"), &settings_.boneOverlayScale, 0.5f, 2.5f);
+        changed |= speedRow(Tr("본 오버레이 크기"), &settings_.boneOverlayScale, 0.5f, 2.5f);
         ui::Tooltip(Tr("뷰포트에서 본 마커(점과 선)의 크기입니다."));
 
         ImGui::SeparatorText(Tr("입력"));
         {
-            // Rebindable studio bone-tool keys. Click a row, then press the new key. (The viewport camera fly keys
-            // W/A/S/D/E/Q/Space stay fixed.)
+            // Rebindable studio keys (bone tools + transport). Click a row, then press the new key.
             static std::string recAction;
             struct KeyRow { const char* action; const char* label; };
             static const KeyRow kRows[] = {
@@ -235,6 +260,7 @@ void App::DrawAppBar(int activeNav) {
                 {"toolAutoIk",   Tr("자동 IK 전환 (K)")},
                 {"toggleBones",  Tr("본 표시 전환 (C)")},
                 {"registerPose", Tr("키 등록 (I)")},
+                {"togglePlay",   Tr("재생/일시정지 (Space)")},
             };
             for (int ai = 0; ai < (int)(sizeof(kRows) / sizeof(kRows[0])); ++ai) {
                 const std::string id = std::string("##keybtn") + std::to_string(ai);
@@ -247,12 +273,11 @@ void App::DrawAppBar(int activeNav) {
                     const char* nm = cur >= 0 ? ImGui::GetKeyName((ImGuiKey)cur) : nullptr;
                     label += (nm && nm[0]) ? nm : "-";
                 }
-                if (Button(id.c_str(), label.c_str(), nullptr, ButtonKind::Secondary)) {
+                if (Button(id.c_str(), label.c_str(), nullptr, ButtonKind::Secondary, ImVec2(-1.0f, 28.0f))) {
                     if (recAction == kRows[ai].action) recAction.clear();
                     else recAction = kRows[ai].action;
                 }
                 if (recAction == kRows[ai].action) {
-                    // capture the next keypress (named keys only, no modifier alone)
                     for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; ++k) {
                         const ImGuiKey kk = (ImGuiKey)k;
                         if (kk == ImGuiKey_LeftCtrl || kk == ImGuiKey_RightCtrl || kk == ImGuiKey_LeftShift ||
@@ -262,7 +287,7 @@ void App::DrawAppBar(int activeNav) {
                         if (ImGui::IsKeyPressed(kk)) {
                             settings_.keys[kRows[ai].action] = k;
                             recAction.clear();
-                            save();
+                            changed = true;
                             break;
                         }
                     }
@@ -271,16 +296,20 @@ void App::DrawAppBar(int activeNav) {
             }
         }
 
-        ImGui::Dummy(ImVec2(0, Dp(6.0f)));
-        if (Button("##resetdefaults", Tr("카메라·단축키 기본값으로 재설정"), icon::Refresh, ButtonKind::Secondary)) {
+        ImGui::EndChild();
+
+        // pinned footer: reset (always visible)
+        ImGui::Separator();
+        if (Button("##resetdefaults", Tr("카메라·단축키 기본값으로 재설정"), icon::Refresh, ButtonKind::Danger, ImVec2(-1.0f, 34.0f))) {
             settings_.cameraInvertX = settings_.cameraInvertY = false;
             settings_.cameraRotateSpeed = settings_.cameraPanSpeed = settings_.cameraZoomSpeed = 1.0f;
             settings_.cameraFovSpeed = settings_.cameraFlySpeed = 1.0f;
             settings_.editorPrecisionFactor = 0.1f;
+            settings_.boneOverlayScale = 1.0f;
             settings_.keys.clear();
-            save();
+            changed = true;
         }
-        save();
+        saveIfChanged();
         ImGui::EndPopup();
     }
     ImGui::PopStyleVar();
@@ -524,20 +553,21 @@ void App::DrawSelect() {
     const float controlsY = top + Dp(48.0f);
     const float gridTop = controlsY + Dp(40.0f);
     ImGui::SetCursorScreenPos(ImVec2(leftX + Dp(2.0f), controlsY));
-    if (Chip("##showhidden", Tr("숨긴 항목"), icon::EyeSlash, libraryShowHidden_)) libraryShowHidden_ = !libraryShowHidden_;
-    ImGui::SameLine(0, Dp(10.0f));
     {
+        // view toggle + hidden items, styled like the category tabs (segmented)
         const char* viewLabels[2] = {Tr("격자"), Tr("목록")};
         int viewMode = libraryListView_ ? 1 : 0;
-        if (Segmented("##libview", viewLabels, 2, &viewMode, Dp(120.0f), 30.0f)) libraryListView_ = viewMode == 1;
-    }
-    ImGui::SameLine(0, Dp(12.0f));
-    if (!libraryShowHidden_) {
-        ImGui::SetNextItemWidth(Dp(140.0f));
-        PushFont(Font::Regular, size::Caption);
-        ImGui::SliderFloat("##tilescale", &libraryTileScale_, 0.7f, 1.6f, Tr("크기 %.2f"));
-        libraryTileScale_ = std::clamp(libraryTileScale_, 0.7f, 1.6f);
-        PopFont();
+        if (Segmented("##libview", viewLabels, 2, &viewMode, Dp(108.0f), 30.0f)) libraryListView_ = viewMode == 1;
+        ImGui::SameLine(0, Dp(10.0f));
+        if (Chip("##showhidden", Tr("숨긴 항목"), icon::EyeSlash, libraryShowHidden_, Dp(150.0f)))
+            libraryShowHidden_ = !libraryShowHidden_;
+        ImGui::SameLine(0, Dp(12.0f));
+        if (!libraryShowHidden_) {
+            // stepped column count (2..7)
+            ImGui::SetNextItemWidth(Dp(150.0f));
+            ImGui::SliderInt("##tilescale", &libraryCols_, 2, 7, Tr("열 %d"));
+            libraryCols_ = std::clamp(libraryCols_, 2, 7);
+        }
     }
     // ---- content grid
     ImGui::SetCursorScreenPos(ImVec2(leftX - Dp(6.0f), gridTop - Dp(6.0f)));
@@ -639,8 +669,7 @@ void App::DrawSelect() {
             }
         } else if (libraryTab_ == 0) {
             const std::string needle = ToLowerAscii(filterCharacter_);
-            const float minW = Dp(172.0f) * libraryTileScale_;
-            const int cols = std::max(1, (int)((availW + cgap) / (minW + cgap)));
+            const int cols = std::clamp(libraryCols_, 2, 7);
             const float cw = (availW - cgap * (cols - 1)) / cols;
             const float thumbH = cw * 4.0f / 3.0f, ch = thumbH + Dp(64.0f);
             int n = 0;
@@ -710,8 +739,7 @@ void App::DrawSelect() {
             }
         } else if (libraryTab_ == 1) {
             const std::string needle = ToLowerAscii(filterStage_);
-            const float minW = Dp(250.0f) * libraryTileScale_;
-            const int cols = std::max(1, (int)((availW + cgap) / (minW + cgap)));
+            const int cols = std::clamp(libraryCols_, 2, 7);
             const float cw = (availW - cgap * (cols - 1)) / cols;
             const float thumbH = cw * 10.0f / 16.0f, ch = thumbH + Dp(64.0f);
             int n = 0;

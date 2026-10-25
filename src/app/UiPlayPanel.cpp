@@ -65,16 +65,19 @@ void App::DrawScreenEffectControls(float width) {
     Gap(10.0f);
     SectionLabel(Tr("컬러 LUT"));
     const int lutCount = 1 + (int)luts_.size();
-    for (int i = 0; i < lutCount; ++i) {
-        if (i % 2) ImGui::SameLine(0, Dp(8.0f));
-        ImGui::PushID(i);
-        const ColorLutEntry* e = i > 0 ? &luts_[(size_t)i - 1] : nullptr;
-        if (Chip("##lut", e ? Tr(e->displayName.c_str()) : Tr("없음"), icon::Image,
-                 settings_.colorLut == (e ? e->id : std::string()), chipW)) {
-            settings_.colorLut = e ? e->id : std::string();
-            fx = true;
+    {   // full-width rows so long names never clip past the right edge
+        const float fullW = ImGui::GetContentRegionAvail().x / Dpi();
+        for (int i = 0; i < lutCount; ++i) {
+            ImGui::PushID(i);
+            const ColorLutEntry* e = i > 0 ? &luts_[(size_t)i - 1] : nullptr;
+            if (Chip("##lut", e ? Tr(e->displayName.c_str()) : Tr("없음"), icon::Image,
+                     settings_.colorLut == (e ? e->id : std::string()), fullW)) {
+                settings_.colorLut = e ? e->id : std::string();
+                fx = true;
+            }
+            ImGui::PopID();
+            Gap(4.0f);
         }
-        ImGui::PopID();
     }
     if (!settings_.colorLut.empty()) fx |= SliderRow("##lutint", Tr("LUT 강도"), &settings_.lutIntensity, 0.0f, 1.0f, "%.2f");
     Gap(14.0f);

@@ -107,6 +107,10 @@ void ModelInstance::EnablePhysics(bool enabled) {
     physicsEnabled_ = enabled;
 }
 
+void ModelInstance::SetWind(const DirectX::XMFLOAT3& dir, float strength, float gust, float gustFreq, float jitter) {
+    if (physics_) physics_->SetWind(dir, strength, gust, gustFreq, jitter);
+}
+
 void ModelInstance::ResetPose() {
     for (BoneState& b : bones_) {
         b.animT = {0, 0, 0};

@@ -391,7 +391,8 @@ void App::UpdateStudio(double dt) {
             view(ImGuiKey_Keypad7, 0.0f, ctrl ? -1.45f : 1.45f);
         }
         const auto pressed = [](ImGuiKey k, bool repeat = true) { return ImGui::IsKeyPressed(k, repeat); };
-        if (pressed(ImGuiKey_Space, false)) StudioSetPlaying(!d.playing);
+        const auto kbd2 = [&](const char* a) { return (ImGuiKey)settings_.KeyFor(a); };
+        if (pressed(kbd2("togglePlay"), false)) StudioSetPlaying(!d.playing);
         const bool redo = ctrl && (pressed(ImGuiKey_Y) || (shift && pressed(ImGuiKey_Z)));
         // the selection refers to key frames that an undo/redo may have moved: drop it
         if (redo && d.history.CanRedo()) { d.history.Redo(); d.selection.clear(); d.rowsKey = ~0ull; }
@@ -586,7 +587,7 @@ void App::UpdateStudioScene() {
         else if (std::fabs(df) > 1e-3f) resetPhysics = df < 0.0f || df > 1.0f + 1e-3f;
         if (!resetPhysics) physicsDt = std::max(0.0f, df) / kMmdFps;
         // paused with pose edits: keep simulating so hair and skirts follow the edited pose
-        if (!resetPhysics && !d.playing && posing) physicsDt = 1.0f / 60.0f;
+        if (!resetPhysics && !d.playing && (posing || d.physicsAlways)) physicsDt = 1.0f / 60.0f;
     }
     d.physicsFrame = frame;
 
@@ -636,6 +637,8 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
             inst.SetRootTransform(root);
         }
         inst.EnablePhysics(d.physics && !m.physicsOff);
+        if (d.physics && !m.physicsOff && (d.windStrength > 0.0f || d.windGust > 0.0f))
+            inst.SetWind(d.windDir, d.windStrength, d.windGust, d.windGustFreq, d.windJitter);
         // Interactive playback caps Bullet substeps (drops simulated time on a slow frame); offline renders keep full.
         inst.SetPhysicsMaxSubsteps(offline_.mode == OfflineMode::None ? 4 : 10);
         if (!(m.placeApplied == m.place)) {  // moved by hand: the bodies restart at the new place
@@ -3513,6 +3516,75 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
         d.physics = !d.physics;
         d.physicsFrame = -1.0f;  // start from the motion's pose
     }
+    rx -= Dp(28.0f);
+    const ImVec2 physAt(rx, cy - Dp(17.0f));
+    ImGui::SetCursorScreenPos(physAt);
+    if (IconButton("##physmenu", icon::CaretDown, Tr("물리/바람 설정"), false, 24.0f)) ImGui::OpenPopup("##studiophysics");
+    ImGui::SetNextWindowPos(ImVec2(physAt.x + Dp(24.0f), physAt.y - Dp(6.0f)), ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+    ImGui::SetNextWindowSize(ImVec2(Dp(300.0f), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(14.0f), Dp(12.0f)));
+    if (ImGui::BeginPopup("##studiophysics")) {
+        bool physChanged = false;
+        physChanged |= ImGui::Checkbox(Tr("물리 항상 계산"), &d.physicsAlways);
+        ui::Tooltip(Tr("재생 중이 아니어도 같은 프레임에 멈춰 있을 때 물리를 계속 계산해 (머리카락/치마가 계속 흔들림)"));
+        physChanged |= ImGui::Checkbox(Tr("물리 꺼도 본 표시"), &d.showPhysicsBones);
+        ui::Tooltip(Tr("물리를 꺼도 물리 뼈(머리카락/치마)를 뷰포트에 표시해 직접 키를 넣을 수 있게"));
+        ImGui::SeparatorText(Tr("바람"));
+        ImGui::Checkbox(Tr("뷰포트에 바람 벡터 표시"), &d.showWindVector);
+        {
+            const bool hasWind = (d.windStrength > 0.0f || d.windGust > 0.0f);
+            // Direction visualizer (top-down: +X right, +Z up) with two compact X/Z sliders to its right.
+            const float sz = Dp(64.0f);
+            const ImVec2 c0 = ImGui::GetCursorScreenPos();
+            ImDrawList* wdl = ImGui::GetWindowDrawList();
+            wdl->AddRectFilled(c0, ImVec2(c0.x + sz, c0.y + sz), p.sunken, Dp(8.0f));
+            wdl->AddRect(c0, ImVec2(c0.x + sz, c0.y + sz), p.line, Dp(8.0f));
+            const ImVec2 cc(c0.x + sz * 0.5f, c0.y + sz * 0.5f);
+            wdl->AddLine(cc, ImVec2(c0.x + sz - Dp(6.0f), cc.y), IM_COL32(235, 75, 75, 90));
+            wdl->AddLine(cc, ImVec2(cc.x, c0.y + Dp(6.0f)), IM_COL32(70, 130, 245, 90));
+            float nx = d.windDir.x, nz = d.windDir.z;
+            const float len = std::sqrt(nx * nx + nz * nz);
+            if (len > 1e-5f) { nx /= len; nz /= len; }
+            if (hasWind && len > 1e-5f) {
+                const float r = sz * 0.34f;
+                const ImVec2 tip(cc.x + nx * r, cc.y - nz * r);
+                const ImU32 arrowCol = IM_COL32(140, 230, 150, 235);
+                wdl->AddLine(cc, tip, arrowCol, Dp(2.0f));
+                const float ah = Dp(8.0f), hw = Dp(4.5f);
+                const float dx = nx, dy = -nz;
+                const float bx = tip.x - dx * ah, by = tip.y - dy * ah;
+                const float px = -nz * hw, py = nx * hw;
+                wdl->AddTriangleFilled(tip, ImVec2(bx + px, by + py), ImVec2(bx - px, by - py), arrowCol);
+            }
+            ImGui::BeginDisabled(!hasWind);  // no wind: direction controls are greyed out
+            ImGui::Dummy(ImVec2(sz, sz));
+            ImGui::SameLine(0, Dp(10.0f));
+            ImGui::BeginGroup();
+            {
+                const float rem = ImGui::GetContentRegionAvail().x;
+                ImGui::SetNextItemWidth(rem);
+                physChanged |= ImGui::SliderFloat("##windx", &d.windDir.x, -1.0f, 1.0f, "X %.2f");
+                ImGui::SetNextItemWidth(rem);
+                physChanged |= ImGui::SliderFloat("##windz", &d.windDir.z, -1.0f, 1.0f, "Z %.2f");
+            }
+            ImGui::EndGroup();
+            ImGui::EndDisabled();
+        }
+        {
+            const auto wSlider = [&](const char* label, float* v, float lo, float hi) {
+                ImGui::Text("%s", Tr(label));
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                physChanged |= ImGui::SliderFloat((std::string("##w") + label).c_str(), v, lo, hi, "%.2f");
+            };
+            wSlider(Tr("바람 세기"), &d.windStrength, 0.0f, 1.0f);
+            wSlider(Tr("돌풍 폭"), &d.windGust, 0.0f, 1.0f);
+            wSlider(Tr("돌풍 주파수"), &d.windGustFreq, 0.1f, 20.0f);
+            wSlider(Tr("바람 무작위성"), &d.windJitter, 0.0f, 1.0f);
+        }
+        if (physChanged) d.physicsFrame = -1.0f;  // re-seed bodies so wind applies cleanly
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
     separator(rx - Dp(8.0f));
     {
         const bool range = d.HasRange();
@@ -3841,6 +3913,57 @@ void App::StudioOrthoNavigate(const ViewProj& vp, bool hovered, bool active) {
         d.quadHeight[v] = std::clamp(d.quadHeight[v] * std::pow(0.88f, io.MouseWheel * settings_.cameraZoomSpeed), 2.0f, 4000.0f);
 }
 
+void App::DrawStudioWindOverlay(const float rr[4]) {
+    StudioDoc& d = *studio_;
+    (void)rr;
+    if (!d.showWindVector) return;
+    if (!(d.windStrength > 0.0f || d.windGust > 0.0f)) return;
+    float nx = d.windDir.x, nz = d.windDir.z;
+    const float len = std::sqrt(nx * nx + nz * nz);
+    if (len < 1e-5f) return;
+    nx /= len; nz /= len;
+
+    // 3D arrow in the scene: from an anchor on the floor along the (horizontal) wind direction, projected to screen.
+    // The shaft ends at `tail`; the arrowhead occupies the last `headLen` world units so the line never pokes past it.
+    const DirectX::XMFLOAT3 anchor(0, 1.5f, 0);
+    const float L = 8.0f, headLen = 1.2f;
+    const DirectX::XMFLOAT3 tailW(anchor.x + nx * L, anchor.y, anchor.z + nz * L);
+    const DirectX::XMFLOAT3 tipW(anchor.x + nx * (L + headLen), anchor.y, anchor.z + nz * (L + headLen));
+    const DirectX::XMFLOAT3 aX(anchor.x + 8.0f, anchor.y, anchor.z), aZ(anchor.x, anchor.y, anchor.z + 8.0f);
+
+    ImVec2 a, tail, tip, ax, az;
+    if (!studioVp_.Project(anchor, a) || !studioVp_.Project(tailW, tail) || !studioVp_.Project(tipW, tip)) return;
+    const bool canX = studioVp_.Project(aX, ax);
+    const bool canZ = studioVp_.Project(aZ, az);
+
+    const ui::Palette& p = ui::P();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float dpi = ui::Dpi();
+
+    // faint floor guide: X (red) and Z (blue) ground lines from the anchor
+    if (canX) dl->AddLine(a, ax, ui::WithAlpha(IM_COL32(235, 75, 75, 255), 0.35f), 1.0f * dpi);
+    if (canZ) dl->AddLine(a, az, ui::WithAlpha(IM_COL32(70, 130, 245, 255), 0.35f), 1.0f * dpi);
+
+    // the wind shaft (outline + fill) ends at `tail`, under the arrowhead
+    dl->AddLine(a, tail, ui::WithAlpha(IM_COL32(10, 14, 20, 255), 0.85f), 5.0f * dpi);
+    dl->AddLine(a, tail, IM_COL32(140, 230, 150, 235), 2.4f * dpi);
+
+    // arrowhead spans `tail` -> `tip` (the shaft never exceeds it)
+    ImVec2 ds(tip.x - tail.x, tip.y - tail.y);
+    const float dl2 = std::sqrt(ds.x * ds.x + ds.y * ds.y);
+    if (dl2 > 1e-3f) {
+        ds.x /= dl2; ds.y /= dl2;
+        const float hw = 4.5f * dpi;
+        const ImVec2 perp(-ds.y, ds.x);
+        dl->AddTriangleFilled(tip, ImVec2(tail.x + perp.x * hw, tail.y + perp.y * hw),
+                              ImVec2(tail.x - perp.x * hw, tail.y - perp.y * hw), IM_COL32(140, 230, 150, 235));
+        dl->AddTriangle(ImVec2(tail.x + perp.x * hw, tail.y + perp.y * hw),
+                        ImVec2(tail.x - perp.x * hw, tail.y - perp.y * hw), tip, ui::WithAlpha(IM_COL32(10, 14, 20, 255), 0.6f));
+    }
+    // anchor dot
+    dl->AddCircleFilled(a, 3.0f * dpi, IM_COL32(120, 130, 140, 255), 12);
+}
+
 void App::StudioAddQuadViews(FrameView& view) const {
     const StudioDoc& d = *studio_;
     if (d.viewLayout != 1) return;
@@ -3959,6 +4082,7 @@ void App::DrawStudioViewport(float x0, float y0, float x1, float y1) {
     if (av == 0) {
         StudioViewportNavigate(hovered, active);
         DrawStudioViewportAxisControls(rr[0], rr[1], rr[0] + rr[2], rr[1] + rr[3]);
+        DrawStudioWindOverlay(rr);
     } else StudioOrthoNavigate(act.vp, hovered, active);
     (void)consumed;
 

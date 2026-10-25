@@ -1373,6 +1373,21 @@ const Entry kEnglish[] = {
     {"격자", "Grid"},
     {"목록", "List"},
     {"크기 %.2f", "Size %.2f"},
+    {"물리/바람 설정", "Physics / wind settings"},
+    {"물리 항상 계산", "Always simulate physics"},
+    {"재생 중이 아니어도 같은 프레임에 멈춰 있을 때 물리를 계속 계산해 (머리카락/치마가 계속 흔들림)", "Keep simulating even while paused on the same frame (hair / skirts keep moving)."},
+    {"물리 꺼도 본 표시", "Show physics bones when physics is off"},
+    {"물리를 꺼도 물리 뼈(머리카락/치마)를 뷰포트에 표시해 직접 키를 넣을 수 있게", "Show physics-driven bones in the viewport even with physics off, so you can key them by hand."},
+    {"바람", "Wind"},
+    {"바람 방향 X", "Wind direction X"},
+    {"바람 방향 Z", "Wind direction Z"},
+    {"바람 세기", "Wind strength"},
+    {"돌풍 폭", "Gust amplitude"},
+    {"돌풍 주파수", "Gust frequency"},
+    {"바람 무작위성", "Wind randomness"},
+    {"뷰포트에 바람 벡터 표시", "Show wind vector in viewport"},
+    {"0..1. 1을 넘으면 물리 뼈를 심하게 흔들 수 있어요", "0..1. Above 1 the physics bones can be shaken violently."},
+    {"열 %d", "Cols %d"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

@@ -462,7 +462,8 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
 
     }
     const GizmoStyle gs = MakeGizmoStyle();
-    const BoneOverlayStyle os = MakeOverlayStyle(settings_.boneOverlayScale);
+    BoneOverlayStyle os = MakeOverlayStyle(settings_.boneOverlayScale);
+    os.showPhysicsBones = studio_->showPhysicsBones;
     if (m && d.activeBone >= (int)m->pmx->bones.size()) d.activeBone = -1;
     studioGizmoShown_ = m && d.activeBone >= 0 && StudioGizmoFrameOf(*m, d.activeBone, studioGizmoFrame_, studioGizmoMode_);
     // no bone picked: the toolbar's model tool moves / rotates the whole character / stage (world axes at its origin)
@@ -561,7 +562,26 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
                 }
             }
         } else if (studioHoverBone_ >= 0) {
-            StudioSelectBone(studioHoverBone_, io.KeyCtrl || io.KeyShift);
+            // Overlapping joints (e.g. an IK helper on a rotatable bone): repeated clicks at the same spot cycle
+            // through the candidates instead of always picking the same one.
+            int pick = studioHoverBone_;
+            if (!io.KeyCtrl && !io.KeyShift) {
+                const std::vector<int> cands = PickBoneCandidates(studioVp_, *m->pmx, *m->inst, mouse, os);
+                if (cands.size() > 1) {
+                    const bool sameSpot = std::hypot(mouse.x - studioCyclePos_.x, mouse.y - studioCyclePos_.y) <= ui::Dp(4.0f);
+                    if (sameSpot) {
+                        auto it = std::find(cands.begin(), cands.end(), studioCycleBone_);
+                        if (it != cands.end()) {
+                            ++it;
+                            if (it == cands.end()) it = cands.begin();
+                            pick = *it;
+                        } else pick = cands.front();
+                    } else pick = cands.front();
+                }
+                studioCyclePos_ = mouse;
+                studioCycleBone_ = pick;
+            }
+            StudioSelectBone(pick, io.KeyCtrl || io.KeyShift);
             if (studioCenterOnBone_ && m && m->inst) {
                 StudioTakeFreeCamera();
                 // centre on the bone without zooming: re-aim the target, keep the distance
@@ -736,51 +756,153 @@ void App::DrawStudioViewportAxisControls(float x0, float y0, float x1, float y1)
     if (!movable && !rotatable) return;
     const Palette& p = P();
 
-    ImGui::SetNextWindowPos(ImVec2(x0 + Dp(8.0f), y1 - Dp(150.0f)), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.92f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(10.0f), Dp(8.0f)));
-    const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize |
-                                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    // Axis colours (match the gizmo: X red, Y green, Z blue).
+    static const ImU32 kAxisCol[3] = {IM_COL32(235, 75, 75, 255), IM_COL32(110, 205, 70, 255), IM_COL32(70, 130, 245, 255)};
+    static const char* kAxisName[3] = {"X", "Y", "Z"};
+
+    const bool fixedAxis = (b.flags & PmxBone_FixedAxis) != 0;
+    // parent world rotation (the frame the bone's local keys live in)
+    XMFLOAT4 parentRotF;
+    {
+        const int parent = b.parentIndex;
+        const XMVECTOR pq = parent >= 0 && parent < (int)m->pmx->bones.size()
+                               ? RotationOf(m->inst->BoneWorld(parent)) : XMQuaternionIdentity();
+        XMStoreFloat4(&parentRotF, pq);
+    }
+    // Effective tool mode (mirrors the gizmo): auto-IK / move tool => translate, else rotate.
+    int ikRoot = -1, ikMid = -1;
+    const bool autoIk = d.autoIk && FindAutoIkChain(*m->pmx, d.activeBone, ikRoot, ikMid);
+    const bool rotateMode = !autoIk && (d.gizmoTool == 1 ? !movable : rotatable);
+    const bool transActive = !rotateMode;
+
+    char title[96];
+    std::snprintf(title, sizeof(title), "%s · %s", DisplayName(b.name, b.nameEn), Tr("본 값 편집"));
+
+    // Two rows (Move / Rotate) of three side-by-side slider boxes, laid out with explicit coordinates.
+    const float pad = Dp(6.0f);
+    const float panelW = Dp(252.0f);
+    const float innerW = panelW - pad * 2.0f;
+    const float rowLabelW = Dp(34.0f);
+    const float cGap = Dp(6.0f);
+    const float cellsAvail = innerW - rowLabelW - cGap;
+    const float cW = (cellsAvail - cGap * 2.0f) / 3.0f;
+    const float labelH = Dp(16.0f);
+    const float fieldH = Dp(24.0f);
+    const float rowH = labelH + fieldH + Dp(6.0f);
+    const int rowsN = (movable ? 1 : 0) + (rotatable ? 1 : 0);
+    const float panelH = pad * 2.0f + Dp(18.0f) + rowsN * rowH + (rowsN > 1 ? Dp(10.0f) : 0.0f) + Dp(6.0f);
+    const ImVec2 pos(x0 + Dp(4.0f), y1 - panelH - Dp(4.0f));
+
+    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(panelW, panelH), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, Dp(10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
     if (ImGui::Begin("##vpaxis", nullptr, wf)) {
         const PoseBone cur = StudioCurrentPose(*m)[(size_t)d.activeBone];
-        char title[96];
-        std::snprintf(title, sizeof(title), "%s · %s", DisplayName(b.name, b.nameEn), Tr("본 값 편집"));
-        Text(ImGui::GetWindowDrawList(), Font::Semibold, size::Caption, ImGui::GetCursorScreenPos(), p.ink2, title);
-        ImGui::Dummy(ImVec2(0, Dp(6.0f)));
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        TextEllipsis(dl, Font::Semibold, size::Caption, ImGui::GetCursorScreenPos(),
+                     ImGui::GetCursorScreenPos().x + panelW - pad * 2, p.ink2, title);
+        ImGui::Dummy(ImVec2(0, Dp(4.0f)));
 
-        float t[3] = {cur.t.x, cur.t.y, cur.t.z};
-        const XMFLOAT3 e = EulerDeg(cur.r);
-        float r[3] = {e.x, e.y, e.z};
-        const auto field = [&](const char* id, const char* label, float v[3], bool enabled, float speed, const char* fmt) {
-            ImGui::BeginDisabled(!enabled);
-            ImGui::SetNextItemWidth(Dp(190.0f));
-            const bool started = ImGui::IsItemActivated();
-            const bool changed = ImGui::DragFloat3(id, v, speed, 0.0f, 0.0f, fmt);
-            const bool ended = ImGui::IsItemDeactivated();
-            ImGui::EndDisabled();
-            if (started && !studioPoseFieldEdit_) {
-                studioPoseBefore_ = m->pose;
-                studioPoseFieldEdit_ = true;
+        // Draw one row of three cells. Each cell: axis label above a slider box with < > chevrons.
+        const auto drawRow = [&](const char* groupLabel, float vals[3], bool enabled, float speed, const char* fmt,
+                                 const char* unit, int fixedAxisOnly) {
+            const ImVec2 row0 = ImGui::GetCursorScreenPos();
+            Text(dl, Font::Regular, size::Caption, ImVec2(row0.x, row0.y + labelH * 0.5f), p.ink3, groupLabel);
+            bool rowCh = false, rowEnd = false;
+            for (int ax = 0; ax < 3; ++ax) {
+                if (fixedAxisOnly >= 0 && ax != fixedAxisOnly) continue;
+                const float x = row0.x + rowLabelW + cGap + ax * (cW + cGap);
+                const ImU32 axisCol = enabled ? kAxisCol[ax] : IM_COL32(90, 98, 106, 180);
+                const std::string an = kAxisName[ax];
+                const float lw = TextSize(Font::Semibold, size::Caption, an.c_str()).x;
+                Text(dl, Font::Semibold, size::Caption, ImVec2(x + cW * 0.5f - lw * 0.5f, row0.y), axisCol, an.c_str());
+                const float yf = row0.y + labelH;
+                const float bx0 = x + Dp(9.0f), bx1 = x + cW - Dp(9.0f);
+                const ImU32 chevron = enabled ? kAxisCol[ax] : IM_COL32(90, 98, 106, 140);
+                dl->AddTriangleFilled(ImVec2(x + Dp(2.0f), yf + fieldH * 0.5f),
+                                      ImVec2(x + Dp(8.0f), yf + fieldH * 0.5f - Dp(4.0f)),
+                                      ImVec2(x + Dp(8.0f), yf + fieldH * 0.5f + Dp(4.0f)), chevron);
+                ImGui::BeginDisabled(!enabled);
+                ImGui::SetCursorScreenPos(ImVec2(bx0, yf));
+                ImGui::SetNextItemWidth(std::max(bx1 - bx0, Dp(30.0f)));
+                const bool started = ImGui::IsItemActivated();
+                const bool ch = ImGui::DragFloat(("##ax" + std::to_string(ax) + unit).c_str(), &vals[ax], speed,
+                                                 0.0f, 0.0f, fmt);
+                const bool ended = ImGui::IsItemDeactivated();
+                ImGui::EndDisabled();
+                dl->AddTriangleFilled(ImVec2(bx1 + Dp(6.0f), yf + fieldH * 0.5f),
+                                      ImVec2(bx1 + Dp(0.0f), yf + fieldH * 0.5f - Dp(4.0f)),
+                                      ImVec2(bx1 + Dp(0.0f), yf + fieldH * 0.5f + Dp(4.0f)), chevron);
+                if (started && !studioPoseFieldEdit_) {
+                    studioPoseBefore_ = m->pose;
+                    studioPoseFieldEdit_ = true;
+                }
+                rowCh |= ch; rowEnd |= ended;
             }
-            return std::pair<bool, bool>{changed, ended};
+            return std::pair<bool, bool>{rowCh, rowEnd};
         };
-        const auto [tChanged, tEnded] = field("##vpaxist", Tr("위치"), t, movable, 0.02f, "%.2f");
-        const auto [rChanged, rEnded] = field("##vpaxisr", Tr("회전"), r, rotatable, 0.25f, "%.1f°");
-        if (tChanged || rChanged) {
+        // helper to apply the changed flag of the whole row
+        PoseBone v = cur;
+        bool anyChanged = false, anyEnded = false;
+
+        if (movable) {
+            float t[3] = {cur.t.x, cur.t.y, cur.t.z};
+            const auto apply = [&]() {
+                const auto r = drawRow(Tr("이동"), t, transActive, 0.02f, "%.2f", "t", -1);
+                if (r.first) v.t = {t[0], t[1], t[2]};
+                anyChanged |= r.first; anyEnded |= r.second;
+            };
+            apply();
+            ImGui::Dummy(ImVec2(0, Dp(6.0f)));
+        }
+
+        if (rotatable) {
+            if (fixedAxis) {
+                // Fixed-axis: a single angle control spans the row.
+                XMVECTOR axW = XMLoadFloat3(&b.fixedAxis);
+                if (XMVectorGetX(XMVector3LengthSq(axW)) < 1e-12f) axW = XMVectorSet(1, 0, 0, 0);
+                axW = XMVector3Normalize(XMVector3Rotate(XMVector3Normalize(axW), XMLoadFloat4(&parentRotF)));
+                XMFLOAT3 axWf; XMStoreFloat3(&axWf, axW);
+                float ang = 0.0f;
+                const auto r = drawRow(Tr("회전"), &ang, rotateMode, 0.5f, "%.1f°", "a", 0);
+                if (r.first) {
+                    const XMVECTOR q = XMQuaternionRotationAxis(XMVector3Normalize(XMLoadFloat3(&axWf)), XMConvertToRadians(ang));
+                    const XMVECTOR parentQ = XMLoadFloat4(&parentRotF);
+                    const XMVECTOR dq = XMQuaternionMultiply(XMQuaternionMultiply(parentQ, q), XMQuaternionInverse(parentQ));
+                    XMStoreFloat4(&v.r, XMQuaternionNormalize(XMQuaternionMultiply(XMLoadFloat4(&cur.r), dq)));
+                    anyChanged = true;
+                }
+                anyEnded |= r.second;
+            } else {
+                const XMFLOAT3 e0 = EulerDeg(cur.r);
+                float r[3] = {e0.x, e0.y, e0.z};
+                const auto apply = [&]() {
+                    const auto rr = drawRow(Tr("회전"), r, rotateMode, 0.25f, "%.1f°", "r", -1);
+                    if (rr.first) v.r = QuatFromEulerDeg({r[0], r[1], r[2]});
+                    anyChanged |= rr.first; anyEnded |= rr.second;
+                };
+                apply();
+            }
+        }
+
+        if (anyChanged) {
             PoseLayer& pose = m->pose;
             if (pose.frame != frame) pose = PoseLayer{};
             pose.frame = frame;
-            PoseBone v = cur;
-            if (tChanged) v.t = {t[0], t[1], t[2]};
-            if (rChanged) v.r = QuatFromEulerDeg({r[0], r[1], r[2]});
             pose.bones[d.activeBone] = v;
         }
-        if ((tEnded || rEnded) && studioPoseFieldEdit_) {
+        if (anyEnded && studioPoseFieldEdit_) {
             studioPoseFieldEdit_ = false;
             StudioSetPose(Tr("본 값 편집"), studioPoseBefore_);
         }
     }
     ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleVar();
     ImGui::PopStyleVar();
 }
 
@@ -1422,8 +1544,11 @@ void App::StudioDrawPoseOverlay(const ViewProj& vp, float x0, float y0, float x1
     if (!m || !m->visible || d.playing) return;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y1), true);
-    if (m && d.showBones)
-        DrawBoneOverlay(dl, vp, *m->pmx, *m->inst, d.selectedBones, d.activeBone, -1, MakeOverlayStyle(settings_.boneOverlayScale));
+    if (m && d.showBones) {
+        BoneOverlayStyle os2 = MakeOverlayStyle(settings_.boneOverlayScale);
+        os2.showPhysicsBones = studio_->showPhysicsBones;
+        DrawBoneOverlay(dl, vp, *m->pmx, *m->inst, d.selectedBones, d.activeBone, -1, os2);
+    }
     if (studioGizmoShown_) DrawGizmo(dl, vp, studioGizmoFrame_, studioGizmoMode_, MakeGizmoStyle(), GizmoPart::None, GizmoPart::None);
     dl->PopClipRect();
 }

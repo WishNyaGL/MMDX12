@@ -162,13 +162,14 @@ float ViewProj::PixelWorldSize(const XMFLOAT3& p) const {
 
 // ---- bone overlay -----------------------------------------------------------------------------------------------
 
-bool BoneShownInOverlay(const PmxModel& model, int bone) {
+bool BoneShownInOverlay(const PmxModel& model, int bone, bool showPhysicsBones) {
     if (bone < 0 || bone >= (int)model.bones.size()) return false;
     const uint16_t flags = model.bones[bone].flags;
     if (!(flags & PmxBone_Visible) || !(flags & (PmxBone_Rotatable | PmxBone_Movable | PmxBone_IK))) return false;
     // bones driven by a simulated rigid body (hair, skirts) cannot be posed by hand: keep the overlay readable
-    for (const PmxRigidBody& rb : model.rigidBodies)
-        if (rb.boneIndex == bone && rb.physicsMode != 0) return false;
+    if (!showPhysicsBones)
+        for (const PmxRigidBody& rb : model.rigidBodies)
+            if (rb.boneIndex == bone && rb.physicsMode != 0) return false;
     return true;
 }
 
@@ -350,7 +351,7 @@ void DrawBoneOverlay(ImDrawList* dl, const ViewProj& vp, const PmxModel& model, 
 
     // Joints
     for (int b = 0; b < (int)bones.size(); ++b) {
-        if (!BoneShownInOverlay(model, b)) continue;
+        if (!BoneShownInOverlay(model, b, style.showPhysicsBones)) continue;
         const XMFLOAT3 joint = BoneJointWorld(model, inst, b);
         ImVec2 c;
         float depth = 0.0f;
@@ -409,7 +410,7 @@ int PickBone(const ViewProj& vp, const PmxModel& model, const ModelInstance& ins
     };
     std::vector<Candidate> candidates;
     for (int b = 0; b < (int)model.bones.size(); ++b) {
-        if (!BoneShownInOverlay(model, b)) continue;
+        if (!BoneShownInOverlay(model, b, style.showPhysicsBones)) continue;
         const XMFLOAT3 joint = BoneJointWorld(model, inst, b);
         ImVec2 c;
         float depth = 0.0f;
@@ -444,6 +445,48 @@ int PickBone(const ViewProj& vp, const PmxModel& model, const ModelInstance& ins
         }
     }
     return best->bone;
+}
+
+std::vector<int> PickBoneCandidates(const ViewProj& vp, const PmxModel& model, const ModelInstance& inst, ImVec2 mouse,
+                                    const BoneOverlayStyle& style) {
+    struct Candidate { float d, depth; int bone; };
+    std::vector<Candidate> candidates;
+    for (int b = 0; b < (int)model.bones.size(); ++b) {
+        if (!BoneShownInOverlay(model, b, style.showPhysicsBones)) continue;
+        const XMFLOAT3 joint = BoneJointWorld(model, inst, b);
+        ImVec2 c;
+        float depth = 0.0f;
+        if (!vp.Project(joint, c, &depth)) continue;
+        const float d = std::hypot(mouse.x - c.x, mouse.y - c.y);
+        const bool isMinor = IsMinorBone(model, b);
+        const float drawnR = JointPixelRadius(vp, depth, style, isMinor || IsFaceBone(model, b));
+        const float r = std::max(style.pickRadius, drawnR);
+        if (d <= r) candidates.push_back({d, depth, b});
+    }
+    if (candidates.empty()) return {};
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) { return a.d < b.d; });
+    const float bestD = candidates.front().d;
+    std::vector<char> listed(model.bones.size(), 0);
+    for (const PmxDisplayFrame& df : model.displayFrames)
+        for (const auto& it : df.items)
+            if (!it.morph && it.index >= 0 && (size_t)it.index < listed.size()) listed[(size_t)it.index] = 1;
+    const auto operable = [&](const Candidate& c) {
+        return (listed[(size_t)c.bone] || model.displayFrames.empty()) && (model.bones[c.bone].flags & PmxBone_Operable) != 0;
+    };
+    // stable order: nearest first; within the same distance band, operable before non-operable, then nearer depth
+    std::vector<Candidate> ordered = candidates;
+    std::stable_sort(ordered.begin(), ordered.end(), [&](const Candidate& a, const Candidate& b) {
+        if (a.d <= bestD + 1.0f && b.d <= bestD + 1.0f) {
+            if (operable(a) != operable(b)) return operable(a) > operable(b);
+            return a.depth < b.depth;
+        }
+        return a.d < b.d;
+    });
+    std::vector<int> out;
+    out.reserve(ordered.size());
+    for (const Candidate& c : ordered) out.push_back(c.bone);
+    return out;
 }
 
 // ---- gizmo ------------------------------------------------------------------------------------------------------

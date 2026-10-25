@@ -45,6 +45,8 @@ public:
     // Rigid-body physics. Off by default (stages, thumbnails); the world is built on first enable.
     // Models without simulated bodies stay a no-op.
     void EnablePhysics(bool enabled);
+    // Applies a global wind to the internal physics world (harmless when physics is off / no dynamic bodies).
+    void SetWind(const DirectX::XMFLOAT3& dir, float strength, float gust, float gustFreq, float jitter);
     bool PhysicsEnabled() const { return physicsEnabled_; }
     // Bullet substep cap per UpdatePose. A slow frame then drops simulated time instead of asking
     // for more substeps (spiral of death). Interactive play uses a low cap, offline renders 10.

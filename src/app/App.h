@@ -587,6 +587,9 @@ private:
     // When on, clicking a bone in the viewport also centers the free camera on it.
     bool studioCenterOnBone_ = false;
     void StudioSelectAllBones();  // Ctrl+A: pick every bone of the active model
+    // Overlapping-bone cycling: last click spot + the bone chosen there (see StudioViewportPose).
+    ImVec2 studioCyclePos_{-1e9f, -1e9f};
+    int studioCycleBone_ = -1;
     // Last focused studio panel (updated while panels draw): 0 viewport / camera, 1 timeline, 2 other. Ctrl+A picks
     // bones when the viewport is focused and keys when the timeline is focused.
     int studioFocusPanel_ = 2;
@@ -652,6 +655,7 @@ private:
     void StudioViewportPose(float x0, float y0, float x1, float y1, bool hovered, bool& consumed);  // overlay + input
     void StudioViewportToolbar(float x, float y);
     void DrawStudioViewportAxisControls(float x0, float y0, float x1, float y1);  // bottom-corner move/rotate XYZ for the active bone
+    void DrawStudioWindOverlay(const float rr[4]);  // viewport wind-direction arrow (camera-aligned)
     void DrawStudioBoneTab(float w);
     void DrawStudioMorphTab(float w);
     bool StudioScriptGizmoPoint(int part, ImVec2& out) const;  // ui-script: a screen point on a gizmo part
@@ -1232,7 +1236,7 @@ private:
     int libraryTab_ = 0;          // 0 characters, 1 stages, 2 songs
     bool libraryShowHidden_ = false;  // library grid: show the "숨긴 항목" (hidden) list instead of the active tab
     bool libraryListView_ = false;    // library grid: show rows instead of thumbnail cards
-    float libraryTileScale_ = 1.0f;   // library card grid: tile-size multiplier (0.7 .. 1.6)
+    int libraryCols_ = 4;             // library card grid: number of columns (2..7), stepped
     int lobbyTab_ = 0;                                                   // select screen settings tab: 0 screen, 1 shader, 2 detail
     std::filesystem::path assetsDir_;
     std::vector<ColorLutEntry> luts_;   // built-in looks + .cube files (ListColorLuts)

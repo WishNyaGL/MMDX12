@@ -214,19 +214,18 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
         if (!luts_.empty()) {
             Gap(10.0f);
             SectionLabel(Tr("컬러 LUT"));
-            const float colW = ImGui::GetContentRegionAvail().x;
-            const float chipW = (colW - Dp(8.0f)) * 0.5f;
+            const float fullW = ImGui::GetContentRegionAvail().x / Dpi();
             int lutCount = 1 + (int)luts_.size();
             for (int i = 0; i < lutCount; ++i) {
-                if (i % 2) ImGui::SameLine(0, Dp(8.0f));
                 ImGui::PushID(i);
                 const ColorLutEntry* e = i > 0 ? &luts_[(size_t)i - 1] : nullptr;
                 if (Chip("##lut", e ? Tr(e->displayName.c_str()) : Tr("없음"), icon::Image,
-                         settings_.colorLut == (e ? e->id : std::string()), chipW)) {
+                         settings_.colorLut == (e ? e->id : std::string()), fullW)) {
                     settings_.colorLut = e ? e->id : std::string();
                     changed = true;
                 }
                 ImGui::PopID();
+                Gap(4.0f);
             }
             if (!settings_.colorLut.empty()) {
                 Gap(4.0f);
@@ -250,16 +249,13 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
             ImGui::TextUnformatted(d.bgVideoPath.empty() ? Tr("없음") : PathToUtf8(d.bgVideoPath.filename()).c_str());
             ImGui::PopStyleColor();
             Gap(4.0f);
-            const float colW = ImGui::GetContentRegionAvail().x;
-            const float bw = (colW - Dp(8.0f)) * 0.5f;
-            if (Button("##bgvideochoose", Tr("파일 선택"), icon::FolderOpen, ButtonKind::Secondary, ImVec2(bw, 0))) {
+            if (Button("##bgvideochoose", Tr("파일 선택"), icon::FolderOpen, ButtonKind::Secondary, ImVec2(-1.0f, 0))) {
                 const std::filesystem::path f = OpenFileDialog(
                     hwnd_, {{L"Video", L"*.avi;*.mp4;*.mov;*.wmv;*.mkv"}, {L"AVI", L"*.avi"}});
                 if (!f.empty()) StudioSetBgVideo(f);
             }
-            ImGui::SameLine(0, Dp(8.0f));
             ImGui::BeginDisabled(d.bgVideoPath.empty());
-            if (Button("##bgvideoclear", Tr("지우기"), icon::Trash, ButtonKind::Secondary, ImVec2(bw, 0))) {
+            if (Button("##bgvideoclear", Tr("지우기"), icon::Trash, ButtonKind::Secondary, ImVec2(-1.0f, 0))) {
                 StudioSetBgVideo({});
             }
             ImGui::EndDisabled();
