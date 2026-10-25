@@ -1363,6 +1363,8 @@ const Entry kJapanese[] = {
     {"안개 색", "霧の色"},
     {"안개", "霧"},
     {"환경 안개", "環境霧"},
+    {"정밀 안개 계산", "精密フォグ計算"},
+    {"오프라인 GI에서 안개를 경로 추적으로 계산", "オフラインGIでフォグをパストレースで計算"},
 };
 const int kJapaneseCount = (int)(sizeof(kJapanese) / sizeof(kJapanese[0]));
 

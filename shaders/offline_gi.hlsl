@@ -17,6 +17,13 @@
 //    the camera is interpolated from the shutter-open camera (offline_common.hlsli).
 //  * Adaptive sampling: a pixel stops once the standard error of its perceptual luminance drops
 //    below a threshold (after a minimum sample count).
+//  * S9c in-path medium (full haze): every path segment travels through the frame's medium
+//    (medium_common.hlsli: the height fog + the local fog volumes of the single-scatter pass), sampled by delta
+//    tracking, with next-event estimation at each scattering event (sun + one punctual light, phase weighted, times
+//    the medium transmittance) and the path continuing in a Henyey-Greenstein direction; the surface shadow rays are
+//    dimmed by the medium too. GpuMedium::mode 0 (t5 space1) = today's code, no tracking loop entered.
+//    Defining MMDX_MEDIUM_SINGLE_EVENT limits the medium to ONE event per path with sun + punctual NEE only (the S9c
+//    correctness check against the single-scatter pass; a temporary build define, never set by the app).
 //
 // UAV table (identical for every kernel in this file):
 //   u0 accum         RGBA32F image: radiance sum rgb, a = samples
@@ -33,6 +40,7 @@
 #include "offline_common.hlsli"
 #include "dielectric.hlsli"
 #include "offline_glass.hlsli"
+#include "medium_common.hlsli"   // S9c: the in-path medium (fog_shapes.hlsli + the GpuMedium buffer t5 space1)
 #define PBR_SAMPLE_LEVEL0     // compute: no screen-space gradients
 #include "pt_pbr.hlsli"
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
@@ -59,8 +67,10 @@ struct PtLight {
     float3 dir; float cosInner;
     float shadowSlice; float shadowType; float shadowSoftness; float shadowDensity;
     float3 shadowColor; float falloff;
-    float affectDiffuse; float affectSpecular; float pointShadowSlice; float pad;
-    float areaWidth; float areaHeight; float isArea; float pad2;
+    float affectDiffuse; float affectSpecular; float pointShadowSlice;
+    float volumetric;   // S9: the light's share of the haze (GpuLight::_pad, 1 = physical)
+    float areaWidth; float areaHeight; float isArea;
+    float aniso;        // S9: this light's scattering anisotropy (GpuLight::_pad2); -1 = the fog's own
 };
 StructuredBuffer<PtLight> gPtLights : register(t2, space1);
 
@@ -72,6 +82,9 @@ static const float kFlatGatherSkip = 1.5;     // faces: fill rays ignore geometr
 static const uint kMaxDepth = 12u;
 static const float kFirefly = 24.0;           // per-sample luminance clamp
 static const float kHaze = 0.35;
+// S9c: the medium NEE weights of the single-scatter pass (offline_volumetric.hlsl CSVolMarch: spotBoost / pointBoost)
+static const float kMediumSpotBoost = 3.0;
+static const float kMediumPointBoost = 0.45;
 // Skin SSS (MMD units: 1 ~ 8 cm). Scatter radii diffuse the incident sun (red travels furthest);
 // transmission depths drive the translucency of thin parts.
 static const float3 kSkinRadius = float3(0.16, 0.07, 0.04);
@@ -331,6 +344,143 @@ void CameraRay(float2 pix, float2 lensU, out float3 o, out float3 d) {
 
 // ---- lighting ---------------------------------------------------------------------------
 
+// ---- S9c: the in-path medium (medium_common.hlsli) -------------------------------------------
+// The GI paths travel through the same haze the single-scatter pass marches (level of detail: every segment of every
+// path). Cheap helpers so mode 0 (the default when the haze is off) runs the old code and consumes no random numbers:
+// every call below returns 1 / does nothing while gMedium[0].mode == 0.
+
+// Transmittance of the medium between o and a light / the sky (shadow rays).
+float MediumShadowT(float3 o, float3 d, float tMax, inout uint rng) {
+#ifdef MMDX_MEDIUM_SINGLE_EVENT
+    return 1.0;   // validation: the single-scatter pass only dims by the camera path (lit * T + L)
+#endif
+    return MediumOn() ? MediumTransmittance(o, d, tMax, rng) : 1.0;
+}
+
+// In-scattered radiance at a medium collision p looking along d (the path's direction): next-event estimation to the
+// sun and to one punctual light (picked by its unshadowed contribution, the weighting the surface NEE uses), phase
+// weighted and scaled by each light's haze share (GpuLight::_pad, 1 = physical). The visibility is the tinted mesh
+// shadow ray times the medium transmittance along it.
+float3 MediumNee(float3 p, float3 d, inout uint rng) {
+    float3 L = 0;
+    // sun: the same soft cone the surfaces sample, the single pass's sun colour (offline_volumetric.hlsl CSVolMarch)
+    const float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, SunShadowConeCos(kSunCosMax));
+    float3 visSun = 1.0;
+    if (gSunShadowParams.x >= 0.5) {
+        float3 mesh = TraceShadowRayTinted(p, sd, 1e5, 0xFFu);
+        float v = Luminance(mesh);
+        visSun = (v > 0.0 ? ShadowTransmission(v, gSunShadowParams.z, gSunShadowColor.rgb) * mesh
+                          : ShadowTransmission(0.0, gSunShadowParams.z, gSunShadowColor.rgb));
+    }
+    visSun *= MediumShadowT(p, sd, 1e5, rng);   // the medium between the event and the sun
+    const float3 sunCol = SrgbToLinear(gLightColor) / SrgbToLinear(float3(0.6, 0.6, 0.6)) * gSunIntensity;
+    L += sunCol * (gMedium[0].sunVolumetric * HgEval(dot(d, sd), gMedium[0].sunG)) * visSun;
+
+    // punctual: one light by its unshadowed contribution (weights = the single pass's in-scattering integrand)
+    const uint nl = (uint)gNumLights;
+    float total = 0.0;
+    [loop] for (uint i = 0; i < nl; ++i) {
+        PtLight l = gPtLights[i];
+        if (l.volumetric <= 0.0) continue;
+        float3 dv = l.pos - p;
+        float dL = length(dv);
+        float3 ld = dv / max(dL, 1e-4);
+        float atten = PunctualFalloff(dL, l.invRange, (int)l.falloff);
+        if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
+        else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
+        if (atten <= 0.0) continue;
+        const float g = l.aniso > -0.99 ? l.aniso : gMedium[0].g;
+        total += Luminance(l.color * (l.volumetric * atten * HgEval(dot(d, ld), g)));
+    }
+    if (total > 0.0) {
+        const float u = Rand(rng) * total;
+        int picked = -1;
+        float w = 0.0;
+        float acc = 0.0;   // walked weight before this light
+        [loop] for (uint i = 0; i < nl; ++i) {
+            PtLight l = gPtLights[i];
+            if (l.volumetric <= 0.0) continue;
+            float3 dv = l.pos - p;
+            float dL = length(dv);
+            float3 ld = dv / max(dL, 1e-4);
+            float atten = PunctualFalloff(dL, l.invRange, (int)l.falloff);
+            if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
+            else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
+            if (atten <= 0.0) continue;
+            const float g = l.aniso > -0.99 ? l.aniso : gMedium[0].g;
+            w = Luminance(l.color * (l.volumetric * atten * HgEval(dot(d, ld), g)));
+            picked = (int)i;
+            if (w > 0.0) {
+                if (u <= acc + w) break;
+                acc += w;
+            }
+        }
+        if (picked >= 0 && w > 0.0) {
+            PtLight l = gPtLights[(uint)picked];
+            float3 dv = l.pos - p;
+            float dL = length(dv);
+            float3 ld = dv / max(dL, 1e-4);
+            float atten = PunctualFalloff(dL, l.invRange, (int)l.falloff);
+            if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
+            else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
+            const float g = l.aniso > -0.99 ? l.aniso : gMedium[0].g;
+            const bool spot = l.cosOuter > -1.0;
+            const float boost = spot ? kMediumSpotBoost : kMediumPointBoost;
+            float3 vis = 1.0;
+            if (l.shadowType != 0.0) {
+                float3 mesh = TraceShadowRayTinted(p, ld, max(dL - 0.05, 0.0), RT_MASK_CHARACTER);
+                float v = Luminance(mesh);
+                vis = (v > 0.0 ? ShadowTransmission(v, l.shadowDensity, l.shadowColor) * mesh
+                               : ShadowTransmission(0.0, l.shadowDensity, l.shadowColor));
+            }
+            vis *= MediumShadowT(p, ld, max(dL - 0.05, 0.0), rng);
+            L += l.color * (boost * l.volumetric) * (atten * HgEval(dot(d, ld), g)) * (total / w) * vis;
+        }
+    }
+    return L;
+}
+
+// One step through the medium along [0, tEnd] from o: a real collision consumes one event and reports the event point
+// (the returned distance) and the path's new direction (HG around the current one); the caller then traces the scene
+// again from there. When the event budget is spent the segment is handled by transmittance only.
+//   0 = the segment is done (no medium change), 1 = the ray bent (trace the scene again), 2 = the path ends here
+//   (the albedo roulette killed it, or the S9c validation build after its one event).
+int MediumStep(inout float3 o, inout float3 d, float tEnd, inout float3 T, inout float3 radiance, inout uint events,
+               inout uint rng, bool primary) {
+    if (!MediumOn()) return 0;
+#ifdef MMDX_MEDIUM_SINGLE_EVENT
+    // Validation build (the S9c correctness check): ONE event per path, sun + punctual NEE only. The event adds its NEE
+    // (and the sky's isotropic fill the fast pass adds as ambient * (1 - T), on the camera segment) and the path then
+    // continues unchanged, so this estimates exactly the single-scatter integral the fast pass marches -- only the
+    // sampling differs. Never set by the app.
+    if (events >= 1u) return 0;
+    if (primary) {
+        const float3 amb = (gSkyZenith + gSkyHorizon + gGroundColor) * (1.0 / 3.0) * gSunIntensity * 0.25;
+        radiance += T * amb * (1.0 - MediumTransmittance(o, d, tEnd, rng));
+    }
+#endif
+    if (events >= MediumMaxEvents()) {
+        T *= MediumTransmittance(o, d, tEnd, rng);
+        return 0;
+    }
+    float t;
+    float3 albedo;
+    if (!MediumSampleDistance(o, d, tEnd, rng, t, albedo)) return 0;
+    float3 p = o + d * t;
+    radiance += T * MediumNee(p, d, rng);
+    // scattering albedo: Russian roulette on its luminance (throughput *= albedo / the survival probability)
+    const float q = min(max(albedo.r, max(albedo.g, albedo.b)), 0.95);
+    if (q <= 0.0 || Rand(rng) > q) return 2;
+    T *= albedo / q;
+    ++events;
+#ifdef MMDX_MEDIUM_SINGLE_EVENT
+    return 0;   // validation: the event's NEE is the whole medium contribution; the ray continues unchanged
+#endif
+    d = HgSample(d, gMedium[0].g, float2(Rand(rng), Rand(rng)));
+    o = p;
+    return 1;
+}
+
 // Unshadowed irradiance from punctual light `li` (pi * colour * attenuation * N.L, so that Lambert
 // albedo / pi * E matches the raster albedo * colour * attenuation * N.L). Characters use the raster
 // soft toon terminator (faces: almost no N.L).
@@ -452,6 +602,10 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                                                   : float3(1, 1, 1));
             }
 
+            // S9c: the medium between the surface and the light dims / tints it as well (mode 0: 1, no random numbers)
+            if (MediumOn())
+                vis *= MediumShadowT(OffsetRayOrigin(s.pos, s.faceN), ld, max(dist - 0.05, 0.0), rng);
+
             if (evalDiff) {
                 float3 e = PI * l.color * atten * diff;
                 diffE = e * (total / pickedW) * vis;
@@ -519,7 +673,8 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                     vis = shadowTrans * (hitVis > 0.0 ? meshTrans * GlassShadow(po, dir, max(dist - 0.05, 0.0))
                                                       : float3(1, 1, 1));
                 }
-                specR += pSpec * lk.color * atten * vis * (s.pbr ? PtPbrEvalSpecular(s.pb, V, ld) : (1.0 / omega));
+                const float medT = MediumShadowT(OffsetRayOrigin(s.pos, s.faceN), ld, max(dist - 0.05, 0.0), rng);
+                specR += pSpec * lk.color * atten * vis * medT * (s.pbr ? PtPbrEvalSpecular(s.pb, V, ld) : (1.0 / omega));
             }
         }
     }
@@ -534,14 +689,17 @@ float3 PunctualIrradiance(Surf s, bool toon, inout uint rng) {
 // Sun visibility (soft cone sample), tinted by the glass it passes through.
 float3 SunVisibility(Surf s, inout uint rng) {
     if (!s.receive) return 1.0;
-    if (gSunShadowParams.x < 0.5) return 1.0;                       // NoCast
+    if (gSunShadowParams.x < 0.5)   // NoCast: the rays are clear, the medium still dims the sun
+        return MediumShadowT(s.pos, -gLightDir, 1e5, rng);
     float cosMax = SunShadowConeCos(kSunCosMax);
     float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, cosMax);
     float3 po = OffsetRayOrigin(s.pos, s.faceN);
     float3 meshTrans = TraceShadowRayTinted(po, sd, 1e5, 0xFFu);
     float v = Luminance(meshTrans);
     float3 trans = ShadowTransmission(v, gSunShadowParams.z, gSunShadowColor.rgb);
-    return trans * (v > 0.0 ? meshTrans * GlassShadow(po, sd, 1e5) : float3(1, 1, 1));
+    // S9c: the medium between the surface and the sun dims / tints the light reaching it
+    return trans * (v > 0.0 ? meshTrans * GlassShadow(po, sd, 1e5) : float3(1, 1, 1)) *
+           MediumShadowT(po, sd, 1e5, rng);
 }
 
 // Lambert irradiance from the sun and the punctual lights (one shadow ray each).
@@ -576,7 +734,8 @@ float SkinWeight(Surf s) {
 // incident light diffused under the skin (soft, red-fringed shadow edges).
 float3 SkinSunVisibility(Surf s, float skin, inout uint rng) {
     if (!s.receive) return 1.0;
-    if (gSunShadowParams.x < 0.5) return 1.0;                       // NoCast
+    if (gSunShadowParams.x < 0.5)   // NoCast: the rays are clear, the medium still dims the sun
+        return MediumShadowT(s.pos, -gLightDir, 1e5, rng).xxx;
     float cosMax = SunShadowConeCos(kSunCosMax);
     float3 t, b;
     BuildBasis(s.faceN, t, b);
@@ -590,7 +749,8 @@ float3 SkinSunVisibility(Surf s, float skin, inout uint rng) {
         float3 meshTrans = TraceShadowRayTinted(po, sd, 1e5, 0xFFu);
         float v = Luminance(meshTrans);
         float3 trans = ShadowTransmission(v, gSunShadowParams.z, gSunShadowColor.rgb);
-        vis[c] = (v > 0.0 ? trans * meshTrans * GlassShadow(po, sd, 1e5) : trans)[c];
+        vis[c] = (v > 0.0 ? trans * meshTrans * GlassShadow(po, sd, 1e5) : trans)[c] *
+                 MediumShadowT(po, sd, 1e5, rng);
     }
     return vis;
 }
@@ -617,7 +777,7 @@ float ExitDistance(float3 origin, float3 dir, float tMax) {
 
 // Light arriving from `dir` (unit, toward the light) through the skin behind the shaded point:
 // per-channel transmittance exp(-thickness / depth) times the light's visibility at the exit point.
-float3 SkinTransmittance(Surf s, float3 dir, float lightDist) {
+float3 SkinTransmittance(Surf s, float3 dir, float lightDist, inout uint rng) {
     float3 inside = s.pos - s.faceN * 0.004;   // just beneath the surface
     float d = ExitDistance(inside, dir, kSkinThicknessMax);
     if (d < 0.0) return 0.0;
@@ -626,7 +786,8 @@ float3 SkinTransmittance(Surf s, float3 dir, float lightDist) {
     float3 exitP = inside + dir * (d + 0.01);
     float3 meshVis = TraceShadowRayTinted(exitP, dir, max(lightDist - d, 0.0), 0xFFu);
     float vis = Luminance(meshVis);
-    return vis > 0.0 ? trans * meshVis * GlassShadow(exitP, dir, max(lightDist - d, 0.0)) : 0.0;
+    const float medT = MediumShadowT(exitP, dir, max(lightDist - d, 0.0), rng);
+    return vis > 0.0 ? trans * meshVis * GlassShadow(exitP, dir, max(lightDist - d, 0.0)) * medT : 0.0;
 }
 
 // Translucency of thin skin (ears, fingers) lit from behind by the sun and one punctual light
@@ -636,7 +797,7 @@ float3 SkinTranslucency(Surf s, float skin, inout uint rng) {
     float3 L = -gLightDir;
     if (dot(s.faceN, L) < 0.2) {
         float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), L, kSunCosMax);
-        c += SunIrradiance() * SkinTransmittance(s, sd, 1e5);
+        c += SunIrradiance() * SkinTransmittance(s, sd, 1e5, rng);
     }
     if (gNumLights >= 1.0) {
         uint nl = (uint)gNumLights;
@@ -649,7 +810,7 @@ float3 SkinTranslucency(Surf s, float skin, inout uint rng) {
         if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
         else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
         if (atten > 0.0 && dot(s.faceN, ld) < 0.2 && l.affectDiffuse > 0.5)
-            c += PI * l.color * atten * (float)nl * SkinTransmittance(s, ld, dist);
+            c += PI * l.color * atten * (float)nl * SkinTransmittance(s, ld, dist, rng);
     }
     return s.albedo / PI * c * kSkinTranslucency * skin;
 }
@@ -762,6 +923,7 @@ float3 GlassGlint(Surf s, float3 V, inout uint rng) {
             float vis = 1.0;
             if (gSunShadowParams.x > 0.5)
                 vis = Luminance(saturate(TraceShadowRayTinted(po, L, 1e5, 0xFFu)));
+            vis *= MediumShadowT(po, L, 1e5, rng);   // S9c: the medium dims the glint too
             c += spec * SunIrradiance() * ndl * vis;
         }
     }
@@ -779,7 +941,7 @@ float3 GlassGlint(Surf s, float3 V, inout uint rng) {
         if (atten <= 0.0 || nl2 <= 0.0) continue;
         float3 hh = normalize(ld + V);
         c += norm * pow(saturate(dot(s.n, hh)), e) * FresnelDielectric(saturate(dot(hh, V)), gGlassParams.z) *
-             PI * l.color * atten * nl2;
+             PI * l.color * atten * nl2 * MediumShadowT(s.pos, ld, max(dist - 0.05, 0.0), rng);
     }
     return c;
 }
@@ -798,6 +960,7 @@ float3 FresnelGlint(Surf s, float3 V, inout uint rng) {
         if (spec > 1e-3) {
             float3 po = OffsetRayOrigin(s.pos, s.faceN);
             float3 vis = gSunShadowParams.x > 0.5 ? TraceShadowRayTinted(po, L, 1e5, 0xFFu) : float3(1, 1, 1);
+            vis *= MediumShadowT(po, L, 1e5, rng);   // S9c: the medium dims the glint too
             c += spec * SunIrradiance() * ndl * vis;
         }
     }
@@ -815,7 +978,7 @@ float3 FresnelGlint(Surf s, float3 V, inout uint rng) {
         if (atten <= 0.0 || nl2 <= 0.0) continue;
         float3 hh = normalize(ld + V);
         c += norm * pow(saturate(dot(s.n, hh)), e) * FresnelDielectric(saturate(dot(hh, V)), ior) * PI * l.color *
-             atten * nl2;
+             atten * nl2 * MediumShadowT(s.pos, ld, max(dist - 0.05, 0.0), rng);
     }
     return c;
 }
@@ -887,10 +1050,27 @@ float3 GatherPath(float3 o, float3 d, float tMin, inout uint rng) {
     float3 L = 0, T = 1;
     int ch = -1;
     uint glassEvents = 0u;
+    uint medEvents = 0;   // S9c: medium events of the whole gather path (MediumMaxEvents, then transmittance)
     [loop] for (uint depth = 0; depth < kGatherDepth; ++depth) {
         Surf y;
         float t;
-        if (!TraceScene(o, d, depth == 0u ? tMin : 0.0, rng, 1.0, y, t)) {
+        bool hit = TraceScene(o, d, depth == 0u ? tMin : 0.0, rng, 1.0, y, t);
+        // S9c: the gather paths run the same medium (the cache then holds fogged irradiance): a scattering event adds its
+        // NEE and bends the ray, so the segment is traced again from the event point.
+        bool ended = false;
+        if (MediumOn()) {
+            [loop] for (uint guard = 0; guard <= kMediumMaxEvents; ++guard) {
+                const int step = MediumStep(o, d, hit ? t : 1e30, T, L, medEvents, rng, false);
+                if (step == 0) break;
+                if (step == 2) {
+                    ended = true;
+                    break;
+                }
+                hit = TraceScene(o, d, 0.0, rng, 1.0, y, t);
+            }
+        }
+        if (ended) break;
+        if (!hit) {
             L += T * Background(d);
             break;
         }
@@ -1207,17 +1387,44 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
     bool viaMesh = false;        // S2b: the path went through a mesh dielectric (sample mips, like PT after bounce 0)
     float tMinNext = 0.0;
     bool primHit = false;
+    bool primLocked = false;     // S9c: a medium event already wrote the guides (item 7)
     float3 primAlbedo = 1, primN = 0;
     float primZ = 1e6, primT = 0.0, chainT = 0.0;
     uint primId = 0;
+    uint medEvents = 0;          // S9c: medium scattering events this path (MediumMaxEvents, then transmittance)
     const uint maxDepth = gP3.x >= 1.0 ? min((uint)gP3.x, kMaxDepth) : kMaxDepth;
     [loop] for (uint depth = 0; depth <= maxDepth; ++depth) {
         Surf s;
         float t;
+        bool ended = false;      // S9c: the medium ended the path (albedo roulette / the validation build)
         // mip 0 only for the camera / mirror chain; a mesh dielectric's refracted ray reads mips, so the surface seen
         // through a glass block is filtered (pathtrace.hlsl samples mip 2 after bounce 0 the same way)
         const float lod = viaMesh ? 2.0 : (specChain ? 0.0 : 1.0);
-        if (!TraceScene(o, d, depth == 0u ? gNearZ : tMinNext, rng, lod, s, t)) {
+        bool hit = TraceScene(o, d, depth == 0u ? gNearZ : tMinNext, rng, lod, s, t);
+        // S9c: every path segment travels through the medium: delta tracking up to the hit (or to the haze sphere's exit
+        // for a miss); a scattering event adds its NEE and bends the ray, so the scene is traced again from it.
+        if (MediumOn()) {
+            [loop] for (uint guard = 0; guard <= kMediumMaxEvents; ++guard) {
+                const int step = MediumStep(o, d, hit ? t : 1e30, T, radiance, medEvents, rng,
+                                            depth == 0u && specChain && !primLocked);
+                if (step == 0) break;
+                if (step == 2) {
+                    ended = true;
+                    break;
+                }
+                if (specChain && !primLocked) {   // the first interaction of a camera ray is in the medium: the guides
+                    primHit = true;
+                    primLocked = true;
+                    primAlbedo = MediumAlbedo(o);
+                    primN = normalize(-d0);       // the view direction as the normal guide
+                    primZ = max(mul(float4(o, 1.0), gView).z, gNearZ);
+                    primT = primZ / max(dot(d0, gInvView[2].xyz), 1e-3);   // (depth = distance x the view axis)
+                }
+                hit = TraceScene(o, d, 0.0, rng, lod, s, t);
+            }
+        }
+        if (ended) break;
+        if (!hit) {
             // transparent export: a primary camera ray (still before its first opaque hit, glass included) that
             // leaves the scene outputs the background override; indirect / bounce misses keep the real sky.
             radiance += T * ((gBgOverride.w > 0.5 && specChain) ? gBgOverride.xyz : Background(d));
@@ -1299,26 +1506,28 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
         if (isPtPackHit) { isPbrHit = false; s.pbr = false; }
 #endif
         if (specChain) {
-            primHit = true;
-            primAlbedo = s.albedo;
-            primN = s.n;
-            // virtual depth along the glass chain (a reflection may hit something behind the camera)
-            primZ = max(chainT * dot(d0, gInvView[2].xyz), gNearZ);
-            primT = chainT;
-            uint modelIdx = (s.g.flags >> 24) & 0xFFu;
-            uint isChar = (s.g.flags & RTG_CHARACTER) ? 0x80u : 0u;
-            uint packClass = 7u;
-            uint tag = 0u;
+            if (!primLocked) {   // S9c: a medium event before the surface kept the guides (item 7)
+                primHit = true;
+                primAlbedo = s.albedo;
+                primN = s.n;
+                // virtual depth along the glass chain (a reflection may hit something behind the camera)
+                primZ = max(chainT * dot(d0, gInvView[2].xyz), gNearZ);
+                primT = chainT;
+                uint modelIdx = (s.g.flags >> 24) & 0xFFu;
+                uint isChar = (s.g.flags & RTG_CHARACTER) ? 0x80u : 0u;
+                uint packClass = 7u;
+                uint tag = 0u;
 #ifdef MMDX_PT_PACK
-            if (isPtPackHit) {
-                RtPtPackRecord rec = LoadPtPackRecord(s.g.packSrv);
-                packClass = rec.materialClass & 0x7u;
+                if (isPtPackHit) {
+                    RtPtPackRecord rec = LoadPtPackRecord(s.g.packSrv);
+                    packClass = rec.materialClass & 0x7u;
 #if defined(PACK_CAP_SURFACE_OUTPUT) && PACK_CAP_SURFACE_OUTPUT
-                tag = ptPackOut.tag & 0xFu;
+                    tag = ptPackOut.tag & 0xFu;
 #endif
+                }
+#endif
+                primId = (tag & 0xFu) | ((packClass & 0x7u) << 4) | isChar | (modelIdx << 8);
             }
-#endif
-            primId = (tag & 0xFu) | ((packClass & 0x7u) << 4) | isChar | (modelIdx << 8);
             specChain = false;
         }
 

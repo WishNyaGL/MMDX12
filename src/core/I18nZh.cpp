@@ -1361,6 +1361,8 @@ const Entry kChinese[] = {
     {"안개 색", "雾颜色"},
     {"안개", "雾"},
     {"환경 안개", "环境雾"},
+    {"정밀 안개 계산", "精确雾计算"},
+    {"오프라인 GI에서 안개를 경로 추적으로 계산", "离线 GI 沿路径计算雾气"},
 };
 const int kChineseCount = (int)(sizeof(kChinese) / sizeof(kChinese[0]));
 

@@ -98,6 +98,7 @@ struct VideoRenderConfig {
     bool bloomConvolution = false;
     bool volumetric = false;
     float volumetricDensity = 1.0f;  // 0.25 .. 4
+    bool volumetricFull = true;      // S9c: GI computes the medium in the paths (off = the single-scatter pass)
     bool dof = false;
     float dofAperture = 1.0f;        // 0.2 .. 3
     // Transparent-background export (P2.3): write a straight-alpha RGBA8 PNG sequence instead of an MP4.

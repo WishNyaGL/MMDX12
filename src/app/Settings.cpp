@@ -194,6 +194,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "dofAperture" && ParseFloat(value, f)) dofAperture = f;
         else if (key == "volumetric" && ParseBool(value, b)) volumetric = b;
         else if (key == "volumetricDensity" && ParseFloat(value, f)) volumetricDensity = f;
+        else if (key == "volumetricFull" && ParseBool(value, b)) volumetricFull = b;
         else if (key == "bloomConvolution" && ParseBool(value, b)) bloomConvolution = b;
         else if (key == "bloomIntensity" && ParseFloat(value, f)) bloomIntensity = std::clamp(f, 0.0f, 1.5f);
         else if (key == "bloomThreshold" && ParseFloat(value, f)) bloomThreshold = std::clamp(f, 0.2f, 4.0f);
@@ -242,6 +243,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "videoBloomConvolution" && ParseBool(value, b)) video.bloomConvolution = b;
         else if (key == "videoVolumetric" && ParseBool(value, b)) video.volumetric = b;
         else if (key == "videoVolumetricDensity" && ParseFloat(value, f)) video.volumetricDensity = f;
+        else if (key == "videoVolumetricFull" && ParseBool(value, b)) video.volumetricFull = b;
         else if (key == "videoDof" && ParseBool(value, b)) video.dof = b;
         else if (key == "videoDofAperture" && ParseFloat(value, f)) video.dofAperture = f;
         else if (key == "videoAlpha" && ParseBool(value, b)) video.alpha = b;
@@ -640,7 +642,8 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     std::fprintf(f, "ptSamples=%d\n", ptSamples);
     std::fprintf(f, "ptBounces=%d\n", ptBounces);
     std::fprintf(f, "dof=%d\ndofAperture=%.3f\n", dof ? 1 : 0, dofAperture);
-    std::fprintf(f, "volumetric=%d\nvolumetricDensity=%.3f\n", volumetric ? 1 : 0, volumetricDensity);
+    std::fprintf(f, "volumetric=%d\nvolumetricDensity=%.3f\nvolumetricFull=%d\n", volumetric ? 1 : 0, volumetricDensity,
+                 volumetricFull ? 1 : 0);
     std::fprintf(f, "bloomConvolution=%d\n", bloomConvolution ? 1 : 0);
     std::fprintf(f, "bloomIntensity=%.3f\nbloomThreshold=%.3f\n", bloomIntensity, bloomThreshold);
     std::fprintf(f, "bloomRadius=%.3f\nbloomBlend=%d\nbloomDepthMask=%.3f\n", bloomLook.radius, bloomLook.blend,
@@ -655,7 +658,8 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
                  video.bitrateMbps, video.quality);
     std::fprintf(f, "videoRenderer=%d\nvideoBloom=%d\nvideoBloomConvolution=%d\nvideoVolumetric=%d\n", video.renderer,
                  video.bloom ? 1 : 0, video.bloomConvolution ? 1 : 0, video.volumetric ? 1 : 0);
-    std::fprintf(f, "videoVolumetricDensity=%.3f\nvideoDof=%d\nvideoDofAperture=%.3f\n", video.volumetricDensity,
+    std::fprintf(f, "videoVolumetricDensity=%.3f\nvideoVolumetricFull=%d\nvideoDof=%d\nvideoDofAperture=%.3f\n",
+                 video.volumetricDensity, video.volumetricFull ? 1 : 0,
                  video.dof ? 1 : 0, video.dofAperture);
     std::fprintf(f, "videoAlpha=%d\n", video.alpha ? 1 : 0);
     for (const VideoProbe& pr : videoProbes)

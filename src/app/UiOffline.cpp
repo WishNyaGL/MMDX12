@@ -36,6 +36,9 @@ OfflineJobDesc MakeJobDesc(const AppOptions& o, const AppSettings& st, const Vid
     j.bloomLook = st.bloomLook;
     j.volumetric = video ? v.volumetric : st.volumetric;
     j.volumetricDensity = video ? v.volumetricDensity : st.volumetricDensity;
+    // S9c: the medium mode of the GI paths (--offline-volumetric overrides it for one run).
+    j.volumetricFull = video ? v.volumetricFull : st.volumetricFull;
+    if (o.offlineVolumetric >= 0) j.volumetricFull = o.offlineVolumetric != 0;
     j.volumetricAnisotropy = st.volumetricAnisotropy;
     j.dof = video ? v.dof : st.dof;
     j.dofAperture = video ? v.dofAperture : st.dofAperture;
@@ -744,6 +747,7 @@ void App::RecordStudioGiViewport(ID3D12GraphicsCommandList* cmd, FrameView& view
     key = FnvFloat(key, job.dofAperture);
     key = FnvInt(key, job.volumetric ? 1 : 0);
     key = FnvFloat(key, job.volumetricDensity);
+    key = FnvInt(key, job.volumetricFull ? 1 : 0);
     key = FnvFloat(key, view.focusDistance);
     key = FnvFloat(key, view.apertureScale);
     key = FnvEffects(key, job.effects);
@@ -1186,6 +1190,7 @@ VideoRenderConfig App::ActiveVideoConfig() const {
     if (options_.dof >= 0) c.dof = options_.dof != 0;
     if (options_.volumetric >= 0) c.volumetric = options_.volumetric != 0;
     if (options_.volumetricDensity > 0.0f) c.volumetricDensity = options_.volumetricDensity;
+    if (options_.offlineVolumetric >= 0) c.volumetricFull = options_.offlineVolumetric != 0;
     if (options_.bloomConv >= 0) c.bloomConvolution = options_.bloomConv != 0;
     c.Clamp();
     return c;

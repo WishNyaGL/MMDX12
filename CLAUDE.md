@@ -250,6 +250,16 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     180 or the stage's `radius`, grown to hold every fog volume) is marched up to `VolumetricMaxDistance` (400, or far
     enough to cross the sphere from a distant eye). g = -1 means unset everywhere (negative g is valid backscatter).
     A fog stage turns the haze on for its play scene only (`App::stageFogVolumetric_`, never saved in the ini).
+    S9c in-path media (`OfflineJobDesc::volumetricFull`, the default; ini `volumetricFull=` / `videoVolumetricFull=`,
+    `--offline-volumetric single|full`, the render dialogs' "정밀 안개 계산"): the offline GI paths compute the same medium
+    themselves (`shaders/medium_common.hlsli`: grey extinction, scattering albedo = the tint, HG phase, delta tracking
+    against a per-segment majorant, ratio tracking / closed form for shadow rays, `kMediumMaxEvents` 32 then transmittance
+    only). Every segment of every path (camera, bounces, prepass gather paths) travels through it, at each scattering event
+    sun + one punctual NEE (phase weighted, times the light's `volumetric` share and the medium transmittance) and the path
+    continues along the HG phase, so bounce light, emissive surfaces, the sky and the fog itself light the fog and the fog
+    dims the light reaching the surfaces. `GpuMedium` (t5 space1, one element) carries the medium; `mode` 0 = off (the image
+    is the pre-S9c one, no tracking loop entered). Full skips the single-scatter pass (no double counting); raster / RT / PT
+    keep it. A pixel whose first interaction is in the medium writes the medium albedo and the view direction as its guides.
     Defaults (no volumes, share 1, g unset, eye within 220 of the origin) reproduce the pre-S9 image.
     AutoLuminous (そぼろ convention, native): `GpuModel::Create` flags a non-PBR material with black specular and
     specular power >= 100 as `MatFlag_AutoLuminous` (cleared for pack-shaded materials); `AutoLumEmission`

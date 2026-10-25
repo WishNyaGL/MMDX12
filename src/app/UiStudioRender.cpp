@@ -206,6 +206,8 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
         if (settings_.volumetric) {
             Gap(4.0f);
             changed |= SliderRow("##vold", Tr("안개 밀도"), &settings_.volumetricDensity, 0.25f, 4.0f, "%.2f");
+            changed |= Switch("##volfull", Tr("정밀 안개 계산"), &settings_.volumetricFull,
+                              Tr("오프라인 GI에서 안개를 경로 추적으로 계산"));
             Gap(4.0f);
         }
         changed |= Switch("##ssao", Tr("앰비언트 오클루전"), &settings_.ssao);

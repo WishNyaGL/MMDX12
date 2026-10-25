@@ -75,6 +75,9 @@ struct OfflineJobDesc {
     BloomLook bloomLook;             // RenderSettings::bloomLook
     bool volumetric = false;         // sun shafts + spotlight cones, sun shadowed with ray queries
     float volumetricDensity = 1.0f;  // 0.25 .. 4
+    // S9c: true = the GI paths compute the medium (full: every path segment travels through the haze, the
+    // single-scatter pass does not run); false = the single-scatter pass only (Single, as before S9c).
+    bool volumetricFull = true;
     // S9: the fog's Henyey-Greenstein anisotropy; -1 = the built-in constants (sun 0.55, punctual 0.3).
     float volumetricAnisotropy = -1.0f;
     // Thin-lens depth of field focused on FrameView::focusDistance; the lens radius scales with dofAperture and
