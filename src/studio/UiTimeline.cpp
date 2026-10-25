@@ -1255,6 +1255,11 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                 const std::string kid = "##tlkey:" + r.label + ":" + std::to_string(k.frame);
                 uiprobe::Add(kid.c_str(), r.label.c_str(), ImVec2(kx - radius, rowY - radius), ImVec2(kx + radius, rowY + radius));
             }
+            if (!k.label.empty()) {   // the key's own caption (a camera switch key: the camera it switches to)
+                Text(dl, Font::Regular, size::Caption, ImVec2(std::round(kx + radius + Dp(3.0f)),
+                                                              std::round(rowY - Dp(size::Caption * 0.65f))),
+                     r.keysEditable ? WithAlpha(p.ink2, 0.9f) : p.ink3, k.label.c_str());
+            }
 
             if (dragged) {
                 float gx = originX + (k.frame + view.dragDelta - view.scrollFrame) * view.pxPerFrame * Dpi();

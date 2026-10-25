@@ -40,7 +40,8 @@ bool PerspectiveAt(const std::vector<CameraKf>& keys, float frame) {
 // ---------------------------------------------------------------------------
 
 bool App::StudioCameraPerspective(float frame) const {
-    return PerspectiveAt(studio_->camera.camera, frame);
+    const StudioDoc& d = *studio_;
+    return PerspectiveAt(d.CameraKeys(d.ActiveCameraUidAt((int)frame)), frame);
 }
 
 void App::StudioOrthoCamera(CameraPose& pose, CameraParams& camera) const {
@@ -186,8 +187,9 @@ void App::DrawStudioCameraPanel(float w) {
     {
         const char* modes[] = {Tr("카메라 모션"), Tr("자유 카메라")};
         const char* modeIcons[] = {icon::VideoCamera, icon::Crosshair};
-        int mode = d.useMotionCamera && d.cameraEval ? 0 : 1;
-        ImGui::BeginDisabled(!d.cameraEval);
+        const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(d.Frame());  // S4: the camera shown now
+        int mode = d.useMotionCamera && eval ? 0 : 1;
+        ImGui::BeginDisabled(!d.HasCameraKeys());
         if (Segmented("##viewmode", modes, 2, &mode, w / Dpi(), 32.0f, modeIcons)) {
             d.useMotionCamera = mode == 0;
             if (mode == 1) StudioPossess(false);  // a free view is not the possessed camera
@@ -196,7 +198,7 @@ void App::DrawStudioCameraPanel(float w) {
         ImGui::Dummy(ImVec2(w, Dp(6.0f)));
         if (Button("##camkey", Tr("현재 시점을 키로 등록"), icon::Plus, ButtonKind::Secondary, ImVec2((w - 2.0f * bw) / Dpi() - 12.0f, btn)))
             StudioKeyCameraFromView();
-        Tooltip(d.useMotionCamera && d.cameraEval ? Tr("카메라 모션의 현재 값으로 키를 만들어요.")
+        Tooltip(d.useMotionCamera && eval ? Tr("카메라 모션의 현재 값으로 키를 만들어요.")
                                                   : Tr("자유 카메라로 보고 있는 시점으로 키를 만들어요."));
         ImGui::SameLine(0, Dp(6.0f));
         if (IconButton("##campossess", icon::Crosshair, d.possessCamera ? Tr("카메라 빙의 해제  (Esc)") : Tr("카메라 빙의: 뷰포트 조작이 이 카메라를 움직여요"),
@@ -237,7 +239,7 @@ void App::DrawStudioCameraPanel(float w) {
     // While a camera key sits at the playhead the key section below edits it instead (one set of fields, no ID clash).
     if (!compact) {
         separator(8.0f);
-        const bool keyed = FindKey(d.camera.camera, d.Frame()) != nullptr;
+        const bool keyed = FindKey(d.SelectedCameraTrack().camera, d.Frame()) != nullptr;  // S4: the selected camera
         const ImVec2 c = ImGui::GetCursorScreenPos();
         Text(cdl, Font::Semibold, size::Small, c, p.ink2, Tr("카메라 값"));
         // key state at the playhead: filled = key here, hollow = interpolated between keys
@@ -319,6 +321,18 @@ void App::DrawStudioCameraPanel(float w) {
     // --- depth-of-field focus track
     separator(8.0f);
     DrawStudioFocusSection(w);
+    // --- S4: camera VMD export and the switch track (MMD has one camera track: flatten the cuts into it)
+    separator(8.0f);
+    {
+        Switch("##vmdflatten", Tr("VMD 내보내기에 전환 반영"), &studioVmdFlatten_,
+               Tr("카메라 VMD를 내보낼 때 전환 트랙을 하나의 카메라 트랙으로 펴서 MMD에서도 같은 컷이 나오게 해요"));
+        char note[96];
+        if (d.cameraSwitch.empty()) std::snprintf(note, sizeof(note), "%s", Tr("전환 키 없음 · 메인 카메라만"));
+        else std::snprintf(note, sizeof(note), Tr("전환 키 %d개"), (int)d.cameraSwitch.size());
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        Text(cdl, Font::Regular, size::Caption, ImVec2(c.x, c.y + Dp(2.0f)), p.ink3, note);
+        ImGui::Dummy(ImVec2(w, Dp(18.0f)));
+    }
     separator(10.0f);
     ImGui::Dummy(ImVec2(w, Dp(2.0f)));
 }
@@ -354,7 +368,8 @@ bool App::DrawStudioCameraKeyFields(float w, RowKind kind, int frame, bool live)
     if (kind == RowKind::Camera) {
         ImGui::PushID(live ? "camlive" : "camkey");  // the playhead and selected-key copies never share widget IDs
         struct PopId { ~PopId() { ImGui::PopID(); } } popId;
-        CameraKf* k = FindKey(d.camera.camera, frame);
+        std::vector<CameraKf>& camKeys = d.SelectedCameraTrack().camera;  // S4: the selected camera's keys
+        CameraKf* k = FindKey(camKeys, frame);
         // live: the fields of the playhead. They always show the camera in effect (a key or the interpolated / free
         // view); editing one keys it here when auto-key is on (or the key already exists), like Adobe / Blender.
         CameraKf cur;
@@ -397,7 +412,7 @@ bool App::DrawStudioCameraKeyFields(float w, RowKind kind, int frame, bool live)
                 k->perspective = cur.perspective;
             } else {
                 cur.frame = frame;
-                UpsertKey(d.camera.camera, cur);  // auto-key: the edit creates the key under the playhead
+                UpsertKey(camKeys, cur);  // auto-key: the edit creates the key under the playhead
             }
             if (live) d.useMotionCamera = true;  // show the effect of the edit (a free view becomes the keyed camera)
             ++d.cameraVersion;
@@ -484,16 +499,22 @@ bool App::DrawStudioCameraKeyFields(float w, RowKind kind, int frame, bool live)
 
 void App::StudioUpdateCameraPath() {
     StudioDoc& d = *studio_;
-    if (studioCamPathVersion_ == d.cameraEvalVersion && !studioCamPath_.empty()) return;
+    // S4: the path of the SELECTED camera (its keys are the ones the camera rows edit)
+    if (studioCamPathVersion_ == d.cameraEvalVersion && studioCamPathUid_ == d.selectedCameraUid &&
+        !studioCamPath_.empty())
+        return;
     studioCamPath_.clear();
     studioCamKeys_.clear();
     studioCamPathVersion_ = d.cameraEvalVersion;  // the evaluator the samples come from
-    if (!d.cameraEval || d.camera.camera.empty()) return;
-    const int first = d.camera.camera.front().frame, last = d.camera.camera.back().frame;
+    studioCamPathUid_ = d.selectedCameraUid;
+    const std::vector<CameraKf>& camKeys = d.SelectedCameraTrack().camera;
+    const std::shared_ptr<CameraMotion>& eval = d.SelectedCameraEval();
+    if (!eval || camKeys.empty()) return;
+    const int first = camKeys.front().frame, last = camKeys.back().frame;
     const int stride = std::max(1, (last - first) / 20000 + 1);  // bounded cost on very long cameras
     studioCamPathStride_ = stride;
     const auto sample = [&](float f) {
-        const CameraPose pose = d.cameraEval->Evaluate(f);
+        const CameraPose pose = eval->Evaluate(f);
         CameraPathPoint pt;
         CameraMotion::ToView(pose, &pt.view, &pt.eye);
         pt.target = pose.target;
@@ -502,7 +523,7 @@ void App::StudioUpdateCameraPath() {
         return pt;
     };
     for (int f = first; f <= last; f += stride) studioCamPath_.push_back(sample((float)f));
-    for (const CameraKf& k : d.camera.camera) studioCamKeys_.push_back(sample((float)k.frame).eye);
+    for (const CameraKf& k : camKeys) studioCamKeys_.push_back(sample((float)k.frame).eye);
 }
 
 
@@ -531,7 +552,7 @@ void App::StudioPossess(bool on) {
     d.possessCamera = on;
     if (on) {
         d.selectedModel = -1;  // the camera row is the possessed object
-        if (d.cameraEval) d.useMotionCamera = true;  // look through the camera that is being edited
+        if (d.SelectedCameraEval()) d.useMotionCamera = true;  // look through the camera that is being edited
         studioCamHandle_ = 0;
     }
 }
@@ -539,7 +560,8 @@ void App::StudioPossess(bool on) {
 void App::StudioWriteCamera(const FreeCamera& cam, const CameraKf* base, bool takeView) {
     StudioDoc& d = *studio_;
     const int frame = d.Frame();
-    CameraKf* key = FindKey(d.camera.camera, frame);
+    std::vector<CameraKf>& camKeys = d.SelectedCameraTrack().camera;  // S4: possession edits the selected camera
+    CameraKf* key = FindKey(camKeys, frame);
     if (!key && !d.autoKey) {
         toast_ = {Tr("이 프레임에 카메라 키가 없어요"), Tr("자동 키를 켜거나 키를 먼저 등록하세요."), {}, false, timeSeconds_ + 3.0};
         return;
@@ -561,7 +583,7 @@ void App::StudioWriteCamera(const FreeCamera& cam, const CameraKf* base, bool ta
         key->fovDeg = k.fovDeg;  // the interpolation curves stay
     } else {
         k.frame = frame;
-        UpsertKey(d.camera.camera, k);
+        UpsertKey(camKeys, k);
     }
     if (takeView) d.useMotionCamera = true;  // possession looks through the edited camera; handles keep the free view
     ++d.cameraVersion;
@@ -590,7 +612,7 @@ void App::StudioNavEditTick() {
 void App::StudioRenderRect(float x0, float y0, float x1, float y1, float out[4]) const {
     const StudioDoc& d = *studio_;
     out[0] = x0; out[1] = y0; out[2] = x1 - x0; out[3] = y1 - y0;
-    if (d.viewLayout != 0 || !d.frameMask || !d.useMotionCamera || !d.cameraEval) return;
+    if (d.viewLayout != 0 || !d.frameMask || !d.useMotionCamera || !d.ActiveCameraEval(d.Frame())) return;
     const float area[4] = {x0, y0, x1 - x0, y1 - y0};
     FitInArea(area, (float)d.aspectW, (float)d.aspectH, out);
     for (int i = 0; i < 4; ++i) out[i] = std::floor(out[i]);  // whole pixels: the 3D image and the mask agree
@@ -601,7 +623,7 @@ void App::DrawStudioFrameMask(float x0, float y0, float x1, float y1) {
     StudioDoc& d = *studio_;
     float r[4];
     StudioRenderRect(x0, y0, x1, y1, r);
-    const bool locked = d.viewLayout == 0 && d.frameMask && d.useMotionCamera && d.cameraEval;
+    const bool locked = d.viewLayout == 0 && d.frameMask && d.useMotionCamera && d.ActiveCameraEval(d.Frame());
     if (!locked) return;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImU32 bar = IM_COL32(14, 17, 22, 255);
@@ -633,7 +655,8 @@ void App::DrawStudioCameraPath(float x0, float y0, float x1, float y1) {
     using namespace ui;
     StudioDoc& d = *studio_;
     const bool cameraSelected = (d.selectedModel < 0 && d.selectedLightUid == 0);
-    if (!cameraSelected || !d.showCameraPath || (d.useMotionCamera && d.cameraEval) || !d.cameraEval) return;
+    if (!cameraSelected || !d.showCameraPath || (d.useMotionCamera && d.SelectedCameraEval()) || !d.SelectedCameraEval())
+        return;
     StudioUpdateCameraPath();
     if (studioCamPath_.empty()) return;
     const float frame = (float)(d.time * kMmdFps);
@@ -641,7 +664,8 @@ void App::DrawStudioCameraPath(float x0, float y0, float x1, float y1) {
     // frame would cover the view.
     int lo, hi;
     StudioCameraPathWindow(lo, hi);
-    const std::vector<CameraKf>& keys = d.camera.camera;
+    const std::vector<CameraKf>& keys = d.SelectedCameraTrack().camera;
+    if (keys.empty()) return;
     const int first = keys.front().frame, stride = studioCamPathStride_;
     const int p0 = std::clamp((lo - first) / stride, 0, (int)studioCamPath_.size() - 1);
     const int p1 = std::clamp((hi - first) / stride + 1, 0, (int)studioCamPath_.size() - 1);
@@ -654,7 +678,7 @@ void App::DrawStudioCameraPath(float x0, float y0, float x1, float y1) {
         for (int i = k0; i < k1; ++i)
             if (d.selection.count({row, keys[(size_t)i].frame})) selected.insert(i - k0);
     }
-    const CameraPose pose = d.cameraEval->Evaluate(frame);
+    const CameraPose pose = d.SelectedCameraEval()->Evaluate(frame);
     CameraPathPoint cur;
     CameraMotion::ToView(pose, &cur.view, &cur.eye);
     cur.target = pose.target;
@@ -712,19 +736,21 @@ void App::StudioCameraPathWindow(int& lo, int& hi) const {
 
 bool App::StudioPickCameraKey(ImVec2 mouse) {
     StudioDoc& d = *studio_;
-    if (d.selectedModel >= 0 || d.selectedLightUid != 0 || !d.showCameraPath || (d.useMotionCamera && d.cameraEval) || !d.cameraEval) return false;
+    if (d.selectedModel >= 0 || d.selectedLightUid != 0 || !d.showCameraPath || (d.useMotionCamera && d.SelectedCameraEval()) ||
+        !d.SelectedCameraEval())
+        return false;
     StudioUpdateCameraPath();
     int lo, hi;
     StudioCameraPathWindow(lo, hi);
     const auto byFrame = [](const CameraKf& k, int f) { return k.frame < f; };
-    const auto& keys = d.camera.camera;
+    const std::vector<CameraKf>& keys = d.SelectedCameraTrack().camera;
     const int k0 = (int)(std::lower_bound(keys.begin(), keys.end(), lo, byFrame) - keys.begin());
     const int k1 = (int)(std::lower_bound(keys.begin(), keys.end(), hi + 1, byFrame) - keys.begin());
     if (k1 <= k0 || k1 > (int)studioCamKeys_.size()) return false;
     int i = PickCameraKey(studioVp_, studioCamKeys_.data() + k0, k1 - k0, mouse, ui::Dp(7.0f));
     if (i < 0) return false;
     i += k0;
-    const int frame = d.camera.camera[(size_t)i].frame;
+    const int frame = keys[(size_t)i].frame;
     const uint64_t row = RowOf(RowKind::Camera);
     if (!ImGui::GetIO().KeyCtrl) { d.selection.clear(); d.selectedRows.clear(); }
     d.selection.insert({row, frame});

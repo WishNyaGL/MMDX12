@@ -724,6 +724,14 @@ private:
     bool StudioReplaceModel(int index, studio::StudioPackageModel& pm, std::string* note);
     void StudioClearEditState();                      // undo history, selection, clipboard, drags (model list changed)
     void StudioSelectModel(int index);                // -1 camera
+    // --- S4: camera entities (uitudio camera outliner / project / script)
+    void StudioSelectCamera(uint32_t uid);            // 0 = the main camera; also selects the camera target
+    void DrawStudioCameraOutliner();                  // the camera rows under the outliner's 장면 group
+    void DrawStudioCameraRename();                    // the camera rename modal (outliner double click / menu)
+    void DrawStudioCameraGizmos(float x0, float y0, float x1, float y1);  // frustums of the other cameras
+    void StudioAddCameraFromView();                   // new extra camera from the current view (undoable)
+    void StudioImportStageCameras();                  // one static-key camera per stage.json camera (undoable)
+    void StudioSwitchCameraAt(int frame, uint32_t uid);  // the active-camera switch track: a key at `frame`
     // A freshly added / opened character with no shader choice: SuggestShaderPack for its library id (never applies).
     void StudioSuggestShader(studio::StudioModel& m);
     DirectX::XMFLOAT4X4 StudioPropRoot(const studio::StudioModel& m) const;  // world matrix of a prop's origin
@@ -1414,6 +1422,8 @@ private:
     bool recoveryPrompt_ = false;
     int studioRenameModel_ = -1;                   // outliner rename popup target
     int studioRemoveModel_ = -1;                   // outliner remove confirmation target
+    int studioRenameCamera_ = -1;                  // S4: outliner camera rename popup target (-1 = none); value = uid + 1
+    bool studioVmdFlatten_ = true;                 // S4: "전환 반영": camera VMD export flattens the switch track in
     std::string studioLoadTitle_;                  // Loading screen title while a project opens (empty: library scene)
     char studioRenameBuf_[128] = {};
     char studioAddFilter_[64] = {};
@@ -1456,6 +1466,7 @@ private:
     std::vector<studio::CameraPathPoint> studioCamPath_;  // motion camera samples (per frame, strided when long)
     std::vector<DirectX::XMFLOAT3> studioCamKeys_;   // eye at each camera key
     uint64_t studioCamPathVersion_ = 0;
+    uint32_t studioCamPathUid_ = 0;                  // S4: the camera the samples were built for (selectedCameraUid)
     int studioCamPathStride_ = 1;
     // scene light editing
     int studioLightPresetPending_ = -1;

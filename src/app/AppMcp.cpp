@@ -1228,7 +1228,7 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         studio::StudioDoc& d = *studio_;
         const bool key = args.value("key", false);
         FreeCamera cam = freeCam_;
-        if (d.useMotionCamera && !d.camera.camera.empty()) {  // start from what the viewport shows
+        if (d.useMotionCamera && !d.SelectedCameraTrack().camera.empty()) {  // start from what the viewport shows
             const studio::CameraKf k = StudioViewedCamera(d.Frame());
             cam.target = k.target;
             cam.pitch = -k.rotation.x;
@@ -1245,7 +1245,7 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
         if (args.contains("fov_deg")) cam.fovDeg = args["fov_deg"].get<float>();
         if (key) {
             // the motion camera's key at the playhead (inserted first when there is none, one undo step each)
-            if (!studio::FindKey(d.camera.camera, d.Frame()) && !d.autoKey) {
+            if (!studio::FindKey(d.SelectedCameraTrack().camera, d.Frame()) && !d.autoKey) {
                 const int sel = d.selectedModel;
                 d.selectedModel = -1;  // camera rows belong to the camera selection
                 StudioInsertKeys({studio::MakeRowId(studio::RowKind::Camera, 0, 0)}, d.Frame());
@@ -1259,7 +1259,7 @@ void App::ExecuteMcp(const std::string& tool, const nlohmann::json& args, std::s
             d.useMotionCamera = false;  // the free view (the motion camera's keys stay)
         }
         promise->Resolve({{"view", d.useMotionCamera ? "motion_camera" : "free"}, {"keyed", key}, {"frame", d.Frame()},
-                          {"camera_keys", d.camera.camera.size()}});
+                          {"camera_keys", d.SelectedCameraTrack().camera.size()}});
         return;
     }
 

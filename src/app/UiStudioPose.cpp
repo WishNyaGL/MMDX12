@@ -222,7 +222,7 @@ void App::StudioRegisterPose(bool allBones, const PoseLayer* layerBefore, const 
     }
     std::vector<TrackState> after;
     after.reserve(before.size());
-    for (const TrackState& s : before) after.push_back(CaptureTrack(d, s.model, s.kind, s.name));
+    for (const TrackState& s : before) after.push_back(CaptureTrack(d, s));
 
     PoseLayer poseAfter = m->pose;
     for (int b : bones) poseAfter.bones.erase(b);
@@ -675,14 +675,16 @@ void App::StudioViewportCameraHandles(bool hovered) {
     using namespace DirectX;
     StudioDoc& d = *studio_;
     ImGuiIO& io = ImGui::GetIO();
-    const bool free = !(d.useMotionCamera && d.cameraEval);
-    if (d.selectedModel >= 0 || d.selectedLightUid != 0 || d.possessCamera || !free || !d.cameraEval || d.camera.camera.empty() || d.playing) {
+    const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(d.Frame());  // S4: the camera shown now
+    const bool free = !(d.useMotionCamera && eval);
+    if (d.selectedModel >= 0 || d.selectedLightUid != 0 || d.possessCamera || !free || !eval ||
+        d.SelectedCameraTrack().camera.empty() || d.playing) {
         if (studioViewDrag_ == 7) studioViewDrag_ = 0;
         studioCamHandle_ = 0;
         return;
     }
     const int frame = d.Frame();
-    const CameraPose pose = d.cameraEval->Evaluate((float)(d.time * kMmdFps));
+    const CameraPose pose = eval->Evaluate((float)(d.time * kMmdFps));
     CameraPathPoint cur;
     CameraMotion::ToView(pose, &cur.view, &cur.eye);
     const XMFLOAT3 handles[2] = {cur.eye, pose.target};
@@ -716,7 +718,7 @@ void App::StudioViewportCameraHandles(bool hovered) {
         studioCamDrag_ = BeginGizmoDrag(studioVp_, studioCamFrame_, GizmoMode::Translate, gs, studioCamHot_, mouse);
         if (studioCamDrag_.part != GizmoPart::None) {
             studioViewDrag_ = 7;
-            studioCamKeyBase_ = SampleCamera(d.camera.camera, frame);  // the motion camera, not the free view
+            studioCamKeyBase_ = SampleCamera(d.SelectedCameraTrack().camera, frame);  // S4: the selected camera's key
             studioCamBase_ = FreeFromKey(studioCamKeyBase_);
         }
     }

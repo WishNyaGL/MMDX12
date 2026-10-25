@@ -630,10 +630,10 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
 
         nlohmann::json cam;
         const CameraKf ck = StudioViewedCamera(frame);
-        cam["key_count"] = d.camera.camera.size();
-        if (!d.camera.camera.empty()) {
-            cam["first_frame"] = d.camera.camera.front().frame;
-            cam["last_frame"] = d.camera.camera.back().frame;
+        cam["key_count"] = d.SelectedCameraTrack().camera.size();
+        if (!d.SelectedCameraTrack().camera.empty()) {
+            cam["first_frame"] = d.SelectedCameraTrack().camera.front().frame;
+            cam["last_frame"] = d.SelectedCameraTrack().camera.back().frame;
         } else {
             cam["first_frame"] = nullptr;
             cam["last_frame"] = nullptr;
@@ -1118,7 +1118,7 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
         }
 
         const bool hasOverride = args.contains("camera") && args["camera"].is_object();
-        if (!hasOverride && d.camera.camera.empty()) {
+        if (!hasOverride && d.SelectedCameraTrack().camera.empty()) {
             promise->Reject("The project has no motion camera and no camera override was given");
             return true;
         }
@@ -1137,9 +1137,8 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
                                      DirectX::XMConvertToRadians(roll)};
             overridePose.distance = -dist;
             overridePose.fovDeg = c.value("fov_deg", 30.0f);
-        } else if (d.cameraEvalVersion != d.cameraVersion) {
-            d.cameraEval = d.camera.camera.empty() ? nullptr : CameraMotion::Create(d.camera.ToVmd());
-            d.cameraEvalVersion = d.cameraVersion;
+        } else {
+            d.RefreshCameraEvals();   // S4: one evaluator per camera
         }
 
         std::vector<int> chars;
@@ -1150,7 +1149,12 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
 
         nlohmann::json result = nlohmann::json::array();
         for (int frame : frames) {
-            CameraPose pose = hasOverride ? overridePose : d.cameraEval->Evaluate((float)frame);
+            const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(frame);
+            if (!hasOverride && !eval) {
+                promise->Reject("no camera keys: pass a camera override");
+                return true;
+            }
+            CameraPose pose = hasOverride ? overridePose : eval->Evaluate((float)frame);
             result.push_back(McpFrameCheck(frame, pose));
         }
         promise->Resolve({{"frames", result}});

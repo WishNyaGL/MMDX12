@@ -164,7 +164,7 @@ bool App::ExecuteMcpPerception(const std::string& tool, const nlohmann::json& ar
         st.tiles = nlohmann::json::array();
 
         StudioSetPlaying(false);
-        if (!d.camera.camera.empty()) d.useMotionCamera = true;
+        if (!d.SelectedCameraTrack().camera.empty()) d.useMotionCamera = true;
         if (!args.value("physics", true)) {
             d.physics = false;
             d.physicsFrame = -1.0f;

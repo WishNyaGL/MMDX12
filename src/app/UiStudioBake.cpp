@@ -135,7 +135,7 @@ void App::StudioBakeApply(const BakeResult& result, int start, int end, bool tur
 
     std::vector<TrackState> after;
     after.reserve(before.size());
-    for (const TrackState& s : before) after.push_back(CaptureTrack(d, s.model, s.kind, s.name));
+    for (const TrackState& s : before) after.push_back(CaptureTrack(d, s));
     std::vector<std::unique_ptr<Command>> parts;
     parts.push_back(std::make_unique<TrackEditCommand>(d, Tr("물리 굽기"), before, std::move(after)));
     if (turnOff && !m->physicsOff)  // share the bake's undo step (PhysicsOffCommand resets physicsFrame / dirty)

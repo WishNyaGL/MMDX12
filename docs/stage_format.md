@@ -240,8 +240,10 @@ stays attached to the surface it was authored with, including the stage's floor 
 "cameras": [{"name": "wide", "position": [0, 20, -60], "target": [0, 10, 0], "fov": 40}]
 ```
 
-`name` required and unique, `fov` vertical in degrees (1..179), `position != target`. S4 turns these into camera
-entities; S1a only parses / validates them.
+`name` required and unique, `fov` vertical in degrees (1..179), `position != target`. S4 turns these into studio camera
+entities: the studio's "스테이지 카메라" button (`studiocamimport`) makes one extra camera per entry with its
+`stageUid` set, a single key at frame 0 holding the pose, and its name as the camera's name. A camera that is imported
+twice gets a numbered copy ("wide", "wide 2"). S5 shows them on LED screens (the screen source `"camera"` names one).
 
 ## `screens`
 

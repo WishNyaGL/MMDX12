@@ -857,11 +857,11 @@ bool App::ExecuteMcpCamera(const std::string& tool, const nlohmann::json& args, 
         std::vector<TrackState> before{CaptureTrack(d, -1, RowKind::Camera, "")};
         if (mode == "replace_range") {
             for (const Shot& s : shots) {
-                d.camera.camera.erase(std::remove_if(d.camera.camera.begin(), d.camera.camera.end(),
+                d.SelectedCameraTrack().camera.erase(std::remove_if(d.SelectedCameraTrack().camera.begin(), d.SelectedCameraTrack().camera.end(),
                                                      [&](const CameraKf& k) {
                                                          return k.frame >= s.start && k.frame <= s.end;
                                                      }),
-                                      d.camera.camera.end());
+                                      d.SelectedCameraTrack().camera.end());
             }
         }
         size_t changed = 0;

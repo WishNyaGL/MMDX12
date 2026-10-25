@@ -353,6 +353,8 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
         out.fromProject = true;
         out.editor = pd.editor;
         out.camera = pd.camera;
+        out.cameras = pd.cameras;
+        out.cameraSwitch = pd.cameraSwitch;
         out.audioPath = pd.audioPath;
         out.audioOffset = pd.audioOffset;
         out.bgVideoPath = pd.bgVideoPath;

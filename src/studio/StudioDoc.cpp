@@ -60,6 +60,8 @@ bool AccessoryVisible(const StudioModel& m, float frame) {
 int StudioDoc::EndFrame() const {
     int end = std::max(camera.EndFrame(), (int)std::ceil(audioEndFrame));
     for (const auto& m : models) end = std::max(end, m->motion.EndFrame());
+    for (const StudioCamera& c : cameras) end = std::max(end, c.track.EndFrame());
+    for (const CameraSwitchKey& k : cameraSwitch) end = std::max(end, k.frame);
     return std::max(end, 300);
 }
 
@@ -75,17 +77,102 @@ void StudioDoc::TouchModel(int model) {
     rowsKey = ~0ull;  // timeline rows show keys: rebuild
 }
 
+void StudioDoc::TouchCamera(uint32_t uid) {
+    // Every camera edit bumps the shared `cameraVersion`: the row fills and the evaluators are rebuilt from it, and
+    // there is at most a handful of cameras, so per-camera version counters would not pay for their bookkeeping.
+    (void)uid;
+    ++cameraVersion;
+    rowsKey = ~0ull;
+}
+
+const std::vector<CameraKf>& StudioDoc::CameraKeys(uint32_t uid) const {
+    static const std::vector<CameraKf> kNone;
+    if (uid == 0) return camera.camera;
+    const StudioCamera* c = FindCamera(uid);
+    return c ? c->track.camera : kNone;
+}
+
+void StudioDoc::RefreshCameraEvals() {
+    if (cameraEvalVersion == cameraVersion) return;
+    cameraEval = camera.camera.empty() ? nullptr : CameraMotion::Create(camera.ToVmd());
+    cameraEvals.assign(cameras.size(), nullptr);
+    for (size_t i = 0; i < cameras.size(); ++i) {
+        if (cameras[i].track.camera.empty()) continue;
+        MotionData camOnly;  // an extra camera carries camera keys only
+        camOnly.camera = cameras[i].track.camera;
+        cameraEvals[i] = CameraMotion::Create(camOnly.ToVmd());
+    }
+    cameraEvalVersion = cameraVersion;
+}
+
+const std::shared_ptr<CameraMotion>& StudioDoc::ActiveCameraEval(int frame) const {
+    static const std::shared_ptr<CameraMotion> kNone;
+    const uint32_t uid = ActiveCameraUidAt(frame);
+    if (uid != 0 && cameraEvals.size() == cameras.size()) {
+        for (size_t i = 0; i < cameras.size(); ++i)
+            if (cameras[i].uid == uid && cameraEvals[i]) return cameraEvals[i];
+    }
+    if (cameraEval) return cameraEval;
+    // the active camera has no keys of its own: with a switch track, fall back to any camera that has keys (a switch
+    // track is meant to be seen, so camera view never ends up with nothing to look through); without one the view stays
+    // free, exactly as before S4 (the extra cameras are just parked overheads).
+    if (!cameraSwitch.empty() && cameraEvals.size() == cameras.size())
+        for (const std::shared_ptr<CameraMotion>& eval : cameraEvals)
+            if (eval) return eval;
+    return kNone;
+}
+
+bool StudioDoc::HasCameraKeys() const {
+    if (!camera.camera.empty()) return true;
+    for (const StudioCamera& c : cameras)
+        if (!c.track.camera.empty()) return true;
+    return false;
+}
+
+const std::shared_ptr<CameraMotion>& StudioDoc::SelectedCameraEval() const {
+    static const std::shared_ptr<CameraMotion> kNone;
+    if (selectedCameraUid == 0) return cameraEval;
+    for (size_t i = 0; i < cameras.size(); ++i)
+        if (cameras[i].uid == selectedCameraUid && cameraEvals.size() == cameras.size()) return cameraEvals[i];
+    return kNone;
+}
+
+uint32_t StudioDoc::ActiveCameraUidAt(int frame) const {
+    if (cameraSwitch.empty()) return 0;
+    // stepped: the last switch key at or before the frame (before the first key the main camera is active)
+    auto it = std::upper_bound(cameraSwitch.begin(), cameraSwitch.end(), frame,
+                               [](int f, const CameraSwitchKey& k) { return f < k.frame; });
+    if (it == cameraSwitch.begin()) return 0;
+    const uint32_t uid = std::prev(it)->uid;
+    return FindCamera(uid) ? uid : 0;  // a switch to a removed camera falls back to the main one
+}
+
+std::string StudioDoc::CameraLabel(uint32_t uid) const {
+    if (uid == 0) return "main";
+    const StudioCamera* c = FindCamera(uid);
+    return c ? c->name : std::string();
+}
+
 TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::string& name) {
     TrackState s;
     s.model = model;
     s.kind = kind;
     s.name = name;
+    if (kind == RowKind::CameraSwitch) {  // S4: the stepped active-camera switch track (whole-list)
+        s.existed = true;
+        s.switchKeys = doc.cameraSwitch;
+        return s;
+    }
     if (IsCameraKind(kind)) {
         s.existed = true;
         if (kind == RowKind::Light) s.lights = doc.camera.light;
         else if (kind == RowKind::Shadow) s.shadows = doc.camera.shadow;
         else if (kind == RowKind::Focus) s.focuses = doc.camera.focus;
-        else s.cameras = doc.camera.camera;
+        else {
+            // S4: the camera row edits the SELECTED camera (uid 0 = the main camera's `doc.camera`)
+            s.cameraUid = doc.selectedCameraUid;
+            s.cameras = doc.CameraTrack(s.cameraUid).camera;
+        }
         return s;
     }
     if (kind == RowKind::SceneLight) {
@@ -167,13 +254,31 @@ TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::stri
     return s;
 }
 
+TrackState CaptureTrack(StudioDoc& doc, const TrackState& before) {
+    TrackState s = CaptureTrack(doc, before.model, before.kind, before.name);
+    if (s.kind == RowKind::Camera) {   // the camera row's track: always the camera `before` was taken from
+        s.cameraUid = before.cameraUid;
+        s.cameras = doc.CameraTrack(s.cameraUid).camera;
+    }
+    return s;
+}
+
 void RestoreTrack(StudioDoc& doc, const TrackState& s) {
+    if (s.kind == RowKind::CameraSwitch) {
+        doc.cameraSwitch = s.switchKeys;
+        doc.rowsKey = ~0ull;
+        return;
+    }
     if (IsCameraKind(s.kind)) {
         if (s.kind == RowKind::Light) doc.camera.light = s.lights;
         else if (s.kind == RowKind::Shadow) doc.camera.shadow = s.shadows;
         else if (s.kind == RowKind::Focus) doc.camera.focus = s.focuses;
-        else doc.camera.camera = s.cameras;
-        doc.TouchModel(-1);
+        else {
+            // S4: a camera whose entity is gone (removed while a later step is undone) is left alone
+            if (s.cameraUid != 0 && !doc.FindCamera(s.cameraUid)) return;
+            doc.CameraTrack(s.cameraUid).camera = s.cameras;
+        }
+        doc.TouchCamera(s.cameraUid);
         return;
     }
     if (s.kind == RowKind::SceneLight) {

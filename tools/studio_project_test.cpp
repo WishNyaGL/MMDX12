@@ -1,6 +1,7 @@
 // Unit tests for the studio project file module (StudioProject.h). Imitates studio_pose_test.cpp:
 // a tiny CHECK macro, prints PASS/FAIL per check and a summary, exit code 0 on success.
 #include "studio/StudioProject.h"
+#include "anim/Motion.h"
 #include <DirectXMath.h>
 #include <json.hpp>
 #include <cstdarg>
@@ -339,7 +340,7 @@ static void TestEffects() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 4, "effect project format is version 4");
+        Check(!j.is_discarded() && j.value("version", 0) == 5, "effect project format is version 5");
         Check(j.contains("effects") && j["effects"].is_array() && j["effects"].size() == 2 &&
                   j["effects"][0]["pack"] == "hoyo_toon_v2" && j["effects"][1]["enabled"] == false &&
                   j["effects"][0]["textureFolder"] == "F:/tex/effect" && j["effects"][0]["tracks"].size() == 2 &&
@@ -384,7 +385,7 @@ static void TestWorlds() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 4, "world project format is version 4");
+        Check(!j.is_discarded() && j.value("version", 0) == 5, "world project format is version 5");
         Check(j.contains("worlds") && j["worlds"].is_array() && j["worlds"].size() == 1 &&
                   j["worlds"][0]["name"] == "snow field" && j["worlds"][0]["pack"] == "snow" &&
                   j["worlds"][0]["enabled"] == false && j["worlds"][0]["tracks"].size() == 1 &&
@@ -447,7 +448,7 @@ static void TestStages() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 4, "stage project format is version 4");
+        Check(!j.is_discarded() && j.value("version", 0) == 5, "stage project format is version 5");
         Check(j.contains("stages") && j["stages"].is_array() && j["stages"].size() == 1 &&
                   j["stages"][0]["uid"] == 3 && j["stages"][0]["stageId"] == "stages:cyclorama" &&
                   j["stages"][0]["variant"] == "dusk" && j["stages"][0]["base"].is_object() &&
@@ -861,7 +862,7 @@ static void TestSceneLightFile() {
         text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     }
     const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-    Check(kProjectFormatVersion == 4 && !j.is_discarded() && j.value("version", 0) == 4, "project format version is 4");
+    Check(kProjectFormatVersion == 5 && !j.is_discarded() && j.value("version", 0) == 5, "project format version is 5");
     const nlohmann::json& e = j["editor"];
     Check(e.contains("lights") && e["lights"].is_array() && e["lights"].size() == 8 && !e.contains("lighting") &&
               !e.contains("useLightTrack"),
@@ -1024,7 +1025,7 @@ static void TestAreaLightProject() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 4, "area light project format is version 4");
+        Check(!j.is_discarded() && j.value("version", 0) == 5, "area light project format is version 5");
         const nlohmann::json& l = j["editor"]["lights"][0];
         Check(l["kind"] == "area", "area light JSON kind is \"area\"");
         Check(l["values"].contains("size") && l["values"]["size"].is_array() && l["values"]["size"].size() == 2 &&
@@ -1440,6 +1441,176 @@ static void TestPropOffsetMatrix() {
           "got (%g,%g,%g)", out.x, out.y, out.z);
 }
 
+static void TestCameraEntities() {
+    const std::filesystem::path projDir = kTemp / "cameras";
+    const std::filesystem::path projFile = projDir / "cameras.mmdxproj";
+    ProjectData data;
+    // the main camera (uid 0) keeps the light / shadow tracks
+    {
+        CameraKf k;
+        k.frame = 0;
+        k.target = {0.0f, 10.0f, 0.0f};
+        k.distance = -45.0f;
+        data.camera.camera = {k};
+        LightKf l;
+        l.frame = 0;
+        l.color = {0.6f, 0.6f, 0.6f};
+        data.camera.light = {l};
+    }
+    // S4: two extra cameras, one from a stage's stage.json, and a switch track
+    {
+        StudioCamera a;
+        a.uid = 1;
+        a.name = "wide";
+        a.visible = true;
+        CameraKf k;
+        k.frame = 0;
+        k.target = {0.0f, 12.0f, 0.0f};
+        k.distance = -70.0f;
+        k.fovDeg = 40;
+        a.track.camera = {k};
+        data.cameras.push_back(a);
+
+        StudioCamera b;
+        b.uid = 2;
+        b.name = "close";
+        b.stageUid = 4;
+        b.visible = false;
+        CameraKf k2;
+        k2.frame = 30;
+        k2.target = {0.0f, 9.0f, 0.0f};
+        k2.distance = -18.0f;
+        b.track.camera = {k2};
+        data.cameras.push_back(b);
+
+        data.cameraSwitch = {{0, 1}, {30, 2}};
+    }
+    std::string err;
+    Check(SaveProject(projFile, data, &err), "SaveProject with cameras", "%s", err.c_str());
+    {
+        std::ifstream in(projFile, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+        Check(!j.is_discarded() && j.value("version", 0) == 5, "camera project format is version 5");
+        Check(j.contains("cameras") && j["cameras"].is_array() && j["cameras"].size() == 2 &&
+                  j["cameras"][0]["uid"] == 1 && j["cameras"][0]["name"] == "wide" &&
+                  j["cameras"][0]["visible"] == true && j["cameras"][0]["motion"].is_string() &&
+                  j["cameras"][1]["uid"] == 2 && j["cameras"][1]["stageUid"] == 4 &&
+                  j["cameras"][1]["visible"] == false,
+              "cameras are written as uid / name / visible / stageUid / motion");
+        Check(j.contains("cameraSwitch") && j["cameraSwitch"].size() == 2 && j["cameraSwitch"][0][0] == 0 &&
+                  j["cameraSwitch"][0][1] == 1 && j["cameraSwitch"][1][0] == 30 && j["cameraSwitch"][1][1] == 2,
+              "the switch track is written as [frame, uid] pairs");
+        Check(j["camera"].is_string(), "the main camera keeps its own VMD");
+    }
+    ProjectData loaded;
+    std::vector<std::string> warnings;
+    Check(LoadProject(projFile, loaded, &err, &warnings), "LoadProject with cameras", "%s", err.c_str());
+    Check(loaded.cameras.size() == data.cameras.size(), "extra camera count kept");
+    if (loaded.cameras.size() == data.cameras.size()) {
+        Check(loaded.cameras[0] == data.cameras[0], "an extra camera round-trips exactly (ignoring uid)");
+        Check(loaded.cameras[1] == data.cameras[1], "a stage camera round-trips exactly (ignoring uid)");
+        Check(loaded.cameras[0].uid == 1 && loaded.cameras[1].uid == 2, "extra camera uids survive");
+        Check(loaded.cameras[1].stageUid == 4 && !loaded.cameras[1].visible, "stageUid / visible survive");
+    }
+    Check(loaded.cameraSwitch == data.cameraSwitch, "the switch track round-trips exactly");
+    Check(loaded.camera.camera.size() == 1 && loaded.camera.light.size() == 1, "the main camera keeps its tracks");
+
+    // a version 4 file has the main camera only
+    {
+        const std::filesystem::path legacy = kTemp / "cameras" / "legacy.mmdxproj";
+        std::ofstream f(legacy);
+        f << "{\"format\":\"mmdx12-studio-project\",\"version\":4,\"models\":[],\"camera\":null,\"audio\":null}";
+        f.close();
+        ProjectData l2;
+        warnings.clear();
+        Check(LoadProject(legacy, l2, &err, &warnings), "LoadProject (version 4) with cameras", "%s", err.c_str());
+        Check(l2.cameras.empty() && l2.cameraSwitch.empty(), "a version 4 file has no extra cameras / switch track");
+    }
+    // a camera that shares a name with another one still gets its own VMD (unique file names)
+    {
+        ProjectData dup = data;
+        dup.cameras[1].name = dup.cameras[0].name;
+        const std::filesystem::path dupFile = kTemp / "cameras" / "dup.mmdxproj";
+        Check(SaveProject(dupFile, dup, &err), "SaveProject with two same-named cameras", "%s", err.c_str());
+        ProjectData d2;
+        warnings.clear();
+        Check(LoadProject(dupFile, d2, &err, &warnings), "LoadProject with two same-named cameras", "%s", err.c_str());
+        Check(d2.cameras.size() == 2 && !d2.cameras[0].track.camera.empty() && !d2.cameras[1].track.camera.empty(),
+              "same-named cameras do not share one VMD");
+    }
+    // saving the same project twice must not delete the extra cameras' own VMDs (the stale-VMD cleanup knows them)
+    {
+        const std::filesystem::path twice = kTemp / "cameras" / "twice.mmdxproj";
+        Check(SaveProject(twice, data, &err), "SaveProject a first time (cameras)", "%s", err.c_str());
+        Check(SaveProject(twice, data, &err), "SaveProject a second time (cameras)", "%s", err.c_str());
+        ProjectData d3;
+        warnings.clear();
+        Check(LoadProject(twice, d3, &err, &warnings), "LoadProject after two saves", "%s", err.c_str());
+        Check(d3.cameras.size() == 2 && !d3.cameras[0].track.camera.empty() && !d3.cameras[1].track.camera.empty(),
+              "a second save keeps the extra cameras' VMDs");
+        Check(warnings.empty(), "a second save writes no missing-camera warning");
+    }
+
+    // ---- flatten export: camera A before the cut, camera B from frame 30 ----
+    {
+        std::vector<StudioCamera> cams;
+        StudioCamera a;
+        a.uid = 1;
+        a.name = "A";
+        a.track.camera = {{0, -20.0f, {0.0f, 10.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {}, 30, true},
+                          {60, -25.0f, {0.0f, 10.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {}, 30, true}};
+        StudioCamera b;
+        b.uid = 2;
+        b.name = "B";
+        b.track.camera = {{0, -60.0f, {0.0f, 5.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {}, 30, true},
+                          {60, -60.0f, {0.0f, 5.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {}, 30, true}};
+        cams = {a, b};
+        MotionData main;
+        main.camera = {{0, -45.0f, {0.0f, 10.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {}, 30, true}};
+        LightKf l;
+        l.frame = 0;
+        main.light = {l};
+        const std::vector<CameraSwitchKey> sw = {{0, 1}, {30, 2}};
+        const MotionData flat = FlattenCameraSwitch(main, cams, sw);
+        const VmdMotion vmd = flat.ToVmd();
+        const auto evalCam = [&](int frame) {
+            static const std::shared_ptr<CameraMotion> cm = CameraMotion::Create(vmd);
+            return cm->Evaluate((float)frame);
+        };
+        const CameraPose before = evalCam(10);
+        const CameraPose atCut = evalCam(30);
+        const CameraPose after = evalCam(40);
+        // camera A runs to a hold key at frame 29, so its curve in 0..29 eases slightly differently than 0..60 would:
+        // near A, far from B is what matters
+        Check(Near(std::fabs(before.distance), 20.0f, 5.0f), "flattened: camera A is active before the cut");
+        Check(Near(std::fabs(atCut.distance), 60.0f, 0.5f), "flattened: camera B is active at the cut frame");
+        Check(Near(std::fabs(after.distance), 60.0f, 0.5f), "flattened: camera B is active after the cut");
+        Check(flat.light.size() == 1, "flattening keeps the main camera's light track");
+        // an empty switch track leaves the main camera alone
+        const MotionData none = FlattenCameraSwitch(main, cams, {});
+        Check(none.camera.size() == 1 && Near(none.camera[0].distance, -45.0f), "an empty switch track keeps the main camera");
+        // the cut itself: a key pair at (f-1, f), so the outgoing pose holds up to f-1 and the incoming starts at f
+        bool hold = false, jump = false;
+        for (const CameraKf& k : flat.camera) {
+            // the outgoing pose is sampled at f-1 (camera A eases from -20 to -25 over 0..60, so 29 is in between)
+            if (k.frame == 29) hold = k.distance < -20.0f && k.distance > -25.0f;
+            if (k.frame == 30) jump = Near(k.distance, -60.0f, 0.01f);
+        }
+        Check(hold && jump, "the cut leaves a key pair at (29, 30)");
+        // a switched-to camera without keys plays the main camera's pose instead of nothing
+        {
+            StudioCamera empty;
+            empty.uid = 3;
+            empty.name = "empty";
+            const MotionData back = FlattenCameraSwitch(main, {empty}, {{0, 3}});
+            const std::shared_ptr<CameraMotion> cm = CameraMotion::Create(back.ToVmd());
+            Check(cm && Near(cm->Evaluate(0.0f).distance, -45.0f, 0.01f),
+                  "a camera without keys falls back to the main camera's pose");
+        }
+    }
+}
+
 static void TestAspectProject() {
     const std::filesystem::path projDir = kTemp / "aspect";
     std::filesystem::create_directories(projDir);
@@ -1531,6 +1702,7 @@ int main() {
     TestEffects();
     TestWorlds();
     TestStages();
+    TestCameraEntities();
     TestAspectProject();
     TestSceneLightFile();
     TestSceneLightReading();

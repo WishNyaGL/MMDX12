@@ -52,7 +52,7 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S2a | glTF material / light import: transmission, ior, volume, emissive_strength, clearcoat (approx.), texture_transform, KHR_lights_punctual | done 2026-10-25 |
 | S2b | Mesh dielectrics: transmissive materials refract in RT / PT / offline GI (thin + volume), raster approximation | done 2026-10-26 |
 | S3 | Studio stage entity: outliner group, overrides saved in the project, keyable stage params (timeline rows) | done 2026-10-26 |
-| S4 | Camera entities: N cameras with own tracks, an active-camera switch track, VMD export flattens cuts | |
+| S4 | Camera entities: N cameras with own tracks, an active-camera switch track, VMD export flattens cuts | done 2026-10-26 |
 | S5 | Screens: N screen surfaces, sources none / image / video / camera feed, multi-video decode, feed render pass | |
 | S6 | Stage-bundled packs: screen packs (new type), surface packs on stage materials, world packs on sockets | |
 | S7 | Many lights: punctual cap 16 -> 256, clustered raster lighting, shadow budget, PT / GI light sampling, volumetric over all lights | |

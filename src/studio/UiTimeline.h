@@ -19,6 +19,8 @@ inline constexpr int kTimelineGraphAllChannels = 64;
 struct TimelineKey {
     int frame = 0;
     bool selected = false;
+    // Optional short text drawn to the right of the key (the camera switch row: the camera's name). Empty = none.
+    std::string label;
 };
 
 // One channel offered by a row's graph lane (its name is the label of its channel sub-row, its curve colour the row's

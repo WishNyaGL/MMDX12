@@ -214,6 +214,8 @@ ProjectData App::StudioProjectData() const {
     pd.effects = d.effects;   // Version 3: the project's own effect stack
     pd.worlds = d.worlds;     // Version 3: the project's world entities
     pd.stages = d.stages;     // Version 4: the project's MMDX stage entities
+    pd.cameras = d.cameras;   // Version 5: the extra cameras (keys only; light / shadow / focus stay the main camera)
+    pd.cameraSwitch = d.cameraSwitch;  // Version 5: the stepped active-camera switch track
     ProjectEditor& e = pd.editor;
     e.frame = d.Frame();
     e.selectedModel = d.selectedModel;

@@ -6,6 +6,7 @@
 #include <json.hpp>
 #include <Windows.h>
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <set>
@@ -44,6 +45,78 @@ size_t StudioWorld::ApproxBytes() const {
 
 bool StudioWorld::operator==(const StudioWorld& o) const {
     return name == o.name && fx == o.fx && place == o.place;
+}
+
+// S4: the main camera's track with the switch track flattened in (MMD has a single camera track). For every switch
+// segment the active camera's keys inside it are copied; where the active camera changes at frame f a key pair at
+// (f-1, f) makes the jump instantaneous: the key at f-1 holds the outgoing camera's pose at f-1 and the key at f is the
+// incoming camera's pose at f (MMD's 1-frame cut: SampleCamera holds the first key across a one-frame gap). A camera
+// without keys of its own contributes the main camera's pose, so a cut never falls through to nothing.
+MotionData FlattenCameraSwitch(const MotionData& main, const std::vector<StudioCamera>& cameras,
+                               const std::vector<CameraSwitchKey>& switches) {
+    MotionData out = main;
+    if (switches.empty()) return out;
+    const auto keysOf = [&](uint32_t uid) -> const std::vector<CameraKf>& {
+        static const std::vector<CameraKf> kNone;
+        if (uid == 0) return main.camera;
+        for (const StudioCamera& c : cameras)
+            if (c.uid == uid) return c.track.camera;
+        return kNone;
+    };
+    const auto poseAt = [&](uint32_t uid, int frame) -> CameraKf {
+        const std::vector<CameraKf>& keys = keysOf(uid);
+        CameraKf k;
+        if (!keys.empty()) k = SampleCamera(keys, frame);
+        else if (!main.camera.empty()) k = SampleCamera(main.camera, frame);
+        k.frame = frame;
+        return k;
+    };
+    std::vector<CameraKf> merged;
+    const auto add = [&](const CameraKf& k) {
+        if (!merged.empty() && merged.back().frame == k.frame) {
+            merged.back() = k;
+            return;
+        }
+        merged.push_back(k);
+    };
+    // segments: [previous cut frame, this cut frame) is the outgoing camera's, the cut frame starts the incoming one
+    int prevCut = -1;
+    uint32_t prevUid = 0;
+    for (size_t i = 0; i < switches.size(); ++i) {
+        const CameraSwitchKey& sw = switches[i];
+        // the outgoing camera's keys in (prevCut, sw.frame)
+        for (const CameraKf& k : keysOf(prevUid))
+            if (k.frame > prevCut && k.frame < sw.frame) add(k);
+        if (sw.frame > 0) {
+            CameraKf hold = poseAt(prevUid, sw.frame - 1);  // the outgoing pose up to the frame before the cut
+            hold.frame = sw.frame - 1;
+            // the outgoing camera's own key at f-1 is better than the sampled pose: it keeps its curve bytes
+            if (const CameraKf* own = FindKey(keysOf(prevUid), sw.frame - 1)) hold = *own;
+            add(hold);
+        }
+        add(poseAt(sw.uid, sw.frame));  // the incoming camera at the cut frame
+        prevCut = sw.frame;
+        prevUid = sw.uid;
+    }
+    // after the last cut the last switched-to camera plays to the end
+    for (const CameraKf& k : keysOf(prevUid))
+        if (k.frame > prevCut) add(k);
+    if (!merged.empty()) out.camera = std::move(merged);
+    return out;
+}
+
+size_t StudioCamera::ApproxBytes() const {
+    return sizeof(StudioCamera) + name.size() + track.ApproxBytes();
+}
+
+bool StudioCamera::operator==(const StudioCamera& o) const {
+    return name == o.name && visible == o.visible && stageUid == o.stageUid && track.camera.size() == o.track.camera.size() &&
+           std::equal(track.camera.begin(), track.camera.end(), o.track.camera.begin(), [](const CameraKf& a, const CameraKf& b) {
+               return a.frame == b.frame && a.distance == b.distance && a.target.x == b.target.x &&
+                      a.target.y == b.target.y && a.target.z == b.target.z && a.rotation.x == b.rotation.x &&
+                      a.rotation.y == b.rotation.y && a.rotation.z == b.rotation.z && a.fovDeg == b.fovDeg &&
+                      a.perspective == b.perspective && std::memcmp(a.interp, b.interp, sizeof(a.interp)) == 0;
+           });
 }
 
 size_t StudioStage::ApproxBytes() const {
@@ -424,6 +497,12 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
         std::wstring camName;
         if (!data.camera.camera.empty() || !data.camera.light.empty() || !data.camera.shadow.empty())
             camName = allocName(stem + L" - camera");
+        // S4: one VMD per extra camera ("<stem> - camera <name>.vmd"), camera keys only.
+        std::vector<std::wstring> cameraVmdNames(data.cameras.size());
+        for (size_t i = 0; i < data.cameras.size(); ++i) {
+            if (data.cameras[i].track.camera.empty()) continue;
+            cameraVmdNames[i] = allocName(stem + L" - camera " + Utf8ToWide(SanitizeFileName(data.cameras[i].name)));
+        }
 
         std::vector<std::wstring> modelVmdNames(data.models.size());  // empty = no VMD for this model
         for (size_t i = 0; i < data.models.size(); ++i) {
@@ -447,6 +526,14 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
             vmd.modelName = "\xE3\x82\xAB\xE3\x83\xA1\xE3\x83\xA9\xE3\x83\xBB\xE7\x85\xA7\xE6\x98\x8E";  // カメラ・照明
             if (!SaveVmdAtomic(dir / camName, vmd, error)) return false;
         }
+        for (size_t i = 0; i < data.cameras.size(); ++i) {
+            if (cameraVmdNames[i].empty()) continue;
+            MotionData camOnly;  // an extra camera carries camera keys only
+            camOnly.camera = data.cameras[i].track.camera;
+            VmdMotion vmd = camOnly.ToVmd();
+            vmd.modelName = "\xE3\x82\xAB\xE3\x83\xA1\xE3\x83\xA9\xE3\x83\xBB\xE7\x85\xA7\xE6\x98\x8E";
+            if (!SaveVmdAtomic(dir / cameraVmdNames[i], vmd, error)) return false;
+        }
 
         // ---- remember which VMDs the previous version referenced, for the cleanup below ----
         std::vector<std::filesystem::path> oldFiles;
@@ -460,6 +547,9 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                         if (ref.is_string()) oldFiles.push_back(ResolvePath(ref.get<std::string>(), dir));
                     };
                     if (old.contains("camera")) collect(old["camera"]);
+                    if (old.contains("cameras") && old["cameras"].is_array())
+                        for (const auto& c : old["cameras"])
+                            if (c.is_object() && c.contains("motion")) collect(c["motion"]);
                     if (old.contains("models") && old["models"].is_array())
                         for (const auto& m : old["models"])
                             if (m.is_object() && m.contains("motion")) collect(m["motion"]);
@@ -576,6 +666,25 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
         }
         j["models"] = std::move(models);
         j["camera"] = camName.empty() ? nlohmann::json(nullptr) : nlohmann::json(WideToUtf8(camName));
+        // Version 5: the extra cameras (uid / name / visible / stageUid + their camera VMD) and the switch track.
+        {
+            nlohmann::json cams = nlohmann::json::array();
+            for (size_t i = 0; i < data.cameras.size(); ++i) {
+                const StudioCamera& c = data.cameras[i];
+                nlohmann::json jc;
+                jc["uid"] = c.uid;
+                jc["name"] = c.name;
+                jc["visible"] = c.visible;
+                if (c.stageUid != 0) jc["stageUid"] = c.stageUid;
+                jc["motion"] = cameraVmdNames[i].empty() ? nlohmann::json(nullptr)
+                                                         : nlohmann::json(WideToUtf8(cameraVmdNames[i]));
+                cams.push_back(std::move(jc));
+            }
+            j["cameras"] = std::move(cams);
+            nlohmann::json sw = nlohmann::json::array();
+            for (const CameraSwitchKey& k : data.cameraSwitch) sw.push_back({k.frame, k.uid});
+            j["cameraSwitch"] = std::move(sw);
+        }
         // M6b: the project's own MME post stack (effects after the scene, replaces the play-mode stack).
         {
             nlohmann::json mme = nlohmann::json::array();
@@ -724,6 +833,9 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
         std::set<std::wstring> writtenLower;
         if (!camName.empty())
             writtenLower.insert(LowerAsciiWide((dir / camName).lexically_normal().generic_wstring()));
+        for (const std::wstring& name : cameraVmdNames)   // S4: the extra cameras' VMDs are this save's files too
+            if (!name.empty())
+                writtenLower.insert(LowerAsciiWide((dir / name).lexically_normal().generic_wstring()));
         for (const std::wstring& name : modelVmdNames)
             if (!name.empty())
                 writtenLower.insert(LowerAsciiWide((dir / name).lexically_normal().generic_wstring()));
@@ -931,6 +1043,39 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                 out.camera = std::move(cam);
             } else if (warnings) {
                 warnings->push_back("camera missing: " + PathToUtf8(vmdPath));
+            }
+        }
+
+        // Version 5: the extra cameras (their camera keys come from their own VMD) and the switch track.
+        if (version >= 5 && j.contains("cameras") && j["cameras"].is_array()) {
+            for (const nlohmann::json& jc : j["cameras"]) {
+                if (!jc.is_object()) continue;
+                StudioCamera c;
+                c.uid = (uint32_t)std::max(0, ReadInt(jc, "uid", 0));
+                if (c.uid == 0) continue;  // uid 0 is the main camera
+                c.name = ReadString(jc, "name", "");
+                if (c.name.empty()) c.name = "camera " + std::to_string(c.uid);
+                c.visible = ReadBool(jc, "visible", c.visible);
+                c.stageUid = (uint32_t)std::max(0, ReadInt(jc, "stageUid", 0));
+                if (jc.contains("motion") && jc["motion"].is_string()) {
+                    const std::filesystem::path vmdPath = ResolvePath(jc["motion"].get<std::string>(), dir);
+                    VmdMotion vmd;
+                    if (LoadVmd(vmdPath, vmd)) c.track.camera = MotionData::FromVmd(vmd).camera;
+                    else if (warnings) warnings->push_back("camera missing: " + PathToUtf8(vmdPath));
+                }
+                out.cameras.push_back(std::move(c));
+            }
+        }
+        if (version >= 5 && j.contains("cameraSwitch") && j["cameraSwitch"].is_array()) {
+            for (const nlohmann::json& jk : j["cameraSwitch"]) {
+                if (!jk.is_array() || jk.size() < 2 || !jk[0].is_number() || !jk[1].is_number()) continue;
+                CameraSwitchKey k;
+                k.frame = std::max(0, jk[0].get<int>());
+                k.uid = (uint32_t)std::max(0, jk[1].get<int>());
+                auto it = std::lower_bound(out.cameraSwitch.begin(), out.cameraSwitch.end(), k.frame,
+                                           [](const CameraSwitchKey& a, int f) { return a.frame < f; });
+                if (it != out.cameraSwitch.end() && it->frame == k.frame) it->uid = k.uid;
+                else out.cameraSwitch.insert(it, k);
             }
         }
 

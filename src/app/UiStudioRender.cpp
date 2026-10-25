@@ -120,11 +120,8 @@ void App::StudioPoseForRender(float frame) {
     d.physicsFrame = frame;
     // S3: the stage targets at the rendered frame (materials + the stage rig lights), before the models' UpdateMaterials
     StudioApplyStageTargets();
-    if (d.cameraEvalVersion != d.cameraVersion) {
-        d.cameraEval = d.camera.camera.empty() ? nullptr : CameraMotion::Create(d.camera.ToVmd());
-        d.cameraEvalVersion = d.cameraVersion;
-        if (!d.cameraEval) d.useMotionCamera = false;
-    }
+    d.RefreshCameraEvals();
+    if (!d.HasCameraKeys()) d.useMotionCamera = false;  // S4: any camera's keys keep the camera view alive
     const uint64_t slot = ctx_.FrameNumber();
     for (int pass = 0; pass < 2; ++pass)  // props last: they follow a bone of a model posed in the first pass
         for (auto& mp : d.models)
@@ -135,7 +132,7 @@ void App::StudioRestoreAfterRender() {
     if (!studio_) return;
     StudioDoc& d = *studio_;
     d.time = offline_.studioTime;
-    d.useMotionCamera = offline_.studioMotionCamera && d.cameraEval != nullptr;
+    d.useMotionCamera = offline_.studioMotionCamera && d.HasCameraKeys();
     d.physicsFrame = -1.0f;   // the editor's next frame starts the simulation over
     if (d.hasAudio) StudioSeekAudio();
 }

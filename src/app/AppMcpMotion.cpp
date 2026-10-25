@@ -777,7 +777,7 @@ bool App::ExecuteMcpMotion(const std::string& tool, const nlohmann::json& args, 
         ops.push_back(std::move(op));
     }
     for (const Op& op : ops) {
-        if (op.kind == OpKind::LookAt && op.targetKind == "camera" && d.camera.camera.empty()) {
+        if (op.kind == OpKind::LookAt && op.targetKind == "camera" && d.SelectedCameraTrack().camera.empty()) {
             promise->Reject("look_at target 'camera' needs a motion camera");
             return true;
         }
@@ -946,12 +946,10 @@ bool App::ExecuteMcpMotion(const std::string& tool, const nlohmann::json& args, 
                         StudioSampleBones(tm, frames, {op.targetBone});
                     for (const auto& r : pos) targets.push_back(r.empty() ? DirectX::XMFLOAT3{0, 0, 0} : r[0]);
                 } else if (op.targetKind == "camera") {
-                    if (d.cameraEvalVersion != d.cameraVersion) {
-                        d.cameraEval = d.camera.camera.empty() ? nullptr : CameraMotion::Create(d.camera.ToVmd());
-                        d.cameraEvalVersion = d.cameraVersion;
-                    }
+                    d.RefreshCameraEvals();   // S4: one evaluator per camera
                     for (int f : frames) {
-                        CameraPose pose = d.cameraEval ? d.cameraEval->Evaluate((float)f) : CameraPose{};
+                        const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(f);
+                        CameraPose pose = eval ? eval->Evaluate((float)f) : CameraPose{};
                         DirectX::XMFLOAT3 eye;
                         CameraMotion::ToView(pose, nullptr, &eye);
                         targets.push_back(eye);
@@ -1013,8 +1011,10 @@ bool App::ExecuteMcpMotion(const std::string& tool, const nlohmann::json& args, 
                                 StudioSampleBones(tm, measureFrames, {op.targetBone});
                             for (const auto& r : pos) mt.push_back(r.empty() ? DirectX::XMFLOAT3{0, 0, 0} : r[0]);
                         } else if (op.targetKind == "camera") {
+                            d.RefreshCameraEvals();
                             for (int f : measureFrames) {
-                                CameraPose pose = d.cameraEval ? d.cameraEval->Evaluate((float)f) : CameraPose{};
+                                const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(f);
+                                CameraPose pose = eval ? eval->Evaluate((float)f) : CameraPose{};
                                 DirectX::XMFLOAT3 eye;
                                 CameraMotion::ToView(pose, nullptr, &eye);
                                 mt.push_back(eye);

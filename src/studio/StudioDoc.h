@@ -89,7 +89,7 @@ struct StudioModel {
 // Timeline row ids: kind in the top byte, then a 24-bit group and a 32-bit index. Light is the camera VMD's light
 // track; SceneLight is the keys of one scene light (SceneLight.h): MakeRowId(RowKind::SceneLight, 0, light uid).
 // Focus is the studio's depth-of-field focus track (camera MotionData::focus, saved in the project, not in VMD).
-enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11, GraphLane = 12, GraphChannel = 13, StageParam = 14 };
+enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11, GraphLane = 12, GraphChannel = 13, StageParam = 14, CameraSwitch = 15 };
 // GraphLane rows are the kTimelineGraphRows rows of an open value / speed graph lane: never a track, no keys. Their id
 // group is the parent row's low 24 bits and their index the block's channel in the high byte, the lane index
 // (0..kTimelineGraphRows-1) in the low byte: MakeRowId(GraphLane, parentLow24, (channel << 8) | laneIndex);
@@ -114,6 +114,8 @@ inline uint32_t RowIndexOf(uint64_t id) { return (uint32_t)id; }
 inline uint32_t RowGroupOf(uint64_t id) { return (uint32_t)(id >> 32) & 0xFFFFFF; }
 // Camera, Light, Shadow and Focus all live in the camera MotionData (model -1): they are selected, edited and
 // undone through it together. (SceneLight rows are offered through the camera target too, but live in the light list.)
+// S4: the Camera row edits the SELECTED camera (StudioDoc::selectedCameraUid; Light / Shadow / Focus stay the main
+// camera's), and CameraSwitch is the stepped active-camera switch track (no keys of its own in a MotionData).
 inline bool IsCameraKind(RowKind k) {
     return k == RowKind::Camera || k == RowKind::Light || k == RowKind::Shadow || k == RowKind::Focus;
 }
@@ -167,14 +169,24 @@ struct ClipboardKey {
     uint64_t row = 0;
     int offset = 0;  // frame relative to the first copied key
     BoneKf bone; MorphKf morph; CameraKf camera; LightKf light; ShadowKf shadow; LightKey sceneLight; FocusKf focus;
+    CameraSwitchKey cameraSwitch;   // S4: a key of the active-camera switch track
     AccessoryKf accessory; EffectParamKey effectParam; EffectParamKey worldParam; EffectParamKey stageParam;
 };
 
 struct StudioDoc {
     std::vector<std::unique_ptr<StudioModel>> models;  // stage parts first, then characters
+    // The MAIN camera (uid 0): its camera keys plus the light / self-shadow / focus tracks. S4 camera entities are
+    // `cameras`; the switch track decides which one the viewport / renders use (ActiveCameraUidAt).
     MotionData camera;                                 // camera keys only
-    uint64_t cameraVersion = 1, cameraEvalVersion = 0;
+    // S4: the extra (non-main) cameras. Camera keys only; the light / shadow / focus tracks stay the main camera's.
+    std::vector<StudioCamera> cameras;
+    uint32_t nextCameraUid = 1;         // extra camera uids are separate from the model / light uids
+    uint32_t selectedCameraUid = 0;     // the camera the camera rows / inspector / possession edit (0 = main)
+    std::vector<CameraSwitchKey> cameraSwitch;  // stepped: the last key at or before the frame wins (empty = main)
+    uint64_t cameraVersion = 1, cameraEvalVersion = 0;   // the main camera + extra camera keys (row fills, evals)
     std::shared_ptr<CameraMotion> cameraEval;
+    // S4: one evaluator per extra camera (index = `cameras`, null when it has no keys), rebuilt with `cameraEvalVersion`.
+    std::vector<std::shared_ptr<CameraMotion>> cameraEvals;
     std::filesystem::path audioPath;
     bool hasAudio = false;
     float audioEndFrame = 0;          // timeline frame where the audio ends (includes audioOffset)
@@ -327,6 +339,41 @@ struct StudioDoc {
         return nullptr;
     }
     const SceneLight* FindLight(uint32_t uid) const { return const_cast<StudioDoc*>(this)->FindLight(uid); }
+    // S4: an extra camera (uid 0 = the main camera, which is not in the list: nullptr).
+    StudioCamera* FindCamera(uint32_t uid) {
+        if (uid == 0) return nullptr;
+        for (StudioCamera& c : cameras)
+            if (c.uid == uid) return &c;
+        return nullptr;
+    }
+    const StudioCamera* FindCamera(uint32_t uid) const { return const_cast<StudioDoc*>(this)->FindCamera(uid); }
+    // The motion a camera uid edits: uid 0 = the main camera (`camera`), else the extra camera's track. A uid that no
+    // camera has falls back to the main camera, so an edit never writes into nothing.
+    MotionData& CameraTrack(uint32_t uid) {
+        StudioCamera* c = FindCamera(uid);
+        return c ? c->track : camera;
+    }
+    const MotionData& CameraTrack(uint32_t uid) const { return const_cast<StudioDoc*>(this)->CameraTrack(uid); }
+    // The selected camera's motion (0 = main): what the camera rows / inspector / possession edit.
+    MotionData& SelectedCameraTrack() { return CameraTrack(selectedCameraUid); }
+    const MotionData& SelectedCameraTrack() const { return CameraTrack(selectedCameraUid); }
+    // Camera keys of a uid (uid 0 = the main camera, unknown = empty).
+    const std::vector<CameraKf>& CameraKeys(uint32_t uid) const;
+    // S4: the camera active at `frame`: the last switch key at or before it, else the main camera (0).
+    uint32_t ActiveCameraUidAt(int frame) const;
+    // A name for the camera of `uid` (the outliner / menus): the main camera's or the extra camera's label.
+    std::string CameraLabel(uint32_t uid) const;
+    void TouchCamera(uint32_t uid);   // after editing a camera's keys (0 = main)
+    // S4: rebuilds the evaluators when `cameraVersion` moved (the app calls this once per frame instead of rebuilding
+    // `cameraEval` itself): `cameraEval` = the main camera, `cameraEvals[i]` = `cameras[i]` (null = no keys).
+    void RefreshCameraEvals();
+    // S4: the evaluator of the camera active at `frame` (the main camera's when that camera has no keys: a switch key
+    // pointing at a camera without keys shows the main camera's view, never nothing). Null = no camera keys at all.
+    const std::shared_ptr<CameraMotion>& ActiveCameraEval(int frame) const;
+    // Any camera (the main one or an extra one) has keys: what enables camera view / the camera controls.
+    bool HasCameraKeys() const;
+    // The selected camera's evaluator (null when it has no keys): the path overlay / inspector preview.
+    const std::shared_ptr<CameraMotion>& SelectedCameraEval() const;
 };
 
 // Track snapshots: the generic undoable edit. Holds whole tracks before and after an edit, which keeps
@@ -336,6 +383,7 @@ struct TrackState {
     RowKind kind = RowKind::Bone;  // Bone, Morph, Camera, Light, Shadow, Focus, SceneLight, EffectParam, WorldParam or StageParam
     std::string name;              // bone/morph name (scene light: LightTrackName, effect / world / stage param: their track name); unused for the camera
     uint32_t uid = 0;              // SceneLight: the light's uid; EffectParam / WorldParam: the entity's uid
+    uint32_t cameraUid = 0;        // S4: Camera rows: the edited camera's uid (0 = the main camera)
     bool existed = false;          // the track existed (absent tracks are erased again)
     std::vector<BoneKf> bones;
     std::vector<MorphKf> morphs;
@@ -344,6 +392,7 @@ struct TrackState {
     std::vector<ShadowKf> shadows;
     std::vector<FocusKf> focuses;
     std::vector<LightKey> lightKeys;  // a scene light's keys
+    std::vector<CameraSwitchKey> switchKeys;  // S4: the active-camera switch track (kind CameraSwitch)
     std::vector<AccessoryKf> accessories;
     std::vector<EffectParamKey> effectParamKeys;
     std::vector<EffectParamKey> worldParamKeys;
@@ -357,14 +406,18 @@ struct TrackState {
                lightKeys.capacity() * sizeof(LightKey) + accessories.capacity() * sizeof(AccessoryKf) +
                effectParamKeys.capacity() * sizeof(EffectParamKey) +
                worldParamKeys.capacity() * sizeof(EffectParamKey) +
-               stageParamKeys.capacity() * sizeof(EffectParamKey);
+               stageParamKeys.capacity() * sizeof(EffectParamKey) + switchKeys.capacity() * sizeof(CameraSwitchKey);
     }
 };
 // A SceneLight track is addressed by its uid (`name` = LightTrackName(uid)): restoring one whose light no longer
 // exists does nothing; an emptied key list keeps the light (its base values drive it again).
+// A Camera track (S4) is addressed by `cameraUid` (0 = the main camera): restoring one whose camera no longer exists
+// does nothing.
 // An EffectParam track is addressed by its uid and param key (`name` = EffectParamTrackName(uid, param)).
 // A StageParam track is addressed by the stage's uid and param key (`name` = StageParamTrackName(uid, param)).
 TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::string& name);
+// The same track as `before` addresses it (including `cameraUid`: the camera row's selected camera may have moved on).
+TrackState CaptureTrack(StudioDoc& doc, const TrackState& before);
 void RestoreTrack(StudioDoc& doc, const TrackState& s);
 
 // ---- S3: studio stage param values (pure; docs/stage_format.md "Studio") ----
@@ -458,8 +511,55 @@ private:
     std::vector<StudioWorld> before_, after_;
 };
 
-// S3: adds, removes or edits MMDX stage entities (variant, param base values, keyed params, cues off) — the edit is
-// one undo step over the whole list. Key edits of a stage go through TrackEditCommand instead.
+// S4: adds, removes, renames or edits the extra cameras — one undo step over the whole list. Key edits of a camera go
+// through TrackEditCommand instead (TrackState::cameraUid); a removed camera whose keys are restored later is skipped.
+// The selected camera falls back to the main camera when the selected one is gone.
+class CamerasCommand : public Command {
+public:
+    CamerasCommand(StudioDoc& doc, std::string name, std::vector<StudioCamera> before, std::vector<StudioCamera> after)
+        : doc_(doc), name_(std::move(name)), before_(std::move(before)), after_(std::move(after)) {}
+    void Do() override { Apply(after_); }
+    void Undo() override { Apply(before_); }
+    std::string Name() const override { return name_; }
+    size_t Bytes() const override {
+        const auto list = [](const std::vector<StudioCamera>& v) {
+            size_t n = 0;
+            for (const StudioCamera& c : v) n += c.ApproxBytes();
+            return n;
+        };
+        return sizeof(*this) + name_.size() + list(before_) + list(after_);
+    }
+
+private:
+    void Apply(const std::vector<StudioCamera>& v) {
+        doc_.cameras = v;
+        if (doc_.selectedCameraUid != 0 && !doc_.FindCamera(doc_.selectedCameraUid)) doc_.selectedCameraUid = 0;
+        doc_.TouchCamera(0);
+    }
+    StudioDoc& doc_;
+    std::string name_;
+    std::vector<StudioCamera> before_, after_;
+};
+
+// S4: the stepped active-camera switch track (add / move / delete a switch key): whole-list snapshot, the track is tiny.
+class CameraSwitchCommand : public Command {
+public:
+    CameraSwitchCommand(StudioDoc& doc, std::string name, std::vector<CameraSwitchKey> before,
+                        std::vector<CameraSwitchKey> after)
+        : doc_(doc), name_(std::move(name)), before_(std::move(before)), after_(std::move(after)) {}
+    void Do() override { doc_.cameraSwitch = after_; doc_.rowsKey = ~0ull; }
+    void Undo() override { doc_.cameraSwitch = before_; doc_.rowsKey = ~0ull; }
+    std::string Name() const override { return name_; }
+    size_t Bytes() const override {
+        return sizeof(*this) + name_.size() + (before_.capacity() + after_.capacity()) * sizeof(CameraSwitchKey);
+    }
+
+private:
+    StudioDoc& doc_;
+    std::string name_;
+    std::vector<CameraSwitchKey> before_, after_;
+};
+
 class StagesCommand : public Command {
 public:
     StagesCommand(StudioDoc& doc, std::string name, std::vector<StudioStage> before, std::vector<StudioStage> after)
@@ -626,6 +726,9 @@ struct StudioPackageModel {
 struct StudioPackage {
     std::vector<StudioPackageModel> models;  // stage parts first
     MotionData camera;
+    // S4: the project's extra cameras and the stepped active-camera switch track (a version <= 4 project: both empty).
+    std::vector<StudioCamera> cameras;
+    std::vector<CameraSwitchKey> cameraSwitch;
     std::filesystem::path audioPath;
     double audioOffset = 0;
     // Background AVI (背景AVI), from a project or PMM import.

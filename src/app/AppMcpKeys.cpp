@@ -226,15 +226,15 @@ bool App::McpWriteCameraKeys(const nlohmann::json& keysJson, const std::string& 
     }
 
     std::vector<TrackState> before{CaptureTrack(d, -1, RowKind::Camera, "")};
-    const std::vector<CameraKf> original = d.camera.camera;  // missing fields evaluate against the pre-edit track
+    const std::vector<CameraKf> original = d.SelectedCameraTrack().camera;  // missing fields evaluate against the pre-edit track
     if (mode == "replace_all") {
-        d.camera.camera.clear();
+        d.SelectedCameraTrack().camera.clear();
     } else if (mode == "replace_range") {
-        d.camera.camera.erase(std::remove_if(d.camera.camera.begin(), d.camera.camera.end(),
+        d.SelectedCameraTrack().camera.erase(std::remove_if(d.SelectedCameraTrack().camera.begin(), d.SelectedCameraTrack().camera.end(),
                                              [&](const CameraKf& k) {
                                                  return k.frame >= minFrame && k.frame <= maxFrame;
                                              }),
-                              d.camera.camera.end());
+                              d.SelectedCameraTrack().camera.end());
     }
 
     for (const NewKey& nk : parsed) {
@@ -256,7 +256,7 @@ bool App::McpWriteCameraKeys(const nlohmann::json& keysJson, const std::string& 
         if (nk.hasFov) k.fovDeg = (uint32_t)std::clamp((int)std::lround(nk.fov), 1, 125);
         if (nk.hasPerspective) k.perspective = nk.perspective;
         if (!ApplyCameraCurve(nk.curve, k.interp, error)) return false;
-        UpsertKey(d.camera.camera, k);
+        UpsertKey(d.SelectedCameraTrack().camera, k);
         ++changed;
     }
 
@@ -290,7 +290,7 @@ bool App::ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, st
         int end = args.contains("end") ? args["end"].get<int>() : std::numeric_limits<int>::max();
         nlohmann::json keys = nlohmann::json::array();
         std::vector<int> frames;
-        for (const CameraKf& k : d.camera.camera) {
+        for (const CameraKf& k : d.SelectedCameraTrack().camera) {
             frames.push_back(k.frame);
             if (k.frame < start || k.frame > end) continue;
             CameraPose pose;
@@ -316,7 +316,7 @@ bool App::ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, st
         nlohmann::json cuts = nlohmann::json::array();
         for (size_t i = 0; i + 1 < frames.size(); ++i)
             if (frames[i + 1] == frames[i] + 1 && frames[i] >= start && frames[i] <= end) cuts.push_back(frames[i]);
-        promise->Resolve({{"keys", std::move(keys)}, {"cuts", std::move(cuts)}, {"count", d.camera.camera.size()}});
+        promise->Resolve({{"keys", std::move(keys)}, {"cuts", std::move(cuts)}, {"count", d.SelectedCameraTrack().camera.size()}});
         return true;
     }
 
@@ -924,11 +924,11 @@ bool App::ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, st
 
         if (target == "camera") {
             before.push_back(CaptureTrack(d, -1, RowKind::Camera, ""));
-            const size_t old = d.camera.camera.size();
-            d.camera.camera.erase(std::remove_if(d.camera.camera.begin(), d.camera.camera.end(),
+            const size_t old = d.SelectedCameraTrack().camera.size();
+            d.SelectedCameraTrack().camera.erase(std::remove_if(d.SelectedCameraTrack().camera.begin(), d.SelectedCameraTrack().camera.end(),
                                                  [&](const CameraKf& k) { return inRange(k.frame); }),
-                                  d.camera.camera.end());
-            changed = old - d.camera.camera.size();
+                                  d.SelectedCameraTrack().camera.end());
+            changed = old - d.SelectedCameraTrack().camera.size();
         } else if (target == "light") {
             const int index = args.value("index", -1);
             if (index < 0 || index >= (int)d.lights.size()) {

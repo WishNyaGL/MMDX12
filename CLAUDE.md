@@ -294,6 +294,24 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     the global preset (App.cpp `BuildFrameView`); the benchmark stays Studio/ deterministic. In the studio the shadow track
     sets `FrameView::shadowsOff`/`shadowDistance`; play mode ignores VMD light/shadow unless `settings_.motionLighting`.
     Perspective-off keys render as a 3 degree lens from far away.
+  - Camera entities (S4, `studio/StudioDoc.*` + `app/UiStudioCameras.cpp`): `StudioDoc::camera` stays the MAIN camera
+    (uid 0; it keeps the light / self-shadow / focus tracks and its own VMD) and `StudioDoc::cameras` holds the extra
+    ones (`StudioCamera`: uid >= 1 from `nextCameraUid`, name, camera-keys-only `MotionData`, visible, stageUid of the
+    stage.json camera it came from). `selectedCameraUid` says which camera the camera row / inspector / possession edit
+    (`CameraTrack(uid)`, `SelectedCameraTrack()`); the outliner's 장면 group lists "메인 카메라" + every extra one (eye,
+    rename, delete, "새 카메라" from the current view, "스테이지 카메라" = one static-key camera per stage.json camera).
+    `cameraSwitch` (`CameraSwitchKey{frame, uid}`, timeline row `RowKind::CameraSwitch`) is stepped: `ActiveCameraUidAt`
+    = the last key at or before the frame, else uid 0. The viewport, play-through, offline stills and videos all render
+    the active camera (`ActiveCameraEval`, one `CameraMotion` per camera rebuilt in `RefreshCameraEvals` from
+    `cameraVersion`); the free camera and possession are unchanged. Undo: camera keys through `TrackState::cameraUid`
+    (the same track snapshots), add / remove / rename / eye through `CamerasCommand` (whole list), switch keys through
+    `CameraSwitchCommand`. Extra cameras are invisible to the render (their `visible` is an overlay flag). VMD export
+    keeps the main camera track unless "VMD 내보내기에 전환 반영" (`studioVmdFlatten_`, default on) is set with a
+    non-empty switch track: then `FlattenCameraSwitch` copies each segment's active camera keys and adds a key pair at
+    (cut-1, cut) so MMD cuts instantly. Saved as version 5 ("cameras" / "cameraSwitch"; one VMD per extra camera,
+    "<stem> - camera <name>.vmd"). Script: `studiocamadd / studiocamselect / studiocamswitch / studiocamimport /
+    studiocamview / studiocamflatten`; `studiostate` logs `STUDIOCAM` (uid, name, keys, visible, stageUid) and
+    `STUDIOCAMSWITCH` (count, active, frame:uid list).
   - DoF focus (`studio/StudioFocus.*`, `app/UiStudioFocus.cpp`): the camera target's `RowKind::Focus` row = `MotionData::focus`
     (`FocusKf`, stepped segments: Auto / Target model uid + bone / Manual distance linear to a following Manual key; per-key
     aperture scale (linear, 0 = sharp) and `transition` frames = a smoothstep rack in 1/z). Saved in the project's editor
