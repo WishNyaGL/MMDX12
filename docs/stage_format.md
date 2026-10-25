@@ -1,6 +1,7 @@
 # MMDX stage format (`stage.json`, formatVersion 1)
 
-Status: S1a (2026-10-25), the asset layer; S2a (2026-10-25) adds the glTF material / light import table below. The
+Status: S1a (2026-10-25), the asset layer; S2a (2026-10-25) adds the glTF material / light import table below;
+S2b (2026-10-26) renders transmissive materials as mesh dielectrics (see “Transmission per render path”). The
 direction (why stages are folders, what S1b..S13 add) is `docs/stage_ecosystem.md`; this file is the reference every
 later milestone keeps current.
 
@@ -85,7 +86,7 @@ throws.
 Duplicated `file` entries are a validation error. A part that does not load is a scan note / `stage_check` error, and
 the stage still lists the parts that do load.
 
-### Supported glTF features (S2a)
+### Supported glTF features (S2a / S2b)
 
 Geometry: triangle primitives, UV0, normals, tangents (ignored), skins / joints, morph targets, node transforms, embedded
 (GL) or side-car textures. Every PBR material of a glTF part becomes one `GpuPbrMaterial` record (a PMX / VRM / MToon /
@@ -98,9 +99,9 @@ Geometry: triangle primitives, UV0, normals, tangents (ignored), skins / joints,
 | `alphaMode` / `doubleSided` | PMX material alpha mode, blend / cutout, culling | rendered |
 | `KHR_materials_emissive_strength` | `ext.emissiveStrength` → HDR emissive slot (`flags` bit 3) | rendered (not clamped > 1, so it blooms) |
 | `KHR_materials_clearcoat` (factor, roughness) | `ext.clearcoat`, `ext.clearcoatRoughness` | rendered: a second GGX lobe (F0 0.04) in raster / RT PBR shading and PT / GI direct light |
-| `KHR_materials_transmission` (factor + texture) | `ext.transmission`, `ext.transmissionTex` (R) | S2a: raster / RT draw it with alpha = 1 − 0.85 × transmission; PT / GI draw the ordinary PBR surface until S2b |
-| `KHR_materials_ior` | `ext.ior` | stored (S2b uses it to refract) |
-| `KHR_materials_volume` (thickness factor + texture, attenuation colour / distance) | `ext.volumeThickness`, `ext.volumeThicknessTex` (G), `ext.volumeAttenuationColor`, `ext.volumeAttenuationDistance` | stored (S2b) |
+| `KHR_materials_transmission` (factor + texture) | `ext.transmission`, `ext.transmissionTex` (R) | S2b: a dielectric in every path (see “Transmission per render path” below) |
+| `KHR_materials_ior` | `ext.ior` | rendered: the Fresnel / refraction index of the interface |
+| `KHR_materials_volume` (thickness factor + texture, attenuation colour / distance) | `ext.volumeThickness`, `ext.volumeThicknessTex` (G), `ext.volumeAttenuationColor`, `ext.volumeAttenuationDistance` | rendered in RT / PT / GI: refraction + Beer-Lambert absorption; `thickness` 0 = thin-walled |
 | `KHR_materials_specular` (factor, colour) | `ext.specularFactor`, `ext.specularColorFactor` | stored, not rendered |
 | `KHR_materials_sheen` (colour, roughness) | `ext.sheenColorFactor`, `ext.sheenRoughness` | stored, not rendered |
 | `KHR_texture_transform` (offset, scale, rotation) on every PBR map | the map slot's `uvScale.xy` (scale), `uvScale.zw` (offset) and the record's per-material rotation (`coat.z`) | rendered in raster / RT / PT / GI |
@@ -114,8 +115,23 @@ The GPU record has room for **one** rotation per material, so the base colour ma
 the same material carries a different one, one `[W]` names the material and the first rotation wins. A material without
 `KHR_texture_transform` (and every Ray-MMD material) keeps an identity transform, so its look is unchanged.
 
-A stage that puts the same GLB in several parts gets the maps decoded once per part; only the emission strength, the
-clearcoat and the transmission alpha change what the current renderers draw (S2b adds the refraction).
+A stage that puts the same GLB in several parts gets the maps decoded once per part.
+
+### Transmission per render path (S2b)
+
+A material with transmission > 0 becomes a **mesh dielectric**: it refracts, reflects (Fresnel) and absorbs
+(Beer-Lambert). Materials with transmission 0 are untouched. The transmission factor comes from the record times its
+map's R channel (`PbrTransmissionAt`), together with `ior`, `volumeThickness`, attenuation colour / distance; a stage
+rule's `transmission` / `ior` change them at run time (`GpuModel::SetPbrOverrides`), and `RtScene` rebuilds the
+geometry flags when that changes which materials are transmissive. The volume thickness map and the attenuation
+distance are read from the record's factor (the maps are carried, not sampled: a per-texel chord is out of scope).
+
+| path | what a transmissive material does |
+|---|---|
+| raster / RT camera view | no screen-space refraction (S2b): the surface is blended with `alpha = 1 − transmission × (1 − Fresnel(N·V, ior))`, its blended colour is tinted by the base colour and its reflectivity output is the interface Fresnel, so SSR / RT reflections show on it |
+| RT (ray-query shadows / reflections) and PT, offline GI shadows | a shadow ray is tinted by `transmission × baseColour × (1 − Fresnel)` per crossing (`TraceShadowRayTinted`) instead of being stopped, and by the volume's absorption over the chord travelled inside; no caustics. Glass therefore casts a coloured shadow that darkens toward its rim |
+| PT, offline GI (path continuation) | at a hit, the transmission event is chosen with probability = the transmission factor, else the ordinary BSDF. The event is Fresnel-weighted reflection vs refraction with the material's ior; thin-walled (`thickness` 0) transmits straight through without bending, a volume refracts and absorbs over the segment it travels inside (`sigma = -ln(attenuationColour) / attenuationDistance`). Smooth when roughness < 0.1; above that the interface normal is a GGX-sampled microfacet normal, so a frosted panel blurs what is seen through it. The base colour tints the light entering the material (glTF), and the offline GI irradiance cache is never read across the interface (that path is brute force) |
+| renders of the benchmark glass cube | unchanged: the analytic cube keeps its own dispersion path through the same shared dielectric step (`shaders/dielectric.hlsli`) |
 
 ## `materials`
 
@@ -137,7 +153,7 @@ one rule per material family). Every override is optional:
 | `roughness`, `metallic` | 0..1 | PBR factors |
 | `emissive` | `[r,g,b]` | emitted colour (linear, already includes the strength below) |
 | `emissiveStrength` | float | multiplies `emissive` (glTF `KHR_materials_emissive_strength`) |
-| `transmission` | 0..1 | dielectric transmission (`KHR_materials_transmission`); S2a blends the surface see-through, S2b refracts it |
+| `transmission` | 0..1 | dielectric transmission (`KHR_materials_transmission`); raster / RT blend the surface see-through, RT / PT / GI refract it (S2b) |
 | `ior` | float | 1.0..3.0 (`KHR_materials_ior`) |
 | `alpha` | 0..1 | opacity |
 | `mirror` | bool | planar mirror surface (S10) |
@@ -395,10 +411,10 @@ warning; the stage still loads its other parts.
 * **Variant**: the lobby's select screen ("셰이더" tab) shows a combo when the selected stage has >= 2 variants, saved as
   `stageVariant=<variant id>|<stage id>` in `mmdx12.ini`; `--stage-variant <id>` wins for one run. Empty = the
   manifest's `defaultVariant`.
-* Ignored silently until their milestones: `screens.*`, `packs.*` and `environment.*` targets (S5 / S6 / S9), the
-  `mirror` / `screen` material fields (S10 / S5) and the volume / clearcoat values of a glTF extension (S2b / later).
-  They are parsed, validated and carried, never warned about at run time. S2a renders transmission as an alpha blend and
-  gives clearcoat its own specular lobe (see the glTF feature table above).
+* Ignored silently until their milestones: `screens.*`, `packs.*` and `environment.*` targets (S5 / S6 / S9) and the
+  `mirror` / `screen` material fields (S10 / S5). They are parsed, validated and carried, never warned about at run time.
+  S2a gives clearcoat its own specular lobe and S2b renders transmission as a mesh dielectric (see the glTF feature table
+  and “Transmission per render path”).
 * Installed stages live in `<exe>/stages/<id>/` (next to the executable, like `shader_packs`): their library ids are
   prefixed `stages:<id>` so they never collide with a user-library id. A missing folder is fine. The user's library can
   hold MMDX stages too (detection stays by content).
@@ -423,7 +439,7 @@ python tools/stagegen/stagegen.py --out captures/stages    # the three procedura
 python tools/stagegen/stagegen.py --out build/bin/stages   # install them next to the exe (<exe>/stages/<id>/)
 build/bin/stage_check captures/stages/cyclorama           # errors -> exit code != 0
 build/bin/stage_check --selftest                          # evaluator / validator unit checks
-build/bin/gltf_pbr_test                                   # glTF PBR records, incl. tools/testdata/ext_test.glb (S2a)
+build/bin/gltf_pbr_test                                   # glTF PBR records, incl. tools/testdata/ext_test.glb (S2a / S2b)
 ```
 
 `stagegen` writes GLB by hand (JSON chunk + BIN chunk, 4-byte padded; named nodes and materials, normals and UVs) with
@@ -431,10 +447,11 @@ numpy only — no Blender, no glTF library. The three stages are `cyclorama` (co
 spots), `mirror_room` (box room, `mirror: true` wall, wood floor PBR) and `led_stage` (raised stage, 3 screen quads,
 truss, 8 swaying spots, fog values).
 
-`tools/testdata/make_ext_test.py` is the one Blender-made test asset (S2a): it writes `tools/testdata/ext_test.glb`, a
-committed GLB with a transmissive / volume glass sphere, an emissive-strength-15 panel, a clearcoat sphere, a
-texture-transformed checker plane and one spot + one point light. `gltf_pbr_test` checks the imported records and
-`stage_check` the stage; no test runs Blender.
+`tools/testdata/make_ext_test.py` is the one Blender-made test asset (S2a / S2b): it writes `tools/testdata/ext_test.glb`,
+a committed GLB with a transmissive / volume glass sphere, a thick tinted glass block, a thin-walled window pane, a
+frosted (roughness 0.4) acrylic panel, an emissive-strength-15 panel, a clearcoat sphere, a texture-transformed checker
+plane and one spot + one point light. `gltf_pbr_test` checks the imported records and `stage_check` the stage; no test
+runs Blender.
 
 ## Decisions taken in S1a (open points of the plan, resolved here)
 

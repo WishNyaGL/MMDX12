@@ -213,6 +213,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
             float3 pos, prevPos, n, faceN, albedo;
             float refl, rough;
             bool receive;
+            bool backFace = false;   // S2b: the ray hit the back face of a (transmissive) mesh
             bool toon = false;    // character material: raster toon sun, no Lambert NEE
             float flat = 0.0;     // MAT_FLAT (faces): even fill instead of traced indirect
             PtPbrSurface pbr;     // decoded PBR record (used when isPbrHit)
@@ -228,7 +229,8 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 uint packClass = 7u;
                 uint tag = 0u;
                 RtSurface sf = FetchSurface(g, hit.prim, hit.bary);
-                if (dot(sf.faceNormal, dir) > 0) sf.faceNormal = -sf.faceNormal;
+                backFace = dot(sf.faceNormal, dir) > 0.0;   // S2b: inside a transmissive body
+                if (backFace) sf.faceNormal = -sf.faceNormal;
                 if (dot(sf.normal, sf.faceNormal) < 0) sf.normal = -sf.normal;
                 float4 tex = SampleBaseTexture(g, sf.uv, bounce == 0 ? 0.0 : 2.0);
                 albedo = SrgbToLinear(saturate(MaterialAlbedo(g, tex.rgb)));
@@ -282,7 +284,8 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                             if (!diffuseChain) {
                                 if (receive && gShadowParams.w < 0.5) {
                                     float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, SunShadowConeCos(kSunCosMax));
-                                    sh = TraceShadowRay(OffsetRayOrigin(pos, faceN), sd, 1e5);
+                                    sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd,
+                                                                                  1e5, 0xFFu)));
                                 }
                                 packIn.sunVis = sh;
                             } else {
@@ -353,7 +356,8 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                             float sh = 1.0;
                             if (receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5) {
                                 float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, SunShadowConeCos(kSunCosMax));
-                                sh = TraceShadowRay(OffsetRayOrigin(pos, faceN), sd, 1e5);
+                                sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd, 1e5,
+                                                                              0xFFu)));
                             }
                             radiance += throughput * (PbrSunDirect(pbr, g, tex, sf.uv, -dir, sh, flat) + pbr.emissive);
                             if (flat > 0.5) {
@@ -371,7 +375,8 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                             if (receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5) {
                                 float cosMax = SunShadowConeCos(kSunCosMax);
                                 float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, cosMax);
-                                sh = TraceShadowRay(OffsetRayOrigin(pos, faceN), sd, 1e5);
+                                sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd, 1e5,
+                                                                              0xFFu)));
                             }
                             radiance += throughput * ToonSun(g, tex, sf.uv, n, -dir, sh);
                             // AutoLuminous (そぼろ): marked (non-PBR, non-pack) materials emit their colour.
@@ -401,6 +406,41 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 receive = true;
             }
 
+            // S2b mesh dielectric: a transmissive PBR hit continues with the transmission event (probability =
+            // the transmission factor) or the ordinary surface BSDF below. The event is the analytic glass cube's
+            // dielectric step with the material's own ior: thin-walled goes straight through (Fresnel still applies),
+            // a volume refracts and absorbs over the chord it travelled inside (Beer-Lambert). Choosing one event and
+            // reporting its contribution is what the primary G-buffer sees, so the denoiser demodulates the glass and
+            // not the surface behind it.
+            // The roulette value is derived from the current state without advancing the path's stream, so a scene
+            // without transmissive materials consumes exactly the random numbers it always did.
+            if (isPbrHit && PtPbrIsTransmissive(pbr) && RandValue(rng) < saturate(pbr.transmission)) {
+                PtPbrTransmission tx = PtPbrTransmit(pbr, dir, faceN, backFace, hit.t,
+                                                     float2(Rand(rng), Rand(rng)));
+                // the Fresnel split is the roulette inside the event: a reflection keeps the full weight, a
+                // refraction carries the base colour tint (glTF) and the absorption of the volume it leaves
+                throughput *= tx.refracted ? tx.tint * tx.absorb : tx.absorb;
+                if (bounce == 0 && s == 0) {   // the denoiser demodulates the interface, not what is behind it
+                    primAlbedo = max(pbr.baseColor, 0.02);
+                    primNormal = n;
+                    primRefl = saturate(Luminance(pbr.f0) + 0.04);
+                    primRough = max(pbr.rough, 0.03);
+                    primCosV = saturate(dot(n, -dir));
+                    primPos = pos;
+                    primPrev = prevPos;
+                    primHit = true;
+                    primId = hitId;
+                }
+                if (bounce == bounces) break;
+                dir = tx.dir;
+                origin = OffsetRayOrigin(pos, tx.refracted ? -faceN : faceN);
+                if (bounce >= 2) {
+                    float q = min(max(throughput.r, max(throughput.g, throughput.b)), 0.95);
+                    if (Rand(rng) > q) break;
+                    throughput /= q;
+                }
+                continue;
+            }
             if (bounce == 0 && s == 0) {
                 primAlbedo = albedo;
                 primNormal = n;
@@ -424,10 +464,11 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
             if (!toon && ndl > 0.0 && dot(faceN, L) > 0.0) {
                 float cosMax = SunShadowConeCos(kSunCosMax);
                 float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), L, cosMax);
-                float rawVis = receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5
-                                   ? TraceShadowRay(OffsetRayOrigin(pos, faceN), sd, 1e5)
-                                   : 1.0;
-                float occ = (1.0 - rawVis) * gSunShadowParams.z;
+                // S2b: a transmissive mesh tints the sun where an opaque caster would stop it
+                float3 rawVis = receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5
+                                    ? TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd, 1e5, 0xFFu)
+                                    : float3(1, 1, 1);
+                float occ = (1.0 - Luminance(saturate(rawVis))) * gSunShadowParams.z;
                 float3 visFactor = (1.0 - occ) + gSunShadowColor.rgb * occ;
                 radiance += throughput * (1.0 - pSpec) * (isPbrHit ? pbr.diffuse : albedo) / PI * SunIrradiance() * ndl * visFactor;
             }
@@ -482,8 +523,10 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                                 float cosCone = PunctualShadowConeCos(0.9999, l.shadowSoftness);
                                 rayDir = SampleCone(float2(Rand(rng), Rand(rng)), ld, cosCone);
                             }
-                            rawVis = TraceShadowRayMasked(OffsetRayOrigin(pos, faceN), rayDir, max(dist - 0.05, 0.0),
-                                                          RT_MASK_CHARACTER);
+                            // S2b: tint through transmissive stage / prop geometry, then the character mask rule
+                            rawVis = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), rayDir,
+                                                                            max(dist - 0.05, 0.0),
+                                                                            RT_MASK_CHARACTER)));
                         }
                         float3 shadowFactor = ShadowTransmission(rawVis, l.shadowDensity, l.shadowColor);
                         if (evalDiff) {

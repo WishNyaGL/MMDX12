@@ -39,6 +39,16 @@ std::pair<uint32_t, uint32_t> PartRange(const GpuModel::RtResources& rt, int par
                      : std::make_pair(rt.partSplit, (uint32_t)rt.geometryMaterials.size());
 }
 
+// S2b: hash of the model's per-material "transmission > 0" set (a static stage BLAS is built once, but a runtime
+// stage target can make a material transmissive afterwards; the OPAQUE geometry flag must follow).
+uint64_t TransmissiveSignature(const GpuModel& model) {
+    uint64_t h = 1469598103934665603ull;   // FNV-1a
+    for (size_t i = 0; i < model.Materials().size(); ++i) {
+        h = (h ^ (model.PbrTransmission(i) > 0.0f ? 1ull : 0ull)) * 1099511628211ull;
+    }
+    return h;
+}
+
 // One geometry desc per drawable material of one BLAS part (EnsureModelResources filtered them).
 std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> BuildGeometryDescs(GpuModel& model, int part) {
     const auto& rt = model.Rt();
@@ -56,8 +66,11 @@ std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> BuildGeometryDescs(GpuModel& model, 
         const bool alphaTest = m.alphaTested || c.diffuse.w < 0.999f ||
                                PackAlphaKeyFromClass(c.packClass) > 0.0f ||
                                (m.morphable && model.Role() == ModelRole::Stage && !model.Dynamic());
-        d.Flags = (m.castShadow && !alphaTest) ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE
-                                               : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+        // S2b mesh dielectrics: a transmissive material is non-opaque like an alpha-tested one, so shadow rays can
+        // see it (TraceShadowRayTinted) instead of the query committing the first opaque hit.
+        const bool transmissive = model.PbrTransmission(i) > 0.0f;
+        d.Flags = ((m.castShadow && !alphaTest && !transmissive) ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE
+                                                                 : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE);
         d.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
         d.Triangles.IndexCount = m.indexCount;
         d.Triangles.IndexBuffer = model.IndexBuffer()->GetGPUVirtualAddress() + (uint64_t)m.indexStart * 4;
@@ -215,6 +228,7 @@ bool RtScene::EnsureModelResources(GpuModel& model) {
                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"rt.blas.scratch");
         if (!bp.blas || !bp.scratch) return false;
     }
+    rt.transmissiveSig = TransmissiveSignature(model);
     return true;
 }
 
@@ -278,7 +292,10 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
     for (GpuModel* m : models) {
         if (!usable(m) || !EnsureModelResources(*m)) continue;
         auto& rt = m->Rt();
-        if (!(m->Role() == ModelRole::Character || m->Dynamic() || !rt.blasBuilt)) continue;
+        // S2b: a static stage rebuilds when a runtime override changed which materials are transmissive (the BLAS
+        // geometry flags are the only thing that follows; the vertices stay valid).
+        const bool transmissionChanged = rt.blasBuilt && rt.transmissiveSig != TransmissiveSignature(*m);
+        if (!(m->Role() == ModelRole::Character || m->Dynamic() || !rt.blasBuilt || transmissionChanged)) continue;
         for (int part = 0; part < 2; ++part) {
             const auto& bp = rt.parts[part];
             if (!bp.blas) continue;
@@ -296,6 +313,7 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
             cmd4->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
         }
         rt.blasBuilt = true;
+        rt.transmissiveSig = TransmissiveSignature(*m);
     }
     D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
     cmd->ResourceBarrier(1, &uavBarrier);
@@ -526,11 +544,15 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
             const float alphaKey = PackAlphaKeyFromClass(c.packClass);
             const bool alphaTest = m2.alphaTested || c.diffuse.w < 0.999f || alphaKey > 0.0f ||
                                    (m2.morphable && m->Role() == ModelRole::Stage && !m->Dynamic());
+            // S2b mesh dielectrics: transmission > 0 (base record or a stage override) makes the material a
+            // dielectric -- ray-query shadow rays tint through it and the path tracers refract at the hit.
+            const bool transmissive = m->PbrTransmission(mi) > 0.0f;
             RtGeometry e{};
             e.vertexSrv = rt.srv;
             e.indexSrv = rt.srv + 1;
             e.indexStart = m2.indexStart;
             e.flags = c.flags | (m2.castShadow ? RtGeom_CastShadow : 0) | (alphaTest ? RtGeom_AlphaTest : 0) |
+                      (transmissive ? RtGeom_Transmissive : 0) |
                       ((m->Role() == ModelRole::Character || m->Dynamic()) ? RtGeom_Character : 0) |
                       (((uint32_t)(modelIdx + 1) & 0xFFu) << 24);
             e.diffuse = c.diffuse;

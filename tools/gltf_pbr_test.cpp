@@ -227,6 +227,36 @@ int wmain() {
                 }
             }
 
+            // S2b mesh dielectrics: a thick tinted block (volume), a thin-walled pane (no volume) and a frosted panel
+            // (roughness 0.4). The render paths read exactly these record fields (transmission / ior / thickness /
+            // attenuation) plus the roughness for the GGX-perturbed interface.
+            const int block = MaterialIndex(model, "GlassBlock");
+            Expect(block >= 0, "ext_test: the GlassBlock material is present");
+            if (block >= 0 && (size_t)block < pbr.materials.size() && pbr.materials[(size_t)block].valid) {
+                const PbrMaterial& m = pbr.materials[(size_t)block];
+                Expect(std::fabs(m.ext.transmission - 1.0f) < 1e-4f, "ext_test: GlassBlock transmission 1");
+                Expect(m.ext.volumeThickness > 1.1f, "ext_test: GlassBlock is a volume (thickness 1.2)");
+                Expect(m.ext.volumeAttenuationColor.y > m.ext.volumeAttenuationColor.x,
+                       "ext_test: GlassBlock attenuation colour is the authored green tint");
+                Expect(m.ext.volumeAttenuationDistance > 1.4f && m.ext.volumeAttenuationDistance < 1.6f,
+                       "ext_test: GlassBlock attenuationDistance 1.5");
+            }
+            const int pane = MaterialIndex(model, "Pane");
+            Expect(pane >= 0, "ext_test: the Pane material is present");
+            if (pane >= 0 && (size_t)pane < pbr.materials.size() && pbr.materials[(size_t)pane].valid) {
+                const PbrMaterial& m = pbr.materials[(size_t)pane];
+                Expect(std::fabs(m.ext.transmission - 1.0f) < 1e-4f, "ext_test: Pane transmission 1");
+                Expect(m.ext.volumeThickness <= 0.0f, "ext_test: Pane is thin-walled (no KHR_materials_volume)");
+            }
+            const int acrylic = MaterialIndex(model, "Acrylic");
+            Expect(acrylic >= 0, "ext_test: the Acrylic material is present");
+            if (acrylic >= 0 && (size_t)acrylic < pbr.materials.size() && pbr.materials[(size_t)acrylic].valid) {
+                const PbrMaterial& m = pbr.materials[(size_t)acrylic];
+                Expect(std::fabs(m.ext.transmission - 1.0f) < 1e-4f, "ext_test: Acrylic transmission 1");
+                Expect(std::fabs(m.slots[(int)PbrSlotId::Smoothness].value[0] - 0.4f) < 1e-3f,
+                       "ext_test: Acrylic roughness 0.4 (the frosted interface)");
+            }
+
             // Lights: one point + one spot, converted to engine units at import.
             Expect(model.importedLights.size() == 2, "ext_test: two KHR_lights_punctual lights imported");
             for (const ImportedLight& l : model.importedLights) {

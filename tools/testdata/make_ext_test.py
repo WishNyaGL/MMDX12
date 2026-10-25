@@ -8,6 +8,9 @@ Run headless (Blender 5.2, see captures/blender_setup.md):
 The GLB is committed so gltf_pbr_test / stage_check never need Blender. It carries, one object each:
   * Glass     - transmissive sphere, KHR_materials_transmission + KHR_materials_ior + KHR_materials_volume
                 (thickness + attenuation colour / distance), i.e. the S2b / stage glass case.
+  * GlassBlock - S2b: a thick tinted glass block (volume thickness + green attenuation), refraction + coloured shadow.
+  * Pane      - S2b: a thin-walled window pane (transmission 1, no volume): straight through, Fresnel reflection.
+  * Acrylic   - S2b: a frosted acrylic panel (transmission 1, roughness 0.4, no volume): the refraction is GGX-blurred.
   * Panel     - emissive strength 15 (KHR_materials_emissive_strength): the LED-panel HDR case.
   * Coat      - red sphere with KHR_materials_clearcoat (factor 1, roughness 0.05).
   * Checker   - a plane whose base colour map has a KHR_texture_transform (offset / scale / rotation).
@@ -86,7 +89,9 @@ def make_checker_image():
 
 
 def make_gradient_image(name):
-    """A 64x64 horizontal ramp: KHR_materials_transmission reads its R channel, KHR_materials_volume G."""
+    """A 64x64 map for the two extension maps: KHR_materials_transmission reads its R channel and the
+    KHR_materials_volume thickness factor is the G channel. Both are constant here (1) so the sphere stays a clean
+    reference: a gradient would band a UV sphere, whose u is the longitude."""
     size = 64
     img = bpy.data.images.new(name, width=size, height=size, alpha=False)
     px = [0.0] * (size * size * 4)
@@ -94,8 +99,8 @@ def make_gradient_image(name):
         for x in range(size):
             v = x / (size - 1.0)
             i = (y * size + x) * 4
-            px[i + 0] = v          # R: transmission
-            px[i + 1] = 0.4 + 0.6 * v   # G: thickness
+            px[i + 0] = 1.0               # R: transmission (constant: the sphere stays clear; the map is still sampled)
+            px[i + 1] = 1.0               # G: thickness (constant: a gradient bands a UV sphere)
             px[i + 2] = v
             px[i + 3] = 1.0
     img.pixels = px
@@ -156,6 +161,52 @@ def main():
         glass.node_tree.links.new(tex_node.outputs["Color"], separate.inputs["Color"])
         glass.node_tree.links.new(separate.outputs["Green"], group_node.inputs["Thickness"])
     add_sphere("Glass", (-4.0, 0.0, 1.2), 1.2, glass)
+
+    # ---- S2b mesh dielectrics: block / pane / frosted acrylic ------------------------------------------------
+    # Blender's exporter writes KHR_materials_transmission from the Principled transmission weight; a material without
+    # the `glTF Material Output` group's Thickness (or with 0) exports no KHR_materials_volume = thin-walled.
+    def transmissive_material(name, base_color, roughness, thickness=0.0, attenuation=None, attenuation_distance=1.0):
+        mat = bpy.data.materials.new(name)
+        bsdf = principled(mat)
+        set_input(bsdf, ["Base Color"], base_color)
+        set_input(bsdf, ["Roughness"], roughness)
+        set_input(bsdf, ["Transmission Weight", "Transmission"], 1.0)
+        set_input(bsdf, ["IOR"], 1.5)
+        if thickness > 0.0:
+            gltf_output_group(mat, thickness=thickness)
+            if attenuation is not None:
+                out = next(n for n in mat.node_tree.nodes if n.type == "OUTPUT_MATERIAL")
+                absorb = mat.node_tree.nodes.new("ShaderNodeVolumeAbsorption")
+                absorb.inputs["Color"].default_value = attenuation
+                # attenuationDistance = 1 / density (the exporter convention)
+                absorb.inputs["Density"].default_value = 1.0 / attenuation_distance
+                mat.node_tree.links.new(absorb.outputs["Volume"], out.inputs["Volume"])
+        return mat
+
+    block_mat = transmissive_material("GlassBlock", (0.55, 0.85, 0.72, 1.0), 0.03, thickness=1.2,
+                                      attenuation=(0.55, 0.92, 0.70, 1.0), attenuation_distance=1.5)
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(-2.6, -1.7, 0.9))
+    block = bpy.context.active_object
+    block.name = "GlassBlock"
+    block.scale = (1.4, 1.4, 1.4)
+    block.data.materials.append(block_mat)
+
+    # Thin-walled window pane: transmission, no volume (KHR_materials_volume absent) -> no bending, no absorption.
+    pane_mat = transmissive_material("Pane", (0.90, 0.95, 1.0, 1.0), 0.02)
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(1.5, -1.5, 1.25))
+    pane = bpy.context.active_object
+    pane.name = "Pane"
+    pane.scale = (1.3, 0.04, 1.3)
+    pane.data.materials.append(pane_mat)
+
+    # Frosted acrylic: roughness 0.4 makes each crossing's refraction normal GGX-perturbed. It is given a volume
+    # (thickness, no attenuation) so the ray crosses twice and the two perturbed crossings blur the see-through.
+    acrylic_mat = transmissive_material("Acrylic", (0.86, 0.88, 0.95, 1.0), 0.4, thickness=0.8)
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(2.75, -2.2, 1.1))
+    acrylic = bpy.context.active_object
+    acrylic.name = "Acrylic"
+    acrylic.scale = (1.5, 0.08, 1.5)
+    acrylic.data.materials.append(acrylic_mat)
 
     # ---- Panel: emission strength 15 (HDR) ------------------------------------------------------------------
     panel_mat = bpy.data.materials.new("Panel")

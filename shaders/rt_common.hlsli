@@ -38,6 +38,7 @@
 #define RTG_ALPHA_TEST  (1u << 17)
 #define RTG_CHARACTER   (1u << 18)
 #define RTG_PT_PACK     (1u << 19)
+#define RTG_TRANSMISSIVE (1u << 20)   // S2b mesh dielectric (RtGeom_Transmissive): refracts / tints shadows
 
 struct RtPtPackRecord {
     uint materialClass;
@@ -226,6 +227,9 @@ float TraceShadowRay(float3 origin, float3 dir, float tMax) {
     return TraceShadowRayMasked(origin, dir, tMax, 0xFFu);
 }
 
+// S2b: TraceShadowRayTinted (tinted visibility through transmissive mesh dielectrics) lives in pbr_common.hlsli, next
+// to the PBR record decoders it needs; this header is included before them, so it cannot host the function itself.
+
 struct RtHit {
     uint instanceId, geometryIndex, prim;
     float2 bary;
@@ -268,6 +272,9 @@ bool CommitDecalNear(float3 origin, float3 dir, float tMin, float tHit, uint opa
         // the opaque surface, so it must not win.
         if (q.CandidateInstanceID() != opaqueInstance || q.CandidateGeometryIndex() <= bestGeom) continue;
         RtGeometry g = LoadGeometry(q.CandidateInstanceID(), q.CandidateGeometryIndex());
+        // S2b: a transmissive mesh is non-opaque in the BLAS but it is not a decal: it must not win over the opaque
+        // surface it happens to touch (a glass sheet flush against a wall stays a separate surface).
+        if ((g.flags & RTG_TRANSMISSIVE) != 0) continue;
         if (CandidateAlpha(g, q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()) < alphaThreshold)
             continue;
         // Among coplanar candidates the later-drawn one wins; keep the highest geometry index.
@@ -358,6 +365,11 @@ uint RngSeed(uint2 pixel, uint frame, uint salt) {
 float Rand(inout uint state) {
     state = PcgHash(state);
     return (state >> 8) * (1.0 / 16777216.0);
+}
+// A random value from the CURRENT state, without advancing it: for a roulette that must not consume a draw on the
+// paths that skip it (a material property decides whether the draw happens at all).
+float RandValue(uint state) {
+    return (PcgHash(state) >> 8) * (1.0 / 16777216.0);
 }
 
 void BuildBasis(float3 n, out float3 t, out float3 b) {

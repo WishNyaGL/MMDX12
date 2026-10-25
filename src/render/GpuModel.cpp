@@ -253,16 +253,20 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     }
     // PBR file maps (work unit P2): texture indices the Ray records reference through a decoded file.
     std::vector<int32_t> pbrFileUsed;
+    const auto usePbrFile = [&](const PbrTextureRef& ref) {
+        if (ref.kind != PbrTexKind::File || ref.fileIndex < 0 || (size_t)ref.fileIndex >= pbr.textures.size() ||
+            pbr.textures[(size_t)ref.fileIndex].Empty())
+            return;
+        if (std::find(pbrFileUsed.begin(), pbrFileUsed.end(), ref.fileIndex) == pbrFileUsed.end())
+            pbrFileUsed.push_back(ref.fileIndex);
+    };
     for (size_t mi = 0; mi < pbr.materials.size() && mi < pmx.materials.size(); ++mi) {
         if (!pbr.materials[mi].valid) continue;
-        for (int si = 0; si < kPbrSlotCount; ++si) {
-            const PbrSlot& s = pbr.materials[mi].slots[si];
-            if (s.tex.kind != PbrTexKind::File || s.tex.fileIndex < 0 ||
-                (size_t)s.tex.fileIndex >= pbr.textures.size() || pbr.textures[(size_t)s.tex.fileIndex].Empty())
-                continue;
-            if (std::find(pbrFileUsed.begin(), pbrFileUsed.end(), s.tex.fileIndex) == pbrFileUsed.end())
-                pbrFileUsed.push_back(s.tex.fileIndex);
-        }
+        for (int si = 0; si < kPbrSlotCount; ++si) usePbrFile(pbr.materials[mi].slots[si].tex);
+        // S2b: the extension maps ride outside the slots (KHR_materials_transmission R, KHR_materials_volume G);
+        // without this they would decode but never reach the GPU, and the record's SRV would stay -1.
+        usePbrFile(pbr.materials[mi].ext.transmissionTex);
+        usePbrFile(pbr.materials[mi].ext.volumeThicknessTex);
     }
     textures_.assign(textures.size(), {});
     for (int32_t i : referenced) {
@@ -274,6 +278,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     }
     // PBR file map textures (R8 for single-channel slots, RGBA8 otherwise).
     pbrIndex_.assign(pmx.materials.size(), DescriptorHeap::kInvalid);
+    pbrTransmission_.assign(pmx.materials.size(), 0.0f);
     pbrTextures_.assign(pbr.textures.size(), {});
     for (int32_t i : pbrFileUsed) {
         const int channel = i < (int)pbr.textureChannels.size() ? pbr.textureChannels[(size_t)i] : -1;
@@ -534,10 +539,9 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             r.shadingModel = (uint32_t)std::max(0, src.shadingModel);
             r.alphaThreshold = src.alphaThreshold;
             r.diffuseAlpha = pm.diffuse.w;
-            // S2a, before S2b: a transmissive material must not draw as an opaque wall. The raster / RT PBR branch
-            // multiplies its output alpha by (1 - 0.85 * transmission) (shaders/mmd.hlsl, PbrTransmission); the ray
-            // paths read PbrAlpha / the PMX coverage, so PT / offline GI keep the opaque PBR look until S2b. The
-            // material's own diffuse alpha is left alone for the same reason.
+            // S2b: the transmission block drives the dielectric in every path (raster / RT Fresnel alpha in
+            // shaders/mmd.hlsl, refraction in pathtrace.hlsl / offline_gi.hlsl, tinted shadows in pbr_common.hlsli).
+            // The material's own diffuse alpha stays untouched: the coverage is the shader's business.
             const float transmission = std::clamp(src.ext.transmission, 0.0f, 1.0f);
             r.params.x = (float)src.albedoSubEnable;
             r.params.y = (float)src.albedoApplyDiffuse;
@@ -583,6 +587,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
                 }
             }
             pbrIndex_[mi] = (uint32_t)records.size();
+            pbrTransmission_[mi] = transmission;   // S2b: RtGeom_Transmissive (the ray paths refract through it)
             records.push_back(r);
         }
         pbrBuf_ = batch.CreateBuffer(records.data(), records.size() * sizeof(GpuPbrMaterial),
@@ -593,6 +598,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         if (!pbrBuf_) {
             LOG_WARN("model '%s': PBR record buffer creation failed", name_.c_str());
             pbrIndex_.assign(pmx.materials.size(), DescriptorHeap::kInvalid);
+            pbrTransmission_.assign(pmx.materials.size(), 0.0f);
             pbrRecords_.clear();
         } else {
             const uint32_t alloc = ctx.SrvHeap().Allocate(1);
@@ -609,6 +615,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             } else {
                 pbrBuf_.Reset();
                 pbrIndex_.assign(pmx.materials.size(), DescriptorHeap::kInvalid);
+                pbrTransmission_.assign(pmx.materials.size(), 0.0f);
                 pbrRecords_.clear();
             }
         }
@@ -797,6 +804,12 @@ void GpuModel::SetPbrOverrides(uint64_t frame, const std::vector<PbrOverride>& l
         pbrOverridesActive_ = false;
         for (uint32_t s = 0; s < kRing; ++s) pbrRingVersion_[s] = 0;
         pbrSrv_ = pbrStaticSrv_;
+        for (size_t mi = 0; mi < pbrTransmission_.size(); ++mi) {   // S2b: back to the base transmission
+            const uint32_t rec = PbrIndex(mi);
+            pbrTransmission_[mi] = rec != DescriptorHeap::kInvalid && rec < pbrRecords_.size()
+                                       ? std::clamp(pbrRecords_[rec].transmission.x, 0.0f, 1.0f)
+                                       : 0.0f;
+        }
         return;
     }
     if (!pbrOverridesActive_) {
@@ -910,6 +923,7 @@ void GpuModel::SetPbrOverrides(uint64_t frame, const std::vector<PbrOverride>& l
         if (o.alpha) m.diffuseAlpha = std::clamp(*o.alpha, 0.0f, 1.0f);
         if (o.transmission) m.transmission.x = std::clamp(*o.transmission, 0.0f, 1.0f);
         if (o.ior) m.transmission.y = std::clamp(*o.ior, 1.0f, 3.0f);
+        pbrTransmission_[o.material] = m.transmission.x;   // S2b: the ray paths' RtGeom_Transmissive follows too
     }
     pbrRingVersion_[r] = version;
 }
@@ -1096,6 +1110,7 @@ void GpuModel::Destroy() {
     pbrTextureSrvs_.clear();
     pbrTextures_.clear();
     pbrIndex_.clear();
+    pbrTransmission_.clear();
     pbrBuf_.Reset();
     rt_ = RtResources{};
     materialConsts_.clear();

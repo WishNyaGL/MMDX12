@@ -31,6 +31,7 @@
 //   gP2 = (shutter time 0..1, focus distance (view z, <= 0: pinhole), lens radius, 0)
 #include "rt_common.hlsli"   // includes common.hlsli
 #include "offline_common.hlsli"
+#include "dielectric.hlsli"
 #include "offline_glass.hlsli"
 #define PBR_SAMPLE_LEVEL0     // compute: no screen-space gradients
 #include "pt_pbr.hlsli"
@@ -112,35 +113,26 @@ float2 ConcentricDisk(float2 u) {
 // The glass box (geometry in offline_glass.hlsli) is a smooth dielectric with dispersion (one hero
 // colour channel per path once it refracts) and Beer-Lambert absorption inside.
 
-float FresnelDielectric(float cosI, float eta) {   // eta = n(transmitted side) / n(incident side)
-    float sinT2 = (1.0 - cosI * cosI) / (eta * eta);
-    if (sinT2 >= 1.0) return 1.0;
-    float cosT = sqrt(1.0 - sinT2);
-    float rs = (cosI - eta * cosT) / (cosI + eta * cosT);
-    float rp = (eta * cosI - cosT) / (eta * cosI + cosT);
-    return 0.5 * (rs * rs + rp * rp);
-}
+// FresnelDielectric / the refraction step live in dielectric.hlsli (shared with the S2b mesh dielectrics).
 
 // Index of refraction for the path's hero channel (-1: none chosen yet, green).
 float GlassIor(int ch) { return gGlassParams.z + gGlassParams.w * 0.5 * (float)((ch < 0 ? 1 : ch) - 1); }
 
 // Smooth dielectric scattering at a glass crossing (n faces the incoming ray): Fresnel-weighted
-// choice between mirror reflection and refraction. The first refraction of a path picks its hero
+// choice between mirror reflection and refraction, through the same dielectric step a transmissive
+// mesh uses with its own ior (dielectric.hlsli). The first refraction of a path picks its hero
 // colour channel (dispersion): the throughput keeps that channel only, x3.
 float3 GlassScatter(float3 d, float3 n, bool inside, inout int ch, inout float3 T, inout uint rng, out bool refracted) {
     refracted = false;
-    float cosI = saturate(dot(-d, n));
-    float eta = inside ? 1.0 / GlassIor(ch) : GlassIor(ch);
-    if (Rand(rng) < FresnelDielectric(cosI, eta)) return reflect(d, n);
+    const float u = Rand(rng);
+    const float ior = GlassIor(ch);
+    float eta = inside ? 1.0 / ior : ior;
+    if (u < FresnelDielectric(saturate(dot(-d, n)), eta)) return reflect(d, n);
     if (ch < 0 && gGlassParams.w > 0.0) {
         ch = min((int)(Rand(rng) * 3.0), 2);
         T *= float3(ch == 0, ch == 1, ch == 2) * 3.0;
-        eta = inside ? 1.0 / GlassIor(ch) : GlassIor(ch);
     }
-    float3 t = refract(d, n, 1.0 / eta);
-    if (dot(t, t) < 1e-8) return reflect(d, n);   // total internal reflection
-    refracted = true;
-    return normalize(t);
+    return DielectricRefract(d, n, inside, GlassIor(ch), refracted);
 }
 
 // Transparent shadow of the glass along a shadow ray: interface transmission at both crossings and
@@ -200,6 +192,7 @@ struct Surf {
     float refl, rough;
     bool character, flat, receive;
     bool glass, inside;     // glass crossing; inside = leaving the glass body
+    bool backFace;          // S2b: the ray hit the back face of the mesh (it is inside a transmissive body)
     bool emitter;           // softbox: the path ends here with `emission`
     bool pbr;               // the mesh hit has a PBR record (pt_pbr decoded into `pb`)
     RtGeometry g;           // undefined for the studio floor and the props
@@ -266,7 +259,8 @@ bool TraceScene(float3 o, float3 d, float tMin, inout uint rng, float lod, out S
         t = hit.t;
         RtGeometry g = LoadGeometry(hit.instanceId, hit.geometryIndex);
         RtSurface sf = FetchSurface(g, hit.prim, hit.bary);
-        if (dot(sf.faceNormal, d) > 0) sf.faceNormal = -sf.faceNormal;
+        s.backFace = dot(sf.faceNormal, d) > 0.0;   // S2b: the geometric normal faces away from the ray
+        if (s.backFace) sf.faceNormal = -sf.faceNormal;
         if (dot(sf.normal, sf.faceNormal) < 0) sf.normal = -sf.normal;
         float4 tex = SampleBaseTexture(g, sf.uv, lod);
         s.g = g;
@@ -438,9 +432,11 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
             if (l.isArea > 0.5) {
                 if (shadowType != 0) {
                     float3 po = OffsetRayOrigin(s.pos, s.faceN);
-                    float hitVis = TraceShadowRayMasked(po, ld, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+                    float3 meshTrans = TraceShadowRayTinted(po, ld, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+                    float hitVis = Luminance(meshTrans);
                     float3 shadowTrans = ShadowTransmission(hitVis, l.shadowDensity, l.shadowColor);
-                    vis = shadowTrans * (hitVis > 0.0 ? GlassShadow(po, ld, max(dist - 0.05, 0.0)) : float3(1, 1, 1));
+                    vis = shadowTrans * (hitVis > 0.0 ? meshTrans * GlassShadow(po, ld, max(dist - 0.05, 0.0))
+                                                      : float3(1, 1, 1));
                 }
             } else if (shadowType != 0) {
                 float3 po = OffsetRayOrigin(s.pos, s.faceN);
@@ -449,9 +445,11 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                     float cosTheta = PunctualShadowConeCos(1.0, l.shadowSoftness);
                     dir = SampleCone(float2(Rand(rng), Rand(rng)), ld, cosTheta);
                 }
-                float hitVis = TraceShadowRayMasked(po, dir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+                float3 meshTrans = TraceShadowRayTinted(po, dir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+                float hitVis = Luminance(meshTrans);
                 float3 shadowTrans = ShadowTransmission(hitVis, l.shadowDensity, l.shadowColor);
-                vis = shadowTrans * (hitVis > 0.0 ? GlassShadow(po, dir, max(dist - 0.05, 0.0)) : float3(1, 1, 1));
+                vis = shadowTrans * (hitVis > 0.0 ? meshTrans * GlassShadow(po, dir, max(dist - 0.05, 0.0))
+                                                  : float3(1, 1, 1));
             }
 
             if (evalDiff) {
@@ -502,9 +500,11 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                 if (lk.isArea > 0.5) {
                     if (shadowType != 0) {
                         float3 po = OffsetRayOrigin(s.pos, s.faceN);
-                        float hitVis = TraceShadowRayMasked(po, ld, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+                        float3 meshTrans = TraceShadowRayTinted(po, ld, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+                        float hitVis = Luminance(meshTrans);
                         float3 shadowTrans = ShadowTransmission(hitVis, lk.shadowDensity, lk.shadowColor);
-                        vis = shadowTrans * (hitVis > 0.0 ? GlassShadow(po, ld, max(dist - 0.05, 0.0)) : float3(1, 1, 1));
+                        vis = shadowTrans * (hitVis > 0.0 ? meshTrans * GlassShadow(po, ld, max(dist - 0.05, 0.0))
+                                                          : float3(1, 1, 1));
                     }
                 } else if (shadowType != 0) {
                     float3 po = OffsetRayOrigin(s.pos, s.faceN);
@@ -513,9 +513,11 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                         float cosTheta = PunctualShadowConeCos(1.0, lk.shadowSoftness);
                         dir = SampleCone(float2(Rand(rng), Rand(rng)), ld, cosTheta);
                     }
-                    float hitVis = TraceShadowRayMasked(po, dir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+                    float3 meshTrans = TraceShadowRayTinted(po, dir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+                    float hitVis = Luminance(meshTrans);
                     float3 shadowTrans = ShadowTransmission(hitVis, lk.shadowDensity, lk.shadowColor);
-                    vis = shadowTrans * (hitVis > 0.0 ? GlassShadow(po, dir, max(dist - 0.05, 0.0)) : float3(1, 1, 1));
+                    vis = shadowTrans * (hitVis > 0.0 ? meshTrans * GlassShadow(po, dir, max(dist - 0.05, 0.0))
+                                                      : float3(1, 1, 1));
                 }
                 specR += pSpec * lk.color * atten * vis * (s.pbr ? PtPbrEvalSpecular(s.pb, V, ld) : (1.0 / omega));
             }
@@ -536,9 +538,10 @@ float3 SunVisibility(Surf s, inout uint rng) {
     float cosMax = SunShadowConeCos(kSunCosMax);
     float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, cosMax);
     float3 po = OffsetRayOrigin(s.pos, s.faceN);
-    float v = TraceShadowRay(po, sd, 1e5);
+    float3 meshTrans = TraceShadowRayTinted(po, sd, 1e5, 0xFFu);
+    float v = Luminance(meshTrans);
     float3 trans = ShadowTransmission(v, gSunShadowParams.z, gSunShadowColor.rgb);
-    return trans * (v > 0.0 ? GlassShadow(po, sd, 1e5) : float3(1, 1, 1));
+    return trans * (v > 0.0 ? meshTrans * GlassShadow(po, sd, 1e5) : float3(1, 1, 1));
 }
 
 // Lambert irradiance from the sun and the punctual lights (one shadow ray each).
@@ -584,9 +587,10 @@ float3 SkinSunVisibility(Surf s, float skin, inout uint rng) {
         float3 p = s.pos + (t * cos(phi) + b * sin(phi)) * r;
         float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, cosMax);
         float3 po = OffsetRayOrigin(p, s.faceN);
-        float v = TraceShadowRay(po, sd, 1e5);
+        float3 meshTrans = TraceShadowRayTinted(po, sd, 1e5, 0xFFu);
+        float v = Luminance(meshTrans);
         float3 trans = ShadowTransmission(v, gSunShadowParams.z, gSunShadowColor.rgb);
-        vis[c] = (v > 0.0 ? trans * GlassShadow(po, sd, 1e5) : trans)[c];
+        vis[c] = (v > 0.0 ? trans * meshTrans * GlassShadow(po, sd, 1e5) : trans)[c];
     }
     return vis;
 }
@@ -620,8 +624,9 @@ float3 SkinTransmittance(Surf s, float3 dir, float lightDist) {
     float3 trans = exp(-d / kSkinDepth);
     if (Luminance(trans) < 1e-3) return 0.0;
     float3 exitP = inside + dir * (d + 0.01);
-    float vis = TraceShadowRay(exitP, dir, max(lightDist - d, 0.0));
-    return vis > 0.0 ? trans * GlassShadow(exitP, dir, max(lightDist - d, 0.0)) : 0.0;
+    float3 meshVis = TraceShadowRayTinted(exitP, dir, max(lightDist - d, 0.0), 0xFFu);
+    float vis = Luminance(meshVis);
+    return vis > 0.0 ? trans * meshVis * GlassShadow(exitP, dir, max(lightDist - d, 0.0)) : 0.0;
 }
 
 // Translucency of thin skin (ears, fingers) lit from behind by the sun and one punctual light
@@ -756,7 +761,7 @@ float3 GlassGlint(Surf s, float3 V, inout uint rng) {
             float3 po = OffsetRayOrigin(s.pos, s.faceN);
             float vis = 1.0;
             if (gSunShadowParams.x > 0.5)
-                vis = TraceShadowRay(po, L, 1e5);
+                vis = Luminance(saturate(TraceShadowRayTinted(po, L, 1e5, 0xFFu)));
             c += spec * SunIrradiance() * ndl * vis;
         }
     }
@@ -775,6 +780,42 @@ float3 GlassGlint(Surf s, float3 V, inout uint rng) {
         float3 hh = normalize(ld + V);
         c += norm * pow(saturate(dot(s.n, hh)), e) * FresnelDielectric(saturate(dot(hh, V)), gGlassParams.z) *
              PI * l.color * atten * nl2;
+    }
+    return c;
+}
+
+// S2b: the same tight glint for a transmissive MESH surface (a smooth dielectric reflects the delta lights, which a
+// sampled reflection direction would almost never find). Weighted by Fresnel at the material's ior.
+float3 FresnelGlint(Surf s, float3 V, inout uint rng) {
+    const float e = 1200.0, norm = (e + 8.0) / (8.0 * PI);
+    const float ior = max(s.pb.ior, 1.0);
+    float3 c = 0;
+    float3 L = -gLightDir;
+    float3 h = normalize(L + V);
+    float ndl = dot(s.n, L);
+    if (ndl > 0.0) {
+        float spec = norm * pow(saturate(dot(s.n, h)), e) * FresnelDielectric(saturate(dot(h, V)), ior);
+        if (spec > 1e-3) {
+            float3 po = OffsetRayOrigin(s.pos, s.faceN);
+            float3 vis = gSunShadowParams.x > 0.5 ? TraceShadowRayTinted(po, L, 1e5, 0xFFu) : float3(1, 1, 1);
+            c += spec * SunIrradiance() * ndl * vis;
+        }
+    }
+    uint nl = (uint)gNumLights;
+    for (uint i = 0; i < nl; ++i) {
+        PtLight l = gPtLights[i];
+        if (l.affectSpecular <= 0.5) continue;
+        float3 dl = l.pos - s.pos;
+        float dist = length(dl);
+        float3 ld = dl / max(dist, 1e-4);
+        float atten = PunctualFalloff(dist, l.invRange, (int)l.falloff);
+        if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
+        else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
+        float nl2 = dot(s.n, ld);
+        if (atten <= 0.0 || nl2 <= 0.0) continue;
+        float3 hh = normalize(ld + V);
+        c += norm * pow(saturate(dot(s.n, hh)), e) * FresnelDielectric(saturate(dot(hh, V)), ior) * PI * l.color *
+             atten * nl2;
     }
     return c;
 }
@@ -914,9 +955,12 @@ float3 InterpolateGrid(Texture2D<float4> etex, float s, float2 q, float3 n, floa
     return cover > 1e-3 ? E / cover : 0.0;
 }
 
-// Indirect irradiance of a camera hit from the final cache (false when not covered).
+// Indirect irradiance of a camera hit from the final cache (false when not covered). S2b: never across a
+// transmissive interface -- the cache holds the irradiance of the opaque surfaces it sampled, so a dielectric vertex
+// is always brute force.
 bool IcLookup(Surf s, out float3 E) {
     E = 0;
+    if (s.pbr && PtPbrIsTransmissive(s.pb)) return false;
     float4 c = mul(float4(s.pos, 1.0), gViewProjNoJitter);
     if (c.w <= 0.0) return false;
     float2 ndc = c.xy / c.w;
@@ -1160,6 +1204,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
     bool diffuseChain = false;   // a diffuse bounce happened: plain Lambert NEE from here on
     bool specChain = true;       // only glass crossings so far: the next opaque hit is the "primary" one
     int ch = -1;                 // hero colour channel once the path refracted (dispersion)
+    bool viaMesh = false;        // S2b: the path went through a mesh dielectric (sample mips, like PT after bounce 0)
     float tMinNext = 0.0;
     bool primHit = false;
     float3 primAlbedo = 1, primN = 0;
@@ -1169,7 +1214,10 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
     [loop] for (uint depth = 0; depth <= maxDepth; ++depth) {
         Surf s;
         float t;
-        if (!TraceScene(o, d, depth == 0u ? gNearZ : tMinNext, rng, specChain ? 0.0 : 1.0, s, t)) {
+        // mip 0 only for the camera / mirror chain; a mesh dielectric's refracted ray reads mips, so the surface seen
+        // through a glass block is filtered (pathtrace.hlsl samples mip 2 after bounce 0 the same way)
+        const float lod = viaMesh ? 2.0 : (specChain ? 0.0 : 1.0);
+        if (!TraceScene(o, d, depth == 0u ? gNearZ : tMinNext, rng, lod, s, t)) {
             // transparent export: a primary camera ray (still before its first opaque hit, glass included) that
             // leaves the scene outputs the background override; indirect / bounce misses keep the real sky.
             radiance += T * ((gBgOverride.w > 0.5 && specChain) ? gBgOverride.xyz : Background(d));
@@ -1274,6 +1322,24 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
             specChain = false;
         }
 
+        // S2b mesh dielectric: a transmissive PBR hit continues with the transmission event (probability = the
+        // transmission factor) or the ordinary surface below -- the same policy as pathtrace.hlsl. The transmission
+        // event keeps the surface out of the irradiance cache (it is not a diffuse vertex, and the cache must never
+        // be read across the interface), so that path is brute force.
+        // The roulette value is derived from the current state without advancing the path's stream, so a scene
+        // without transmissive materials consumes exactly the random numbers it always did.
+        if (isPbrHit && PtPbrIsTransmissive(s.pb) &&
+            RandValue(rng) < saturate(s.pb.transmission)) {
+            PtPbrTransmission tx = PtPbrTransmit(s.pb, d, s.faceN, s.backFace, t, float2(Rand(rng), Rand(rng)));
+            if (!s.backFace || s.pb.thick <= 0.0) radiance += T * FresnelGlint(s, -d, rng);
+            T *= tx.refracted ? tx.tint * tx.absorb : tx.absorb;
+            viaMesh = true;
+            if (depth == maxDepth) break;
+            d = tx.dir;
+            o = OffsetRayOrigin(s.pos, tx.refracted ? -s.faceN : s.faceN);
+            tMinNext = 0.0;
+            continue;
+        }
         float3 V = -d;
         float cosV = saturate(dot(s.n, V));
         float pSpec = s.refl > 0.001 ? saturate(s.refl + (1.0 - s.refl) * pow(1.0 - cosV, 5.0) * s.refl) : 0.0;

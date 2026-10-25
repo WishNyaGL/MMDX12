@@ -205,6 +205,9 @@ enum RtGeometryFlags : uint32_t {
     RtGeom_AlphaTest  = 1u << 17,  // non-opaque in the BLAS: ray queries evaluate texture alpha
     RtGeom_Character  = 1u << 18,
     RtGeom_PtPack     = 1u << 19,
+    // S2b mesh dielectrics: the material's PBR record has transmission > 0. Built non-opaque in the BLAS so shadow
+    // rays can see it (TraceShadowRayTinted) and the ray paths refract through it.
+    RtGeom_Transmissive = 1u << 20,
 };
 
 // Pack record read by offline GI path tracer for geometries with RtGeom_PtPack. 160 bytes: a multiple of 16, because

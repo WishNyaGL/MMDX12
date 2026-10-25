@@ -158,8 +158,8 @@ void ApplyRuleToRecord(const StageMaterialRule& rule, PbrMaterial& m, PmxMateria
         const float a = std::clamp(*rule.alpha, 0.0f, 1.0f);
         pm.diffuse.w = a;
     }
-    // S2a: the glTF extensions a stage rule can set (docs/stage_format.md "materials"). The raster / RT PBR branch
-    // blends a transmissive material with alpha = 1 - 0.85 * transmission; S2b refracts it.
+    // S2a: the glTF extensions a stage rule can set (docs/stage_format.md "materials"). S2b: a transmission > 0 makes
+    // the material a dielectric in every render path (raster / RT Fresnel alpha, RT / PT / GI refraction).
     if (rule.transmission) m.ext.transmission = std::clamp(*rule.transmission, 0.0f, 1.0f);
     if (rule.ior) m.ext.ior = std::clamp(*rule.ior, 1.0f, 3.0f);
     // castShadow / receiveShadow are the PMX material flags (see ApplyStageMaterialRules).

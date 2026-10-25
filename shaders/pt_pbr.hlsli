@@ -11,6 +11,7 @@
 //
 // Semantics: docs/raymmd_semantics.md §1/§2/§4. The look mirrors mmd.hlsl MmdShadePbr ("MMD look on top").
 #include "pbr_common.hlsli"
+#include "dielectric.hlsli"
 
 struct PtPbrSurface {
     float3 N;         // mapped world normal (NORMAL + NORMAL_SUB, triangle-UV tangent frame)
@@ -27,6 +28,12 @@ struct PtPbrSurface {
     float specScale;  // SKIN attenuates its sun specular (0.15)
     float coat;       // S2a KHR_materials_clearcoat factor (0 = no coat: the lobe is skipped)
     float coatRough;  // ... and its roughness
+    // S2b mesh dielectric (KHR_materials_transmission / ior / volume): transmission 0 = an ordinary surface.
+    float transmission;
+    float ior;
+    float3 attenColor;   // volume attenuation colour (linear)
+    float attenDistance; // volume attenuation distance (0 = no absorption)
+    float thick;         // volume thickness (0 = thin-walled)
     uint model;
     bool celLike;     // model 8/9: MMD shading + mapped normal + emissive only, no GGX
     bool specOn;      // GGX sun/punctual specular enabled (not CEL/TONEBASED)
@@ -72,6 +79,7 @@ PtPbrSurface PtPbrDecode(uint prim, RtGeometry g, RtSurface sf, float3 baseN, fl
                            : normalize((e1 * d2.y - e2 * d1.y) / det);
 
     float3 albedoLin = PbrAlbedo(m, sf.uv, pmxDiffuse);   // linear
+    const float transp = PbrTransmissionAt(m, sf.uv);   // factor x map (KHR_materials_transmission)
     float metal = p.celLike ? 0.0 : saturate(PbrSlotMetalness(m.slots[PBR_SLOT_METALNESS], sf.uv));
     float3 f0mma = PbrSlotF0(m.slots[PBR_SLOT_SPECULAR], sf.uv);
     p.metal = metal;
@@ -84,6 +92,11 @@ PtPbrSurface PtPbrDecode(uint prim, RtGeometry g, RtSurface sf, float3 baseN, fl
     p.customB = PbrCustomB(m, sf.uv);
     p.coat = PbrClearcoat(m);              // S2a: 0 for Ray-MMD / plain glTF (the lobe is skipped)
     p.coatRough = max(PbrClearcoatRoughness(m), 0.03);
+    p.transmission = transp;              // S2b: 0 for every Ray-MMD / plain glTF material
+    p.ior = max(m.transmission.y, 1.0);
+    p.thick = max(m.transmission.z, 0.0);
+    p.attenColor = saturate(m.attenuation.xyz);
+    p.attenDistance = max(m.transmission.w, 0.0);
     p.baseColor = lerp(p.diffuse, p.f0, metal);
     p.specScale = 1.0;
     p.specOn = !p.celLike;   // CEL (8) / TONEBASED (9): MMD shading + mapped normal + emissive only
@@ -135,9 +148,9 @@ float PtGgxG2(float NoV, float NoL, float alpha) {
     return 2.0 * NoV * NoL / max(gv + gl, 1e-6);
 }
 
-// GGX visible-normal sampling (Heitz 2018) with alpha = rough. Returns the continuation direction and the
-// throughput weight F * G2 / G1.
-void PtPbrSampleSpecular(PtPbrSurface p, float3 V, float2 u, out float3 L, out float3 weight) {
+// GGX visible-normal sampling (Heitz 2018) with alpha = rough. Returns the sampled microfacet normal (world space);
+// shared by the specular continuation and the S2b rough transmission.
+float3 PtPbrSampleMicrofacetNormal(PtPbrSurface p, float3 V, float2 u) {
     float3 n = p.N;
     if (dot(n, V) < 0.0) n = -n;   // shade the side the incoming ray sees
     float3 t, b;
@@ -157,8 +170,16 @@ void PtPbrSampleSpecular(PtPbrSurface p, float3 V, float2 u, out float3 L, out f
     t2 = (1.0 - s) * sqrt(max(0.0, 1.0 - t1 * t1)) + s * t2;
     float3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
     float3 Ne = normalize(float3(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z)));
-    float3 H = normalize(t * Ne.x + b * Ne.y + n * Ne.z);
+    return normalize(t * Ne.x + b * Ne.y + n * Ne.z);
+}
+
+// GGX visible-normal sampling with the continuation direction and the throughput weight F * G2 / G1.
+void PtPbrSampleSpecular(PtPbrSurface p, float3 V, float2 u, out float3 L, out float3 weight) {
+    float3 n = p.N;
+    if (dot(n, V) < 0.0) n = -n;   // shade the side the incoming ray sees
+    float3 H = PtPbrSampleMicrofacetNormal(p, V, u);
     L = reflect(-V, H);
+    float alpha = max(p.rough, 1e-3);
     float NoV = saturate(dot(n, V));
     float NoL = saturate(dot(n, L));
     float3 F = PtPbrFresnel(p.f0, saturate(dot(V, H)));
@@ -167,4 +188,49 @@ void PtPbrSampleSpecular(PtPbrSurface p, float3 V, float2 u, out float3 L, out f
     weight = F * (G2 / max(G1, 1e-5));
 }
 
+// ---- S2b mesh dielectrics (KHR_materials_transmission / ior / volume) ------------------------
+// A transmission event at a decoded PBR hit (probability = the transmission factor).
+struct PtPbrTransmission {
+    float3 dir;      // continuation direction (reflection or refraction)
+    float3 tint;     // throughput multiplier of the interface (base colour on entry, 1 on exit; the Fresnel split is
+                     // the roulette probability inside the event)
+    float3 absorb;   // Beer-Lambert over the chord travelled inside the body (1 when not leaving a volume)
+    bool refracted;  // the event refracted (as opposed to a Fresnel reflection)
+    bool inside;     // the hit was the back face of the mesh
+};
+
+bool PtPbrIsTransmissive(PtPbrSurface p) { return p.transmission > 0.0; }
+
+// One crossing of a transmissive interface. `faceN` faces the incoming ray, `backFace` = the ray hit the mesh's back
+// face (it travels inside the body), `chord` = the distance travelled since the previous vertex (for absorption).
+PtPbrTransmission PtPbrTransmit(PtPbrSurface p, float3 dir, float3 faceN, bool backFace, float chord, float2 u) {
+    PtPbrTransmission r;
+    r.inside = backFace;
+    const bool thin = p.thick <= 0.0;
+    float3 N = faceN;
+    const bool rough = p.rough >= 0.1;   // below that the interface is smooth (S2b v1)
+    if (rough) {
+        // frosted interface: the interface normal is the GGX microfacet normal, so Fresnel and (for a volume) the
+        // refraction direction follow the microfacets
+        float3 H = PtPbrSampleMicrofacetNormal(p, -dir, u);
+        if (dot(H, N) > 0.0) N = H;
+    }
+    r.dir = DielectricScatter(dir, N, backFace && !thin, p.ior, thin, u.x, r.refracted);
+    if (rough && thin && r.refracted) {
+        // A thin-walled rough pane has no exit crossing to bend back at: the entry refraction alone (a small angular
+        // spread that grows with roughness, the standard thin-slab approximation) blurs what is seen through it.
+        float3 t = refract(dir, N, 1.0 / max(p.ior, 1.0));
+        if (dot(t, t) > 1e-8) r.dir = normalize(t);
+    }
+    // glTF: the base colour tints the light entering the material (once, at the front face); the volume's
+    // Beer-Lambert absorption applies to every segment travelled inside it (a back-face crossing ends one segment,
+    // whether the path then leaves the body or is reflected back into it).
+    r.tint = backFace ? float3(1, 1, 1) : p.baseColor;
+    r.absorb = (!thin && backFace)
+                   ? DielectricAbsorb(p.attenColor, p.attenDistance, min(chord, p.thick))
+                   : float3(1, 1, 1);
+    return r;
+}
+
 #endif // MMDX_PT_PBR_HLSLI
+

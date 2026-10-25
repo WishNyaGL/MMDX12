@@ -1,5 +1,6 @@
 #ifndef MMDX_PBR_COMMON_HLSLI
 #define MMDX_PBR_COMMON_HLSLI
+#include "dielectric.hlsli"   // S2b: FresnelDielectric / DielectricAbsorb
 // Per-material PBR data (work unit P2). Mirror of GpuPbrMaterial in src/render/ShaderInterop.h; the values come
 // from Ray-MMD material data decoded by asset/PbrMaterial.h. This is the plumbing only: the P3 lighting uses the
 // sampling decoders below.
@@ -322,9 +323,18 @@ float3 PbrEmissive(GpuPbrMaterial m, float2 uv) {
 }
 
 // ---- S2a glTF material extensions ---------------------------------------------------------------
-// KHR_materials_transmission. Until S2b the factor alone drives the blending approximation; the map's SRV is carried
-// in the record (sheen.w) for S2b, not sampled here.
+// KHR_materials_transmission factor (0 = ordinary surface). The transmission map's SRV rides in the record
+// (sheen.w as a number, -1 = none); PbrTransmissionAt samples it where a UV is available.
 float PbrTransmission(GpuPbrMaterial m) { return saturate(m.transmission.x); }
+
+// The material's transmission at `uv`: the factor times the transmission map's red channel (KHR_materials_transmission
+// reads R; a single-channel R8 upload bakes it into R). The map has no per-slot transform in the record, so the
+// material's own UV is used.
+float PbrTransmissionAt(GpuPbrMaterial m, float2 uv) {
+    const int srv = (int)m.sheen.w;
+    if (srv < 0) return PbrTransmission(m);
+    return saturate(PbrTransmission(m) * gPbrTex[NonUniformResourceIndex((uint)srv)].SampleLevel(gPbrWrap, uv, 0).r);
+}
 
 // KHR_materials_volume thickness factor (the record keeps the factor; the thickness map is not needed before S2b).
 float PbrThickness(GpuPbrMaterial m) { return max(m.transmission.z, 0.0); }
@@ -436,5 +446,70 @@ float3 PbrSpecularSheen(float3 N, float3 V, float3 L, float rough, float3 fuzz) 
     float vh = saturate(dot(V, H));
     return fuzz * (s * pow(1.0 - vh, 5.0));
 }
+
+#ifdef MMDX_RT_COMMON_HLSLI
+// S2b: tinted shadow visibility. A shadow ray that crosses transmissive mesh geometry (RtGeom_Transmissive) is not
+// stopped there: the visibility is multiplied by the interface's transmittance instead, so a glass block casts a
+// coloured shadow that darkens toward its rim. Everything else -- opaque hits, alpha-tested geometry -- ends the ray
+// exactly like TraceShadowRayMasked, so a scene without transmissive materials returns the same 0 / 1.
+// An entry (front-face) crossing carries transmission * baseColour * (1 - Fresnel) plus the volume's Beer-Lambert
+// absorption over its thickness factor; an exit (back-face) crossing carries only its own (1 - Fresnel), so the
+// surface tint is applied once per body (glTF: the base colour tints the light entering the material) and a closed
+// solid loses (1 - F)^2 while a single-sheet pane loses its light once. No caustics: attenuated, never bent.
+float3 TransmissiveShadowTint(RtGeometry g, uint prim, float2 bary, float3 dir, bool frontFace) {
+    GpuPbrMaterial m = PbrLoadMaterial((int)g.pbrSrv, g.pbrIndex);
+    const float2 uv = LoadUv(g, LoadTriangle(g, prim), bary);
+    const float transmission = PbrTransmissionAt(m, uv);
+    if (transmission <= 0.0) return 0.0;   // no transmission: it blocks like an ordinary surface
+    float3 faceN = FetchSurface(g, prim, bary).faceNormal;
+    float3 n = frontFace ? faceN : -faceN;             // face the incoming ray
+    const float eta = frontFace ? max(m.transmission.y, 1.0) : 1.0 / max(m.transmission.y, 1.0);
+    const float fres = FresnelDielectric(saturate(dot(-dir, n)), eta);
+    if (!frontFace) return float3(1.0 - fres, 1.0 - fres, 1.0 - fres);   // exit: only the interface loss
+    const float3 baseColor = SrgbToLinear(saturate(PbrAlbedo(m, uv, g.diffuse.rgb)));   // tint, once (glTF)
+    float3 absorb = 1;
+    if (m.transmission.z > 0.0)   // KHR_materials_volume over the material's thickness factor (order-independent)
+        absorb = DielectricAbsorb(saturate(m.attenuation.xyz), max(m.transmission.w, 0.0), max(m.transmission.z, 0.0));
+    return transmission * baseColor * (1.0 - fres) * absorb;
+}
+
+// One traversal, no restart: a non-transmissive candidate is committed as a blocker (alpha-tested exactly like
+// TraceShadowRayMasked), a transmissive one is NOT committed but folds its per-crossing tint into `vis`. The query's
+// own opaque handling finds the nearest opaque triangle, so a blocker behind glass still shadows: traversal order
+// never decides the result.
+// Volume absorption is an order-independent approximation: the material's thickness factor is absorbed on its
+// front-face (entry) crossing, where the exiting chord is not known yet in a single traversal, and the exit crossing
+// carries only its interface loss. The direction of a shadow ray is fixed, so the energy is right; the per-chord
+// detail is not (no caustics, by design).
+float3 TraceShadowRayTinted(float3 origin, float3 dir, float tMax, uint mask) {
+    // Same flags as TraceShadowRayMasked: the search ends at the first committed (blocking) hit, which is what makes a
+    // scene without transmissive materials return the identical 0 / 1. Tinted crossings are only accumulated up to
+    // that point, and a crossing behind a blocker cannot matter (the result is 0).
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    RayDesc r;
+    r.Origin = origin;
+    r.Direction = dir;
+    r.TMin = 0.0;
+    r.TMax = tMax;
+    q.TraceRayInline(gTlas, RAY_FLAG_NONE, mask, r);
+    float3 vis = 1;
+    while (q.Proceed()) {
+        if (q.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;   // opaque: the query commits the nearest
+        RtGeometry g = LoadGeometry(q.CandidateInstanceID(), q.CandidateGeometryIndex());
+        if ((g.flags & RTG_CAST_SHADOW) == 0) continue;
+        if (CandidateAlpha(g, q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()) < 0.5) continue;
+        if ((g.flags & RTG_TRANSMISSIVE) != 0 && g.pbrIndex != 0xFFFFFFFFu) {
+            // a dielectric crossing: tint the light instead of stopping it, and keep looking for a blocker behind it
+            vis *= TransmissiveShadowTint(g, q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics(), dir,
+                                          q.CandidateTriangleFrontFace());
+            if (dot(vis, float3(1, 1, 1)) <= 1e-4) return 0.0;   // fully absorbed: nothing to find behind it
+            continue;   // do not commit: the traversal continues, a nearer opaque hit still ends the ray
+        }
+        q.CommitNonOpaqueTriangleHit();
+    }
+    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : vis;
+}
+
+#endif // MMDX_RT_COMMON_HLSLI (tinted shadow rays exist in the ray paths only)
 
 #endif // MMDX_PBR_COMMON_HLSLI

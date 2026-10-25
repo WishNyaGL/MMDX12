@@ -59,7 +59,7 @@ void CSReflect(uint3 id : SV_DispatchThreadID) {
     float ndl = dot(s.normal, L);
     float sh = 1.0;
     if ((g.flags & MAT_RECEIVE) && gCascadeSplits.w > 0.5 && ndl > 0 && gSunShadowParams.x > 0.5)
-        sh = TraceShadowRay(OffsetRayOrigin(s.pos, s.faceNormal), L, 2000.0);
+        sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(s.pos, s.faceNormal), L, 2000.0, 0xFFu)));
 
     float3 shTrans = ShadowTransmission(sh, gSunShadowParams.z, gSunShadowColor.rgb);
     float3 lightTerm = shTrans * smoothstep(-0.1, 0.2, ndl);

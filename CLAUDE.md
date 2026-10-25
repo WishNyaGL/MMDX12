@@ -36,7 +36,10 @@ progress.md is the session log. Read its latest entry first.
   (asset/ModelImport `ImportedPbr`, `BuildImportedPbrModelData`); VRM / MToon / KHR_materials_unlit stay NPR (no record).
   S2a adds the glTF material extensions to the record (transmission / ior / volume, HDR emissive strength, clearcoat,
   specular / sheen stored only, KHR_texture_transform) and imports KHR_lights_punctual as `ImportedLight`s
-  (`asset/StageLights`, a stage's `"gltfLights": true`).
+  (`asset/StageLights`, a stage's `"gltfLights": true`). S2b (`shaders/dielectric.hlsli`, `RtGeom_Transmissive`):
+  transmission > 0 is a mesh dielectric — raster / RT blend with `alpha = 1 - transmission * (1 - Fresnel)` and report
+  the Fresnel as reflectivity, RT / PT / GI refract (thin straight through, a volume with Snell + Beer-Lambert, rough
+  interfaces GGX-perturbed), and shadow rays through it return a tint (`TraceShadowRayTinted`) instead of stopping.
 - MMDX stages (docs/stage_format.md, `asset/StageManifest.h`): a folder with a `stage.json`. Play mode loads its parts
   through `LoadScenePackage` and the studio through `LoadStudioStage` / `LoadStudioPackage` /
   `LoadStudioProjectPackage` (manifest order, not the library's flat part list); the manifest's `materials` rules are

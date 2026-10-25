@@ -50,12 +50,13 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S1a | Format core (asset layer): `stage.json` parser, param / variant / binding evaluator, library detection, `stage_check`, procedural test stages (`tools/stagegen`) | done 2026-10-25 |
 | S1b | App integration: play + studio load MMDX stages, manifest lights as "스테이지 조명", material overrides, lobby variant picker | done 2026-10-25 |
 | S2a | glTF material / light import: transmission, ior, volume, emissive_strength, clearcoat (approx.), texture_transform, KHR_lights_punctual | done 2026-10-25 |
-| S2b | Mesh dielectrics: transmissive materials refract in RT / PT / offline GI (thin + volume), raster approximation | |
+| S2b | Mesh dielectrics: transmissive materials refract in RT / PT / offline GI (thin + volume), raster approximation | done 2026-10-26 |
 | S3 | Studio stage entity: outliner group, overrides saved in the project, keyable stage params (timeline rows) | |
 | S4 | Camera entities: N cameras with own tracks, an active-camera switch track, VMD export flattens cuts | |
 | S5 | Screens: N screen surfaces, sources none / image / video / camera feed, multi-video decode, feed render pass | |
 | S6 | Stage-bundled packs: screen packs (new type), surface packs on stage materials, world packs on sockets | |
 | S7 | Many lights: punctual cap 16 -> 256, clustered raster lighting, shadow budget, PT / GI light sampling, volumetric over all lights | |
+| S7b | Spot cookies / gobos: a projected texture per spot (stage-bundled PNGs, rotatable, keyable) in raster / RT / PT / GI and the volumetric beams | |
 | S8 | Emissive lights: emissive-triangle NEE in PT / GI (screens and LED walls light the scene), raster screen lights | |
 | S9 | Participating media in PT / offline GI (haze for beams), stage `environment.fog` | |
 | S10 | Planar mirrors in raster (RT / PT / GI reflect natively) | |

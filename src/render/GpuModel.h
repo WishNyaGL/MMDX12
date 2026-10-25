@@ -205,6 +205,11 @@ public:
     uint32_t PbrIndex(size_t material) const {
         return material < pbrIndex_.size() ? pbrIndex_[material] : DescriptorHeap::kInvalid;
     }
+    // S2b mesh dielectrics: the material's PBR transmission factor (KHR_materials_transmission, runtime overrides
+    // included; 0 = opaque or no record). Renderer::RtScene sets RtGeom_Transmissive for a material that has one.
+    float PbrTransmission(size_t material) const {
+        return material < pbrTransmission_.size() ? pbrTransmission_[material] : 0.0f;
+    }
     // Runtime PBR overrides (MMDX stage material targets): applies `list` for ring entry `frame % 3` and only when
     // `version` differs from the one that entry was written with (same contract as UpdateMaterials). The FIRST call
     // with a non-empty list moves the PBR records into a 3-entry UPLOAD-heap ring with one SRV each (a model that
@@ -253,6 +258,10 @@ public:
         std::vector<uint32_t> geometryMaterials;
         uint32_t partSplit = 0;
         bool blasBuilt = false;
+        // S2b: hash of the per-material "transmission > 0" set the BLAS was built with. A static stage's BLAS is built
+        // once, but a runtime stage target (SetPbrOverrides) can turn a material transmissive later; RtScene rebuilds
+        // when this changes, so the OPAQUE / NON_OPAQUE geometry flags never go stale.
+        uint64_t transmissiveSig = 0;
     };
     RtResources& Rt() { return rt_; }
 
@@ -289,6 +298,9 @@ private:
     uint32_t pbrSrv_ = DescriptorHeap::kInvalid;
     uint32_t pbrStaticSrv_ = DescriptorHeap::kInvalid;   // the DEFAULT-heap buffer's SRV (kept for Destroy)
     std::vector<uint32_t> pbrIndex_;
+    // Per material transmission factor (0 = opaque / no record): the base records, kept current by SetPbrOverrides
+    // (a stage `transmission` target must move the ray paths' RtGeom_Transmissive too).
+    std::vector<float> pbrTransmission_;
     bool hasPbrRecords_ = false;
     // Base PBR records (the ones Create built) and the 3-entry UPLOAD-heap ring of SetPbrOverrides. Lazily created.
     std::vector<GpuPbrMaterial> pbrRecords_;

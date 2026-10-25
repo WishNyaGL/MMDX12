@@ -8,7 +8,7 @@
 #ifdef RT_SHADOWS
 #include "rt_common.hlsli"
 #endif
-#include "pbr_common.hlsli"
+#include "pbr_common.hlsli"   // includes dielectric.hlsli (S2b FresnelDielectric)
 
 cbuffer MaterialCB : register(b1) {
     float4 gDiffuse; float3 gSpecular; float gSpecularPower; float3 gAmbient; float gEdgeSize;
@@ -174,7 +174,8 @@ float Shadow(float3 wp, float3 n, float viewZ, float2 pixel) {
 }
 
 #ifdef RT_SHADOWS
-// Two cone-jittered rays toward the sun (soft penumbra), honouring alpha-tested casters.
+// Two cone-jittered rays toward the sun (soft penumbra), honouring alpha-tested casters. S2b: a transmissive mesh
+// tints the visibility instead of stopping the ray, so glass casts a coloured shadow here too.
 float ShadowRt(float3 wp, float3 n, float viewZ, float2 pixel) {
     if (gCascadeSplits.w < 0.5 || gSunShadowParams.x < 0.5) return 1.0;
     float3 L = -gLightDir;
@@ -185,7 +186,8 @@ float ShadowRt(float3 wp, float3 n, float viewZ, float2 pixel) {
     // Soft cones reach 15 degrees: four rays keep the wide penumbra from going grainy
     int rays = (gSunShadowParams.x > 1.5) ? 4 : 2;
     [loop] for (int k = 0; k < rays; ++k)
-        vis += TraceShadowRay(origin, SampleCone(float2(Rand(rng), Rand(rng)), L, cosCone), 2000.0);
+        vis += Luminance(saturate(TraceShadowRayTinted(origin, SampleCone(float2(Rand(rng), Rand(rng)), L, cosCone),
+                                                       2000.0, 0xFFu)));
     return vis / (float)rays;
 }
 #define SHADOW_TERM(wp, n, viewZ, pixel) ShadowRt(wp, n, viewZ, pixel)
@@ -220,14 +222,15 @@ float PointShadowRt(Light l, float3 wp, float3 n, float dist, uint lightIndex) {
             float3 rayDelta = samplePos - origin;
             float rayDist = length(rayDelta);
             float3 rayDir = rayDelta / max(rayDist, 1e-4);
-            vis += TraceShadowRayMasked(origin, rayDir, max(rayDist - 0.05, 0.0), RT_MASK_CHARACTER);
+            vis += Luminance(saturate(TraceShadowRayTinted(origin, rayDir, max(rayDist - 0.05, 0.0),
+                                                           RT_MASK_CHARACTER)));
         }
         return vis * 0.5;
     }
     float cosCone = (l.shadowType > 1.5) ? PunctualShadowConeCos(0.99993, l.shadowSoftness) : 0.99993;
     [unroll] for (int k = 0; k < 2; ++k) {
         float3 rayDir = SampleCone(float2(Rand(rng), Rand(rng)), ld, cosCone);
-        vis += TraceShadowRayMasked(origin, rayDir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+        vis += Luminance(saturate(TraceShadowRayTinted(origin, rayDir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER)));
     }
     return vis * 0.5;
 }
@@ -333,11 +336,13 @@ float3 PunctualSpecularGGX(float3 wp, float3 n, float3 V, float rough, float3 f0
 }
 
 #if defined(SCENE_HAS_ID) && SCENE_HAS_ID
-PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivity, float4 curClip, float4 prevClip, uint customId = 0) {
+// `glass` (S2b): a transmissive surface keeps its Fresnel reflectivity even where alpha < 0.98, so SSR / RT
+// reflections show on it (the alpha < 0.98 rule marks ordinary translucent layers "no AO / no SSR").
+PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivity, float4 curClip, float4 prevClip, uint customId = 0, bool glass = false) {
     PSOut o;
     o.color = float4(color, alpha);
     float3 vn = normalize(mul(worldNormal, (float3x3)gView));
-    o.normal = float4(OctEncode(vn), alpha < 0.98 ? -1.0 : reflectivity, alpha);
+    o.normal = float4(OctEncode(vn), (alpha < 0.98 && !glass) ? -1.0 : reflectivity, alpha);
     o.velocity = Velocity(curClip, prevClip);
     if (customId != 0u) {
         o.id = (alpha < 0.98) ? 0u : customId;
@@ -347,11 +352,14 @@ PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivi
     return o;
 }
 #else
-PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivity, float4 curClip, float4 prevClip) {
+// Same parameter list as the ID variant (a caller may pass both), the id target is simply absent here.
+PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivity, float4 curClip, float4 prevClip,
+                 uint customId = 0, bool glass = false) {
     PSOut o;
+    customId = customId;
     o.color = float4(color, alpha);
     float3 vn = normalize(mul(worldNormal, (float3x3)gView));
-    o.normal = float4(OctEncode(vn), alpha < 0.98 ? -1.0 : reflectivity, alpha);
+    o.normal = float4(OctEncode(vn), (alpha < 0.98 && !glass) ? -1.0 : reflectivity, alpha);
     o.velocity = Velocity(curClip, prevClip);
     return o;
 }
@@ -632,9 +640,21 @@ PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, 
     // 0 for the library materials that leave EMISSIVE_ENABLE off. PbrEmissive returns linear already and does its own
     // saturate for non-HDR records (S2a: an LED panel's strength is not clamped).
     color += PbrEmissive(m, uv);
-    // S2a, before S2b: a transmissive material is blended see-through in raster / RT (alpha = 1 - 0.85 * transmission
-    // on top of the material's own coverage). PT / offline GI keep the opaque PBR look until S2b.
-    alpha *= 1.0 - 0.85 * PbrTransmission(m);
+    // S2b mesh dielectric, raster / RT camera view: no screen-space refraction in this milestone. The see-through is
+    // physically flavoured instead of S2a's flat 0.85: alpha = 1 - transmission * (1 - Fresnel(N.V, ior)), what passes
+    // through is tinted by the base colour (glTF), and the reflectivity output is the interface Fresnel, so SSR / RT
+    // reflections show on the glass. Reflectivity always carries at least the S2a value (smooth dielectrics mirror).
+    const float transp = PbrTransmissionAt(m, uv);
+    if (transp > 0.0) {
+        const float nv = saturate(dot(n, V));
+        const float fres = FresnelDielectric(nv, max(m.transmission.y, 1.0));
+        const float coverage = saturate(1.0 - transp * (1.0 - fres));
+        // the blended layer keeps the refracted (tinted) light rather than the shaded opaque surface
+        color = lerp(color, color * pbrAlbedo, transp * (1.0 - fres));
+        reflectivity = max(reflectivity, fres);
+        alpha *= coverage;
+        return PackOutput(color, alpha, n, reflectivity, i.curClip, i.prevClip, 0u, true);
+    }
     return PackOutput(color, alpha, n, alpha > 0.9 ? reflectivity : 0.0, i.curClip, i.prevClip);
 }
 
