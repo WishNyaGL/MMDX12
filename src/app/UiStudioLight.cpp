@@ -436,67 +436,6 @@ void App::DrawStudioLightInspector(float w) {
         const bool vmdLinkedSun = light->kind == LightKind::Sun && light->vmdLink && !d.camera.light.empty();
         if (!vmdLinkedSun) {
             const bool animated = !light->keys.empty();
-            const bool keyed = FindKey(light->keys, d.Frame()) != nullptr;
-            if (Stopwatch("##lightstopwatch", animated)) {
-                if (!animated) {
-                    // OFF → ON: key the current values at the playhead (one undo step)
-                    StudioBeginLightEdit(light->uid, true);
-                    LightKey k{d.Frame(), SampleLightValues(*light, d.Frame())};
-                    UpsertKey(light->keys, k);
-                    studioLightChanged_ = true;
-                    StudioEndLightEdit(light->uid);
-                    d.rowsKey = ~0ull;
-                } else {
-                    // ON → OFF: confirm modal; on confirm all keys are removed and the playhead value becomes the
-                    // constant (one undo step through the LightsCommand snapshot)
-                    studioStopwatchLabel_ = light->name;
-                    studioStopwatchOff_ = [this, &d, uid = light->uid] {
-                        if (SceneLight* l = d.FindLight(uid)) {
-                            std::vector<SceneLight> before = d.lights;
-                            l->v = SampleLightValues(*l, d.Frame());
-                            l->keys.clear();
-                            d.history.Push(std::make_unique<LightsCommand>(d, Tr("애니메이션 끄기"), before, d.lights));
-                            d.rowsKey = ~0ull;
-                        }
-                    };
-                }
-            }
-            if (animated) {
-                ImGui::SameLine(0.0f, 0.0f);
-                const auto jumpKey = [&](int dir) {
-                    int target = -1;
-                    if (dir < 0) {
-                        for (const LightKey& k : light->keys) { if (k.frame < d.Frame()) target = k.frame; else break; }
-                    } else {
-                        for (const LightKey& k : light->keys) { if (k.frame > d.Frame()) { target = k.frame; break; } }
-                    }
-                    if (target < 0) return;
-                    StudioSetPlaying(false);
-                    StudioSeek(target / (double)kMmdFps);
-                };
-                const auto toggleKey = [&] {
-                    StudioBeginLightEdit(light->uid, true);
-                    if (LightKey* k = FindKey(light->keys, d.Frame())) {
-                        EraseKey(light->keys, d.Frame());
-                    } else {
-                        UpsertKey(light->keys, LightKey{d.Frame(), SampleLightValues(*light, d.Frame())});
-                    }
-                    studioLightChanged_ = true;
-                    StudioEndLightEdit(light->uid);
-                    d.rowsKey = ~0ull;
-                };
-                const int nav = KeyNav("##lightkeynav",
-                                       std::any_of(light->keys.begin(), light->keys.end(),
-                                                   [f = d.Frame()](const LightKey& k) { return k.frame < f; }),
-                                       keyed,
-                                       std::any_of(light->keys.begin(), light->keys.end(),
-                                                   [f = d.Frame()](const LightKey& k) { return k.frame > f; }));
-                if (nav == -1) jumpKey(-1);
-                else if (nav == 1) jumpKey(1);
-                else if (nav == 2) toggleKey();
-            }
-            // say what the stopwatch does: the light's values animate (keys) or stay constant over the scene
-            ImGui::SameLine(0.0f, Dp(6.0f));
             const ImVec2 lc = ImGui::GetCursorScreenPos();
             Text(cdl, Font::Regular, size::Caption, ImVec2(lc.x, lc.y + Dp(4.0f)), animated ? p.ink2 : p.ink3,
                  animated ? Tr("애니메이션 (키 사용)") : Tr("장면 전체에 같은 값"));

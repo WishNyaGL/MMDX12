@@ -1,14 +1,25 @@
 #pragma once
 #include "imgui.h"
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
 namespace mmdx::studio {
 
+// The caller inserts this many consecutive "lane rows" right after a row whose graph is open; the widget draws
+// one value / speed graph lane across their combined height. Row heights stay fixed (no variable rows).
+inline constexpr int kTimelineGraphRows = 5;
+
 struct TimelineKey {
     int frame = 0;
     bool selected = false;
+};
+
+// One channel offered by a row's graph lane (label shown on its chip, curve colour).
+struct TimelineGraphChannel {
+    std::string label;   // UTF-8
+    ImU32 color = 0;
 };
 
 struct TimelineRow {
@@ -20,7 +31,22 @@ struct TimelineRow {
     bool keysEditable = true;   // false: keys are drawn dimmed and cannot be selected or moved (summary rows)
     bool selected = false;      // row picked on the label column: label cell drawn highlighted
     ImU32 tint = 0;             // track-type marker: a thin bar at the label's left edge (0 = none)
+    bool hasStopwatch = false;
+    bool animated = false;
     std::vector<TimelineKey> keys;  // sorted by frame ascending
+    // Graph lane (read-only value / speed curves). Non-empty graphChannels = this row offers a graph; the caller
+    // inserts kTimelineGraphRows lane rows after it while graphOpen is set.
+    std::vector<TimelineGraphChannel> graphChannels;
+    bool graphOpen = false;      // caller state: the lane rows below this row are shown
+    int graphActive = 0;         // active channel index into graphChannels
+    uint64_t graphOf = 0;        // lane rows: parent row id (0 = not a lane row)
+    int graphIndex = 0;          // lane rows: 0..kTimelineGraphRows-1 within the block
+    // Editable segment of the lane (refreshed by the caller every frame, like graphActive): the frames of the two keys
+    // whose arriving segment the handles edit (-1 = none).
+    int graphSegFrom = -1, graphSegTo = -1;
+    // The active channel's curve bytes of that segment. The caller writes them (the undo step and StudioHandleTimeline
+    // read them back); the widget keeps them in step with its own handle drag.
+    uint8_t graphCurve[4] = {};
 };
 
 // UI state owned by the caller (persisted between frames).
@@ -41,6 +67,12 @@ struct TimelineView {
     float boxAnchorFrame = 0.0f;         // box select anchor as a frame (content coordinates: stays put while the view auto-scrolls)
     float boxAnchorY = 0.0f;             // box select anchor as content px below the rows area's top (content coordinates)
     uint64_t scrollToRow = 0;            // caller writes a row id: the widget scrolls it into view on the next call, then resets it to 0 (0 = no request; unknown id is just reset)
+    int graphDrag = 0;                   // transient handle drag: 0 none, 1 = P1, 2 = P2 (lane parent id in graphDragRow)
+    uint64_t graphDragRow = 0;           // lane parent row of the handle being dragged
+    bool graphDragMoved = false;         // ... and the pointer moved since the press (a plain click edits nothing)
+    // Set by the caller each frame before calling Timeline(): value of `row`'s `channel` at a fractional frame
+    // (the caller owns the interpretation). Used only to draw the graph lanes.
+    std::function<float(uint64_t row, int channel, float frame)> graphSample;
 };
 
 struct TimelineKeyRef { uint64_t row; int frame; };
@@ -57,9 +89,16 @@ struct TimelineEvents {
     bool moveKeys = false; int moveDelta = 0;          // committed on mouse release: move ALL selected keys by this many frames (never 0)
     bool addKeyAt = false; uint64_t addKeyRow = 0; int addKeyFrame = 0;  // double click on an empty spot of an editable, non-group row
     bool rowClick = false; uint64_t rowClickId = 0; RowClickMode rowClickMode = RowClickMode::Replace;  // label clicked
+    bool stopwatch = false; uint64_t stopwatchRow = 0;
+    bool keyNav = false; uint64_t keyNavRow = 0; int keyNavDir = 0;
     bool rangeChanged = false;                         // view.rangeStart/rangeEnd were changed by the widget this frame
     bool contextMenu = false; int contextFrame = 0; uint64_t contextRow = 0;  // right click in the key area (row 0 = none)
     bool contextOnRuler = false;                       // the context menu event came from the ruler: contextRow = 0, contextFrame = frame under the mouse
+    bool toggleGraph = false; uint64_t toggleGraphRow = 0;   // the graph icon of a parent row was clicked
+    bool graphChannel = false; uint64_t graphChannelRow = 0; int graphChannelIndex = 0;  // a channel chip was clicked (parent row + index)
+    // a lane handle (P1 / P2) was dragged or double clicked: the new bytes of the segment's curve
+    bool graphCurve = false; uint64_t graphCurveRow = 0; int graphCurveFrame = 0; uint8_t graphCurveBytes[4] = {};
+    bool graphCurveEnd = false;   // the handle drag ended this frame (one undo step)
 };
 
 // Draws the timeline into the current ImGui window at the cursor, filling `size` (x or y <= 0 means "remaining space").

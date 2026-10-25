@@ -505,6 +505,8 @@ private:
     void StudioCopyCurve();                          // inspector: interpolation of the first selected key
     void StudioPasteCurve();                         // onto every selected key of the same kind
     void StudioJumpKey(int dir);                     // previous/next key of the shown rows
+    void StudioRowStopwatch(uint64_t rowId);         // stopwatch clicked in row
+    void StudioRowKeyNav(uint64_t rowId, int dir);   // keynav clicked in row (-1, 1, 2)
     void StudioImportVmd();                                   // open dialog, then StudioImportVmdFrom
     void StudioImportVmdFrom(const std::filesystem::path& path);  // merge into the selected model (camera VMDs: camera)
     void StudioExportVmd();                                   // save dialog, then StudioExportVmdTo
@@ -1433,6 +1435,11 @@ private:
     bool studioKeyChanged_ = false;                  // ... and its value changed (else no undo step)
     bool studioKeyLive_ = false;                     // ... through the playhead fields (independent of the key selection)
     std::vector<studio::TrackState> studioKeyBefore_;
+    // timeline lane handle drag: the tracks before the gesture (one undo step on release; not d.curveBefore, which the
+    // inspector clears when no key item is active)
+    bool studioLaneCurveEditing_ = false;
+    bool studioLaneCurveChanged_ = false;            // ... and the gesture actually changed bytes (else no undo step)
+    std::vector<studio::TrackState> studioLaneCurveBefore_;
     std::vector<studio::CameraPathPoint> studioCamPath_;  // motion camera samples (per frame, strided when long)
     std::vector<DirectX::XMFLOAT3> studioCamKeys_;   // eye at each camera key
     uint64_t studioCamPathVersion_ = 0;

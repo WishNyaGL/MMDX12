@@ -80,7 +80,10 @@ struct StudioModel {
 // Timeline row ids: kind in the top byte, then a 24-bit group and a 32-bit index. Light is the camera VMD's light
 // track; SceneLight is the keys of one scene light (SceneLight.h): MakeRowId(RowKind::SceneLight, 0, light uid).
 // Focus is the studio's depth-of-field focus track (camera MotionData::focus, saved in the project, not in VMD).
-enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11 };
+enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11, GraphLane = 12 };
+// GraphLane rows are the kTimelineGraphRows rows of an open value / speed graph lane: never a track, no keys. Their id
+// group is the parent row's low 24 bits and their index the lane index (0..kTimelineGraphRows-1); `TimelineRow::graphOf`
+// carries the parent id.
 inline uint64_t MakeRowId(RowKind k, uint32_t group, uint32_t index) {
     return ((uint64_t)k << 56) | ((uint64_t)(group & 0xFFFFFF) << 32) | index;
 }
@@ -233,6 +236,7 @@ struct StudioDoc {
     int followFrame = -1;             // frame the timeline last scrolled to show (follows playback and seeks)
     std::set<KeyId> selection;
     std::set<uint64_t> collapsed;     // collapsed group rows (per selected model; cleared on switch)
+    std::set<uint64_t> graphOpen;     // rows whose value / speed graph lane is open (not saved to the project)
     std::vector<ClipboardKey> clipboard;
     int clipboardModel = -2;          // model the clipboard came from (-1 camera, -2 empty)
     int curveChannel = 3;             // inspector: bone 0..3 (X,Y,Z,R), camera 0..5

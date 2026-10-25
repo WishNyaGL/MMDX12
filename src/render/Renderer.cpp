@@ -872,8 +872,11 @@ void Renderer::Render(ID3D12GraphicsCommandList* cmd, const FrameView& view) {
     lastFrameQpc_ = now.QuadPart;
 
     // 1. Output and internal resolution.
-    IUpscaler* up = EffectiveUpscaler();
+    // A studio quad view never runs the upscaler (RecordScene), so it renders at the output size: sizing the targets
+    // for the upscaler would leave a low-resolution image stretched to the viewport (pixelated).
     const RenderPath path = EffectivePath();
+    const bool quadView = !view.extraViews.empty() && path == RenderPath::Raster;
+    IUpscaler* up = quadView ? nullptr : EffectiveUpscaler();
     uint32_t outW, outH;
     float area[4];
     ViewportArea(settings_, (float)ctx_->Width(), (float)ctx_->Height(), area);

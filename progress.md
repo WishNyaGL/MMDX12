@@ -2368,3 +2368,26 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
   back-lit glow strength, sakura on dark concert lighting, PT / GI of the pack beyond the worker's captures.
 - Left for the user: look at the updated sakura and the engine-affected packs (eye_adaptation, rain_lens, rain, fireflies,
   ground_mist, snow) in `build/` (installed there), then release together with more features (not released yet).
+
+## 2026-10-25 - Studio timeline: row controls, value / speed graph lane, quad-view upscaler fix
+- Request: Premiere-style editing in the studio timeline. (1) stopwatch (animate on/off) and prev / next key buttons move from
+  the inspector to the timeline rows; (2) value / speed graph shown and editable in the timeline, compatible with (and keeping)
+  the inspector's MMD-style `BezierCurveEditor`; (3) bug: DLSS / upscaler on + studio quad view looked pixelated.
+- Row controls (`UiTimeline.cpp` `controlRects`, `App::StudioRowStopwatch` / `StudioRowKeyNav`): stopwatch + prev / key-here /
+  next drawn with `ImDrawList` and hit-tested by hand (the timeline is ONE ImGui item, UiKit widgets cannot nest). Bone, morph and
+  scene-light rows; same undo names as before; inspector blocks removed.
+- Graph lane: graph icon on bone / camera rows with >= 2 keys opens `kTimelineGraphRows` (5) fixed-height lane rows
+  (`RowKind::GraphLane`, `StudioDoc::graphOpen`): value sub-lane (channel chips, shared `curveChannel`, ghost channels normalised
+  per channel) + speed sub-lane (|dv/dframe| x 30). Sampler `d.view.graphSample` reads live key data. Camera 1-frame gap = cut.
+- Lane editing: the active segment (single selected key's arriving segment, else the one under the playhead) shows P1 / P2
+  Bezier handles; drag rewrites the curve bytes (`SetBoneCurve` / `SetCameraCurve`, all channels with "apply to all"), one undo step
+  "보간 곡선 편집" via `studioLaneCurve*` members, double click = linear reset. Tooltips on the label controls.
+- Quad view fix (`Renderer::Render`): the upscaler sized the targets at render resolution but `RecordScene` skips the upscaler in
+  the quad view, so a low-res image was stretched. Quad view (raster + extraViews) now sizes as no-upscaler. Verified with FSR
+  Performance before / after captures; DLSS itself not tested (same shared sizing path).
+- Workers: antigravity gemini-3.8-flash-low did the row controls (30 min timeout + 2 resumes: it looped on reads over a spec
+  conflict, Claude decided the ImDrawList design; one run was killed by the memory-pressure reaper). opencode deepseek 1017 `#low`
+  did the graph lane and the handle editing, `default` + `--review full`. Claude reviewed, QA'd visually, and did the quad fix.
+- Verified: build, ui-script captures of the lane, camera handle drag at max zoom (keys 2 frames apart) + Ctrl+Z restored it.
+  NOT verified: handle double-click reset, bone-row handle drag (test motions are baked: a key per frame), live inspector sync,
+  the "apply to all channels" path, DLSS quad view.

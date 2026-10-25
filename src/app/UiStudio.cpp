@@ -909,6 +909,7 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
     const StudioDoc& d = *studio_;
     kind = RowKindOf(row);
     name.clear();
+    if (kind == RowKind::GraphLane) return false;  // graph lane rows carry no track / keys
     if (IsCameraKind(kind)) return d.selectedModel < 0;
     if (kind == RowKind::SceneLight) {
         // a light row is only offered through the camera target (the lights live next to the camera)
@@ -1695,9 +1696,238 @@ void App::StudioJumpKey(int dir) {
     }
 }
 
+void App::StudioRowStopwatch(uint64_t rowId) {
+    StudioDoc& d = *studio_;
+    RowKind kind;
+    std::string name;
+    if (!StudioTrackOfRow(rowId, kind, name)) return;
+    const int frame = d.Frame();
+
+    if (kind == RowKind::Bone) {
+        StudioModel* m = StudioPoseModel();
+        if (!m) return;
+        const uint32_t bone = RowIndexOf(rowId);
+        if (bone >= m->pmx->bones.size()) return;
+        const auto it = m->motion.bones.find(name);
+        const bool animated = it != m->motion.bones.end() && !it->second.empty() &&
+                              !IsStaticBoneTrack(m->motion, name);
+        std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Bone, name)};
+        if (!animated) {
+            const PoseBone cur0 = StudioCurrentPose(*m)[(size_t)bone];
+            BoneKf k;
+            FillLinearInterp(k.interp);
+            k.frame = frame;
+            k.t = cur0.t;
+            k.r = cur0.r;
+            UpsertKey(m->motion.bones[name], k);
+            m->motion.staticBones.erase(name);
+            StudioPushTrackEdit(Tr("애니메이션 켜기"), before);
+        } else {
+            studioStopwatchLabel_ = name;
+            studioStopwatchOff_ = [this, &d, bi = bone, bname = name] {
+                StudioModel* mm = d.Selected();
+                if (!mm) return;
+                std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Bone, bname)};
+                const PoseBone cur1 = StudioCurrentPose(*mm)[(size_t)bi];
+                BoneKf k;
+                FillLinearInterp(k.interp);
+                k.frame = 0;
+                k.t = cur1.t;
+                k.r = cur1.r;
+                mm->motion.bones[bname] = {k};
+                mm->motion.staticBones.insert(bname);
+                StudioPushTrackEdit(Tr("애니메이션 끄기"), before);
+                ++mm->motionVersion;
+                d.rowsKey = ~0ull;
+            };
+        }
+        ++m->motionVersion;
+        d.rowsKey = ~0ull;
+    } else if (kind == RowKind::Morph) {
+        StudioModel* m = StudioPoseModel();
+        if (!m) return;
+        const uint32_t morphIdx = RowIndexOf(rowId);
+        if (morphIdx >= m->pmx->morphs.size()) return;
+        StudioSelectMorph((int)morphIdx);
+        const auto mt = m->motion.morphs.find(name);
+        const bool animated = mt != m->motion.morphs.end() && !mt->second.empty() &&
+                              !IsStaticMorphTrack(m->motion, name);
+        const bool staticTrack = IsStaticMorphTrack(m->motion, name);
+        const float v = m->inst->MorphWeight((int)morphIdx);
+        std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Morph, name)};
+        if (!animated) {
+            UpsertKey(m->motion.morphs[name], MorphKf{frame, v});
+            if (staticTrack) m->motion.staticMorphs.erase(name);
+            StudioPushTrackEdit(Tr("애니메이션 켜기"), before);
+        } else {
+            studioStopwatchLabel_ = name;
+            studioStopwatchOff_ = [this, &d, mi = (int)morphIdx, mname = name] {
+                StudioModel* mm = d.Selected();
+                if (!mm) return;
+                std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Morph, mname)};
+                const auto kt = mm->motion.morphs.find(mname);
+                float val = kt != mm->motion.morphs.end() && !kt->second.empty()
+                                ? SampleMorph(kt->second, d.Frame()) : mm->inst->MorphWeight(mi);
+                mm->motion.morphs[mname] = {MorphKf{0, val}};
+                mm->motion.staticMorphs.insert(mname);
+                StudioPushTrackEdit(Tr("애니메이션 끄기"), before);
+                ++mm->motionVersion;
+                d.rowsKey = ~0ull;
+            };
+        }
+        ++m->motionVersion;
+        d.rowsKey = ~0ull;
+    } else if (kind == RowKind::SceneLight) {
+        const uint32_t uid = RowIndexOf(rowId);
+        SceneLight* light = d.FindLight(uid);
+        if (!light) return;
+        const bool animated = !light->keys.empty();
+        if (!animated) {
+            StudioBeginLightEdit(light->uid, true);
+            LightKey k{d.Frame(), SampleLightValues(*light, d.Frame())};
+            UpsertKey(light->keys, k);
+            studioLightChanged_ = true;
+            StudioEndLightEdit(light->uid);
+            d.rowsKey = ~0ull;
+        } else {
+            studioStopwatchLabel_ = light->name;
+            studioStopwatchOff_ = [this, &d, uid = light->uid] {
+                if (SceneLight* l = d.FindLight(uid)) {
+                    std::vector<SceneLight> before = d.lights;
+                    l->v = SampleLightValues(*l, d.Frame());
+                    l->keys.clear();
+                    d.history.Push(std::make_unique<LightsCommand>(d, Tr("애니메이션 끄기"), before, d.lights));
+                    d.rowsKey = ~0ull;
+                }
+            };
+        }
+    }
+}
+
+void App::StudioRowKeyNav(uint64_t rowId, int dir) {
+    StudioDoc& d = *studio_;
+    RowKind kind;
+    std::string name;
+    if (!StudioTrackOfRow(rowId, kind, name)) return;
+    const int frame = d.Frame();
+
+    if (dir == -1 || dir == 1) {
+        int target = -1;
+        if (kind == RowKind::Bone) {
+            StudioModel* m = StudioPoseModel();
+            if (m) {
+                const auto it = m->motion.bones.find(name);
+                if (it != m->motion.bones.end()) {
+                    if (dir < 0) {
+                        for (const BoneKf& kf : it->second) { if (kf.frame < frame) target = kf.frame; else break; }
+                    } else {
+                        for (const BoneKf& kf : it->second) { if (kf.frame > frame) { target = kf.frame; break; } }
+                    }
+                }
+            }
+        } else if (kind == RowKind::Morph) {
+            StudioModel* m = StudioPoseModel();
+            if (m) {
+                const auto it = m->motion.morphs.find(name);
+                if (it != m->motion.morphs.end()) {
+                    if (dir < 0) {
+                        for (const MorphKf& kf : it->second) { if (kf.frame < frame) target = kf.frame; else break; }
+                    } else {
+                        for (const MorphKf& kf : it->second) { if (kf.frame > frame) { target = kf.frame; break; } }
+                    }
+                }
+            }
+        } else if (kind == RowKind::SceneLight) {
+            SceneLight* light = d.FindLight(RowIndexOf(rowId));
+            if (light) {
+                if (dir < 0) {
+                    for (const LightKey& k : light->keys) { if (k.frame < frame) target = k.frame; else break; }
+                } else {
+                    for (const LightKey& k : light->keys) { if (k.frame > frame) { target = k.frame; break; } }
+                }
+            }
+        }
+        if (target >= 0) {
+            StudioSetPlaying(false);
+            StudioSeek(target / (double)kMmdFps);
+        }
+        return;
+    }
+
+    if (dir == 2) {
+        if (kind == RowKind::Bone) {
+            StudioModel* m = StudioPoseModel();
+            if (!m) return;
+            const uint32_t bone = RowIndexOf(rowId);
+            if (bone >= m->pmx->bones.size()) return;
+            const auto it = m->motion.bones.find(name);
+            const bool keyed = it != m->motion.bones.end() && FindKey(it->second, frame) != nullptr;
+            std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Bone, name)};
+            if (keyed) {
+                EraseKey(m->motion.bones[name], frame);
+                StudioPushTrackEdit(Tr("본 키 삭제"), before);
+            } else {
+                const PoseBone cur0 = StudioCurrentPose(*m)[(size_t)bone];
+                BoneKf k;
+                if (it != m->motion.bones.end()) {
+                    if (const BoneKf* existing = FindKey(it->second, frame)) k = *existing;
+                    else FillLinearInterp(k.interp);
+                } else {
+                    FillLinearInterp(k.interp);
+                }
+                k.frame = frame;
+                k.t = cur0.t;
+                k.r = cur0.r;
+                UpsertKey(m->motion.bones[name], k);
+                m->motion.staticBones.erase(name);
+                StudioPushTrackEdit(Tr("본 키 등록"), before);
+            }
+            ++m->motionVersion;
+            d.rowsKey = ~0ull;
+        } else if (kind == RowKind::Morph) {
+            StudioModel* m = StudioPoseModel();
+            if (!m) return;
+            const uint32_t morphIdx = RowIndexOf(rowId);
+            if (morphIdx >= m->pmx->morphs.size()) return;
+            StudioSelectMorph((int)morphIdx);
+            const auto mt = m->motion.morphs.find(name);
+            const bool keyedHere = mt != m->motion.morphs.end() && FindKey(mt->second, frame) != nullptr;
+            const float v = m->inst->MorphWeight((int)morphIdx);
+            std::vector<TrackState> before = {CaptureTrack(d, d.selectedModel, RowKind::Morph, name)};
+            if (keyedHere) {
+                EraseKey(m->motion.morphs[name], frame);
+                StudioPushTrackEdit(Tr("모프 키 삭제"), before);
+            } else {
+                UpsertKey(m->motion.morphs[name], MorphKf{frame, v});
+                StudioPushTrackEdit(Tr("모프 키 등록"), before);
+            }
+            ++m->motionVersion;
+            d.rowsKey = ~0ull;
+        } else if (kind == RowKind::SceneLight) {
+            SceneLight* light = d.FindLight(RowIndexOf(rowId));
+            if (!light) return;
+            StudioBeginLightEdit(light->uid, true);
+            if (FindKey(light->keys, d.Frame())) {
+                EraseKey(light->keys, d.Frame());
+            } else {
+                UpsertKey(light->keys, LightKey{d.Frame(), SampleLightValues(*light, d.Frame())});
+            }
+            studioLightChanged_ = true;
+            StudioEndLightEdit(light->uid);
+            d.rowsKey = ~0ull;
+        }
+    }
+}
+
 void App::StudioHandleTimeline(const TimelineEvents& ev) {
     OpTimer timer{"StudioHandleTimeline"};
     StudioDoc& d = *studio_;
+    if (ev.stopwatch) {
+        StudioRowStopwatch(ev.stopwatchRow);
+    }
+    if (ev.keyNav) {
+        StudioRowKeyNav(ev.keyNavRow, ev.keyNavDir);
+    }
     if (ev.seek) {
         StudioSetPlaying(false);
         StudioSeek(ev.seekFrame / (double)kMmdFps);
@@ -1705,6 +1935,81 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
     if (ev.toggleGroup) {
         if (!d.collapsed.erase(ev.toggledRow)) d.collapsed.insert(ev.toggledRow);
         d.rowsKey = ~0ull;
+    }
+    if (ev.toggleGraph) {
+        // the graph lane rows are inserted by StudioRebuildRows: rebuild them
+        if (!d.graphOpen.erase(ev.toggleGraphRow)) d.graphOpen.insert(ev.toggleGraphRow);
+        d.rowsKey = ~0ull;
+    }
+    if (ev.graphChannel) {
+        // a lane's chip picks the shared channel (the inspector's segmented control follows); clamp to that row's count
+        int count = 6;
+        for (const TimelineRow& r : d.rows)
+            if (r.id == ev.graphChannelRow && !r.graphChannels.empty()) {
+                count = (int)r.graphChannels.size();
+                break;
+            }
+        d.curveChannel = std::clamp(ev.graphChannelIndex, 0, count - 1);
+        d.rowsKey = ~0ull;
+    }
+    if (ev.graphCurve) {
+        // a lane handle drag: write the bytes into the active channel (every channel when "apply to all" is on) of the
+        // key that owns the segment. A curve edit moves no key: no d.rowsKey.
+        RowKind kind;
+        std::string name;
+        if (StudioTrackOfRow(ev.graphCurveRow, kind, name)) {
+            StudioModel* m = kind == RowKind::Bone ? d.Selected() : nullptr;
+            BoneKf* boneKey = nullptr;
+            CameraKf* cameraKey = nullptr;
+            if (kind == RowKind::Bone && m) {
+                const auto it = m->motion.bones.find(name);
+                if (it != m->motion.bones.end()) boneKey = FindKey(it->second, ev.graphCurveFrame);
+            } else if (kind == RowKind::Camera && d.selectedModel < 0) {
+                cameraKey = FindKey(d.camera.camera, ev.graphCurveFrame);
+            }
+            if (boneKey || cameraKey) {
+                if (!studioLaneCurveEditing_) {
+                    studioLaneCurveBefore_.clear();
+                    studioLaneCurveBefore_.push_back(CaptureTrack(d, d.selectedModel, kind, name));
+                    studioLaneCurveEditing_ = true;
+                    studioLaneCurveChanged_ = false;
+                }
+                const int channels = kind == RowKind::Bone ? 4 : 6;
+                const int c0 = d.curveAllChannels ? 0 : std::clamp(d.curveChannel, 0, channels - 1);
+                const int c1 = d.curveAllChannels ? channels : c0 + 1;
+                bool differs = false;
+                for (int ch = c0; ch < c1; ++ch) {
+                    uint8_t cur[4];
+                    if (boneKey) GetBoneCurve(boneKey->interp, ch, cur);
+                    else GetCameraCurve(cameraKey->interp, ch, cur);
+                    if (std::memcmp(cur, ev.graphCurveBytes, 4) != 0) differs = true;
+                }
+                if (differs) {
+                    if (boneKey)
+                        for (int ch = c0; ch < c1; ++ch) SetBoneCurve(boneKey->interp, ch, ev.graphCurveBytes);
+                    else
+                        for (int ch = c0; ch < c1; ++ch) SetCameraCurve(cameraKey->interp, ch, ev.graphCurveBytes);
+                    if (boneKey) ++m->motionVersion;
+                    else ++d.cameraVersion;
+                    studioLaneCurveChanged_ = true;
+                }
+            }
+        }
+        if (ev.graphCurveEnd) {
+            if (studioLaneCurveEditing_ && studioLaneCurveChanged_)
+                StudioPushTrackEdit(Tr("보간 곡선 편집"), studioLaneCurveBefore_);
+            studioLaneCurveBefore_.clear();
+            studioLaneCurveEditing_ = false;
+            studioLaneCurveChanged_ = false;
+        }
+    }
+    if (ev.graphCurveEnd && !ev.graphCurve) {
+        // the segment vanished mid-gesture: still close the undo step (if anything was written)
+        if (studioLaneCurveEditing_ && studioLaneCurveChanged_)
+            StudioPushTrackEdit(Tr("보간 곡선 편집"), studioLaneCurveBefore_);
+        studioLaneCurveBefore_.clear();
+        studioLaneCurveEditing_ = false;
+        studioLaneCurveChanged_ = false;
     }
     if (ev.rowClick) {
         // a row label selects the row and all of its keys (a group: every row in it, also when collapsed)
@@ -1725,6 +2030,7 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
             d.selectedRows.clear();
             d.selection.clear();
             for (int i = std::min(anchorIndex, index); i <= std::max(anchorIndex, index); ++i) {
+                if (d.rows[i].graphOf != 0) continue;  // graph lane rows are not selectable
                 d.selectedRows.insert(d.rows[i].id);
                 selectRowKeys(d.rows[i].id, true);
             }
@@ -1772,6 +2078,9 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
                 if (d.activeBone < 0) d.activeBone = (int)RowIndexOf(row);
             }
         }
+        // a plain click on one key seeks the playhead to it (Premiere / AE): the live panels then show and edit that key's values
+        if (ev.selectMode == SelectMode::Replace && ev.selectKeys.size() == 1)
+            StudioSeek(ev.selectKeys[0].frame / (double)kMmdFps);
         // a key click brings its properties up in the inspector's "키" tab
         if (!ev.selectKeys.empty() && StudioPoseModel()) d.inspectorTab = 0;
         if (!ev.selectKeys.empty()) studioInspectorToKey_ = true;  // scroll the inspector to the key's fields
@@ -1857,13 +2166,39 @@ void App::StudioRebuildRows() {
         out.reserve(keys.size());
         for (const auto& k : keys) out.push_back({k.frame, d.selection.count({rowId, k.frame}) != 0});
     };
+    // Value / speed graph lane: a row with at least 2 keys offers one channel per `labels` entry. Returns true when
+    // the lane is open (the caller then inserts kTimelineGraphRows lane rows after the row).
+    const auto fillGraph = [&](TimelineRow& r, const char* const* labels, int count) {
+        r.graphChannels.clear();
+        if (r.keys.size() < 2) return false;
+        for (int i = 0; i < count; ++i) r.graphChannels.push_back({labels[i], BezierChannelColor(i)});
+        r.graphOpen = d.graphOpen.count(r.id) != 0;
+        r.graphActive = std::clamp(d.curveChannel, 0, count - 1);
+        return r.graphOpen;
+    };
+    // Inserts the kTimelineGraphRows lane rows of an open graph right where they belong (call after pushing the parent
+    // row). A lane row is never a track: RowKind::GraphLane carries the parent id in `graphOf`; its group is the parent
+    // row id's low 24 bits and its index the graph index.
+    const auto pushLaneRows = [&](std::vector<TimelineRow>& out, uint64_t parentId) {
+        for (int i = 0; i < kTimelineGraphRows; ++i) {
+            TimelineRow lane;
+            lane.id = MakeRowId(RowKind::GraphLane, (uint32_t)(parentId & 0xFFFFFFu), (uint32_t)i);
+            lane.keysEditable = false;
+            lane.graphOf = parentId;
+            lane.graphIndex = i;
+            out.push_back(std::move(lane));
+        }
+    };
     if (d.selectedModel < 0) {
         TimelineRow r;
         r.id = MakeRowId(RowKind::Camera, 0, 0);
         r.label = Tr("카메라");
         r.selected = d.selectedRows.count(r.id) != 0;
         keysOf(r.id, d.camera.camera, r.keys);
+        const char* const cameraChannels[] = {"X", "Y", "Z", Tr("회전"), Tr("거리"), Tr("시야")};
+        const bool cameraGraph = fillGraph(r, cameraChannels, 6);
         d.rows.push_back(std::move(r));
+        if (cameraGraph) pushLaneRows(d.rows, MakeRowId(RowKind::Camera, 0, 0));
         TimelineRow l;
         l.id = MakeRowId(RowKind::Light, 0, 0);
         l.label = Tr("조명");
@@ -1889,6 +2224,11 @@ void App::StudioRebuildRows() {
             r.id = MakeRowId(RowKind::SceneLight, 0, light.uid);
             r.label = light.name;
             r.selected = d.selectedRows.count(r.id) != 0;
+            const bool vmdLinkedSun = (light.kind == LightKind::Sun && light.vmdLink && !d.camera.light.empty());
+            if (!vmdLinkedSun) {
+                r.hasStopwatch = true;
+                r.animated = !light.keys.empty();
+            }
             keysOf(r.id, light.keys, r.keys);
             d.rows.push_back(std::move(r));
         }
@@ -2085,6 +2425,7 @@ void App::StudioRebuildRows() {
         std::set<int> summary;
         std::vector<TimelineRow> children;
         std::set<std::pair<bool, int32_t>> listed;  // some models list a bone twice in one frame
+        const char* const boneChannels[] = {"X", "Y", "Z", Tr("회전")};
         for (const PmxDisplayFrame::Item& it : items) {
             if (!listed.insert({it.morph, it.index}).second) continue;
             TimelineRow r;
@@ -2092,21 +2433,30 @@ void App::StudioRebuildRows() {
             if (it.morph) {
                 r.id = MakeRowId(RowKind::Morph, g, (uint32_t)it.index);
                 r.label = pmx.morphs[(size_t)it.index].name;
-                if (auto t = mo.morphs.find(r.label); t != mo.morphs.end()) {
+                r.hasStopwatch = true;
+                const auto t = mo.morphs.find(r.label);
+                r.animated = (t != mo.morphs.end() && !t->second.empty() && !IsStaticMorphTrack(mo, r.label));
+                if (t != mo.morphs.end()) {
                     keysOfModel(r.id, t->second, r.keys);
                     for (const auto& k : t->second) summary.insert(k.frame);
                 }
             } else {
                 r.id = MakeRowId(RowKind::Bone, g, (uint32_t)it.index);
                 r.label = pmx.bones[(size_t)it.index].name;
-                if (auto t = mo.bones.find(r.label); t != mo.bones.end()) {
+                r.hasStopwatch = true;
+                const auto t = mo.bones.find(r.label);
+                r.animated = (t != mo.bones.end() && !t->second.empty() && !IsStaticBoneTrack(mo, r.label));
+                if (t != mo.bones.end()) {
                     keysOfModel(r.id, t->second, r.keys);
                     for (const auto& k : t->second) summary.insert(k.frame);
                 }
             }
             r.selected = d.selectedRows.count(r.id) != 0 || (!it.morph && d.selectedBones.count(it.index));
+            const bool graph = !it.morph && fillGraph(r, boneChannels, 4);
+            const uint64_t rowId = r.id;
             childIds.push_back(r.id);
             if (group.expanded) children.push_back(std::move(r));
+            if (graph && group.expanded) pushLaneRows(children, rowId);
         }
         for (int f : summary) group.keys.push_back({f, false});
         d.rows.push_back(std::move(group));
@@ -3605,6 +3955,157 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
             d.view.scrollFrame = std::max(0.0f, f - visible * (d.playing ? 0.08f : 0.4f));
     }
     d.followFrame = d.Frame();
+    // The lane's active channel follows d.curveChannel: the inspector's segmented control (and the lane's own chips)
+    // both write it, so mirror it into the rows each frame (a curve edit moves no key, rows are not rebuilt).
+    for (TimelineRow& r : d.rows)
+        if (!r.graphChannels.empty()) r.graphActive = std::clamp(d.curveChannel, 0, (int)r.graphChannels.size() - 1);
+    // The lane's editable segment, filled from live key data every frame (no row rebuild needed): the key selected on
+    // this row (when exactly one is selected and it is not the row's first key) or, else, the segment [a, b) holding the
+    // playhead (at or after the last key: the last segment; before the first key: none).
+    std::set<uint64_t> graphRows;  // rows that offer a lane (the only ones the segment search needs)
+    for (const TimelineRow& r : d.rows)
+        if (!r.graphChannels.empty()) graphRows.insert(r.id);
+    std::map<uint64_t, std::pair<int, int>> rowSel;  // graph row -> (selected key count, first selected frame)
+    for (const KeyId& k : d.selection) {
+        if (!graphRows.count(k.first)) continue;
+        auto& e = rowSel[k.first];
+        if (e.first == 0) e.second = k.second;
+        ++e.first;
+    }
+    for (TimelineRow& r : d.rows) {
+        r.graphSegFrom = r.graphSegTo = -1;
+        if (r.graphChannels.empty()) continue;
+        const RowKind kind = RowKindOf(r.id);
+        const std::vector<CameraKf>* cameraKeys = nullptr;
+        const std::vector<BoneKf>* boneKeys = nullptr;
+        if (kind == RowKind::Bone) {
+            RowKind k;
+            std::string name;
+            if (!StudioTrackOfRow(r.id, k, name) || k != RowKind::Bone) continue;
+            const StudioModel* m = d.Selected();
+            if (!m) continue;
+            const auto it = m->motion.bones.find(name);
+            if (it == m->motion.bones.end()) continue;
+            boneKeys = &it->second;
+        } else if (kind == RowKind::Camera && d.selectedModel < 0) {
+            cameraKeys = &d.camera.camera;
+        } else {
+            continue;
+        }
+        const size_t keyCount = boneKeys ? boneKeys->size() : cameraKeys->size();
+        if (keyCount < 2) continue;
+        const auto frameAt = [&](size_t i) { return boneKeys ? (*boneKeys)[i].frame : (*cameraKeys)[i].frame; };
+        size_t from = 0, to = 0;
+        bool have = false;
+        const auto sel = rowSel.find(r.id);
+        const int selectedFrame = sel != rowSel.end() && sel->second.first == 1 ? sel->second.second : -1;
+        if (selectedFrame >= 0 && selectedFrame != frameAt(0)) {
+            for (size_t i = 1; i < keyCount; ++i) {
+                if (frameAt(i) == selectedFrame) { from = i - 1; to = i; have = true; break; }
+            }
+        }
+        if (!have) {
+            const int frame = d.Frame();
+            if (frame >= frameAt(0)) {
+                for (size_t i = 1; i < keyCount; ++i) {
+                    if (frame < frameAt(i)) { from = i - 1; to = i; have = true; break; }
+                }
+                if (!have) { from = keyCount - 2; to = keyCount - 1; have = true; }  // at or after the last key
+            }
+        }
+        if (!have) continue;
+        const int a = frameAt(from), b = frameAt(to);
+        if (b <= a) continue;
+        if (cameraKeys && b - a <= 1) continue;  // a one-frame camera gap is a cut: nothing to edit
+        const int active = std::clamp(r.graphActive, 0, (int)r.graphChannels.size() - 1);
+        if (boneKeys) GetBoneCurve((*boneKeys)[to].interp, active, r.graphCurve);
+        else GetCameraCurve((*cameraKeys)[to].interp, active, r.graphCurve);
+        r.graphSegFrom = a;
+        r.graphSegTo = b;
+    }
+    // Graph lane sampler: reads the live motion data by row id on every call (never caches pointers into d.rows or the
+    // tracks), so an inspector curve edit shows in the lane in the same frame. Bone: 0..2 translation X/Y/Z, 3 rotation
+    // (degrees of the eased slerp). Camera: 0..2 target, 3 rotation (degrees), 4 distance, 5 fov degrees.
+    d.view.graphSample = [this](uint64_t row, int channel, float frame) -> float {
+        const StudioDoc& d = *studio_;
+        const RowKind kind = RowKindOf(row);
+        std::string name;
+        if (kind == RowKind::Bone) {
+            RowKind k;
+            std::string n;
+            if (!StudioTrackOfRow(row, k, n) || k != RowKind::Bone) return 0.0f;
+            name = n;
+        } else if (kind != RowKind::Camera || d.selectedModel >= 0) {
+            return 0.0f;
+        }
+        if (kind == RowKind::Bone) {
+            const StudioModel* m = d.Selected();
+            if (!m) return 0.0f;
+            const auto it = m->motion.bones.find(name);
+            if (it == m->motion.bones.end() || it->second.empty()) return 0.0f;
+            const std::vector<BoneKf>& keys = it->second;
+            if (frame <= (float)keys.front().frame) {
+                const BoneKf& k0 = keys.front();
+                if (channel == 0) return k0.t.x;
+                if (channel == 1) return k0.t.y;
+                if (channel == 2) return k0.t.z;
+                return DirectX::XMConvertToDegrees(2.0f * std::acos(std::min(1.0f, std::abs(k0.r.w))));
+            }
+            if (frame >= (float)keys.back().frame || keys.size() == 1) {
+                const BoneKf& k0 = keys.back();
+                if (channel == 0) return k0.t.x;
+                if (channel == 1) return k0.t.y;
+                if (channel == 2) return k0.t.z;
+                return DirectX::XMConvertToDegrees(2.0f * std::acos(std::min(1.0f, std::abs(k0.r.w))));
+            }
+            auto seg = std::upper_bound(keys.begin(), keys.end(), frame,
+                                        [](float f, const BoneKf& k) { return f < (float)k.frame; });
+            const BoneKf& a = *(seg - 1);
+            const BoneKf& b = *seg;
+            const float span = (float)(b.frame - a.frame);
+            const float t = span > 0.0f ? ((frame - (float)a.frame) / span) : 0.0f;
+            if (channel >= 0 && channel <= 2) {
+                uint8_t c[4];
+                GetBoneCurve(b.interp, channel, c);
+                const float e = Bezier::FromBytes(c[0], c[1], c[2], c[3]).Evaluate(t);
+                const float av = channel == 0 ? a.t.x : (channel == 1 ? a.t.y : a.t.z);
+                const float bv = channel == 0 ? b.t.x : (channel == 1 ? b.t.y : b.t.z);
+                return av + (bv - av) * e;
+            }
+            uint8_t c[4];
+            GetBoneCurve(b.interp, 3, c);
+            DirectX::XMFLOAT4 q;
+            DirectX::XMStoreFloat4(&q, DirectX::XMQuaternionSlerp(DirectX::XMLoadFloat4(&a.r), DirectX::XMLoadFloat4(&b.r),
+                                                                 Bezier::FromBytes(c[0], c[1], c[2], c[3]).Evaluate(t)));
+            return DirectX::XMConvertToDegrees(2.0f * std::acos(std::min(1.0f, std::abs(q.w))));
+        }
+        const std::vector<CameraKf>& keys = d.camera.camera;
+        if (keys.empty()) return 0.0f;
+        const auto pick = [&](const CameraKf& k) -> float {
+            if (channel == 0) return k.target.x;
+            if (channel == 1) return k.target.y;
+            if (channel == 2) return k.target.z;
+            if (channel == 3) return DirectX::XMConvertToDegrees(std::sqrt(k.rotation.x * k.rotation.x +
+                                                                         k.rotation.y * k.rotation.y +
+                                                                         k.rotation.z * k.rotation.z));
+            if (channel == 4) return k.distance;
+            return (float)k.fovDeg;
+        };
+        if (frame <= (float)keys.front().frame) return pick(keys.front());
+        if (frame >= (float)keys.back().frame || keys.size() == 1) return pick(keys.back());
+        auto seg = std::upper_bound(keys.begin(), keys.end(), frame,
+                                    [](float f, const CameraKf& k) { return f < (float)k.frame; });
+        const CameraKf& a = *(seg - 1);
+        const CameraKf& b = *seg;
+        if (b.frame - a.frame <= 1) return pick(a);  // a one-frame gap is a cut: MMD holds the first key
+        const int param = std::clamp(channel, 0, 5);
+        const float t = (frame - (float)a.frame) / (float)(b.frame - a.frame);
+        uint8_t c[4];
+        GetCameraCurve(b.interp, param, c);
+        const float e = Bezier::FromBytes(c[0], c[1], c[2], c[3]).Evaluate(t);
+        const float av = pick(a), bv = pick(b);
+        return av + (bv - av) * e;
+    };
     TimelineEvents ev;
     Timeline("##tl", ImVec2(0, 0), d.rows, d.Frame(), d.EndFrame(), d.view, ev);
     ImGui::EndChild();
