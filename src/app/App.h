@@ -572,6 +572,24 @@ private:
     void StudioTakeFreeCamera();                    // leave the motion camera at its current view (viewport navigation)
     void StudioFocusSelection();                     // F: frame the picked bone / selected model
     float studioFlyMul_ = 1.0f;                      // RMB + WASD fly speed multiplier (wheel while flying)
+    // UI display name preference: when settings_.showEnglishNames is on and a PMX English name exists,
+    // it wins, else the original name. Never used for internal ids (VMD / VPD track keys).
+    const char* DisplayName(const std::string& name, const std::string& nameEn) const {
+        return settings_.showEnglishNames && !nameEn.empty() ? nameEn.c_str() : name.c_str();
+    }
+    // Gizmo precision drag (Ctrl dampens pointer motion). The solved gizmo values are recomputed from the
+    // drag-start base every frame, so keeping a running effective-mouse lets the modifier switch mid-drag
+    // without a jump and keeps one undo step per gesture.
+    ImVec2 studioGizmoEffMouse_{0, 0};
+    ImVec2 studioGizmoLastRaw_{0, 0};
+    bool studioGizmoCtrl_ = false;
+    bool studioGizmoInit_ = false;
+    // When on, clicking a bone in the viewport also centers the free camera on it.
+    bool studioCenterOnBone_ = false;
+    void StudioSelectAllBones();  // Ctrl+A: pick every bone of the active model
+    // Last focused studio panel (updated while panels draw): 0 viewport / camera, 1 timeline, 2 other. Ctrl+A picks
+    // bones when the viewport is focused and keys when the timeline is focused.
+    int studioFocusPanel_ = 2;
     studio::CameraKf StudioViewedCamera(int frame) const;  // the camera as shown now (free view or motion camera) as a key at `frame`
     void StudioBeginKeyEdit(studio::RowKind kind);   // inspector key fields: one undo step per edit
     void StudioEndKeyEdit();
@@ -633,6 +651,7 @@ private:
     bool StudioGizmoFrameOf(const studio::StudioModel& m, int bone, studio::GizmoFrame& f, studio::GizmoMode& mode) const;
     void StudioViewportPose(float x0, float y0, float x1, float y1, bool hovered, bool& consumed);  // overlay + input
     void StudioViewportToolbar(float x, float y);
+    void DrawStudioViewportAxisControls(float x0, float y0, float x1, float y1);  // bottom-corner move/rotate XYZ for the active bone
     void DrawStudioBoneTab(float w);
     void DrawStudioMorphTab(float w);
     bool StudioScriptGizmoPoint(int part, ImVec2& out) const;  // ui-script: a screen point on a gizmo part
@@ -1211,6 +1230,9 @@ private:
     ThumbnailCache thumbs_;
     bool thumbsClearPending_ = false;
     int libraryTab_ = 0;          // 0 characters, 1 stages, 2 songs
+    bool libraryShowHidden_ = false;  // library grid: show the "숨긴 항목" (hidden) list instead of the active tab
+    bool libraryListView_ = false;    // library grid: show rows instead of thumbnail cards
+    float libraryTileScale_ = 1.0f;   // library card grid: tile-size multiplier (0.7 .. 1.6)
     int lobbyTab_ = 0;                                                   // select screen settings tab: 0 screen, 1 shader, 2 detail
     std::filesystem::path assetsDir_;
     std::vector<ColorLutEntry> luts_;   // built-in looks + .cube files (ListColorLuts)
@@ -1391,6 +1413,7 @@ private:
     bool studioThumbsShown_ = false;               // the add popup's thumbnail grid was drawn (pump thumbnails)
     int studioAddPage_ = 0;   // "+" popup page: 0 root (장면 › / 조명 › / 월드 이펙트 ›), 1 characters, 2 stages, 3 songs,
                               // 4 장면 (캐릭터/스테이지/소품/MME/곡/음원/VMD), 5 조명, 6 조명 프리셋, 7 월드 이펙트
+    int studioAddGridCols_ = 3;  // the "+" popup thumbnail grid: columns (2..6); higher = smaller tiles
     uint32_t studioReplaceUid_ = 0;                // "+" popup in replace mode: the model whose file is swapped (0: add)
     bool studioOpenAdd_ = false;                   // the outliner opens the "+" popup next frame (model menu's replace)
     bool studioHelpOpen_ = false;                  // shortcut overlay

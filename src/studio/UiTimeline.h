@@ -13,7 +13,8 @@ struct TimelineKey {
 
 struct TimelineRow {
     uint64_t id = 0;            // unique per row, stable across frames
-    std::string label;          // UTF-8
+    std::string label;          // UTF-8 internal key (track name; VMD/VPD-safe). Never localised.
+    std::string displayLabel;   // optional UI-only label (e.g. the PMX English bone name); empty = use `label`
     int depth = 0;              // indent level (0 = top)
     bool isGroup = false;       // group rows have a caret and show their children's keys summarised
     bool expanded = true;       // only meaningful for groups; the CALLER hides collapsed children (do not pass them in)

@@ -165,26 +165,122 @@ void App::DrawAppBar(int activeNav) {
     if (hovered) Tooltip(compactPath ? path.c_str() : Tr("라이브러리 폴더 변경"));
     if (clicked) ImGui::OpenPopup("##libpopup");
     ImGui::SetCursorScreenPos(ImVec2(right - Dp(76.0f), (h - Dp(36.0f)) * 0.5f));
-    if (IconButton("##lang", icon::Globe, Tr("언어"))) ImGui::OpenPopup("##langpopup");
+    if (IconButton("##settings", icon::Gear, Tr("설정"))) ImGui::OpenPopup("##settingspopup");
     ImGui::SetNextWindowPos(ImVec2(right - Dp(40.0f), h + Dp(6.0f)), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-    ImGui::SetNextWindowSize(ImVec2(Dp(200.0f), 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(12.0f), Dp(12.0f)));
-    if (ImGui::BeginPopup("##langpopup")) {
-        const Language langs[] = {Language::Auto, Language::Korean, Language::English, Language::Japanese,
-                                Language::Chinese};
-        for (const Language l : langs) {
-            const std::string label = l == Language::Auto ? std::string(Tr("시스템 언어")) + "  (" +
-                                                                LanguageName(DetectSystemLanguage()) + ")"
-                                                          : std::string(LanguageName(l));
-            if (Chip((std::string("##lang") + std::to_string((int)l)).c_str(), label.c_str(), nullptr,
-                     settings_.language == (int)l, -1.0f)) {
-                settings_.language = (int)l;
-                SetLanguage(l);
-                settings_.Save(settingsPath_);
-                ImGui::CloseCurrentPopup();
+    ImGui::SetNextWindowSize(ImVec2(Dp(360.0f), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(16.0f), Dp(14.0f)));
+    if (ImGui::BeginPopup("##settingspopup")) {
+        const auto save = [&]() { settings_.Save(settingsPath_); };
+
+        ImGui::SeparatorText(Tr("언어"));
+        {
+            const Language langs[] = {Language::Auto, Language::Korean, Language::English, Language::Japanese,
+                                    Language::Chinese};
+            for (const Language l : langs) {
+                const std::string label = l == Language::Auto ? std::string(Tr("시스템 언어")) + "  (" +
+                                                                    LanguageName(DetectSystemLanguage()) + ")"
+                                                              : std::string(LanguageName(l));
+                if (Chip((std::string("##lang") + std::to_string((int)l)).c_str(), label.c_str(), nullptr,
+                         settings_.language == (int)l, -1.0f)) {
+                    settings_.language = (int)l;
+                    SetLanguage(l);
+                    save();
+                    ImGui::CloseCurrentPopup();
+                }
+                Gap(4.0f);
             }
-            Gap(4.0f);
         }
+
+        // A slider row that also accepts a typed value (a number field to the right of the slider).
+        const auto speedRow = [&](const char* label, float* v, float vmin, float vmax) {
+            ImGui::Text("%s", Tr(label));
+            ImGui::SameLine();
+            const float avail = ImGui::GetContentRegionAvail().x;
+            ImGui::SetNextItemWidth(avail - Dp(72.0f));
+            ImGui::SliderFloat(("##sl_" + std::string(label)).c_str(), v, vmin, vmax, "%.2f");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(Dp(64.0f));
+            ImGui::InputFloat(("##in_" + std::string(label)).c_str(), v, 0.05f, 0.1f, "%.2f");
+            *v = std::clamp(*v, vmin, vmax);
+        };
+
+        ImGui::SeparatorText(Tr("카메라"));
+        ImGui::Checkbox(Tr("가로 축 반전"), &settings_.cameraInvertX);
+        ImGui::Checkbox(Tr("세로 축 반전"), &settings_.cameraInvertY);
+        speedRow(Tr("회전 감도"), &settings_.cameraRotateSpeed, 0.05f, 10.0f);
+        speedRow(Tr("이동 감도"), &settings_.cameraPanSpeed, 0.05f, 10.0f);
+        speedRow(Tr("줌 감도"), &settings_.cameraZoomSpeed, 0.05f, 10.0f);
+        speedRow(Tr("화각 감도"), &settings_.cameraFovSpeed, 0.05f, 10.0f);
+        speedRow(Tr("비행 속도"), &settings_.cameraFlySpeed, 0.05f, 20.0f);
+
+        ImGui::SeparatorText(Tr("편집"));
+        speedRow(Tr("Ctrl 정밀도"), &settings_.editorPrecisionFactor, 0.01f, 1.0f);
+        ui::Tooltip(Tr("기즈모를 드래그할 때 Ctrl을 누르면 이 배율만큼 정밀하게 이동·회전합니다."));
+
+        ImGui::SeparatorText(Tr("인터페이스"));
+        ImGui::Checkbox(Tr("본·모프 영문 이름 표시"), &settings_.showEnglishNames);
+        ui::Tooltip(Tr("PMX에 영어 이름이 있으면 목록과 툴팁에서 표시합니다 (내부 식별자는 그대로)."));
+        speedRow(Tr("본 오버레이 크기"), &settings_.boneOverlayScale, 0.5f, 2.5f);
+        ui::Tooltip(Tr("뷰포트에서 본 마커(점과 선)의 크기입니다."));
+
+        ImGui::SeparatorText(Tr("입력"));
+        {
+            // Rebindable studio bone-tool keys. Click a row, then press the new key. (The viewport camera fly keys
+            // W/A/S/D/E/Q/Space stay fixed.)
+            static std::string recAction;
+            struct KeyRow { const char* action; const char* label; };
+            static const KeyRow kRows[] = {
+                {"toolMove",     Tr("이동 도구 (W)")},
+                {"toolRotate",   Tr("회전 도구 (E)")},
+                {"toolAutoIk",   Tr("자동 IK 전환 (K)")},
+                {"toggleBones",  Tr("본 표시 전환 (C)")},
+                {"registerPose", Tr("키 등록 (I)")},
+            };
+            for (int ai = 0; ai < (int)(sizeof(kRows) / sizeof(kRows[0])); ++ai) {
+                const std::string id = std::string("##keybtn") + std::to_string(ai);
+                std::string label = kRows[ai].label;
+                label += ": ";
+                if (recAction == kRows[ai].action) {
+                    label += Tr("[키 입력 중...]");
+                } else {
+                    const int cur = settings_.KeyFor(kRows[ai].action);
+                    const char* nm = cur >= 0 ? ImGui::GetKeyName((ImGuiKey)cur) : nullptr;
+                    label += (nm && nm[0]) ? nm : "-";
+                }
+                if (Button(id.c_str(), label.c_str(), nullptr, ButtonKind::Secondary)) {
+                    if (recAction == kRows[ai].action) recAction.clear();
+                    else recAction = kRows[ai].action;
+                }
+                if (recAction == kRows[ai].action) {
+                    // capture the next keypress (named keys only, no modifier alone)
+                    for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; ++k) {
+                        const ImGuiKey kk = (ImGuiKey)k;
+                        if (kk == ImGuiKey_LeftCtrl || kk == ImGuiKey_RightCtrl || kk == ImGuiKey_LeftShift ||
+                            kk == ImGuiKey_RightShift || kk == ImGuiKey_LeftAlt || kk == ImGuiKey_RightAlt ||
+                            kk == ImGuiKey_LeftSuper || kk == ImGuiKey_RightSuper)
+                            continue;
+                        if (ImGui::IsKeyPressed(kk)) {
+                            settings_.keys[kRows[ai].action] = k;
+                            recAction.clear();
+                            save();
+                            break;
+                        }
+                    }
+                }
+                Gap(2.0f);
+            }
+        }
+
+        ImGui::Dummy(ImVec2(0, Dp(6.0f)));
+        if (Button("##resetdefaults", Tr("카메라·단축키 기본값으로 재설정"), icon::Refresh, ButtonKind::Secondary)) {
+            settings_.cameraInvertX = settings_.cameraInvertY = false;
+            settings_.cameraRotateSpeed = settings_.cameraPanSpeed = settings_.cameraZoomSpeed = 1.0f;
+            settings_.cameraFovSpeed = settings_.cameraFlySpeed = 1.0f;
+            settings_.editorPrecisionFactor = 0.1f;
+            settings_.keys.clear();
+            save();
+        }
+        save();
         ImGui::EndPopup();
     }
     ImGui::PopStyleVar();
@@ -424,8 +520,26 @@ void App::DrawSelect() {
         SearchField("##search", filter, 128, hints[libraryTab_], sw);
     }
 
+    // ---- library view controls (their own row BELOW the tabs, so they never overlap the tab buttons)
+    const float controlsY = top + Dp(48.0f);
+    const float gridTop = controlsY + Dp(40.0f);
+    ImGui::SetCursorScreenPos(ImVec2(leftX + Dp(2.0f), controlsY));
+    if (Chip("##showhidden", Tr("숨긴 항목"), icon::EyeSlash, libraryShowHidden_)) libraryShowHidden_ = !libraryShowHidden_;
+    ImGui::SameLine(0, Dp(10.0f));
+    {
+        const char* viewLabels[2] = {Tr("격자"), Tr("목록")};
+        int viewMode = libraryListView_ ? 1 : 0;
+        if (Segmented("##libview", viewLabels, 2, &viewMode, Dp(120.0f), 30.0f)) libraryListView_ = viewMode == 1;
+    }
+    ImGui::SameLine(0, Dp(12.0f));
+    if (!libraryShowHidden_) {
+        ImGui::SetNextItemWidth(Dp(140.0f));
+        PushFont(Font::Regular, size::Caption);
+        ImGui::SliderFloat("##tilescale", &libraryTileScale_, 0.7f, 1.6f, Tr("크기 %.2f"));
+        libraryTileScale_ = std::clamp(libraryTileScale_, 0.7f, 1.6f);
+        PopFont();
+    }
     // ---- content grid
-    const float gridTop = top + Dp(40.0f) + Dp(20.0f);
     ImGui::SetCursorScreenPos(ImVec2(leftX - Dp(6.0f), gridTop - Dp(6.0f)));
     ImGui::BeginChild("##grid", ImVec2(leftR - leftX + Dp(12.0f), ds.y - gridTop - pad + Dp(12.0f)), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoBackground);
@@ -437,9 +551,95 @@ void App::DrawSelect() {
         const float cgap = Dp(16.0f);
         float contentH = 0;
 
-        if (libraryTab_ == 0) {
+        if (libraryShowHidden_) {
+            const LibraryOverrides ov = LoadLibraryOverrides();
+            const std::filesystem::path root = ResolveLibraryPath().lexically_normal();
+            int count = 0;
+            for (const auto& [rel, k] : ov.byPath) {
+                if (k != AssetKind::Hidden) continue;
+                ++count;
+                const std::filesystem::path full = root / Utf8ToPath(rel);
+                const std::string name = PathToUtf8(full.filename());
+                ImGui::PushID(rel.c_str());
+                ImGui::TextUnformatted(name.c_str());
+                ImGui::SameLine();
+                if (Button("##unhide", Tr("숨긴 항목 다시 표시"), icon::Eye, ButtonKind::Ghost)) {
+                    SetLibraryOverride({full}, AssetKind::Auto);
+                }
+                PushFont(Font::Regular, size::Caption);
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(p.ink3), "%s", rel.c_str());
+                PopFont();
+                Gap(4.0f);
+                ImGui::PopID();
+            }
+            if (count == 0) {
+                const ImVec2 ms = TextSize(Font::Semibold, size::Title, Tr("숨긴 항목 없음"));
+                Text(dl, Font::Semibold, size::Title, ImVec2(origin.x + (availW - ms.x) * 0.5f, origin.y + Dp(80.0f)),
+                     p.ink2, Tr("숨긴 항목 없음"));
+            }
+        } else if (libraryListView_) {
+            const float rowH = Dp(38.0f);
+            if (libraryTab_ == 0) {
+                const std::string needle = ToLowerAscii(filterCharacter_);
+                int n = 0;
+                for (size_t i = 0; i < library_.characters.size(); ++i) {
+                    const CharacterAsset& a = library_.characters[i];
+                    if (!MatchesFilter(needle, a.displayName, a.id)) continue;
+                    char buf[512];
+                    const std::string meta = std::string(Tr("정점 ")) + Thousands(a.vertexCount) +
+                                             std::string(Tr("  ·  본 ")) + Thousands(a.boneCount);
+                    std::snprintf(buf, sizeof(buf), "%s    ·    %s", a.displayName.c_str(), meta.c_str());
+                    ImGui::PushID((int)i);
+                    if (ImGui::Selectable(buf, selCharacter_ == (int)i)) {
+                        selCharacter_ = (int)i;
+                        settings_.lastCharacter = a.id;
+                    }
+                    AssetContextMenu({a.modelPath}, true);
+                    ImGui::PopID();
+                    ++n;
+                }
+                contentH = std::max(contentH, n * rowH);
+                if (n == 0) contentH = std::max(contentH, Dp(120.0f));
+            } else if (libraryTab_ == 1) {
+                const std::string needle = ToLowerAscii(filterStage_);
+                int n = 0;
+                if (ImGui::Selectable(Tr("스튜디오"), selStage_ == -1)) { selStage_ = -1; settings_.lastStage.clear(); }
+                for (size_t i = 0; i < library_.stages.size(); ++i) {
+                    const StageAsset& a = library_.stages[i];
+                    if (!MatchesFilter(needle, a.displayName, a.id)) continue;
+                    ImGui::PushID((int)i);
+                    if (ImGui::Selectable(a.displayName.c_str(), selStage_ == (int)i)) {
+                        selStage_ = (int)i;
+                        settings_.lastStage = a.id;
+                    }
+                    AssetContextMenu(a.parts, false);
+                    ImGui::PopID();
+                    ++n;
+                }
+                contentH = std::max(contentH, n * rowH);
+            } else {
+                const std::string needle = ToLowerAscii(filterSong_);
+                int n = 0;
+                for (size_t i = 0; i < library_.songs.size(); ++i) {
+                    const SongAsset& a = library_.songs[i];
+                    if (!MatchesFilter(needle, a.displayName, a.id)) continue;
+                    char buf[512];
+                    std::snprintf(buf, sizeof(buf), "%s    ·    %s", a.displayName.c_str(), MinSec(a.durationSec).c_str());
+                    ImGui::PushID((int)i);
+                    if (ImGui::Selectable(buf, selSong_ == (int)i)) {
+                        selSong_ = (int)i;
+                        settings_.lastSong = a.id;
+                        ResetVideoRange();
+                    }
+                    ImGui::PopID();
+                    ++n;
+                }
+                contentH = std::max(contentH, n * rowH);
+                if (n == 0) contentH = std::max(contentH, Dp(120.0f));
+            }
+        } else if (libraryTab_ == 0) {
             const std::string needle = ToLowerAscii(filterCharacter_);
-            const float minW = Dp(172.0f);
+            const float minW = Dp(172.0f) * libraryTileScale_;
             const int cols = std::max(1, (int)((availW + cgap) / (minW + cgap)));
             const float cw = (availW - cgap * (cols - 1)) / cols;
             const float thumbH = cw * 4.0f / 3.0f, ch = thumbH + Dp(64.0f);
@@ -510,7 +710,7 @@ void App::DrawSelect() {
             }
         } else if (libraryTab_ == 1) {
             const std::string needle = ToLowerAscii(filterStage_);
-            const float minW = Dp(250.0f);
+            const float minW = Dp(250.0f) * libraryTileScale_;
             const int cols = std::max(1, (int)((availW + cgap) / (minW + cgap)));
             const float cw = (availW - cgap * (cols - 1)) / cols;
             const float thumbH = cw * 10.0f / 16.0f, ch = thumbH + Dp(64.0f);

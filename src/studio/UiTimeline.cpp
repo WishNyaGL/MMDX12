@@ -429,8 +429,9 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
             labelX += Dp(16.0f);
         }
         ImU32 textCol = r.selected ? p.accentInk : p.ink;
+        const std::string& shownLabel = r.displayLabel.empty() ? r.label : r.displayLabel;
         TextEllipsis(dl, r.isGroup ? Font::Semibold : Font::Regular, size::Small,
-                     ImVec2(labelX, rowY + (rowHeight - Dp(size::Small * 1.25f)) * 0.5f), keyAreaX - Dp(4.0f), textCol, r.label.c_str());
+                     ImVec2(labelX, rowY + (rowHeight - Dp(size::Small * 1.25f)) * 0.5f), keyAreaX - Dp(4.0f), textCol, shownLabel.c_str());
 
         dl->AddLine(ImVec2(rmin.x, rmax.y), ImVec2(rmax.x, rmax.y), p.line);
         if (uiprobe::Enabled()) uiprobe::Add("##tlrow", r.label.c_str(), rmin, ImVec2(keyAreaX, rmax.y));   // MCP ui_click
