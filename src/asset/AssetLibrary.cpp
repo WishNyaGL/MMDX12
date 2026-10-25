@@ -3,6 +3,7 @@
 #include "asset/MmeEffect.h"
 #include "asset/ModelImport.h"
 #include "asset/PmxModel.h"
+#include "asset/StageManifest.h"
 #include "asset/VideoReader.h"
 #include "asset/VmdMotion.h"
 #include "core/AudioProbe.h"
@@ -473,6 +474,7 @@ bool SaveLibraryScanResult(const LibraryScanResult& result) {
         for (const auto& p : s.parts) parts.push_back(PathToUtf8(p));
         js["parts"] = std::move(parts);
         js["vertexCount"] = s.vertexCount;
+        js["manifestPath"] = PathToUtf8(s.manifestPath);
         stages.push_back(std::move(js));
     }
     j["stages"] = std::move(stages);
@@ -581,6 +583,7 @@ bool LoadLibraryScanResult(const std::filesystem::path& root, LibraryScanResult&
                     if (p.is_string()) s.parts.push_back(Utf8ToPath(p.get<std::string>()));
             }
             s.vertexCount = js.value("vertexCount", 0u);
+            s.manifestPath = Utf8ToPath(js.value("manifestPath", ""));
             out.stages.push_back(std::move(s));
         }
     }
@@ -669,6 +672,7 @@ bool LibraryScanResultsEqual(const LibraryScanResult& a, const LibraryScanResult
         if (a.stages[i].id != b.stages[i].id ||
             a.stages[i].displayName != b.stages[i].displayName ||
             a.stages[i].parts != b.stages[i].parts ||
+            a.stages[i].manifestPath != b.stages[i].manifestPath ||
             a.stages[i].vertexCount != b.stages[i].vertexCount)
             return false;
     }
@@ -719,7 +723,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
 
     // ---- 1. walk ----
     std::vector<ModelEntry> models;
-    std::vector<std::filesystem::path> vmdFiles, audioFiles, sidecarFiles, videoFiles, fxFiles;
+    std::vector<std::filesystem::path> vmdFiles, audioFiles, sidecarFiles, videoFiles, fxFiles, stageFiles;
     // Size and mtime of each kept file, cached from the walk's directory_entry (MSVC fills these from
     // FindNextFileW). Keyed by the lexically-normal path; a missing key falls back to path-based calls.
     struct FileStat {
@@ -768,6 +772,7 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
                 else if (ext == ".mp4" || ext == ".mov" || ext == ".wmv" || ext == ".avi" || ext == ".mkv")
                     videoFiles.push_back(p);
                 else if (ToLowerAscii(FileNameUtf8(p)) == "mmdx.json") sidecarFiles.push_back(p);
+                else if (ToLowerAscii(FileNameUtf8(p)) == kStageManifestName) stageFiles.push_back(p.lexically_normal());
             }
             std::error_code incEc;
             it.increment(incEc);
@@ -865,6 +870,43 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
     // R1: lower-cased "folder/stem" of every .fx, so a same-stem .x can be spotted without more filesystem calls.
     std::set<std::string> fxStems;
     for (const auto& p : fxFiles) fxStems.insert(ToLowerAscii(PathToUtf8(p.parent_path() / p.stem())));
+
+    // MMDX stages (docs/stage_format.md): a folder holding a stage.json that parses ("format": "mmdx-stage") is ONE
+    // stage by content, and its model files are not also characters / props / stages. A stage.json that does not
+    // parse is a note and the folder is scanned as before. Semantic problems (unknown binding targets, missing model
+    // files) do not hide a stage: tools/stage_check reports them.
+    struct MmdxStage {
+        std::filesystem::path dir;
+        StageManifest manifest;
+        std::set<std::filesystem::path> partPaths;   // absolute, lexically normal
+    };
+    std::vector<MmdxStage> mmdxStages;
+    std::sort(stageFiles.begin(), stageFiles.end());
+    for (const auto& file : stageFiles) {
+        MmdxStage stage;
+        std::string error;
+        if (!LoadStageManifest(file, stage.manifest, error) || stage.manifest.models.empty()) {
+            result.notes.push_back("skipped " + RelKey(file, root) + ": not an MMDX stage (" +
+                                   (error.empty() ? std::string("no model parts") : error) + ")");
+            continue;
+        }
+        stage.dir = file.parent_path().lexically_normal();
+        for (const auto& part : stage.manifest.models)
+            stage.partPaths.insert((stage.dir / Utf8ToPath(part.file)).lexically_normal());
+        mmdxStages.push_back(std::move(stage));
+    }
+    // The nearest MMDX stage folder above a file (nested stage folders: the innermost one owns its files).
+    const auto mmdxStageOf = [&](const std::filesystem::path& p) -> const MmdxStage* {
+        const MmdxStage* best = nullptr;
+        for (const auto& s : mmdxStages)
+            if (IsUnder(p, s.dir) && (!best || s.dir.native().size() > best->dir.native().size())) best = &s;
+        return best;
+    };
+    auto isMmdxPart = [&](const std::filesystem::path& p) {
+        const MmdxStage* s = mmdxStageOf(p);
+        return s && s->partPaths.count(p.lexically_normal()) > 0;
+    };
+
 
     // Folders that hold PMX files: other model formats there are usually conversions of the same
     // thing (FBX/OBJ exports shipped next to the PMX) and are skipped unless named explicitly.
@@ -1292,6 +1334,8 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
         if (m.humanoid && IsMmdModelFormat(m.format)) humanoidDirs.insert(m.path.parent_path());
     for (const auto& m : models) {
         if (used.count(&m)) continue;
+        // An MMDX stage's model files belong to that stage, never to the character / stage lists (docs/stage_format.md).
+        if (isMmdxPart(m.path)) continue;
         const AssetKind ov = overrideOf(m.rel);
         if (ov == AssetKind::Character) {
             characterModels.push_back(&m);
@@ -1426,6 +1470,39 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& rootIn, ScanProgress*
             }
             return false;
         };
+        // MMDX stages: one asset per valid stage.json folder, its declared parts (all files that loaded) sorted.
+        for (const auto& st : mmdxStages) {
+            StageAsset stage;
+            stage.id = RelKey(st.dir, root);
+            stage.format = "MMDX";
+            stage.manifestPath = st.dir / Utf8ToPath(kStageManifestName);
+            const std::string lang = StageLanguage();
+            stage.displayName = st.manifest.DisplayName(lang);
+            if (stage.displayName.empty()) stage.displayName = PathToUtf8(st.dir.filename());
+            std::vector<std::pair<std::string, std::filesystem::path>> sorted;
+            uint32_t missing = 0;
+            for (const auto& part : st.manifest.models) {
+                const std::filesystem::path p = (st.dir / Utf8ToPath(part.file)).lexically_normal();
+                const auto it = modelByPath.find(p);
+                if (it == modelByPath.end()) {
+                    ++missing;
+                    continue;
+                }
+                sorted.emplace_back(it->second->rel, it->second->path);
+                stage.vertexCount += it->second->vertexCount;
+            }
+            std::sort(sorted.begin(), sorted.end());
+            for (auto& [rel, p] : sorted) stage.parts.push_back(p);
+            if (stage.parts.empty()) {
+                // nothing of it loaded: the folder is scanned as before, like an unparsable manifest
+                result.notes.push_back("skipped " + stage.id + ": MMDX stage without usable model parts");
+                continue;
+            }
+            if (missing)
+                result.notes.push_back(stage.id + ": MMDX stage, " + std::to_string(missing) +
+                                       " declared part(s) not loaded (see stage_check)");
+            result.stages.push_back(std::move(stage));
+        }
         for (auto& [dir, group] : pmxStageGroups) {
             const std::string id = RelKey(dir, root);
             uint32_t totalVerts = 0;

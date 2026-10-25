@@ -28,11 +28,15 @@ struct CharacterAsset {
 };
 
 struct StageAsset {
-    std::string id;               // library-relative path of the directory (PMX parts) or of the model file
+    std::string id;               // library-relative path of the directory (PMX parts / an MMDX stage) or of the model file
     std::string displayName;
-    std::string format;
+    std::string format;           // "PMX", "glTF", ..., or "MMDX" for a stage folder with a valid stage.json
     std::vector<std::filesystem::path> parts;  // model files drawn together, sorted
     uint32_t vertexCount = 0;     // sum over parts
+    // MMDX stage (docs/stage_format.md): a folder whose stage.json parses as one ("format": "mmdx-stage"). The rest
+    // of the format is read by asset/StageManifest.h; the scan only needs to know the folder is ONE stage. Empty for
+    // a classic stage.
+    std::filesystem::path manifestPath;
 };
 
 struct SongPart {
@@ -108,7 +112,8 @@ LibraryScanResult ScanLibrary(const std::filesystem::path& root, ScanProgress* p
 bool CreateLibrarySkeleton(const std::filesystem::path& root, const std::filesystem::path& templateDir);
 
 // Persistent library scan result and probe cache (Requirements B.5, B.6, B.7)
-inline constexpr uint32_t kLibraryScanResultVersion = 8;   // 8: SongAsset::stageVmds (every stage motion of a song)
+// 9: StageAsset::manifestPath (MMDX stage folders); 8: SongAsset::stageVmds
+inline constexpr uint32_t kLibraryScanResultVersion = 9;
 inline constexpr uint32_t kProbeCacheVersion = 4;
 
 bool SaveLibraryScanResult(const LibraryScanResult& result);

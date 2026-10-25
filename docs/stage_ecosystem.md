@@ -1,0 +1,73 @@
+# MMDX stages: format, studio editing, scripting, gallery
+
+Status: direction v1 (2026-10-25). Architect: Claude; decisions by the owner. Each milestone below is built by a worker
+run and marked done here with its date. This is a direction document; the format reference lives in
+`docs/stage_format.md` (written with milestone S1a and kept current by every later milestone).
+
+## 0. Goal
+
+An MMDX-native stage ("MMDX 스테이지") that carries real PBR materials, a designed light rig, screens and scripted
+content, downloaded complete from an online stage gallery and dropped into the studio or play mode. The showcase is
+offline GI / PT video quality that the MMD ecosystem cannot reach without Blender. The engine stays generic: it exposes
+contracts (screens, cameras, sockets, params, packs); every concrete look or behaviour lives in the stage.
+
+Reference stages (content, built later on these contracts): (4) dance-studio cyclorama with colour variants,
+(1) dance practice room with a mirror wall, (2) arena stage with moving spots, haze and LED screens fed by cameras /
+videos, (3) a Times Square-like plaza with many LED billboards and building fireworks. Real brands / logos are never used.
+
+## 1. Decisions
+
+- **Container**: a stage is a folder (zip when distributed) with `stage.json` (`"format": "mmdx-stage"`). Geometry is
+  glTF 2.0 (`.glb` / `.gltf`, preferred: Blender exports it with standard PBR extensions) or PMX (lets existing MMD stages
+  be upgraded by wrapping them). A stage may have several model parts.
+- **Detection by content**: any library folder holding a valid `stage.json` is an MMDX stage (never by folder name).
+  Its model files are not also listed as plain stages.
+- **Editing = overrides**: the studio never edits the installed stage. Exposed params, variant, light / screen / part
+  overrides are stored in the `.mmdxproj` and keyable on the timeline. Mesh work stays in Blender.
+- **Scripting layers** (every layer is a pure function of time + params + audio analysis, so seeks, reverse playback,
+  video and GI shutter samples agree):
+  - L0 declarative (`stage.json`): params, variants (= named param value sets), bindings (param -> target with
+    scale / offset / curve), cue tracks.
+  - L1 GPU code through the existing pack system, bundled inside the stage: surface packs on stage materials, world
+    packs anchored to stage sockets, and the new **screen packs** (`"type": "screen"`, a pixel shader that draws LED
+    content from time / audio / params).
+  - L2 a CPU script VM: deferred. If ever built: sandboxed, no file / network access, pure `evaluate(t)`. Native code
+    from a stage is never loaded.
+- **Gallery**: a top-level "갤러리" screen (online stages / effects / looks), separate from the installed-pack manager.
+  Stages have their own index (`stages/index.json`) with the same source / verified / revoked / SHA-256 rules as
+  shader packs (`app/ShaderPackStore`), absolute download URLs (big zips live on an external host, never the home
+  server), resumable downloads, install into the library.
+
+## 2. Engine gaps and milestones
+
+Order = dependency order. Every milestone keeps the ecosystem rules (docs/effect_ecosystem.md §0): every render path,
+zero cost when unused, failures stay local, no library-layout dependence.
+
+| # | Milestone | Status |
+|---|---|---|
+| S1a | Format core (asset layer): `stage.json` parser, param / variant / binding evaluator, library detection, `stage_check`, procedural test stages (`tools/stagegen`) | done 2026-10-25 |
+| S1b | App integration: play + studio load MMDX stages, manifest lights as "스테이지 조명", material overrides, lobby variant picker | |
+| S2a | glTF material / light import: transmission, ior, volume, emissive_strength, clearcoat (approx.), texture_transform, KHR_lights_punctual | |
+| S2b | Mesh dielectrics: transmissive materials refract in RT / PT / offline GI (thin + volume), raster approximation | |
+| S3 | Studio stage entity: outliner group, overrides saved in the project, keyable stage params (timeline rows) | |
+| S4 | Camera entities: N cameras with own tracks, an active-camera switch track, VMD export flattens cuts | |
+| S5 | Screens: N screen surfaces, sources none / image / video / camera feed, multi-video decode, feed render pass | |
+| S6 | Stage-bundled packs: screen packs (new type), surface packs on stage materials, world packs on sockets | |
+| S7 | Many lights: punctual cap 16 -> 256, clustered raster lighting, shadow budget, PT / GI light sampling, volumetric over all lights | |
+| S8 | Emissive lights: emissive-triangle NEE in PT / GI (screens and LED walls light the scene), raster screen lights | |
+| S9 | Participating media in PT / offline GI (haze for beams), stage `environment.fog` | |
+| S10 | Planar mirrors in raster (RT / PT / GI reflect natively) | |
+| S11 | Compressed textures: DDS BCn (+ glTF `MSFT_texture_dds`), VRAM budget report | |
+| S12 | Gallery screen + stage store (index, resumable download, install, update, revoke) | |
+| S13 | Website stage gallery (MMDX12_Web): index + pages; deploy only after the owner says so | |
+
+## 3. Runtime model (shared by all milestones)
+
+- `StageManifest` (asset layer, pure data) = parsed `stage.json`. `StageState` = resolved param values for one time
+  (variant + project overrides + keyed params), produced by a pure evaluator; bindings turn it into concrete targets
+  (`lights.<name>.<field>`, `materials.<name>.<field>`, `screens.<id>.<field>`, `packs.<n>.params.<key>`,
+  `environment.<field>`).
+- Play mode: the lobby picks stage + variant (select-screen panel, saved per stage); params use their defaults / the
+  variant; the lighting picker gains "스테이지 조명" (default when the stage has lights).
+- Studio: one stage entity per MMDX stage (its parts stay models internally); its params are timeline rows.
+- Sockets: named transforms (a glTF node or an explicit transform) that world packs, cameras and props attach to.

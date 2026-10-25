@@ -1,0 +1,399 @@
+// stage_check: validates an MMDX stage folder (stage.json + its model parts). Prints the manifest it read, every
+// problem and a texture / file size budget. Exit code 0 = ok, 1 = problems, 2 = usage.
+//
+// Usage: stage_check <stage dir> [--skip-models]
+//        stage_check --selftest
+//
+// Checks: the JSON schema and its semantics (asset/StageManifest.h's validator: ids, references, binding targets,
+// cue tracks, pack roles, screen sources), that every declared file exists, that every model part loads through
+// LoadModelFile, that material names / globs in "materials" and "screens" match a material of the parts, and that
+// variants / cues only name known params. --skip-models skips the model load (fast schema check); --selftest runs
+// the evaluator and validator unit checks on built-in JSON.
+#include "asset/ModelImport.h"
+#include "asset/PmxModel.h"
+#include "asset/StageEval.h"
+#include "asset/StageManifest.h"
+#include "core/TextUtil.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+
+namespace {
+
+namespace fs = std::filesystem;
+
+using mmdx::StageManifest;
+using mmdx::StageParam;
+
+int g_problems = 0;
+
+void Problem(const std::string& what) {
+    std::printf("  [problem] %s\n", what.c_str());
+    ++g_problems;
+}
+
+void Info(const std::string& what) { std::printf("  %s\n", what.c_str()); }
+
+std::string Hex(float v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.4g", v);
+    return buf;
+}
+
+// ---- manifest report -------------------------------------------------------------------------------------------------
+
+void ReportManifest(const StageManifest& m) {
+    const std::string lang = mmdx::StageLanguage();
+    Info("id: " + m.id + "  version: " + m.version + "  name: \"" + m.name.Get(lang) + "\"");
+    if (!m.minAppVersion.empty()) Info("minAppVersion: " + m.minAppVersion);
+    if (!m.license.empty()) Info("license: " + m.license);
+    if (!m.authors.empty()) {
+        std::string a;
+        for (const auto& au : m.authors) a += (a.empty() ? "" : ", ") + au.name;
+        Info("authors: " + a);
+    }
+    if (!m.tags.empty()) {
+        std::string t;
+        for (const auto& tag : m.tags) t += (t.empty() ? "" : ", ") + tag;
+        Info("tags: " + t);
+    }
+    {
+        std::string parts;
+        for (const auto& p : m.models) parts += (parts.empty() ? "" : ", ") + p.file + " (" + mmdx::StagePartRoleName(p.role) + ")";
+        Info("models: " + parts);
+    }
+    Info("materials: " + std::to_string(m.materials.size()) + " rules, lights: " + std::to_string(m.lights.size()) +
+         ", sockets: " + std::to_string(m.sockets.size()) + ", cameras: " + std::to_string(m.cameras.size()) +
+         ", screens: " + std::to_string(m.screens.size()) + ", packs: " + std::to_string(m.packs.size()));
+    Info("params: " + std::to_string(m.params.size()) + ", variants: " + std::to_string(m.variants.size()) +
+         ", bindings: " + std::to_string(m.bindings.size()) + ", cue tracks: " + std::to_string(m.cues.size()));
+    for (const auto& p : m.models) {
+        std::string field;
+        for (const auto& l : m.lights)
+            if (l.name == p.name) field = " (same name as a light)";
+        (void)field;
+    }
+    for (const auto& v : m.variants)
+        Info("variant: " + v.id + " \"" + v.label.Get(lang) + "\" (" + std::to_string(v.values.size()) + " values)" +
+             ((!m.defaultVariant.empty() && m.defaultVariant == v.id) ? " [default]" : ""));
+    if (m.defaultVariant.empty() && !m.variants.empty()) Info("variant: the first one is the default");
+}
+
+// ---- model loading + material names ----------------------------------------------------------------------------------
+
+struct LoadedParts {
+    bool ok = true;
+    std::set<std::string> materials;   // exact names of every part
+    uint64_t vertices = 0, indices = 0;
+};
+
+LoadedParts LoadParts(const StageManifest& m, bool load) {
+    LoadedParts out;
+    for (const auto& part : m.models) {
+        const fs::path path = (m.dir / mmdx::Utf8ToPath(part.file)).lexically_normal();
+        std::error_code ec;
+        if (!fs::is_regular_file(path, ec)) {
+            Problem("models: " + part.file + ": missing file");
+            out.ok = false;
+            continue;
+        }
+        if (!load) continue;
+        mmdx::PmxModel model;
+        std::string err;
+        if (!mmdx::LoadModelFile(path, mmdx::ModelRole::Stage, model, &err)) {
+            Problem("models: " + part.file + ": does not load: " + err);
+            out.ok = false;
+            continue;
+        }
+        out.vertices += model.vertices.size();
+        out.indices += model.indices.size();
+        for (const auto& mat : model.materials) out.materials.insert(mat.name);
+        Info("model: " + part.file + " -> " + std::to_string(model.vertices.size()) + " vertices, " +
+             std::to_string(model.materials.size()) + " materials");
+        if (model.vertices.empty() || model.indices.empty()) {
+            Problem("models: " + part.file + ": no geometry");
+            out.ok = false;
+        }
+    }
+    return out;
+}
+
+// Every "materials" / "screens" pattern that matches no part material is a problem: the override would do nothing.
+void CheckMaterialNames(const StageManifest& m, const std::set<std::string>& materials) {
+    auto anyMatch = [&](const std::string& pattern) {
+        if (mmdx::StageGlobIsPattern(pattern)) {
+            for (const auto& n : materials)
+                if (mmdx::StageGlobMatch(pattern, n)) return true;
+            return false;
+        }
+        return materials.count(pattern) > 0;
+    };
+    for (const auto& r : m.materials)
+        if (!anyMatch(r.match)) Problem("materials: \"" + r.match + "\" matches no material of the parts");
+    for (const auto& s : m.screens)
+        for (const auto& pattern : s.materials)
+            if (!anyMatch(pattern)) Problem("screens: " + s.id + ": \"" + pattern + "\" matches no material of the parts");
+    for (const auto& p : m.packs)
+        if (p.role == mmdx::StagePackRole::Surface)
+            for (const auto& pattern : p.materials)
+                if (!anyMatch(pattern)) Problem("packs: " + p.folder + ": \"" + pattern + "\" matches no material of the parts");
+}
+
+// ---- files / budget --------------------------------------------------------------------------------------------------
+
+void CheckFiles(const StageManifest& m) {
+    // declared files exist
+    for (const auto& s : m.screens)
+        if (s.source == mmdx::StageScreenSource::Image || s.source == mmdx::StageScreenSource::Video) {
+            std::error_code ec;
+            if (!fs::is_regular_file(m.dir / mmdx::Utf8ToPath(s.file), ec))
+                Problem("screens: " + s.id + ": missing file " + s.file);
+        }
+    for (const auto& p : m.packs) {
+        std::error_code ec;
+        if (!fs::is_regular_file(m.dir / mmdx::Utf8ToPath(p.folder) / L"pack.json", ec))
+            Problem("packs: " + p.folder + ": no pack.json");
+    }
+    // budget: every file under the folder, grouped by extension
+    std::map<std::string, std::pair<uint64_t, uint32_t>> byExt;   // ext -> (bytes, count)
+    uint64_t total = 0;
+    uint32_t files = 0;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(m.dir, fs::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        std::error_code e2;
+        if (!it->is_regular_file(e2) || e2) continue;
+        const std::string ext = mmdx::ToLowerAscii(mmdx::PathToUtf8(it->path().extension()));
+        const uint64_t size = (uint64_t)fs::file_size(it->path(), e2);
+        if (e2) continue;
+        auto& slot = byExt[ext.empty() ? "(none)" : ext];
+        slot.first += size;
+        ++slot.second;
+        total += size;
+        ++files;
+    }
+    char buf[128];
+    for (const auto& [ext, v] : byExt) {
+        std::snprintf(buf, sizeof(buf), "%.1f MB in %u file(s)", v.first / (1024.0 * 1024.0), v.second);
+        Info("files " + ext + ": " + buf);
+    }
+    std::snprintf(buf, sizeof(buf), "%.1f MB in %u file(s)", total / (1024.0 * 1024.0), files);
+    Info("total: " + std::string(buf));
+    // The gallery's zip budget (docs/stage_ecosystem.md S12 mirrors the shader pack rules): warn well before it.
+    if (total > 512ull * 1024 * 1024) Problem("total size " + std::string(buf) + " is over 512 MB");
+    else if (total > 256ull * 1024 * 1024) Info("note: over 256 MB, downloads get slow");
+}
+
+// ---- self test -------------------------------------------------------------------------------------------------------
+
+int SelfTest() {
+    int failures = 0;
+    auto check = [&](bool ok, const char* what, const std::string& detail = {}) {
+        std::printf("%s %s%s%s\n", ok ? "PASS" : "FAIL", what, detail.empty() ? "" : ": ", detail.c_str());
+        if (!ok) ++failures;
+    };
+
+    const std::string json = R"({
+      "format": "mmdx-stage", "formatVersion": 1,
+      "id": "selftest", "version": "1.0.0", "name": {"ko": "셀프 테스트", "en": "Self test"},
+      "models": [{"file": "room.glb", "role": "floor"}],
+      "materials": [{"match": "cove*", "baseColor": [0.5, 0.6, 0.7, 1.0], "roughness": 0.4},
+                    {"match": "glass", "transmission": 1.0, "ior": 1.5}],
+      "lights": [
+        {"kind": "sun", "name": "key", "values": {"direction": [-0.3, -1, 0.2], "color": [1, 0.9, 0.8], "intensity": 1.2}},
+        {"kind": "spot", "name": "fill", "values": {"position": [0, 40, 0], "aim": [0, 0, 0], "intensity": 2.0, "coneOuter": 0.3, "coneInner": 0.2}},
+        {"kind": "spot", "name": "up", "values": {"intensity": 1.0}}],
+      "sockets": [{"name": "world", "position": [0, 0, 0]}, {"name": "node_socket", "node": "Box"}],
+      "cameras": [{"name": "wide", "position": [0, 20, -60], "target": [0, 10, 0], "fov": 40}],
+      "screens": [{"id": "led", "materials": ["led*"], "source": "image", "file": "led.png", "width": 512, "height": 256}],
+      "environment": {"fog": {"density": 0.03, "color": [0.5, 0.6, 0.7], "anisotropy": 0.5}},
+      "packs": [{"folder": "packs/floor", "role": "surface", "materials": ["cove*"], "params": {"tint": 0.5}},
+                {"folder": "packs/haze", "role": "world", "socket": "world"}],
+      "groups": [{"id": "look", "label": {"en": "Look"}}],
+      "params": [
+        {"key": "coveColor", "type": "color", "label": {"en": "Cove colour"}, "group": "look", "default": [0.5, 0.6, 0.7, 1.0]},
+        {"key": "keyIntensity", "type": "float", "default": 1.0, "min": 0.0, "max": 4.0},
+        {"key": "fillLevel", "type": "float", "default": 0.5, "min": 0.0, "max": 1.0},
+        {"key": "mode", "type": "enum", "default": "warm",
+         "options": [{"value": "warm", "label": {"en": "Warm"}}, {"value": "cool"}]}],
+      "variants": [{"id": "studio", "label": {"en": "Studio"}, "values": {"coveColor": [0.8, 0.8, 0.82, 1.0]}},
+                   {"id": "night", "values": {"coveColor": [0.05, 0.06, 0.09, 1.0]}}],
+      "defaultVariant": "studio",
+      "bindings": [
+        {"param": "coveColor", "target": "materials.cove*.baseColor"},
+        {"param": "keyIntensity", "target": "lights.key.intensity"},
+        {"param": "fillLevel", "target": "lights.fill.intensity", "scale": 2.0, "offset": 0.25},
+        {"param": "fillLevel", "target": "lights.up.intensity", "remap": [0.0, 1.0, 4.0, 1.0]}],
+      "cues": [{"param": "keyIntensity", "keys": [{"frame": 0, "value": 1.0}, {"frame": 60, "value": 3.0}]}]
+    })";
+    StageManifest m;
+    std::string error;
+    const bool parsed = mmdx::ParseStageManifest(json, fs::path("selftest"), m, error);
+    check(parsed, "manifest parses", error);
+    const auto errors = mmdx::ValidateStageManifest(m);
+    check(errors.empty(), "manifest validates", errors.empty() ? "" : errors.front());
+
+    // glob
+    check(mmdx::StageGlobMatch("cove*", "Cove_Center"), "glob: case-insensitive prefix");
+    check(!mmdx::StageGlobMatch("cove", "cove_wall"), "glob: exact pattern does not match a longer name");
+    check(mmdx::StageGlobMatch("*.*", "a.b"), "glob: two wildcards");
+    check(mmdx::StageGlobMatch("Led?1", "led01"), "glob: '?' matches one character");
+    check(mmdx::StageGlobMatch("*", ""), "glob: '*' matches the empty string");
+
+    // defaults + default variant
+    auto r = mmdx::EvaluateStage(m, "", {}, 0.0);
+    check(r.warnings.empty(), "no evaluator warnings", r.warnings.empty() ? "" : r.warnings.front());
+    const auto& defColor = r.params.at("coveColor");
+    check(defColor.type == mmdx::StageValue::Type::Color && defColor.x == 0.8f && defColor.z == 0.82f,
+          "variant overrides the default colour");
+    // cue at 0 s = frame 0 = 1.0, so keyIntensity stays 1.0
+    check(r.params.at("keyIntensity").x == 1.0f, "cue at t=0");
+    auto r2 = mmdx::EvaluateStage(m, "", {}, 1.0);   // frame 30: half way 1 -> 3
+    check(std::abs(r2.params.at("keyIntensity").x - 2.0f) < 1e-4f, "cue is linear in time", Hex(r2.params.at("keyIntensity").x));
+    auto r3 = mmdx::EvaluateStage(m, "night", {}, 100.0);
+    check(r3.params.at("coveColor").x == 0.05f, "chosen variant");
+    // bindings in order; scale / offset; remap
+    const auto findTarget = [](const mmdx::StageEvalResult& res, const std::string& target) -> const mmdx::StageAssignment* {
+        for (const auto& a : res.targets)
+            if (a.target == target) return &a;
+        return nullptr;
+    };
+    const auto* col = findTarget(r, "materials.cove*.baseColor");
+    check(col && col->value.type == mmdx::StageValue::Type::Color && col->value.x == 0.8f, "colour assignment");
+    const auto* key = findTarget(r, "lights.key.intensity");
+    check(key && key->value.x == 1.0f, "light intensity assignment");
+    const auto* fill = findTarget(r, "lights.fill.intensity");
+    check(fill && std::abs(fill->value.x - 1.25f) < 1e-4f, "scale + offset", fill ? Hex(fill->value.x) : "");
+    const auto* up = findTarget(r, "lights.up.intensity");
+    check(up && std::abs(up->value.x - 2.5f) < 1e-4f, "remap", up ? Hex(up->value.x) : "");
+    check(r.targets.size() == 4, "every binding produced an assignment");
+    // overrides beat cues
+    mmdx::StageParamValues overrides;
+    overrides["keyIntensity"] = mmdx::StageValue::Number(4.0f);
+    auto r4 = mmdx::EvaluateStage(m, "", overrides, 1.0);
+    check(r4.params.at("keyIntensity").x == 4.0f, "overrides beat cues");
+    // clamps
+    overrides["keyIntensity"] = mmdx::StageValue::Number(99.0f);
+    check(mmdx::EvaluateStage(m, "", overrides, 0.0).params.at("keyIntensity").x == 4.0f, "overrides clamp to max");
+    // unknown references warn, never crash
+    mmdx::StageParamValues bad;
+    bad["nope"] = mmdx::StageValue::Number(1.0f);
+    auto r5 = mmdx::EvaluateStage(m, "nosuchvariant", bad, 0.0);
+    check(r5.warnings.size() == 2, "unknown override + unknown variant warn", std::to_string(r5.warnings.size()));
+    check(r5.params.at("coveColor").x == 0.5f, "an unknown variant falls back to the defaults");
+
+    // enum -> screen source (string target)
+    const std::string enumJson = R"({
+      "format": "mmdx-stage", "formatVersion": 1, "id": "enumtest", "version": "1", "name": "Enum test",
+      "models": [{"file": "x.glb"}],
+      "screens": [{"id": "led", "materials": ["led"], "source": "none"}],
+      "params": [{"key": "src", "type": "enum", "default": "image",
+                  "options": [{"value": "none"}, {"value": "image"}, {"value": "video"}]}],
+      "bindings": [{"param": "src", "target": "screens.led.source"}]
+    })";
+    StageManifest em;
+    check(mmdx::ParseStageManifest(enumJson, fs::path("enumtest"), em, error), "enum manifest parses", error);
+    check(mmdx::ValidateStageManifest(em).empty(), "enum manifest validates");
+    auto er = mmdx::EvaluateStage(em, "", {}, 0.0);
+    const auto* src = findTarget(er, "screens.led.source");
+    check(src && src->value.type == mmdx::StageValue::Type::Text && src->value.text == "image",
+          "enum -> string target uses the option value", src ? src->value.text : "(none)");
+
+    // validation catches author errors
+    StageManifest bad2 = m;
+    bad2.bindings.push_back({"fillLevel", "lights.nosuch.intensity", 1, 0, std::nullopt});
+    bad2.bindings.push_back({"fillLevel", "lights.key.nosuchfield", 1, 0, std::nullopt});
+    bad2.bindings.push_back({"keyIntensity", "materials.nosuchrule.roughness", 1, 0, std::nullopt});
+    bad2.bindings.push_back({"noparam", "lights.key.intensity", 1, 0, std::nullopt});
+    const auto badErrors = mmdx::ValidateStageManifest(bad2);
+    check(badErrors.size() >= 4, "validation rejects unknown targets / fields / rules / params",
+          std::to_string(badErrors.size()));
+    StageManifest badColor = m;
+    badColor.bindings.push_back({"coveColor", "lights.key.intensity", 1, 0, std::nullopt});
+    check(!mmdx::ValidateStageManifest(badColor).empty(), "validation rejects a colour param on a number target");
+    StageManifest bad3 = m;
+    bad3.variants.push_back({"broken", {}, {{"nosuchparam", mmdx::StageValue::Number(1)}}});
+    check(!mmdx::ValidateStageManifest(bad3).empty(), "validation rejects a variant value of an unknown param");
+    StageManifest bad4 = m;
+    bad4.id = "Not Valid!";
+    check(!mmdx::ValidateStageManifest(bad4).empty(), "validation rejects a bad id");
+    StageManifest bad5 = m;
+    StageParam duplicate;
+    duplicate.key = "mode";
+    duplicate.type = mmdx::StageParamType::Float;
+    bad5.params.push_back(duplicate);
+    check(!mmdx::ValidateStageManifest(bad5).empty(), "validation rejects a repeated param key");
+
+    // clone independence: the parsed manifest holds what the JSON says
+    check(m.lights.size() == 3 && m.lights[1].kind == mmdx::studio::LightKind::Spot, "lights parsed with kinds");
+    check(m.screens.size() == 1 && m.screens[0].width == 512, "screens parsed");
+    check(m.environment.fog.present && m.environment.fog.density == 0.03f, "fog parsed");
+    check(m.packs.size() == 2 && m.packs[1].role == mmdx::StagePackRole::World, "packs parsed");
+    check(m.cameras.size() == 1 && m.cameras[0].fov == 40.0f, "cameras parsed");
+    check(m.sockets.size() == 2 && m.sockets[1].node == "Box", "sockets parsed");
+    check(m.models.size() == 1 && m.models[0].role == mmdx::StagePartRole::Floor && m.models[0].name == "room",
+          "model parts parsed (name from the file stem)");
+
+    // an unparsable / foreign file is rejected with a message
+    StageManifest other;
+    check(!mmdx::ParseStageManifest(R"({"format":"pack","formatVersion":1})", fs::path("x"), other, error),
+          "a foreign format is rejected");
+    check(!error.empty(), "the rejection explains itself", error);
+    check(!mmdx::ParseStageManifest("{not json", fs::path("x"), other, error), "bad JSON is rejected");
+
+    std::printf("\nstage_check selftest: %s (%d failed)\n", failures == 0 ? "PASS" : "FAIL", failures);
+    return failures == 0 ? 0 : 1;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::printf("usage: stage_check <stage dir> [--skip-models]\n       stage_check --selftest\n");
+        return 2;
+    }
+    if (std::strcmp(argv[1], "--selftest") == 0) return SelfTest();
+    bool loadModels = true;
+    for (int i = 2; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--skip-models") == 0) loadModels = false;
+        else {
+            std::printf("unknown argument: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    const fs::path dir = mmdx::Utf8ToPath(argv[1]).lexically_normal();
+    const fs::path manifestFile = fs::is_directory(dir) ? dir / mmdx::Utf8ToPath(mmdx::kStageManifestName) : dir;
+    std::printf("stage_check: %s\n", mmdx::PathToUtf8(manifestFile).c_str());
+    StageManifest m;
+    std::string error;
+    if (!mmdx::LoadStageManifest(manifestFile, m, error)) {
+        std::printf("  [problem] %s\n", error.c_str());
+        std::printf("\nPROBLEMS\n");
+        return 1;
+    }
+    std::printf("manifest: ok\n");
+    ReportManifest(m);
+    for (const auto& e : mmdx::ValidateStageManifest(m)) Problem(e);
+
+    // the evaluator must never warn on a valid manifest; a default variant / defaults pass is the cheapest probe
+    const auto eval = mmdx::EvaluateStage(m, "", {}, 0.0);
+    for (const auto& w : eval.warnings) Problem("evaluator: " + w);
+
+    const LoadedParts parts = LoadParts(m, loadModels);
+    if (loadModels && parts.ok && !parts.materials.empty()) CheckMaterialNames(m, parts.materials);
+    if (loadModels && parts.ok) {
+        Info("vertices: " + std::to_string(parts.vertices) + ", indices: " + std::to_string(parts.indices) +
+             ", material names: " + std::to_string(parts.materials.size()));
+    }
+    CheckFiles(m);
+
+    std::printf(g_problems == 0 ? "\nOK\n" : "\nPROBLEMS\n");
+    return g_problems == 0 ? 0 : 1;
+}

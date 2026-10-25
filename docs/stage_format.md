@@ -1,0 +1,358 @@
+# MMDX stage format (`stage.json`, formatVersion 1)
+
+Status: S1a (2026-10-25), the asset layer. The direction (why stages are folders, what S1b..S13 add) is
+`docs/stage_ecosystem.md`; this file is the reference every later milestone keeps current.
+
+An **MMDX stage** is a folder holding `stage.json` plus its model parts (glTF 2.0 `.glb` / `.gltf` or PMX). The
+library detects it **by content** (a `stage.json` whose `"format"` is `"mmdx-stage"` and whose `"formatVersion"` this
+build reads), never by folder name, and the folder then counts as **one** stage: its model files are not listed as
+characters, props or stages of their own. A `stage.json` that does not parse is a scan note and the folder is scanned
+exactly as before.
+
+```
+my_stage/
+  stage.json          required
+  parts/room.glb      any model files, referenced relatively
+  textures/led.png
+  packs/floor/        optional bundled packs (pack.json + shader)
+  preview.png         optional
+```
+
+Everything relative resolves against the stage folder. Strings may be plain or localized (`{"ko": .., "en": ..,
+"ja": .., "zh": ..}`; fallback: the UI language, then `en`, then the plain string, then `ko`, then any entry).
+
+Conventions: colours are **linear** `[r,g,b]` or `[r,g,b,a]` (0..1) — `#rrggbb` is accepted and read as 0..1;
+positions, sizes and ranges are **MMD world units** (1 unit = 8 cm); angles in degrees; times in seconds, cue frames at
+**30 fps**. Unknown keys are ignored (forward compatibility); a wrong-typed key keeps its default and the scan never
+throws.
+
+## Minimal example
+
+```json
+{
+  "format": "mmdx-stage",
+  "formatVersion": 1,
+  "id": "my_stage",
+  "version": "1.0.0",
+  "name": {"ko": "내 스테이지", "en": "My stage"},
+  "models": [{"file": "parts/room.glb", "role": "floor"}]
+}
+```
+
+## Top level
+
+| key | type | notes |
+|---|---|---|
+| `format` | string | **required**, exactly `"mmdx-stage"` |
+| `formatVersion` | int | **required**, `1` (a newer version is "not an MMDX stage" for this build) |
+| `id` | string | **required**, `[a-z0-9_-]{1,64}`, unique in the library (`stage_check` enforces the shape) |
+| `version` | string | `"1.2.0"`, dotted numbers (the gallery compares versions with the updater's rules) |
+| `name`, `description` | string or localized | `name` is required — it is the card / outliner title |
+| `authors` | array | `{"name": "..", "role": "..", "url": ".."}`; `name` required, `url` http(s) only |
+| `license` | string | free text / SPDX id (`"CC0-1.0"`, `"MIT"`, ...) |
+| `minAppVersion` | string | optional; later milestones refuse to load a stage that needs a newer app |
+| `tags` | string[] | lower-case words |
+| `preview`, `previews` | string / string[] | preview images (and videos) inside the folder; a missing one is a `stage_check` error |
+| `models` | array | see below, at least one |
+| `materials` | array | per-material PBR overrides |
+| `lights` | array | **the `.mmdxproj` editor `lights` schema**, see below |
+| `sockets` | array | named transforms (pack / camera / prop anchors) |
+| `cameras` | array | named static cameras (S4) |
+| `screens` | array | LED / video surfaces (S5, S8) |
+| `environment` | object | `fog`, `ambient` (S9 / later) |
+| `packs` | array | bundled packs with a role and initial params (S6) |
+| `groups`, `params`, `variants`, `defaultVariant` | array / string | the exposed parameter surface |
+| `bindings` | array | param → target assignments |
+| `cues` | array | L0 timeline: keyed param tracks |
+
+## `models`
+
+```json
+"models": [
+  {"file": "parts/room.glb", "name": "Room", "role": "floor"},
+  {"file": "parts/chairs.pmx", "role": "props"}
+]
+```
+
+* `file` — **required**, relative to the stage folder, no `..`, no absolute / drive path.
+* `name` — optional (default: the file stem). It is only a label; lights, sockets and screens are matched by material
+  name / node name / id, never by part name.
+* `role` — `"main"` (default), `"floor"` (the part the stage is aligned on and players stand on) or `"props"`.
+  Parsed and reported now; the renderer consumes it in S1b.
+
+Duplicated `file` entries are a validation error. A part that does not load is a scan note / `stage_check` error, and
+the stage still lists the parts that do load.
+
+## `materials`
+
+```json
+"materials": [
+  {"match": "cove", "baseColor": [0.82, 0.82, 0.85], "roughness": 0.45, "receiveShadow": true},
+  {"match": "led_*", "screen": "main", "castShadow": false},
+  {"match": "glass", "transmission": 1.0, "ior": 1.5, "alpha": 0.6}
+]
+```
+
+`match` is an exact material name or a `*` / `?` wildcard, ASCII-case-insensitive. The first matching rule wins per
+field (a later rule may still fill fields the earlier one leaves out — consumers apply the resolved values, so author
+one rule per material family). Every override is optional:
+
+| field | type | meaning |
+|---|---|---|
+| `baseColor` | colour | albedo (linear); alpha is the material's opacity |
+| `roughness`, `metallic` | 0..1 | PBR factors |
+| `emissive` | `[r,g,b]` | emitted colour (linear, already includes the strength below) |
+| `emissiveStrength` | float | multiplies `emissive` (glTF `KHR_materials_emissive_strength`) |
+| `transmission` | 0..1 | dielectric transmission (S2b) |
+| `ior` | float | 1.0..3.0 |
+| `alpha` | 0..1 | opacity |
+| `mirror` | bool | planar mirror surface (S10) |
+| `screen` | string | a screen id from `screens`: this material is that screen's surface |
+| `castShadow`, `receiveShadow` | bool | shadow participation |
+
+A rule that matches no material of the parts (after they load) is a `stage_check` error: the override would do nothing.
+
+## `lights`
+
+The array entries are **exactly the `.mmdxproj` editor `lights` entries** — one implementation
+(`asset/SceneLightJson.h`, `SceneLightToJson` / `SceneLightFromJson`) reads and writes both, and
+`tools/studio_project_test` keeps the project round trip byte-identical. `name` is required here (the name is the
+binding key); `uid` is ignored in a stage (the stage's order is its identity).
+
+```json
+"lights": [
+  {"kind": "sun", "name": "key", "values": {"direction": [-0.35, -1, 0.25], "color": [1, 0.96, 0.9], "intensity": 1.1}},
+  {"kind": "ambient", "name": "ambient", "values": {"intensity": 0.18}},
+  {"kind": "spot", "name": "spot_l",
+   "values": {"position": [-45, 62, 40], "aim": [-22, 0, -30], "color": [1, 1, 1], "intensity": 2.4,
+              "range": 140, "coneOuter": 0.26, "coneInner": 0.17},
+   "spot": {"aim": "sway", "swayPhase": 0.0},
+   "shadow": {"type": "soft"}}
+]
+```
+
+Fields (all optional except `kind` and `name`; a missing one keeps the `SceneLight` default):
+`kind` (`sun` / `point` / `spot` / `ambient` / `area`), `enabled`, `values` (`position`, `aim`, `direction`, `color`,
+`intensity`, `range`, `coneOuter`, `coneInner` radians, `size`), `sun` (`vmdLink`, `rimStrength`, `rimColor`), `spot`
+(`aim` = `manual` / `target` / `sway`, `target`, `part` = `centre` / `head`, `swayPhase`), `sky` (`zenith`,
+`horizon`, `ground`), `shadow` (`type` = `nocast` / `hard` / `soft`, `softness`, `density`, `color`), `falloff`
+(`none` / `linear` / `inverse_square`), `affectDiffuse`, `affectSpecular`, `viewportVisible`, `keys`.
+
+Rules: at most one `sun` and one `ambient`; `coneInner <= coneOuter`; a `sun` cannot carry `keys` (use cues on its
+`intensity` / `color` / `direction` instead). Play mode's lighting picker gains a "스테이지 조명" entry in S1b.
+
+## `sockets`
+
+```json
+"sockets": [
+  {"name": "world", "position": [0, 0, -20]},
+  {"name": "truss", "node": "Truss_Front"},
+  {"name": "wall", "node": "Cove_Wall", "rotation": [0, 180, 0], "scale": [1, 1, 1]}
+]
+```
+
+`name` required and unique. `node` names a glTF node / PMX bone; without `node`, an explicit `position` /
+`rotation` (degrees) / `scale` is required. With `node`, the explicit transform is an extra offset applied on top.
+
+## `cameras`
+
+```json
+"cameras": [{"name": "wide", "position": [0, 20, -60], "target": [0, 10, 0], "fov": 40}]
+```
+
+`name` required and unique, `fov` vertical in degrees (1..179), `position != target`. S4 turns these into camera
+entities; S1a only parses / validates them.
+
+## `screens`
+
+```json
+"screens": [
+  {"id": "main", "materials": ["led_main"], "source": "image", "file": "textures/led_main.png",
+   "width": 2048, "height": 1024, "brightness": 1.6, "emitLight": true},
+  {"id": "feed", "materials": ["led_side"], "source": "camera", "camera": "stage"},
+  {"id": "fx", "materials": ["led_*"], "source": "program", "file": "packs/led"}
+]
+```
+
+* `id` — required, unique.
+* `materials` — required, at least one name / glob of the surfaces this screen draws on (also reachable through a
+  material rule's `"screen"`).
+* `source` — `none` (default), `image` (`file`), `video` (`file`), `camera` (`camera` = a camera name) or `program`
+  (`file` = a bundled pack folder that draws the content).
+* `width` / `height` — the LED pixel grid (default 1920x1080), `brightness`, `emitLight` (S8: the screen lights the
+  scene).
+
+Only parsed and validated in S1a; S5 / S8 render them. A `program` pack is validated structurally (the folder exists
+and holds `pack.json`).
+
+## `environment`
+
+```json
+"environment": {
+  "fog": {"density": 0.02, "color": [0.55, 0.6, 0.72], "anisotropy": 0.55, "heightFalloff": 0.03},
+  "ambient": {"intensity": 0.08, "skyZenith": [0.03, 0.04, 0.08], "skyHorizon": [0.1, 0.12, 0.2],
+              "ground": [0.05, 0.05, 0.06]}
+}
+```
+
+`fog.density` is the participating-media density (S9), `anisotropy` the Henyey-Greenstein `g`, `heightFalloff` the
+exponential height decay per unit. `ambient` overrides the ambient light's sky / ground colours and hemisphere
+strength. Parsed only for now.
+
+## `packs`
+
+```json
+"packs": [
+  {"folder": "packs/floor", "role": "surface", "materials": ["cove*"], "params": {"tint": 0.6}},
+  {"folder": "packs/haze", "role": "world", "socket": "world"},
+  {"folder": "packs/led", "role": "screen", "screen": "main"}
+]
+```
+
+`folder` is relative and must hold a `pack.json`. `role` decides what the pack attaches to: `surface` (needs
+`materials` globs), `world` (needs an existing `socket`), `screen` (needs an existing `screen` id). `params` are the
+initial parameter values (float); a binding reaches them as `packs.<index>.params.<key>` (the index is the array
+position). S6 wires them into the renderer.
+
+## `params`, `groups`, `variants`
+
+```json
+"groups": [{"id": "look", "label": {"en": "Look"}, "collapsed": false}],
+"params": [
+  {"key": "coveColor", "type": "color", "label": {"ko": "배경 색", "en": "Cove colour"},
+   "group": "look", "default": [0.82, 0.82, 0.85, 1.0]},
+  {"key": "keyIntensity", "type": "float", "label": {"en": "Key intensity"},
+   "default": 1.1, "min": 0.0, "max": 3.0},
+  {"key": "mirrorAmount", "type": "enum", "default": "on",
+   "options": [{"value": "off", "label": {"en": "Off"}}, {"value": "on"}]}
+],
+"variants": [
+  {"id": "studio", "label": {"en": "Studio"}, "values": {"coveColor": [0.82, 0.82, 0.85, 1.0]}},
+  {"id": "night", "label": {"en": "Night"}, "values": {"keyIntensity": 0.5}}
+],
+"defaultVariant": "studio"
+```
+
+* `param.key` — required, unique; `type` — `float` (default), `int`, `bool`, `color`, `enum`.
+* `float` / `int` use `min` / `max` (default 0..1 / 0..100) and `default` (clamped); `bool`: `default` true / false;
+  `color`: `default` = `[r,g,b]` or `[r,g,b,a]` (linear); `enum`: `options` (required, each `value` unique, optional
+  `label`), `default` = an option's `value` or its index (default: the first option).
+* `group` — a `groups` id (unknown = a `stage_check` error); the UI nests params under it.
+* `label` — localized; an empty label falls back to the key.
+
+A **variant** is a named set of param values. `defaultVariant` names the initial one (empty = the first variant; no
+variants = the plain defaults). A variant that names an unknown param is an error.
+
+## `bindings`
+
+```json
+"bindings": [
+  {"param": "keyIntensity", "target": "lights.key.intensity"},
+  {"param": "fillLevel", "target": "lights.fill.intensity", "scale": 2.0, "offset": 0.25},
+  {"param": "mirrorAmount", "target": "materials.mirror_wall.roughness", "remap": [0, 1, 0.5, 0.02]}
+]
+```
+
+`out = remap(value) * scale + offset`, where `remap: [inMin, inMax, outMin, outMax]` maps the param range onto the
+target range first (an empty input range is an error). Several bindings may hit one target: they are emitted in list
+order and applied in that order. Target paths:
+
+| path | value type |
+|---|---|
+| `lights.<name>.<field>` | see the light fields: `enabled` (bool), `intensity` / `range` / `coneOuter` / `coneInner` / `shadowSoftness` / `shadowDensity` / `rimStrength` / `swayPhase` (float), `color` / `rimColor` / `shadowColor` (colour), `position` / `aim` / `direction` / `size` (vec3), `vmdLink` (bool) |
+| `materials.<rule match>.<field>` | `baseColor` (colour), `roughness` / `metallic` / `emissiveStrength` / `transmission` / `ior` / `alpha` (float), `emissive` (vec3), `mirror` / `castShadow` / `receiveShadow` (bool), `screen` (string) |
+| `screens.<id>.<field>` | `brightness` (float), `width` / `height` (int), `emitLight` / `enabled` (bool), `source` / `file` / `camera` (string) |
+| `packs.<index>.params.<key>` | float |
+| `environment.<field>` | `fog.density` / `fog.anisotropy` / `fog.heightFalloff` / `ambient.intensity` (float), `fog.color` / `ambient.skyZenith` / `ambient.skyHorizon` / `ambient.ground` (colour) |
+
+A `float` / `int` / `bool` param drives number / bool / vec3 targets (a float drives every component of a vec3 unless
+the target is a colour); a `color` param drives colour / vec3 targets; an `enum` param drives a string target by the
+**option's value** and number targets by its index. Everything else is a validation error, and so is an unknown kind,
+field, owner, material rule or pack index.
+
+The evaluator never crashes on such a target: it reports it in its warnings and skips the assignment.
+
+## `cues` (L0 timeline)
+
+```json
+"cues": [
+  {"param": "keyIntensity", "keys": [{"frame": 0, "value": 1.1}, {"frame": 300, "value": 1.5}]},
+  {"param": "fogDensity", "stepped": true, "keys": [{"frame": 0, "value": 0.004}, {"frame": 900, "value": 0.012}]}
+]
+```
+
+One track per param (two tracks for one param is an error), `keys` sorted by the parser, one key per frame (a repeated
+frame keeps the last). `stepped: true` holds the last key at or before the frame; otherwise the value is linear between
+the two neighbours (colours component-wise). `int` / `bool` / `enum` keys always hold (no interpolation). Before the
+first key and after the last, that key holds (as MMD does). Frames are 30 fps song frames: `frame = time * 30`.
+
+The studio keys stage params itself in S3; these cue tracks are the stage's own light show, and a project track
+overrides them (project overrides beat cues, see below).
+
+## Evaluation (pure)
+
+`EvaluateStage(manifest, variantId, overrides, timeSeconds) -> StageEvalResult`
+(`asset/StageEval.h`) is the single implementation used by play, studio, GI and the tools. Order per param:
+
+1. the param's default,
+2. the chosen variant's value (`variantId` empty = `defaultVariant`; an unknown id warns and uses the defaults),
+3. the cue track's value at `time` (clamped to 0),
+4. the caller's overrides (a project's saved values).
+
+Values are clamped to their param's range / option list. Then every binding turns its param's resolved value into one
+assignment (`target` + typed value: float, vec3, colour, bool or string). The function is deterministic and does no
+I/O, so seeks, reverse playback, video and GI shutter samples agree.
+
+## Validation
+
+`ValidateStageManifest` (`asset/StageManifest.h`) is everything checkable from the JSON alone, and `tools/stage_check`
+adds the file / model checks:
+
+* identity: `id` shape, `name` present, unique model files / light names / socket names / camera names / screen ids /
+  param keys / variant ids / group ids;
+* references: groups, screens (from material rules and packs), sockets (from packs), cameras (from screens), params
+  (from variants, bindings, cues), the default variant, pack indices;
+* binding targets and type compatibility, cue track shape, `remap` ranges;
+* pack roles and their required fields, screen sources and their required fields, sun / ambient counts, cone angles;
+* `stage_check` only: declared files exist, every model part loads (`LoadModelFile`), material names / globs in
+  `materials` / `screens` / surface packs match a loaded material, previews exist, and a size budget report.
+
+## Tools
+
+```
+python tools/stagegen/stagegen.py --out captures/stages    # the three procedural test stages
+build/bin/stage_check captures/stages/cyclorama           # errors -> exit code != 0
+build/bin/stage_check --selftest                          # evaluator / validator unit checks
+```
+
+`stagegen` writes GLB by hand (JSON chunk + BIN chunk, 4-byte padded; named nodes and materials, normals and UVs) with
+numpy only — no Blender, no glTF library. The three stages are `cyclorama` (cove, 3 colour variants, 7 lights with 4
+spots), `mirror_room` (box room, `mirror: true` wall, wood floor PBR) and `led_stage` (raised stage, 3 screen quads,
+truss, 8 swaying spots, fog values).
+
+## Decisions taken in S1a (open points of the plan, resolved here)
+
+1. **`lights` schema**: the project's `editor.lights` entry verbatim, moved into `asset/SceneLightJson.*` so the
+   project file and the stage share one implementation (`studio/SceneLight.cpp` moved to `mmdx_core`, which the asset
+   layer links). `uid` is carried but unused in a stage; `name` becomes required.
+2. **Material targets bind to a rule, not to a model material name** (`materials.<rule match>.<field>`): a stage's
+   materials are addressed by the rule the author wrote, so one binding covers a whole glob, and the rule name is
+   stable even when a Blender re-export renames a material. S1b applies the resolved rule values on top of the parsed
+   rules.
+3. **`remap` + `scale` + `offset`** are all optional and compose in that order (`remap` first) — one binding can
+   therefore both clamp-map a normalised slider and scale it into a light's units.
+4. **Enum → string targets** use the option's `value` (not its index); enum → number targets use the index. This makes
+   `screens.<id>.source` drivable from a dropdown and keeps numeric targets interpolatable.
+5. **Cues are param tracks only** (no per-light animation curves): lights are animated by binding light fields to
+   params and cueing those params, which is the same shape the studio's timeline rows will use in S3.
+6. **Sockets need a `node` or an explicit transform**; a socket with neither is an error (an anchor at the origin is
+   `"position": [0, 0, 0]`).
+7. **A sun light cannot carry `keys`** — the project format allows it, but a stage's light show is the cue layer; a
+   keyed sun would be a second, hidden animation system.
+8. **`materials` matches are case-insensitive globs**, first rule wins per field; the material / screen / pack-surface
+   globs must match at least one loaded material (`stage_check` error, never a hard load failure).
+9. **Invalid `stage.json` = not a stage**: the folder is scanned as before and a scan note explains why. Semantic
+   errors (bad targets, missing files) do not hide a stage from the library — the stage still loads and
+   `stage_check` reports the problems.
+10. **Budgets**: `stage_check` reports the file size per extension and errors above 512 MB (a gallery zip is expected
+    to stay under 256 MB).

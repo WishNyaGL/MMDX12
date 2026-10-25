@@ -7,6 +7,11 @@
 //     that light track drives the sun's colour and direction.
 //   - Ambient: the environment (sky, ground, hemisphere strength; at most one per scene). Not keyable.
 //   - Point / Spot: punctual lights. A spot aims by hand, at a character, or sways like the concert preset's beams.
+//
+// SceneLightToJson / SceneLightFromJson (asset/SceneLightJson.h) are the ONE implementation of the "lights" file
+// schema: a project file's editor.lights array and an MMDX stage's stage.json "lights" array both use them
+// (docs/stage_format.md), so a light block can move between the two unchanged. Keys missing from the JSON keep the
+// SceneLight defaults.
 #include <DirectXMath.h>
 #include <cstdint>
 #include <string>

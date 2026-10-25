@@ -69,6 +69,10 @@ endif()
 add_library(mmdx_core STATIC ${CORE_SRC})
 target_include_directories(mmdx_core PUBLIC src ${EXT}/stb ${EXT}/json ${EXT}/miniaudio)
 target_include_directories(mmdx_core SYSTEM PRIVATE ${EXT}/cgltf)
+# The scene light core (studio/SceneLight.h: kind / aim / shadow / falloff names, key sampling, presets) is pure data
+# and pure math, and the asset layer needs it: an MMDX stage.json's "lights" use the project file's schema
+# (asset/SceneLightJson), so asset/StageManifest calls into it. It lives in mmdx_core once; mmdx_app links it from here.
+target_sources(mmdx_core PRIVATE src/studio/SceneLight.cpp)
 # Media Foundation: asset/VideoReader (IMFSourceReader) and the RIFF AVI reader. mfreadwrite pulls the source
 # reader in; the app already links these too (VideoEncoder).
 target_link_libraries(mmdx_core PRIVATE ufbx mfplat mfreadwrite mfuuid)
@@ -99,6 +103,9 @@ target_link_options(mmdx_render INTERFACE /DELAYLOAD:libxess.dll)
 
 # app: window, screens, audio, benchmark, leaderboard
 file(GLOB APP_SRC CONFIGURE_DEPENDS src/app/*.cpp src/audio/*.cpp src/studio/*.cpp)
+# studio/SceneLight.* is pure data + math and lives in mmdx_core (the asset layer's StageManifest uses it): never
+# compile it twice.
+list(REMOVE_ITEM APP_SRC ${CMAKE_SOURCE_DIR}/src/studio/SceneLight.cpp)
 if(NOT APP_SRC)
   set(APP_SRC ${CMAKE_SOURCE_DIR}/cmake/empty.cpp)
 endif()
@@ -166,6 +173,12 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/pack_check.cpp)
   add_executable(pack_check tools/pack_check.cpp)
   # CompileShaderDxc comes from mmdx_render (dxcompiler / dxcapi); the manifest parsing from mmdx_core (json, NetUtil).
   target_link_libraries(pack_check PRIVATE mmdx_render)
+endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/tools/stage_check.cpp)
+  # The MMDX stage format (asset/StageManifest, asset/StageEval) and the model load it validates; the same entry
+  # point registers this file as define-able from tools (the manifest parser itself is mmdx_core).
+  add_executable(stage_check tools/stage_check.cpp)
+  target_link_libraries(stage_check PRIVATE mmdx_core)
 endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tools/shader_choice_test.cpp)
   add_executable(shader_choice_test tools/shader_choice_test.cpp src/app/Settings.cpp)
@@ -241,8 +254,9 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_pose_test.cpp)
   target_link_libraries(studio_pose_test PRIVATE mmdx_core)
 endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_project_test.cpp)
+  # SceneLight.cpp comes from mmdx_core (see above), never listed twice.
   add_executable(studio_project_test tools/studio_project_test.cpp src/studio/StudioProject.cpp src/studio/StudioMotion.cpp
-                                     src/studio/SceneLight.cpp src/studio/StudioEffects.cpp)
+                                     src/studio/StudioEffects.cpp)
   target_include_directories(studio_project_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
   # StudioMotion.cpp needs Bezier (src/anim/Motion.cpp and its ModelInstance/Physics chain),
   # which mmdx_anim builds; mmdx_core carries core/asset and the json include dir.
@@ -275,7 +289,7 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/world_track_test.cpp)
 endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_focus_test.cpp)
   add_executable(studio_focus_test tools/studio_focus_test.cpp src/studio/StudioFocus.cpp src/studio/StudioProject.cpp
-                                   src/studio/StudioMotion.cpp src/studio/SceneLight.cpp src/studio/StudioEffects.cpp)
+                                   src/studio/StudioMotion.cpp src/studio/StudioEffects.cpp)
   target_include_directories(studio_focus_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(studio_focus_test PRIVATE mmdx_core mmdx_anim)
 endif()
