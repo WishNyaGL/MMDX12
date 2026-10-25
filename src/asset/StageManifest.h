@@ -224,6 +224,9 @@ struct StageManifest {
     std::vector<StagePart> models;
     std::vector<StageMaterialRule> materials;
     std::vector<studio::SceneLight> lights;        // the .mmdxproj "lights" schema; names are the binding keys
+    // S2a: take the model's glTF KHR_lights_punctual lights as part of the rig (appended after `lights`, named after
+    // the glTF node). Off = a stage's rig is exactly its `lights` array.
+    bool gltfLights = false;
     std::vector<StageSocket> sockets;
     std::vector<StageCamera> cameras;
     std::vector<StageScreen> screens;

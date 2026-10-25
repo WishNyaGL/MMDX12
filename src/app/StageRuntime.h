@@ -38,14 +38,21 @@ public:
     const StageManifest* Manifest() const { return manifest_.get(); }
     const std::string& Variant() const { return variant_; }
     // The stage has lights: play mode's lighting picker defaults to "스테이지 조명" for it.
-    bool HasLights() const { return manifest_ && !manifest_->lights.empty(); }
+    bool HasLights() const {
+        return manifest_ && (!manifest_->lights.empty() || (!gltfLights_.empty() && manifest_->gltfLights));
+    }
     bool Empty() const { return !manifest_; }
 
     // Evaluates the stage at `timeSeconds` (song time) for GPU frame `frame` and applies the results: the light targets
     // into Lights(), the material targets into the parts' GPU models (only when a value changed).
     const std::vector<studio::SceneLight>& Apply(double timeSeconds, uint64_t frame);
 
-    // The rig at the last Apply (the manifest's lights with the targets applied; empty when the stage has none).
+    // S2a: the parts' glTF punctual lights (asset/StageLights.h PartGltfLights), appended to the rig when the manifest
+    // opts in with "gltfLights": true. Called once at load; empty = none.
+    void SetGltfLights(std::vector<studio::SceneLight> lights) { gltfLights_ = std::move(lights); }
+
+    // The rig at the last Apply (the manifest's lights with the targets applied, plus the glTF lights when enabled;
+    // empty when the stage has none).
     const std::vector<studio::SceneLight>& Lights() const { return lights_; }
 
 private:
@@ -55,6 +62,7 @@ private:
     std::string variant_;   // empty = the manifest's default variant
     std::vector<StageRuntimePart> parts_;
     std::vector<studio::SceneLight> lights_;
+    std::vector<studio::SceneLight> gltfLights_;   // S2a KHR_lights_punctual of the parts (manifest.gltfLights)
     uint64_t appliedFrame_ = ~0ull;   // the frame `lights_` / the material targets were last applied for
 };
 

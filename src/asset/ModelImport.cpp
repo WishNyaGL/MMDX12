@@ -429,7 +429,8 @@ std::unordered_map<int, int> BuildTextures(const ImpScene& s, PmxModel& out) {
     // PmxModel::importedPbr, so no material's texture / sphere / toon index ever reaches them.
     std::unordered_map<int, int> pbrMap;
     for (const ImpMaterial& m : s.materials)
-        for (int idx : {m.metalRoughTex, m.normalTex, m.occlusionTex, m.emissiveTex}) {
+        for (int idx : {m.metalRoughTex, m.normalTex, m.occlusionTex, m.emissiveTex, m.transmissionTex,
+                        m.thicknessTex}) {
             if (idx < 0 || (size_t)idx >= s.textures.size() || pbrMap.count(idx)) continue;
             const int outIdx = (int)out.textures.size();
             const ImpTexture& t = s.textures[(size_t)idx];
@@ -549,6 +550,7 @@ void BuildMaterialsAndGeometry(const ImpScene& s, Builder& b, bool character, co
                 ip.emissive[0] = im.emissive.x;
                 ip.emissive[1] = im.emissive.y;
                 ip.emissive[2] = im.emissive.z;
+                ip.emissiveStrength = im.emissiveStrength;
                 const auto remap = [&](int idx) {
                     auto it = pbrTexMap.find(idx);
                     return it == pbrTexMap.end() ? -1 : it->second;
@@ -557,6 +559,43 @@ void BuildMaterialsAndGeometry(const ImpScene& s, Builder& b, bool character, co
                 ip.normalTex = remap(im.normalTex);
                 ip.occlusionTex = remap(im.occlusionTex);
                 ip.emissiveTex = remap(im.emissiveTex);
+                // S2a glTF material extensions.
+                ip.transmission = im.transmission;
+                ip.transmissionTex = remap(im.transmissionTex);
+                ip.thicknessTex = remap(im.thicknessTex);
+                ip.ior = im.ior;
+                ip.volumeThickness = im.volumeThickness;
+                ip.attenuationColor[0] = im.attenuationColor.x;
+                ip.attenuationColor[1] = im.attenuationColor.y;
+                ip.attenuationColor[2] = im.attenuationColor.z;
+                ip.attenuationDistance = im.attenuationDistance;
+                ip.clearcoat = im.clearcoat;
+                ip.clearcoatRoughness = im.clearcoatRoughness;
+                ip.specularFactor = im.specularFactor;
+                ip.specularColor[0] = im.specularColor.x;
+                ip.specularColor[1] = im.specularColor.y;
+                ip.specularColor[2] = im.specularColor.z;
+                ip.sheenColor[0] = im.sheenColor.x;
+                ip.sheenColor[1] = im.sheenColor.y;
+                ip.sheenColor[2] = im.sheenColor.z;
+                ip.sheenRoughness = im.sheenRoughness;
+                // KHR_texture_transform (offset / scale per map; the rotation is one per material).
+                const auto uv = [](const ImpUvTransform& t) {
+                    ImportedUvTransform out;
+                    out.offsetU = t.offsetU;
+                    out.offsetV = t.offsetV;
+                    out.scaleU = t.scaleU;
+                    out.scaleV = t.scaleV;
+                    out.rotation = t.rotation;
+                    out.hasRotation = t.rotation != 0.0f;
+                    return out;
+                };
+                ip.baseColorUv = uv(im.baseColorUv);
+                ip.metalRoughUv = uv(im.metalRoughUv);
+                ip.normalUv = uv(im.normalUv);
+                ip.occlusionUv = uv(im.occlusionUv);
+                ip.emissiveUv = uv(im.emissiveUv);
+                ip.transmissionUv = uv(im.transmissionUv);
                 out.importedPbr.push_back(ip);
             } else {
                 out.importedPbr.push_back(ImportedPbr{});
@@ -678,7 +717,9 @@ void BuildMorphs(const ImpScene& s, Builder& b, const std::vector<uint32_t>& mes
 // MMD stages are built around the dancer at the origin; generic scenes are not. When nothing
 // walkable lies under the origin, move the scene so its main floor (the height with the most
 // upward-facing area) is at y = 0, centred on a floor triangle near that floor's middle.
-void PlaceStage(PmxModel& out) {
+// `offset` (S2a) receives the shift that was applied (0 when none), so imported lights move with the geometry.
+void PlaceStage(PmxModel& out, XMFLOAT3& offset) {
+    offset = {0, 0, 0};
     struct Tri {
         XMFLOAT3 a, b, c, centroid;
         float area;
@@ -727,7 +768,47 @@ void PlaceStage(PmxModel& out) {
     });
     const XMFLOAT3 o = pick->centroid;
     for (PmxVertex& v : out.vertices) v.position = {v.position.x - o.x, v.position.y - o.y, v.position.z - o.z};
+    offset = {-o.x, -o.y, -o.z};
     LOG_INFO("stage placed on its main floor: moved by (%.1f, %.1f, %.1f)", -o.x, -o.y, -o.z);
+}
+
+// S2a: KHR_lights_punctual -> engine light descriptions. Units: the extension declares candela (point / spot) and lux
+// (directional); asset/StageLights.h documents the conversion to the engine's light intensities. The axes and the
+// metres -> MMD-unit scale follow the geometry conversion (Builder::Pos / Dir), and `shift` is what PlaceStage moved
+// the geometry by.
+void ConvertLights(const ImpScene& s, const Builder& b, const XMFLOAT3& shift, std::vector<ImportedLight>& out) {
+    constexpr float kPi = 3.14159265358979f;
+    // A 1000 W point light exports as 683000 / (4 pi) = 54351 cd; the engine reads that as ~0.5 intensity, about the
+    // default hemisphere fill at 5 m. lux: the same constant per photometric lumen, so a 683 lux sun reads 0.5.
+    constexpr float kCandelaToEngine = 4.0f * kPi / 683.0f * 0.0005f;
+    constexpr float kLuxToEngine = 1.0f / 683.0f * 0.5f;
+    for (const ImpLight& l : s.lights) {
+        ImportedLight light;
+        light.name = l.name;
+        light.color = {std::max(0.0f, l.color.x), std::max(0.0f, l.color.y), std::max(0.0f, l.color.z)};
+        switch (l.kind) {
+        case ImpLight::Kind::Directional:
+            light.kind = ImportedLight::Kind::Directional;
+            light.intensity = std::max(0.0f, l.intensity) * kLuxToEngine;
+            break;
+        case ImpLight::Kind::Spot:
+        case ImpLight::Kind::Point:
+            light.kind = l.kind == ImpLight::Kind::Spot ? ImportedLight::Kind::Spot : ImportedLight::Kind::Point;
+            light.intensity = std::max(0.0f, l.intensity) * kCandelaToEngine;
+            break;
+        }
+        const XMFLOAT3 p = b.Pos(l.position);
+        light.position = {p.x + shift.x, p.y + shift.y, p.z + shift.z};
+        light.direction = b.Dir(l.direction);
+        const float len = std::sqrt(light.direction.x * light.direction.x + light.direction.y * light.direction.y +
+                                    light.direction.z * light.direction.z);
+        if (len > 1e-6f) light.direction = {light.direction.x / len, light.direction.y / len, light.direction.z / len};
+        else light.direction = {0, -1, 0};
+        light.range = std::max(0.0f, l.range) * b.scale;
+        light.innerCone = std::clamp(l.innerCone, 0.0f, kPi * 0.5f);
+        light.outerCone = std::clamp(l.outerCone, light.innerCone, kPi * 0.5f);
+        out.push_back(std::move(light));
+    }
 }
 
 bool ConvertStage(const ImpScene& s, PmxModel& out, bool place) {
@@ -737,7 +818,11 @@ bool ConvertStage(const ImpScene& s, PmxModel& out, bool place) {
     std::vector<uint32_t> base;
     const std::unordered_map<int, int> pbrTexMap = BuildTextures(s, out);
     BuildMaterialsAndGeometry(s, b, false, boneOfNode, {}, {}, pbrTexMap, base);
-    if (place) PlaceStage(out);
+    XMFLOAT3 shift{0, 0, 0};
+    if (place) PlaceStage(out, shift);
+    // S2a: KHR_lights_punctual, converted the same way the geometry is (same scale / axis signs, plus the shift that
+    // PlaceStage may have applied, so the lights stay attached to the geometry they were authored with).
+    ConvertLights(s, b, shift, out.importedLights);
     return !out.vertices.empty();
 }
 

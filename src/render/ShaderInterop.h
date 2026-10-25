@@ -262,18 +262,25 @@ struct GpuPbrSlot {
     int32_t textureSrv;    // absolute SrvHeap index of the slot texture (None falls back to the constant)
     float loopU, loopV;    // <slot>MapLoopNum
     DirectX::XMFLOAT4 value;    // xyz = constant value, w = scale (normalMapScale / parallaxMapScale)
-    DirectX::XMFLOAT4 uvScale;  // xy = <PREFIX>_MAP_UV_SCALE, zw unused
+    DirectX::XMFLOAT4 uvScale;  // xy = <PREFIX>_MAP_UV_SCALE, zw = S2a KHR_texture_transform offset
 };
 static_assert(sizeof(GpuPbrSlot) == 64, "GpuPbrSlot layout");
 
 struct GpuPbrMaterial {
-    uint32_t flags;        // GpuPbrFlags: bit 0 valid, bit 1 cutout alpha, bit 2 emissive
+    uint32_t flags;        // GpuPbrFlags: bit 0 valid, bit 1 cutout alpha, bit 2 emissive, bit 3 HDR emissive
     uint32_t shadingModel; // CUSTOM_ENABLE (0..9)
     float alphaThreshold;  // material_common ALPHA_THRESHOLD
     float diffuseAlpha;    // PMX material diffuse alpha (coverage / blend)
     DirectX::XMFLOAT4 params;   // x = ALBEDO_SUB_ENABLE blend mode (0 none)
     GpuPbrSlot slots[kGpuPbrSlotCount];
+    // S2a glTF material extensions (asset/PbrMaterial.h PbrMaterial::Extensions). Neutral defaults as above; every
+    // shader term multiplies by one of them (transmission 0, clearcoat 0, rotation 0), so Ray-MMD records render
+    // exactly as before.
+    DirectX::XMFLOAT4 transmission;   // x factor, y ior, z volume thickness factor, w attenuation distance (0 = inf)
+    DirectX::XMFLOAT4 attenuation;    // xyz volume attenuation colour (linear), w clearcoat factor
+    DirectX::XMFLOAT4 coat;           // x clearcoat roughness, y specular factor, z uv rotation, w sheen roughness
+    DirectX::XMFLOAT4 sheen;          // xyz sheen colour (linear), w = transmission texture SRV as a NUMBER (-1 = none)
 };
-static_assert(sizeof(GpuPbrMaterial) == 800, "GpuPbrMaterial layout");
+static_assert(sizeof(GpuPbrMaterial) == 864, "GpuPbrMaterial layout");
 
 } // namespace mmdx

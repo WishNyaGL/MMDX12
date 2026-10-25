@@ -43,6 +43,7 @@ SamplerState gPbrWrap : register(s4);
 #define PBR_FLAG_VALID    1u
 #define PBR_FLAG_CUTOUT   2u
 #define PBR_FLAG_EMISSIVE 4u
+#define PBR_FLAG_EMISSIVE_HDR 8u   // the emissive is HDR (> 1): do not clamp it to 1 (S2a KHR_materials_emissive_strength)
 
 // Decoded record: one "slot" (constant + texture) per field; the material header carries the shading model and
 // alpha information. The field order matches GpuPbrMaterial / GpuPbrSlot.
@@ -55,7 +56,7 @@ struct GpuPbrSlot {
     int textureSrv;    // absolute SrvHeap index of the slot texture (-1 = none)
     float loopU, loopV;
     float4 value;      // xyz = constant value, w = scale (normalMapScale / ...)
-    float4 uvScale;    // xy = <PREFIX>_MAP_UV_SCALE
+    float4 uvScale;    // xy = <PREFIX>_MAP_UV_SCALE, zw = S2a KHR_texture_transform offset
 };
 
 struct GpuPbrMaterial {
@@ -65,7 +66,18 @@ struct GpuPbrMaterial {
     float diffuseAlpha;
     float4 params;          // x = ALBEDO_SUB_ENABLE blend mode
     GpuPbrSlot slots[PBR_SLOT_COUNT];
+    // S2a glTF material extensions. Neutral defaults (transmission 0, clearcoat 0, uv rotation 0) keep a Ray-MMD
+    // record's shading identical.
+    float4 transmission;    // x factor, y ior, z volume thickness factor, w attenuation distance (0 = inf)
+    float4 attenuation;     // xyz volume attenuation colour (linear), w clearcoat factor
+    float4 coat;            // x clearcoat roughness, y specular factor, z uv rotation (radians), w sheen roughness
+    float4 sheen;           // xyz sheen colour (linear), w = transmission texture SRV as a NUMBER (-1 = none)
 };
+
+// S2a: the glTF KHR_texture_transform rotation is one value per material (GpuPbrMaterial::coat.z), because a material
+// has no room for one per slot. PbrLoadMaterial sets it here, like PbrSetUvGradients sets the screen-space gradients
+// once per pixel before any slot is sampled; every slot of that record then samples with the same rotation.
+static float gPbrUvRotation = 0.0;
 
 GpuPbrSlot PbrLoadSlot(ByteAddressBuffer b, uint base) {
     GpuPbrSlot s;
@@ -85,7 +97,7 @@ GpuPbrSlot PbrLoadSlot(ByteAddressBuffer b, uint base) {
 GpuPbrMaterial PbrLoadMaterial(int srvIndex, uint index) {
     GpuPbrMaterial m;
     ByteAddressBuffer b = gPbrBuf[NonUniformResourceIndex((uint)srvIndex)];
-    const uint base = index * 800u;   // sizeof(GpuPbrMaterial)
+    const uint base = index * 864u;   // sizeof(GpuPbrMaterial)
     m.flags = b.Load(base + 0);
     m.shadingModel = b.Load(base + 4);
     m.alphaThreshold = asfloat(b.Load(base + 8));
@@ -93,18 +105,43 @@ GpuPbrMaterial PbrLoadMaterial(int srvIndex, uint index) {
     m.params = asfloat(b.Load4(base + 16));
     [unroll] for (uint i = 0; i < PBR_SLOT_COUNT; ++i)
         m.slots[i] = PbrLoadSlot(b, base + 32u + i * 64u);
+    // S2a extension block, after the slots (mirror of GpuPbrMaterial).
+    const uint ext = base + 32u + PBR_SLOT_COUNT * 64u;
+    m.transmission = asfloat(b.Load4(ext + 0));
+    m.attenuation = asfloat(b.Load4(ext + 16));
+    m.coat = asfloat(b.Load4(ext + 32));
+    m.sheen = asfloat(b.Load4(ext + 48));
+    gPbrUvRotation = m.coat.z;   // 0 for Ray-MMD / stage records: slots sample exactly as before
     return m;
 }
 
 // ---- slot decoding (Ray semantics: docs/raymmd_semantics.md) --------------------------------
 
-// UV transform: loop counts, optional UV_SCALE, then the flip.
+// UV transform: loop counts, optional UV_SCALE, then the flip; a glTF KHR_texture_transform offset is added last
+// (uv = uv * scale + offset). The rotation is one per material (gPbrUvRotation); it sits between scale and flip.
+// Ray records have rotation 0 / offset 0, so their arithmetic is exactly the pre-S2a one.
 float2 PbrSlotUv(GpuPbrSlot s, float2 uv) {
     uv *= float2(s.loopU, s.loopV);
     uv *= s.uvScale.xy;
+    if (gPbrUvRotation != 0.0) {
+        float c, sn;
+        sincos(gPbrUvRotation, sn, c);
+        uv = float2(uv.x * c - uv.y * sn, uv.x * sn + uv.y * c);
+    }
     if (s.uvFlip == 1u || s.uvFlip == 3u) uv.x = 1.0 - uv.x;
     if (s.uvFlip == 2u || s.uvFlip == 3u) uv.y = 1.0 - uv.y;
-    return uv;
+    return uv + s.uvScale.zw;
+}
+
+// The derivative of PbrSlotUv for a screen-space uv step (a scaled / rotated map keeps correct mips).
+float2 PbrSlotUvDelta(GpuPbrSlot s, float2 d) {
+    d *= float2(s.loopU, s.loopV) * s.uvScale.xy;
+    if (gPbrUvRotation != 0.0) {
+        float c, sn;
+        sincos(gPbrUvRotation, sn, c);
+        d = float2(d.x * c - d.y * sn, d.x * sn + d.y * c);
+    }
+    return d;
 }
 
 // Sampled texel, or the slot's constant when it has no texture (the load-time fallback).
@@ -120,9 +157,9 @@ float4 PbrSlotTexel(GpuPbrSlot s, float2 uv) {
 #ifdef PBR_SAMPLE_LEVEL0
         return gPbrTex[NonUniformResourceIndex((uint)s.textureSrv)].SampleLevel(gPbrWrap, PbrSlotUv(s, uv), 0);
 #else
-        const float2 k = float2(s.loopU, s.loopV) * s.uvScale.xy;   // PbrSlotUv's scale (flips keep the length)
         return gPbrTex[NonUniformResourceIndex((uint)s.textureSrv)].SampleGrad(gPbrWrap, PbrSlotUv(s, uv),
-                                                                             gPbrUvDx * k, gPbrUvDy * k);
+                                                                             PbrSlotUvDelta(s, gPbrUvDx),
+                                                                             PbrSlotUvDelta(s, gPbrUvDy));
 #endif
     }
     return float4(s.value.xyz, 1.0);
@@ -269,13 +306,32 @@ float PbrAlpha(GpuPbrMaterial m, float2 uv) {
     return saturate(PbrApplyScaleS(v, s));
 }
 
-// EMISSIVE colour, linear, with APPLY_SCALE (the morph/blink controls are out of scope in P3).
+// EMISSIVE colour, linear, with APPLY_SCALE (the morph/blink controls are out of scope in P3). The glTF importer folds
+// KHR_materials_emissive_strength into the slot's value and sets PBR_FLAG_EMISSIVE_HDR when the result exceeds 1: such
+// a record is not clamped (an LED panel with strength 20 glows and blooms), and a record without a map reads its value
+// as a linear HDR colour. Every other record keeps the sRGB constant decode and the old saturate, so Ray-MMD output is
+// unchanged.
 float3 PbrEmissive(GpuPbrMaterial m, float2 uv) {
     if ((m.flags & PBR_FLAG_EMISSIVE) == 0u) return 0;   // EMISSIVE_ENABLE 0: the slot's value is not light
     GpuPbrSlot s = m.slots[PBR_SLOT_EMISSIVE];
+    const bool hdr = (m.flags & PBR_FLAG_EMISSIVE_HDR) != 0u;
+    if (hdr && s.textureSrv < 0) return max(s.value.xyz, 0.0);
     float3 e = SrgbToLinear(saturate(PbrSlotRgb(s, uv)));
-    return PbrApplyScaleRgb(e, s);
+    e = PbrApplyScaleRgb(e, s);
+    return hdr ? e : saturate(e);
 }
+
+// ---- S2a glTF material extensions ---------------------------------------------------------------
+// KHR_materials_transmission. Until S2b the factor alone drives the blending approximation; the map's SRV is carried
+// in the record (sheen.w) for S2b, not sampled here.
+float PbrTransmission(GpuPbrMaterial m) { return saturate(m.transmission.x); }
+
+// KHR_materials_volume thickness factor (the record keeps the factor; the thickness map is not needed before S2b).
+float PbrThickness(GpuPbrMaterial m) { return max(m.transmission.z, 0.0); }
+
+// KHR_materials_clearcoat: the coat factor and its roughness (0..1 linear roughness like glTF).
+float PbrClearcoat(GpuPbrMaterial m) { return saturate(m.attenuation.w); }
+float PbrClearcoatRoughness(GpuPbrMaterial m) { return saturate(m.coat.x); }
 
 // CUSTOM_A scalar (curvature / sheen / threshold ...) with COLOR_FLIP.
 float PbrCustomA(GpuPbrMaterial m, float2 uv) {

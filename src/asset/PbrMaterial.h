@@ -53,6 +53,8 @@ struct PbrSlot {
     float scale = 0;
     float loopU = 1, loopV = 1;        // <slot>MapLoopNum
     float uvScaleU = 1, uvScaleV = 1;  // <PREFIX>_MAP_UV_SCALE
+    // S2a: glTF KHR_texture_transform offset (uv = uv * scale + offset; the rotation is per material, PbrExtensions).
+    float uvOffsetU = 0, uvOffsetV = 0;
     PbrTextureRef tex;
     // P6 imported maps (Ray never sets these; they do not reach GpuPbrMaterial). `mapScale` multiplies the decoded
     // channel (glTF roughnessFactor / metallicFactor), `aoStrength` bakes lerp(1, map, strength) into the channel
@@ -68,6 +70,28 @@ struct PbrMaterial {
     int albedoSubEnable = 0;    // ALBEDO_SUB_ENABLE blend mode
     int albedoApplyDiffuse = 0; // ALBEDO_MAP_APPLY_DIFFUSE: multiply the sampled albedo by the PMX diffuse
     bool emissiveEnable = false;
+    // S2a glTF material extensions (KHR_materials_transmission / ior / volume / clearcoat / specular / sheen and
+    // KHR_texture_transform). Every field keeps its neutral default for a Ray-MMD record, so a Ray material is
+    // unchanged: the shaders only add a term when a factor is > 0.
+    struct Extensions {
+        float transmission = 0.0f;      // KHR_materials_transmission factor
+        PbrTextureRef transmissionTex;  // its texture (R channel), decoded like a slot map
+        // KHR_materials_volume thickness map. Carried (and resolved on the CPU) for S2b; the S2a GPU record has no
+        // slot for it, and nothing samples it yet.
+        PbrTextureRef volumeThicknessTex;
+        float ior = 1.5f;               // KHR_materials_ior
+        float volumeThickness = 0.0f;   // KHR_materials_volume thicknessFactor
+        DirectX::XMFLOAT3 volumeAttenuationColor{1, 1, 1};  // linear
+        float volumeAttenuationDistance = 0.0f;             // 0 = infinite (no attenuation)
+        float clearcoat = 0.0f;         // KHR_materials_clearcoat factor
+        float clearcoatRoughness = 0.0f;
+        float specularFactor = 1.0f;    // KHR_materials_specular (stored, not rendered)
+        DirectX::XMFLOAT3 specularColorFactor{1, 1, 1};
+        DirectX::XMFLOAT3 sheenColorFactor{0, 0, 0};   // KHR_materials_sheen (stored, not rendered)
+        float sheenRoughness = 0.0f;
+        float uvRotation = 0.0f;        // KHR_texture_transform rotation in radians (one per material)
+        float emissiveStrength = 1.0f;  // KHR_materials_emissive_strength (HDR multiplier on the emissive slot)
+    } ext;
     PbrSlot slots[kPbrSlotCount];
 };
 

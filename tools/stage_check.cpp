@@ -69,6 +69,7 @@ void ReportManifest(const StageManifest& m) {
         Info("models: " + parts);
     }
     Info("materials: " + std::to_string(m.materials.size()) + " rules, lights: " + std::to_string(m.lights.size()) +
+         (m.gltfLights ? " (+ the parts' glTF lights: \"gltfLights\": true)" : "") +
          ", sockets: " + std::to_string(m.sockets.size()) + ", cameras: " + std::to_string(m.cameras.size()) +
          ", screens: " + std::to_string(m.screens.size()) + ", packs: " + std::to_string(m.packs.size()));
     Info("params: " + std::to_string(m.params.size()) + ", variants: " + std::to_string(m.variants.size()) +
@@ -116,6 +117,11 @@ LoadedParts LoadParts(const StageManifest& m, bool load) {
         for (const auto& mat : model.materials) out.materials.insert(mat.name);
         Info("model: " + part.file + " -> " + std::to_string(model.vertices.size()) + " vertices, " +
              std::to_string(model.materials.size()) + " materials");
+        // S2a: KHR_lights_punctual. The manifest takes them as part of the rig only with "gltfLights": true, so the
+        // report says whether they are used or ignored.
+        if (!model.importedLights.empty())
+            Info("glTF lights: " + std::to_string(model.importedLights.size()) + " in " + part.file +
+                 (m.gltfLights ? " (in the rig: \"gltfLights\": true)" : " (ignored: no \"gltfLights\")"));
         if (model.vertices.empty() || model.indices.empty()) {
             Problem("models: " + part.file + ": no geometry");
             out.ok = false;
@@ -304,6 +310,18 @@ int SelfTest() {
     const auto* src = findTarget(er, "screens.led.source");
     check(src && src->value.type == mmdx::StageValue::Type::Text && src->value.text == "image",
           "enum -> string target uses the option value", src ? src->value.text : "(none)");
+
+    // S2a: the "gltfLights" flag is parsed (off by default) and a stage that opts in keeps validating unchanged.
+    {
+        StageManifest on;
+        std::string onError;
+        std::string json2 = json;
+        json2.insert(json2.find("\"models\""), "\"gltfLights\": true, ");
+        check(mmdx::ParseStageManifest(json2, fs::path("selftest"), on, onError), "gltfLights parses", onError);
+        check(on.gltfLights, "gltfLights: true is read");
+        check(!m.gltfLights, "gltfLights defaults to off");
+        check(mmdx::ValidateStageManifest(on).empty(), "gltfLights: true validates");
+    }
 
     // validation catches author errors
     StageManifest bad2 = m;

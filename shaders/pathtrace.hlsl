@@ -256,6 +256,10 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 if (g.flags & MAT_STAGE) {
                     radiance += throughput * SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
                     radiance += throughput * AutoLumEmission(g.flags, g.diffuse, g.specularPower, SrgbToLinear(saturate(tex.rgb)));
+                    // S2a: a stage material's PBR emissive (KHR_materials_emissive_strength, HDR) is visible to a
+                    // camera hit here too, like offline GI's CameraDirect; a stage's PBR sun term stays out (the
+                    // stage path below is ambient-only).
+                    if (isPbrHit) radiance += throughput * pbr.emissive;
                 } else {
 #ifdef MMDX_PT_PACK
                     bool isPtPackHit = (g.flags & RTG_PT_PACK) != 0;

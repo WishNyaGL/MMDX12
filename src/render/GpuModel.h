@@ -31,7 +31,8 @@ enum class ModelRole : uint8_t { Character = 0, Stage = 1 };
 // A set field replaces the record's value: baseColor is LINEAR and stored sRGB-encoded like an authored constant,
 // roughness goes to the record's smoothness slot as linear roughness (TYPE 2, like imported glTF), metallic to metalness,
 // emissive is linear and already multiplied by its strength, alpha is the record's diffuseAlpha (coverage).
-// castShadow / receiveShadow are the material's shadow flags, not record fields.
+// S2a: transmission / ior write the record's glTF extension block (raster / RT blend the surface see-through until S2b
+// refracts it). castShadow / receiveShadow are the material's shadow flags, not record fields.
 struct PbrOverride {
     size_t material = 0;
     std::optional<DirectX::XMFLOAT3> baseColor;
@@ -39,6 +40,8 @@ struct PbrOverride {
     std::optional<float> metallic;
     std::optional<DirectX::XMFLOAT3> emissive;
     std::optional<float> alpha;
+    std::optional<float> transmission;
+    std::optional<float> ior;
     std::optional<bool> castShadow;
     std::optional<bool> receiveShadow;
 };

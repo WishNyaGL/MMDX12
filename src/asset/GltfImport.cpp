@@ -63,6 +63,18 @@ std::vector<float> Unpack(const cgltf_accessor* a) {
     return v;
 }
 
+// S2a: a texture view's KHR_texture_transform (identity when the map has none).
+ImpUvTransform UvTransformOf(const cgltf_texture_view& v) {
+    ImpUvTransform out;
+    if (!v.has_transform) return out;
+    out.offsetU = v.transform.offset[0];
+    out.offsetV = v.transform.offset[1];
+    out.scaleU = v.transform.scale[0];
+    out.scaleV = v.transform.scale[1];
+    out.rotation = v.transform.rotation;
+    return out;
+}
+
 // VRM 0.x humanoid slot and expression names -> VRM 1.0 names.
 std::string Vrm0Bone(const std::string& b) {
     static const std::pair<const char*, const char*> kThumb[] = {
@@ -249,6 +261,37 @@ bool ImportGltf(const std::filesystem::path& path, ImpScene& scene, std::string*
         scene.skins.push_back(std::move(out));
     }
 
+    // S2a: KHR_lights_punctual. One entry per node that references a light; the position / direction come from the
+    // node's world transform (the source convention: metres, +Y up, the light shines along its node's -Z). The asset
+    // layer converts metres / axes to engine units later (asset/StageLights.h), so this stays format-neutral.
+    for (cgltf_size i = 0; i < data->nodes_count; ++i) {
+        const cgltf_node& node = data->nodes[i];
+        if (!node.light) continue;
+        const cgltf_light& l = *node.light;
+        ImpLight out;
+        out.name = node.name ? node.name : (l.name ? l.name : "light" + std::to_string(i));
+        switch (l.type) {
+        case cgltf_light_type_directional: out.kind = ImpLight::Kind::Directional; break;
+        case cgltf_light_type_spot: out.kind = ImpLight::Kind::Spot; break;
+        default: out.kind = ImpLight::Kind::Point; break;
+        }
+        float m[16];
+        cgltf_node_transform_world(&node, m);
+        const XMFLOAT4X4 world = ToRowMatrix(m);
+        XMFLOAT3 origin, zero;
+        XMStoreFloat3(&origin, XMVector3TransformCoord(XMVectorZero(), XMLoadFloat4x4(&world)));
+        XMStoreFloat3(&zero, XMVector3TransformNormal(XMVectorSet(0, 0, -1, 0), XMLoadFloat4x4(&world)));
+        out.position = origin;
+        const XMVECTOR d = XMVector3Normalize(XMLoadFloat3(&zero));
+        XMStoreFloat3(&out.direction, d);
+        out.color = {l.color[0], l.color[1], l.color[2]};
+        out.intensity = l.intensity;
+        out.range = l.range;
+        out.innerCone = l.spot_inner_cone_angle;
+        out.outerCone = l.spot_outer_cone_angle;
+        scene.lights.push_back(std::move(out));
+    }
+
     // Materials and textures.
     const std::filesystem::path dir = path.parent_path();
     std::map<const cgltf_image*, int> imageCache;
@@ -262,24 +305,24 @@ bool ImportGltf(const std::filesystem::path& path, ImpScene& scene, std::string*
             const float* c = m.pbr_metallic_roughness.base_color_factor;
             out.baseColor = {c[0], c[1], c[2], c[3]};
             tex = m.pbr_metallic_roughness.base_color_texture.texture;
+            out.baseColorUv = UvTransformOf(m.pbr_metallic_roughness.base_color_texture);
         } else if (m.has_pbr_specular_glossiness) {
             const float* c = m.pbr_specular_glossiness.diffuse_factor;
             out.baseColor = {c[0], c[1], c[2], c[3]};
             tex = m.pbr_specular_glossiness.diffuse_texture.texture;
+            out.baseColorUv = UvTransformOf(m.pbr_specular_glossiness.diffuse_texture);
         }
         if (tex) out.texture = ImportImage(data, tex->image ? tex->image : (tex->has_webp ? tex->webp_image : nullptr), dir, scene, imageCache);
         out.emissive = {m.emissive_factor[0], m.emissive_factor[1], m.emissive_factor[2]};
-        if (m.has_emissive_strength) {
-            const float s = m.emissive_strength.emissive_strength;
-            out.emissive = {out.emissive.x * s, out.emissive.y * s, out.emissive.z * s};
-        }
+        if (m.has_emissive_strength) out.emissiveStrength = m.emissive_strength.emissive_strength;
         out.doubleSided = m.double_sided;
         out.blend = m.alpha_mode != cgltf_alpha_mode_opaque;
         out.opaque = !out.blend;
 
         // P6: metallic-roughness / normal / occlusion / emissive maps. These are the SAME cgltf images as the base
         // colour, so the shared image cache dedupes them into ImpScene::textures.
-        auto importView = [&](const cgltf_texture_view& v) {
+        auto importView = [&](const cgltf_texture_view& v, ImpUvTransform* uvOut = nullptr) {
+            if (uvOut) *uvOut = UvTransformOf(v);
             const cgltf_texture* t = v.texture;
             if (!t) return -1;
             if (v.texcoord != 0) {   // only UV0 is supported
@@ -297,13 +340,41 @@ bool ImportGltf(const std::filesystem::path& path, ImpScene& scene, std::string*
                 out.hasMetallicRoughness = true;
                 out.metallic = m.pbr_metallic_roughness.metallic_factor;
                 out.roughness = m.pbr_metallic_roughness.roughness_factor;
-                out.metalRoughTex = importView(m.pbr_metallic_roughness.metallic_roughness_texture);
+                out.metalRoughTex = importView(m.pbr_metallic_roughness.metallic_roughness_texture, &out.metalRoughUv);
             }
-            out.normalTex = importView(m.normal_texture);
+            out.normalTex = importView(m.normal_texture, &out.normalUv);
             out.normalScale = m.normal_texture.scale;
-            out.occlusionTex = importView(m.occlusion_texture);
+            out.occlusionTex = importView(m.occlusion_texture, &out.occlusionUv);
             out.occlusionStrength = m.occlusion_texture.scale;   // cgltf's `scale` is the occlusion strength
-            out.emissiveTex = importView(m.emissive_texture);
+            out.emissiveTex = importView(m.emissive_texture, &out.emissiveUv);
+            // S2a: the glTF 2.0 material extensions (cgltf parses them; the values are the extension defaults when a
+            // material does not use one).
+            if (m.has_transmission) {
+                out.transmission = m.transmission.transmission_factor;
+                out.transmissionTex = importView(m.transmission.transmission_texture, &out.transmissionUv);
+            }
+            if (m.has_ior) out.ior = m.ior.ior;
+            if (m.has_volume) {
+                out.volumeThickness = m.volume.thickness_factor;
+                out.thicknessTex = importView(m.volume.thickness_texture, &out.thicknessUv);
+                out.attenuationColor = {m.volume.attenuation_color[0], m.volume.attenuation_color[1],
+                                        m.volume.attenuation_color[2]};
+                out.attenuationDistance = m.volume.attenuation_distance;
+            }
+            if (m.has_clearcoat) {
+                out.clearcoat = m.clearcoat.clearcoat_factor;
+                out.clearcoatRoughness = m.clearcoat.clearcoat_roughness_factor;
+            }
+            if (m.has_specular) {
+                out.specularFactor = m.specular.specular_factor;
+                out.specularColor = {m.specular.specular_color_factor[0], m.specular.specular_color_factor[1],
+                                     m.specular.specular_color_factor[2]};
+            }
+            if (m.has_sheen) {
+                out.sheenColor = {m.sheen.sheen_color_factor[0], m.sheen.sheen_color_factor[1],
+                                  m.sheen.sheen_color_factor[2]};
+                out.sheenRoughness = m.sheen.sheen_roughness_factor;
+            }
         }
         scene.materials.push_back(std::move(out));
     }

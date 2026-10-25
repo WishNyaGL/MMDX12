@@ -1,7 +1,8 @@
 # MMDX stage format (`stage.json`, formatVersion 1)
 
-Status: S1a (2026-10-25), the asset layer. The direction (why stages are folders, what S1b..S13 add) is
-`docs/stage_ecosystem.md`; this file is the reference every later milestone keeps current.
+Status: S1a (2026-10-25), the asset layer; S2a (2026-10-25) adds the glTF material / light import table below. The
+direction (why stages are folders, what S1b..S13 add) is `docs/stage_ecosystem.md`; this file is the reference every
+later milestone keeps current.
 
 An **MMDX stage** is a folder holding `stage.json` plus its model parts (glTF 2.0 `.glb` / `.gltf` or PMX). The
 library detects it **by content** (a `stage.json` whose `"format"` is `"mmdx-stage"` and whose `"formatVersion"` this
@@ -64,6 +65,7 @@ throws.
 | `groups`, `params`, `variants`, `defaultVariant` | array / string | the exposed parameter surface |
 | `bindings` | array | param → target assignments |
 | `cues` | array | L0 timeline: keyed param tracks |
+| `gltfLights` | bool | **S2a**: take the glTF lights of the parts into the rig (see below), default `false` |
 
 ## `models`
 
@@ -82,6 +84,38 @@ throws.
 
 Duplicated `file` entries are a validation error. A part that does not load is a scan note / `stage_check` error, and
 the stage still lists the parts that do load.
+
+### Supported glTF features (S2a)
+
+Geometry: triangle primitives, UV0, normals, tangents (ignored), skins / joints, morph targets, node transforms, embedded
+(GL) or side-car textures. Every PBR material of a glTF part becomes one `GpuPbrMaterial` record (a PMX / VRM / MToon /
+`KHR_materials_unlit` material stays NPR and gets none).
+
+| glTF feature | where it goes | render status |
+|---|---|---|
+| `pbrMetallicRoughness` (base colour, metallic, roughness factor + maps) | albedo / metalness / smoothness slots | rendered |
+| `normalTexture` (+ `scale`), `occlusionTexture` (+ strength), `emissiveTexture` | normal / occlusion / emissive slots (occlusion strength baked at decode) | rendered |
+| `alphaMode` / `doubleSided` | PMX material alpha mode, blend / cutout, culling | rendered |
+| `KHR_materials_emissive_strength` | `ext.emissiveStrength` → HDR emissive slot (`flags` bit 3) | rendered (not clamped > 1, so it blooms) |
+| `KHR_materials_clearcoat` (factor, roughness) | `ext.clearcoat`, `ext.clearcoatRoughness` | rendered: a second GGX lobe (F0 0.04) in raster / RT PBR shading and PT / GI direct light |
+| `KHR_materials_transmission` (factor + texture) | `ext.transmission`, `ext.transmissionTex` (R) | S2a: raster / RT draw it with alpha = 1 − 0.85 × transmission; PT / GI draw the ordinary PBR surface until S2b |
+| `KHR_materials_ior` | `ext.ior` | stored (S2b uses it to refract) |
+| `KHR_materials_volume` (thickness factor + texture, attenuation colour / distance) | `ext.volumeThickness`, `ext.volumeThicknessTex` (G), `ext.volumeAttenuationColor`, `ext.volumeAttenuationDistance` | stored (S2b) |
+| `KHR_materials_specular` (factor, colour) | `ext.specularFactor`, `ext.specularColorFactor` | stored, not rendered |
+| `KHR_materials_sheen` (colour, roughness) | `ext.sheenColorFactor`, `ext.sheenRoughness` | stored, not rendered |
+| `KHR_texture_transform` (offset, scale, rotation) on every PBR map | the map slot's `uvScale.xy` (scale), `uvScale.zw` (offset) and the record's per-material rotation (`coat.z`) | rendered in raster / RT / PT / GI |
+| `KHR_lights_punctual` | `PmxModel::importedLights` → the rig with `"gltfLights": true` | rendered as ordinary scene lights |
+| multiple UV sets (`TEXCOORD_1` ...) | — | **not** supported for PBR maps: a map on a non-zero `texCoord` is dropped with one `[W]` (also for a texture transform's `texCoord`) |
+| Draco / meshopt compression, `KHR_materials_unlit`, specular-glossiness materials | — | unsupported / NPR (see above) |
+
+`KHR_texture_transform` follows the extension's own matrix order: `uv' = R(rotation) · S(scale) · uv + offset` (the
+rotation is about the texture origin, as the spec defines it) — applied after the engine's loop / UV-scale conventions.
+The GPU record has room for **one** rotation per material, so the base colour map's rotation is used; if another map of
+the same material carries a different one, one `[W]` names the material and the first rotation wins. A material without
+`KHR_texture_transform` (and every Ray-MMD material) keeps an identity transform, so its look is unchanged.
+
+A stage that puts the same GLB in several parts gets the maps decoded once per part; only the emission strength, the
+clearcoat and the transmission alpha change what the current renderers draw (S2b adds the refraction).
 
 ## `materials`
 
@@ -103,8 +137,8 @@ one rule per material family). Every override is optional:
 | `roughness`, `metallic` | 0..1 | PBR factors |
 | `emissive` | `[r,g,b]` | emitted colour (linear, already includes the strength below) |
 | `emissiveStrength` | float | multiplies `emissive` (glTF `KHR_materials_emissive_strength`) |
-| `transmission` | 0..1 | dielectric transmission (S2b) |
-| `ior` | float | 1.0..3.0 |
+| `transmission` | 0..1 | dielectric transmission (`KHR_materials_transmission`); S2a blends the surface see-through, S2b refracts it |
+| `ior` | float | 1.0..3.0 (`KHR_materials_ior`) |
 | `alpha` | 0..1 | opacity |
 | `mirror` | bool | planar mirror surface (S10) |
 | `screen` | string | a screen id from `screens`: this material is that screen's surface |
@@ -140,6 +174,36 @@ Fields (all optional except `kind` and `name`; a missing one keeps the `SceneLig
 
 Rules: at most one `sun` and one `ambient`; `coneInner <= coneOuter`; a `sun` cannot carry `keys` (use cues on its
 `intensity` / `color` / `direction` instead). Play mode's lighting picker gains a "스테이지 조명" entry in S1b.
+
+### `gltfLights` (S2a)
+
+A glTF part may carry lights with `KHR_lights_punctual`. They are imported into the model as light descriptions
+(`PmxModel::importedLights`), and a stage uses them **only** when its `stage.json` says `"gltfLights": true`. They are
+then appended to the `lights` rig above, after it, named after the glTF node (a name the rig already uses gets a
+` 2`, ` 3`, … suffix), in manifest part order. `gltfLights` off (the default) = a plain glTF model's lights are ignored,
+exactly like today; bindings can still target the appended lights by name, but a rule must know them at author time.
+
+Only the three punctual kinds are used; the mapping to a rig entry:
+
+| glTF light | rig entry | fields used |
+|---|---|---|
+| `point` | `kind: "point"` | `position` (node world translation), `color`, `intensity`, `range` |
+| `spot` | `kind: "spot"`, `aimMode: "manual"`, soft shadow | the above + `aim` = position + direction, `coneInner` / `coneOuter` |
+| `directional` | `kind: "sun"` (`vmdLink: false`) | `direction` (the node's -Z), `color`, `intensity` |
+
+**Unit conversion** (the extension declares candela for point / spot and lux for directional; the engine's intensities are
+unitless multipliers, like every other light in the rig — `intensity` 1 = the preset key light):
+
+```
+engine intensity (point / spot)  = candela * 4π / 683 * 0.0005     ≈ candela * 9.2e-6
+engine intensity (directional)   = lux    * 1 / 683 * 0.5          ≈ lux * 7.3e-4
+```
+
+The first factor is the photometric conversion (683 lm/W, 4π sr for an isotropic point light), the trailing scale is tuned
+by eye: Blender's 1000 W point light exports as 54351 cd and reads 0.5 — about the default hemisphere fill at 5 m (62.5 MMD
+units). Positions and ranges are converted with the geometry (`1 m = 12.5` MMD units, the same axis mirror), so a light
+stays attached to the surface it was authored with, including the stage's floor alignment shift. Spot cones are radians.
+`range` 0 = unlimited; the rig gets 140 (the engine default) instead.
 
 ## `sockets`
 
@@ -290,7 +354,6 @@ The studio keys stage params itself in S3; these cue tracks are the stage's own 
 overrides them (project overrides beat cues, see below).
 
 ## Evaluation (pure)
-
 `EvaluateStage(manifest, variantId, overrides, timeSeconds) -> StageEvalResult`
 (`asset/StageEval.h`) is the single implementation used by play, studio, GI and the tools. Order per param:
 
@@ -332,9 +395,10 @@ warning; the stage still loads its other parts.
 * **Variant**: the lobby's select screen ("셰이더" tab) shows a combo when the selected stage has >= 2 variants, saved as
   `stageVariant=<variant id>|<stage id>` in `mmdx12.ini`; `--stage-variant <id>` wins for one run. Empty = the
   manifest's `defaultVariant`.
-* Ignored silently until their milestones: `screens.*`, `packs.*` and `environment.*` targets (S5 / S6 / S9), and the
-  `transmission` / `ior` / `mirror` / `screen` material fields (S2b / S10 / S5). They are parsed, validated and carried,
-  never warned about at run time.
+* Ignored silently until their milestones: `screens.*`, `packs.*` and `environment.*` targets (S5 / S6 / S9), the
+  `mirror` / `screen` material fields (S10 / S5) and the volume / clearcoat values of a glTF extension (S2b / later).
+  They are parsed, validated and carried, never warned about at run time. S2a renders transmission as an alpha blend and
+  gives clearcoat its own specular lobe (see the glTF feature table above).
 * Installed stages live in `<exe>/stages/<id>/` (next to the executable, like `shader_packs`): their library ids are
   prefixed `stages:<id>` so they never collide with a user-library id. A missing folder is fine. The user's library can
   hold MMDX stages too (detection stays by content).
@@ -359,12 +423,18 @@ python tools/stagegen/stagegen.py --out captures/stages    # the three procedura
 python tools/stagegen/stagegen.py --out build/bin/stages   # install them next to the exe (<exe>/stages/<id>/)
 build/bin/stage_check captures/stages/cyclorama           # errors -> exit code != 0
 build/bin/stage_check --selftest                          # evaluator / validator unit checks
+build/bin/gltf_pbr_test                                   # glTF PBR records, incl. tools/testdata/ext_test.glb (S2a)
 ```
 
 `stagegen` writes GLB by hand (JSON chunk + BIN chunk, 4-byte padded; named nodes and materials, normals and UVs) with
 numpy only — no Blender, no glTF library. The three stages are `cyclorama` (cove, 3 colour variants, 7 lights with 4
 spots), `mirror_room` (box room, `mirror: true` wall, wood floor PBR) and `led_stage` (raised stage, 3 screen quads,
 truss, 8 swaying spots, fog values).
+
+`tools/testdata/make_ext_test.py` is the one Blender-made test asset (S2a): it writes `tools/testdata/ext_test.glb`, a
+committed GLB with a transmissive / volume glass sphere, an emissive-strength-15 panel, a clearcoat sphere, a
+texture-transformed checker plane and one spot + one point light. `gltf_pbr_test` checks the imported records and
+`stage_check` the stage; no test runs Blender.
 
 ## Decisions taken in S1a (open points of the plan, resolved here)
 

@@ -12,6 +12,7 @@
 #include "app/Icons.h"
 #include "app/Lighting.h"
 #include "app/UiKit.h"
+#include "asset/StageLights.h"
 #include "core/I18n.h"
 #include "core/Log.h"
 #include "imgui.h"
@@ -162,19 +163,30 @@ void App::StudioApplyLightPreset(int presetIndex) {
 }
 
 // S1b: an MMDX stage that ships a light rig replaces the project's lights with it, in ONE undoable step. The lights
-// become ordinary scene lights (S3 turns them into real stage overrides).
+// become ordinary scene lights (S3 turns them into real stage overrides). S2a: when the manifest says "gltfLights",
+// the parts' KHR_lights_punctual lights are appended first, named after their glTF nodes.
 void App::StudioApplyStageLightRig(const std::vector<studio::StudioPackageModel>& loadedParts) {
     if (!studio_) return;
     StudioDoc& d = *studio_;
     std::shared_ptr<const StageManifest> manifest;
     for (const studio::StudioPackageModel& part : loadedParts)
-        if (part.stageManifest && !part.stageManifest->lights.empty()) {
+        if (part.stageManifest && (!part.stageManifest->lights.empty() || part.stageManifest->gltfLights)) {
             manifest = part.stageManifest;
             break;
         }
     if (!manifest) return;
     std::vector<SceneLight> before = d.lights;
     std::vector<SceneLight> after = manifest->lights;
+    if (manifest->gltfLights) {
+        std::vector<std::string> taken;
+        for (const SceneLight& l : after) taken.push_back(l.name);
+        for (const studio::StudioPackageModel& part : loadedParts)
+            if (part.pmx && part.stageManifest.get() == manifest.get()) {
+                std::vector<SceneLight> added = PartGltfLights(*manifest, *part.pmx, taken);
+                after.insert(after.end(), added.begin(), added.end());
+            }
+    }
+    if (after.empty()) return;
     for (SceneLight& l : after) {
         l.uid = d.nextLightUid++;   // the stage's order is its identity; uids are per project
         if (l.name.empty()) l.name = LightKindName(l.kind);

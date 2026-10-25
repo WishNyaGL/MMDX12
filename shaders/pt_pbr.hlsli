@@ -25,6 +25,8 @@ struct PtPbrSurface {
     float metal;
     float customA;    // CUSTOM_A (anisotropic strength / sheen amount / curvature)
     float specScale;  // SKIN attenuates its sun specular (0.15)
+    float coat;       // S2a KHR_materials_clearcoat factor (0 = no coat: the lobe is skipped)
+    float coatRough;  // ... and its roughness
     uint model;
     bool celLike;     // model 8/9: MMD shading + mapped normal + emissive only, no GGX
     bool specOn;      // GGX sun/punctual specular enabled (not CEL/TONEBASED)
@@ -77,9 +79,11 @@ PtPbrSurface PtPbrDecode(uint prim, RtGeometry g, RtSurface sf, float3 baseN, fl
     p.f0 = p.celLike ? f0mma : lerp(f0mma, max(0.02, albedoLin), metal);
     p.rough = max(PbrSlotRoughness(m.slots[PBR_SLOT_SMOOTHNESS], sf.uv), 0.03);
     p.ao = PbrSlotAo(m.slots[PBR_SLOT_OCCLUSION], sf.uv);
-    p.emissive = saturate(PbrEmissive(m, sf.uv));
+    p.emissive = PbrEmissive(m, sf.uv);
     p.customA = PbrCustomA(m, sf.uv);
     p.customB = PbrCustomB(m, sf.uv);
+    p.coat = PbrClearcoat(m);              // S2a: 0 for Ray-MMD / plain glTF (the lobe is skipped)
+    p.coatRough = max(PbrClearcoatRoughness(m), 0.03);
     p.baseColor = lerp(p.diffuse, p.f0, metal);
     p.specScale = 1.0;
     p.specOn = !p.celLike;   // CEL (8) / TONEBASED (9): MMD shading + mapped normal + emissive only
@@ -93,15 +97,17 @@ PtPbrSurface PtPbrDecode(uint prim, RtGeometry g, RtSurface sf, float3 baseN, fl
 }
 
 // Per-model specular lobe for NEE (mirrors MmdShadePbr: ANISOTROPY anisotropic GGX, CLOTH GGX->sheen,
-// otherwise isotropic GGX).
+// otherwise isotropic GGX), plus the S2a clearcoat lobe (F0 0.04, its own roughness) when the material has one.
 float3 PtPbrEvalSpecular(PtPbrSurface p, float3 V, float3 L) {
-    if (p.model == 3u) return PbrSpecularGGXAniso(p.N, V, L, p.rough, p.f0, p.customA, p.T, p.customB.r);
-    if (p.model == 5u) {
+    float3 spec;
+    if (p.model == 3u) spec = PbrSpecularGGXAniso(p.N, V, L, p.rough, p.f0, p.customA, p.T, p.customB.r);
+    else if (p.model == 5u) {
         float3 ggx = PbrSpecularGGX(p.N, V, L, p.rough, p.f0);
         float3 sheen = PbrSpecularSheen(p.N, V, L, p.rough, p.customB);
-        return lerp(ggx, sheen, saturate(p.customA));
-    }
-    return PbrSpecularGGX(p.N, V, L, p.rough, p.f0);
+        spec = lerp(ggx, sheen, saturate(p.customA));
+    } else spec = PbrSpecularGGX(p.N, V, L, p.rough, p.f0);
+    if (p.coat > 0.0) spec += p.coat * PbrSpecularGGX(p.N, V, L, p.coatRough, 0.04);
+    return spec;
 }
 
 // Specular continuation probability from Schlick F(N.V) luminance vs the diffuse weight (plan P4 §4).

@@ -1169,6 +1169,7 @@ bool ParseStageManifest(const std::string& json, const std::filesystem::path& di
     ParseModels(j, out, ctx);
     ParseMaterials(j, out, ctx);
     ParseLights(j, out, ctx);
+    out.gltfLights = ReadBool(j, "gltfLights", false);   // S2a: append the parts' KHR_lights_punctual lights
     ParseSockets(j, out, ctx);
     ParseCameras(j, out, ctx);
     ParseScreens(j, out, ctx);

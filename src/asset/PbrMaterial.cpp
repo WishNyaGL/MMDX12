@@ -178,6 +178,8 @@ void DecodePbrTextures(PbrModelData& data, const char* label) {
         float mapScale = 1.0f;                       // multiply the decoded channel (glTF roughness/metalness factor)
         float aoStrength = -1.0f;                    // >= 0: bake glTF occlusion strength (lerp 1 .. map) into `channel`
         std::vector<std::pair<int, int>> slots;      // (material, slot) referencing this entry
+        std::vector<int> extTransmission;            // material indices whose KHR transmission map this entry is
+        std::vector<int> extThickness;               // ... whose KHR volume thickness map this entry is
     };
     std::map<std::string, int> byKey;
     std::vector<Entry> entries;
@@ -215,6 +217,28 @@ void DecodePbrTextures(PbrModelData& data, const char* label) {
             }
             entries[index].slots.emplace_back(mi, si);
         }
+        // S2a: the KHR_materials_transmission / volume thickness maps are not slots (they have no PbrSlotId), but they
+        // are decoded like one so S2b finds them in PbrModelData::texturePaths. Transmission reads R, thickness G.
+        const auto entryFor = [&](const PbrTextureRef& ref, int channel, float mapScale) {
+            if (ref.kind != PbrTexKind::File && ref.kind != PbrTexKind::Embedded) return -1;
+            std::string key = (ref.kind == PbrTexKind::File ? PathToUtf8(ref.path)
+                                                            : "emb:" + std::to_string(ref.pmxIndex)) +
+                              "|" + std::to_string(channel) + "|" + std::to_string(mapScale) + "|-1";
+            auto it = byKey.find(key);
+            if (it != byKey.end()) return it->second;
+            Entry e;
+            e.path = ref.path;
+            e.bytes = ref.bytes;
+            e.channel = channel;
+            e.mapScale = mapScale;
+            byKey.emplace(key, (int)entries.size());
+            entries.push_back(std::move(e));
+            return (int)entries.size() - 1;
+        };
+        const int transIdx = entryFor(m.ext.transmissionTex, 0, 1.0f);
+        if (transIdx >= 0) entries[(size_t)transIdx].extTransmission.push_back(mi);
+        const int thickIdx = entryFor(m.ext.volumeThicknessTex, 1, 1.0f);
+        if (thickIdx >= 0) entries[(size_t)thickIdx].extThickness.push_back(mi);
     }
 
     data.texturePaths.resize(entries.size());
@@ -287,6 +311,8 @@ void DecodePbrTextures(PbrModelData& data, const char* label) {
                 s.tex.fileIndex = -1;
                 s.tex.bytes = nullptr;
             }
+            for (int mi : e.extTransmission) data.materials[(size_t)mi].ext.transmissionTex = PbrTextureRef{};
+            for (int mi : e.extThickness) data.materials[(size_t)mi].ext.volumeThicknessTex = PbrTextureRef{};
             continue;
         }
         uint64_t bytes = 0;
@@ -300,6 +326,18 @@ void DecodePbrTextures(PbrModelData& data, const char* label) {
             s.tex.kind = PbrTexKind::File;
             s.tex.fileIndex = (int)idx;
             s.tex.bytes = nullptr;
+        }
+        for (int mi : e.extTransmission) {
+            PbrTextureRef& ref = data.materials[(size_t)mi].ext.transmissionTex;
+            ref.kind = PbrTexKind::File;
+            ref.fileIndex = (int)idx;
+            ref.bytes = nullptr;
+        }
+        for (int mi : e.extThickness) {
+            PbrTextureRef& ref = data.materials[(size_t)mi].ext.volumeThicknessTex;
+            ref.kind = PbrTexKind::File;
+            ref.fileIndex = (int)idx;
+            ref.bytes = nullptr;
         }
     }
 }
@@ -381,6 +419,7 @@ void BuildImportedPbrModelData(const PmxModel& pmx, PbrModelData& out) {
     };
 
     out.materials.resize(pmx.materials.size());
+    bool rotationWarned = false;   // one [W] per model for maps with different KHR_texture_transform rotations
     for (size_t i = 0; i < pmx.materials.size(); ++i) {
         const ImportedPbr& ip = pmx.importedPbr[i];
         if (!ip.valid) continue;
@@ -460,24 +499,68 @@ void BuildImportedPbrModelData(const PmxModel& pmx, PbrModelData& out) {
 
         // Emissive: sRGB colour map x emissiveFactor. The shader sRGB-decodes PbrEmissive and multiplies by value
         // (applyScale 1); the factor is baked into the RGBA map (the RGBA path is not channel-baked).
+        // KHR_materials_emissive_strength is multiplied into the slot value here (the record has no separate slot for
+        // it), so an LED panel with strength 15 carries 15 and GpuModel marks the record HDR (bit 3): PbrEmissive then
+        // reads it unclamped and the value reaches bloom.
+        const float emissiveStrength = std::max(0.0f, ip.emissiveStrength);
         const bool emissive = ip.emissive[0] > 0 || ip.emissive[1] > 0 || ip.emissive[2] > 0;
         m.emissiveEnable = emissive;
+        m.ext.emissiveStrength = emissiveStrength;
         PbrSlot& em = m.slots[(int)PbrSlotId::Emissive];
         if (ip.emissiveTex >= 0) {
             em.from = 1;
             em.applyScale = 1;
             em.hasValue = true;
-            em.value[0] = ip.emissive[0];
-            em.value[1] = ip.emissive[1];
-            em.value[2] = ip.emissive[2];
+            em.value[0] = ip.emissive[0] * emissiveStrength;
+            em.value[1] = ip.emissive[1] * emissiveStrength;
+            em.value[2] = ip.emissive[2] * emissiveStrength;
             em.tex = refFor(ip.emissiveTex);
         } else if (emissive) {
             em.from = 0;
             em.hasValue = true;
-            em.value[0] = ip.emissive[0];
-            em.value[1] = ip.emissive[1];
-            em.value[2] = ip.emissive[2];
+            em.value[0] = ip.emissive[0] * emissiveStrength;
+            em.value[1] = ip.emissive[1] * emissiveStrength;
+            em.value[2] = ip.emissive[2] * emissiveStrength;
         }
+
+        // S2a: glTF material extensions. Ray-MMD records keep every one of these at its neutral default, so nothing
+        // here can change how a Ray material renders.
+        m.ext.transmission = std::clamp(ip.transmission, 0.0f, 1.0f);
+        m.ext.transmissionTex = ip.transmissionTex >= 0 ? refFor(ip.transmissionTex) : PbrTextureRef{};
+        m.ext.volumeThicknessTex = ip.thicknessTex >= 0 ? refFor(ip.thicknessTex) : PbrTextureRef{};
+        m.ext.ior = ip.ior > 0.0f ? ip.ior : 1.5f;
+        m.ext.volumeThickness = std::max(0.0f, ip.volumeThickness);
+        m.ext.volumeAttenuationColor = {ip.attenuationColor[0], ip.attenuationColor[1], ip.attenuationColor[2]};
+        m.ext.volumeAttenuationDistance = std::max(0.0f, ip.attenuationDistance);
+        m.ext.clearcoat = std::clamp(ip.clearcoat, 0.0f, 1.0f);
+        m.ext.clearcoatRoughness = std::clamp(ip.clearcoatRoughness, 0.0f, 1.0f);
+        m.ext.specularFactor = std::clamp(ip.specularFactor, 0.0f, 1.0f);
+        m.ext.specularColorFactor = {ip.specularColor[0], ip.specularColor[1], ip.specularColor[2]};
+        m.ext.sheenColorFactor = {ip.sheenColor[0], ip.sheenColor[1], ip.sheenColor[2]};
+        m.ext.sheenRoughness = std::clamp(ip.sheenRoughness, 0.0f, 1.0f);
+
+        // KHR_texture_transform: scale into the slot's uv scale, offset into uvOffset (uv = uv * scale + offset). The
+        // rotation is one value per material on the GPU record: the base colour map's, or the first map that has one.
+        const auto applyUv = [&](PbrSlot& slot, const ImportedUvTransform& t) {
+            slot.uvScaleU = t.scaleU;
+            slot.uvScaleV = t.scaleV;
+            slot.uvOffsetU = t.offsetU;
+            slot.uvOffsetV = t.offsetV;
+            if (t.rotation != 0.0f) {
+                if (m.ext.uvRotation == 0.0f) m.ext.uvRotation = t.rotation;
+                else if (m.ext.uvRotation != t.rotation && !rotationWarned) {
+                    LOG_WARN("PBR: %s: maps of '%s' use different KHR_texture_transform rotations; using the first",
+                             out.modelName.c_str(), pm.name.c_str());
+                    rotationWarned = true;
+                }
+            }
+        };
+        applyUv(albedo, ip.baseColorUv);
+        applyUv(rough, ip.metalRoughUv);
+        applyUv(metal, ip.metalRoughUv);
+        applyUv(m.slots[(int)PbrSlotId::Normal], ip.normalUv);
+        applyUv(m.slots[(int)PbrSlotId::Occlusion], ip.occlusionUv);
+        applyUv(em, ip.emissiveUv);
     }
 
     const auto tDecodeStart = std::chrono::steady_clock::now();

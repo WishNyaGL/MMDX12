@@ -164,6 +164,15 @@ struct PmxDisplayFrame {
 // texture / sphere / toon index, so the loader never decodes them as a diffuse texture. asset/PbrMaterial.cpp's
 // BuildImportedPbrModelData turns one into the engine-neutral PbrMaterial. Kept here (not in PbrMaterial.h) to avoid
 // a PmxModel <-> PbrMaterial include cycle.
+// S2a: one glTF KHR_texture_transform (offset / scale / rotation) as it arrives. The importer folds it into the map's
+// PbrSlot; `rotation` is one value per material (the GPU record has room for one), so the first map that has one wins.
+struct ImportedUvTransform {
+    float offsetU = 0.0f, offsetV = 0.0f;
+    float scaleU = 1.0f, scaleV = 1.0f;
+    float rotation = 0.0f;   // radians
+    bool hasRotation = false;
+};
+
 struct ImportedPbr {
     bool valid = false;
     float metallic = 1.0f;          // glTF/FBX metallic factor
@@ -171,10 +180,43 @@ struct ImportedPbr {
     float normalScale = 1.0f;       // normal map scale
     float occlusionStrength = 1.0f; // occlusion map strength
     float emissive[3] = {0, 0, 0};  // sRGB emissive factor (already x KHR_materials_emissive_strength)
+    float emissiveStrength = 1.0f;  // KHR_materials_emissive_strength (a record with > 1 emits HDR)
     int metalRoughTex = -1;         // packed map: G = roughness, B = metalness
     int normalTex = -1;
     int occlusionTex = -1;
     int emissiveTex = -1;
+    // S2a extensions (KHR_materials_transmission / ior / volume / clearcoat / specular / sheen).
+    float transmission = 0.0f;      // transmissionFactor
+    int transmissionTex = -1;       // R channel
+    float ior = 1.5f;
+    float volumeThickness = 0.0f;   // thicknessFactor
+    int thicknessTex = -1;          // G channel (carried for S2b)
+    float attenuationColor[3] = {1, 1, 1};
+    float attenuationDistance = 0.0f;   // 0 = infinite
+    float clearcoat = 0.0f;
+    float clearcoatRoughness = 0.0f;
+    float specularFactor = 1.0f;
+    float specularColor[3] = {1, 1, 1};
+    float sheenColor[3] = {0, 0, 0};
+    float sheenRoughness = 0.0f;
+    // KHR_texture_transform: the base colour map's rotation is the material's (the others only offset / scale).
+    ImportedUvTransform baseColorUv;
+    ImportedUvTransform metalRoughUv, normalUv, occlusionUv, emissiveUv, transmissionUv;
+};
+
+// S2a KHR_lights_punctual: one glTF light, already converted to engine space (MMD units / axes) by the importer. A
+// stage's manifest takes these as its rig when it says "gltfLights": true (asset/StageLights.h).
+struct ImportedLight {
+    enum class Kind : uint8_t { Point = 0, Spot, Directional };
+    Kind kind = Kind::Point;
+    std::string name;              // the glTF node name (the rig's light name)
+    XMFLOAT3 position{};           // MMD world units (point / spot)
+    XMFLOAT3 direction{0, -1, 0};  // unit vector the light travels along (spot / directional)
+    XMFLOAT3 color{1, 1, 1};       // linear RGB
+    float intensity = 1.0f;        // engine intensity (asset/StageLights.h documents the unit conversion)
+    float range = 0.0f;            // MMD units, 0 = unlimited
+    float innerCone = 0.0f;        // spot, radians
+    float outerCone = 0.0f;        // spot, radians
 };
 
 struct PmxModel {
@@ -194,6 +236,7 @@ struct PmxModel {
     std::vector<char> opaqueTextures;
     std::vector<PmxMaterial> materials;
     std::vector<ImportedPbr> importedPbr;   // P6: parallel to materials, empty for PMX/PMD (see ImportedPbr)
+    std::vector<ImportedLight> importedLights;  // S2a: glTF KHR_lights_punctual lights (empty for PMX / glTF without)
     std::vector<PmxBone> bones;
     std::vector<PmxMorph> morphs;
     std::vector<PmxRigidBody> rigidBodies;

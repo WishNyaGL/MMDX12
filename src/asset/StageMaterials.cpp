@@ -129,6 +129,7 @@ void ApplyRuleToRecord(const StageMaterialRule& rule, PbrMaterial& m, PmxMateria
         // emissive keeps that colour, a rule that sets the colour scales it
         const bool on = e.x > 0.0f || e.y > 0.0f || e.z > 0.0f;
         m.emissiveEnable = on;
+        m.ext.emissiveStrength = strength;   // > 1 marks the record HDR (GpuModel), so a strong panel is not clamped
         PbrSlot& em = m.slots[(int)PbrSlotId::Emissive];
         if (SlotHasTexture(em)) {
             em.applyScale = 1;   // linear factor on the decoded map
@@ -140,15 +141,27 @@ void ApplyRuleToRecord(const StageMaterialRule& rule, PbrMaterial& m, PmxMateria
             em.from = 0;
             em.applyScale = 0;
             em.hasValue = true;
-            em.value[0] = EncodeSrgb(e.x * strength);
-            em.value[1] = EncodeSrgb(e.y * strength);
-            em.value[2] = EncodeSrgb(e.z * strength);
+            // An HDR emissive (strength > 1) is read as a linear colour by PbrEmissive; the plain case keeps the sRGB
+            // constant every other record uses.
+            if (strength > 1.0f) {
+                em.value[0] = e.x * strength;
+                em.value[1] = e.y * strength;
+                em.value[2] = e.z * strength;
+            } else {
+                em.value[0] = EncodeSrgb(e.x * strength);
+                em.value[1] = EncodeSrgb(e.y * strength);
+                em.value[2] = EncodeSrgb(e.z * strength);
+            }
         }
     }
     if (rule.alpha) {
         const float a = std::clamp(*rule.alpha, 0.0f, 1.0f);
         pm.diffuse.w = a;
     }
+    // S2a: the glTF extensions a stage rule can set (docs/stage_format.md "materials"). The raster / RT PBR branch
+    // blends a transmissive material with alpha = 1 - 0.85 * transmission; S2b refracts it.
+    if (rule.transmission) m.ext.transmission = std::clamp(*rule.transmission, 0.0f, 1.0f);
+    if (rule.ior) m.ext.ior = std::clamp(*rule.ior, 1.0f, 3.0f);
     // castShadow / receiveShadow are the PMX material flags (see ApplyStageMaterialRules).
 }
 
@@ -205,7 +218,8 @@ StageMaterialRule StageEffectiveMaterialValues(const std::vector<StageMaterialRu
 }
 
 bool StageRuleSetsPbr(const StageMaterialRule& rule) {
-    return rule.baseColor || rule.roughness || rule.metallic || rule.emissive || rule.emissiveStrength;
+    return rule.baseColor || rule.roughness || rule.metallic || rule.emissive || rule.emissiveStrength ||
+           rule.transmission || rule.ior;
 }
 
 void ApplyStageMaterialRules(const std::vector<StageMaterialRule>& rules, const StageMaterialBinding& binding,

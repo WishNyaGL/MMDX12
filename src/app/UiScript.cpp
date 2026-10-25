@@ -178,9 +178,13 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 const std::string variant = m->stageManifest
                                                 ? (m->stageVariant.empty() ? std::string("<default>") : m->stageVariant)
                                                 : std::string("-");
-                LOG_INFO("STUDIOSTAGE stage=%s part=%d variant=%s lights=%d", m->stageManifest ? m->stageManifest->id.c_str() : "-",
-                         m->stagePart, variant.c_str(),
-                         m->stageManifest ? (int)m->stageManifest->lights.size() : 0);
+                // S2a: the rig size is the manifest's lights plus the part's glTF ones ("gltfLights": true).
+                const int gltfLights = m->stageManifest && m->stageManifest->gltfLights && m->pmx
+                                           ? (int)m->pmx->importedLights.size()
+                                           : 0;
+                LOG_INFO("STUDIOSTAGE stage=%s part=%d variant=%s lights=%d gltfLights=%d",
+                         m->stageManifest ? m->stageManifest->id.c_str() : "-", m->stagePart, variant.c_str(),
+                         (m->stageManifest ? (int)m->stageManifest->lights.size() : 0) + gltfLights, gltfLights);
             }
             // P2.2: the selected model's physics bake state (driven bones + baked key count + the off flag)
             if (m) {

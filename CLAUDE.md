@@ -34,6 +34,9 @@ progress.md is the session log. Read its latest entry first.
   `--pbr-debug none|albedo|normal|roughness|metalness|ao|emissive|model` shows one channel (`asset/PbrMaterial`,
   `shaders/pbr_common.hlsli`). Imported glTF/GLB/VRM/FBX models fill the same block from their PBR maps
   (asset/ModelImport `ImportedPbr`, `BuildImportedPbrModelData`); VRM / MToon / KHR_materials_unlit stay NPR (no record).
+  S2a adds the glTF material extensions to the record (transmission / ior / volume, HDR emissive strength, clearcoat,
+  specular / sheen stored only, KHR_texture_transform) and imports KHR_lights_punctual as `ImportedLight`s
+  (`asset/StageLights`, a stage's `"gltfLights": true`).
 - MMDX stages (docs/stage_format.md, `asset/StageManifest.h`): a folder with a `stage.json`. Play mode loads its parts
   through `LoadScenePackage` and the studio through `LoadStudioStage` / `LoadStudioPackage` /
   `LoadStudioProjectPackage` (manifest order, not the library's flat part list); the manifest's `materials` rules are
@@ -112,7 +115,7 @@ progress.md is the session log. Read its latest entry first.
   - `studio_gizmo_test` / `studio_pose_test`: gizmo projection/hit/drag math and bone overlay; mirror names/poses, VPD pose ops
   - `studio_project_test`: .mmdxproj save/load round trip, VMD naming/cleanup, atomic writes, prop offset matrix
   - `pbr_tex_probe <pmx> [--dump <dir>] [--verbose]`: PBR (Ray-MMD) map decode per material: paths, channel, mip-0 size, loops, UV scale/flip
-  - `gltf_pbr_test`: imported PBR records (`captures/assets_dl` BoomBox.glb maps / channels, Seed-san.vrm = no records; SKIP when absent)
+  - `gltf_pbr_test`: imported PBR records (`captures/assets_dl` BoomBox.glb maps / channels, Seed-san.vrm = no records; SKIP when absent; `tools/testdata/ext_test.glb` = the S2a glTF extensions + lights)
   - `studio_focus_test`: DoF focus track evaluation, automatic focus (score, hysteresis, rack), focus keys in projects
   - `mmdx12_mcp [--pipe <name>] [--pid <pid>] [--launch] [--timeout <ms>]`: Model Context Protocol stdio bridge
   - `mcp_smoke.py [--handshake-only] [--scenario]`: MCP test client (protocol handshake & end-to-end scenario)

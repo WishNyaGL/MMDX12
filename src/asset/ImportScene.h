@@ -25,10 +25,18 @@ struct ImpTexture {
     std::string label;            // name for logs
 };
 
+// S2a: one glTF KHR_texture_transform. Identity (offset 0, scale 1, rotation 0) when the map has none.
+struct ImpUvTransform {
+    float offsetU = 0.0f, offsetV = 0.0f;
+    float scaleU = 1.0f, scaleV = 1.0f;
+    float rotation = 0.0f;        // radians
+};
+
 struct ImpMaterial {
     std::string name;
     DirectX::XMFLOAT4 baseColor{1, 1, 1, 1};
-    DirectX::XMFLOAT3 emissive{0, 0, 0};   // already times KHR_materials_emissive_strength
+    DirectX::XMFLOAT3 emissive{0, 0, 0};   // glTF emissiveFactor (linear); the strength is emissiveStrength
+    float emissiveStrength = 1.0f;         // KHR_materials_emissive_strength
     int texture = -1;             // into ImpScene::textures
     bool doubleSided = false;
     bool blend = false;           // alpha blend or mask: keep texture alpha
@@ -44,6 +52,34 @@ struct ImpMaterial {
     int occlusionTex = -1;
     float occlusionStrength = 1.0f;
     int emissiveTex = -1;
+    // S2a: KHR_materials_transmission / ior / volume / clearcoat / specular / sheen and KHR_texture_transform.
+    float transmission = 0.0f;
+    int transmissionTex = -1;     // R channel
+    float ior = 1.5f;
+    float volumeThickness = 0.0f;
+    int thicknessTex = -1;        // G channel (carried for S2b)
+    DirectX::XMFLOAT3 attenuationColor{1, 1, 1};
+    float attenuationDistance = 0.0f;   // 0 = infinite
+    float clearcoat = 0.0f;
+    float clearcoatRoughness = 0.0f;
+    float specularFactor = 1.0f;
+    DirectX::XMFLOAT3 specularColor{1, 1, 1};
+    DirectX::XMFLOAT3 sheenColor{0, 0, 0};
+    float sheenRoughness = 0.0f;
+    ImpUvTransform baseColorUv, metalRoughUv, normalUv, occlusionUv, emissiveUv, transmissionUv, thicknessUv;
+};
+
+// S2a: KHR_lights_punctual, in the source convention (glTF: metres, +Y up, direction along the node's -Z).
+struct ImpLight {
+    enum class Kind : uint8_t { Point = 0, Spot, Directional };
+    Kind kind = Kind::Point;
+    std::string name;
+    DirectX::XMFLOAT3 position{0, 0, 0};
+    DirectX::XMFLOAT3 direction{0, 0, -1};
+    DirectX::XMFLOAT3 color{1, 1, 1};
+    float intensity = 1.0f;       // candela (point / spot) or lux (directional), as the extension declares
+    float range = 0.0f;           // metres, 0 = unlimited
+    float innerCone = 0.0f, outerCone = 0.7853982f;   // radians
 };
 
 // P6 record rule: a material gets a PBR record unless it is NPR (VRM / MToon / KHR_materials_unlit), or has no PBR
@@ -53,6 +89,8 @@ inline bool ImpMaterialHasPbrData(const ImpMaterial& m) {
     const bool anyMap = m.metalRoughTex >= 0 || m.normalTex >= 0 || m.occlusionTex >= 0 || m.emissiveTex >= 0;
     if (anyMap) return true;
     if (m.emissive.x > 0 || m.emissive.y > 0 || m.emissive.z > 0) return true;
+    // S2a: an extension the material carries is PBR data on its own (a glass sphere with default factors).
+    if (m.transmission > 0.0f || m.clearcoat > 0.0f || m.specularFactor != 1.0f) return true;
     return m.hasMetallicRoughness && (m.metallic < 0.999f || m.roughness < 0.999f);
 }
 
@@ -97,6 +135,7 @@ struct ImpScene {
     std::vector<ImpSkin> skins;
     std::vector<ImpMaterial> materials;
     std::vector<ImpTexture> textures;
+    std::vector<ImpLight> lights;            // S2a: KHR_lights_punctual (empty when the file has none)
     std::map<std::string, int> humanBones;   // VRM humanoid slot (VRM 1.0 names) -> node
     std::vector<ImpExpression> expressions;
     std::vector<std::string> warnings;

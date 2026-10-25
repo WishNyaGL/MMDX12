@@ -600,6 +600,18 @@ PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, 
         color += spec * sh * sunLin * nl * specScale;
         color += PunctualSpecularGGX(i.worldPos, n, V, rough, f0) * specScale;
     }
+    // S2a KHR_materials_clearcoat: a second, smoother GGX lobe over the base layer with F0 0.04 (glTF's coat
+    // reflectance). Zero cost when the factor is 0 (Ray-MMD / plain glTF materials never enter).
+    const float coat = PbrClearcoat(m);
+    if (coat > 0.0f && !celLike) {
+        const float coatRough = max(PbrClearcoatRoughness(m), 0.03);
+        const float3 coatF0 = 0.04;
+        color += PbrSpecularGGX(n, V, L, coatRough, coatF0) * (coat * sh * sunLin * nl);
+        color += PunctualSpecularGGX(i.worldPos, n, V, coatRough, coatF0) * coat;
+        // The coat reflects part of the base light: attenuate the base layer by (1 - coat Fresnel).
+        const float coatF = 0.04 + 0.96 * pow(1.0 - saturate(dot(n, V)), 5.0);
+        color *= 1.0 - coat * coatF;
+    }
 
     // Reflectivity output (SSR / RT reflections): F0 luminance scaled by smoothness, so smooth / metal materials
     // mirror and rough dielectrics barely do. CEL keeps the MMD value. A stage with a record drops its floor gloss
@@ -617,8 +629,12 @@ PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, 
     }
 
     // Emissive (linear * intensity) after lighting. EMISSIVE promotion (custom 2) is the same term; the value is
-    // 0 for the library materials that leave EMISSIVE_ENABLE off. PbrEmissive returns linear already.
-    color += saturate(PbrEmissive(m, uv));
+    // 0 for the library materials that leave EMISSIVE_ENABLE off. PbrEmissive returns linear already and does its own
+    // saturate for non-HDR records (S2a: an LED panel's strength is not clamped).
+    color += PbrEmissive(m, uv);
+    // S2a, before S2b: a transmissive material is blended see-through in raster / RT (alpha = 1 - 0.85 * transmission
+    // on top of the material's own coverage). PT / offline GI keep the opaque PBR look until S2b.
+    alpha *= 1.0 - 0.85 * PbrTransmission(m);
     return PackOutput(color, alpha, n, alpha > 0.9 ? reflectivity : 0.0, i.curClip, i.prevClip);
 }
 

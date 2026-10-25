@@ -529,11 +529,27 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             GpuPbrMaterial r{};
             r.flags = 1u | (src.alphaThreshold > 0.0f && src.alphaThreshold < 0.999f ? 2u : 0u) |
                       (src.emissiveEnable ? 4u : 0u);
+            // S2a: an emissive whose KHR_materials_emissive_strength exceeds 1 is not clamped (HDR glow / bloom).
+            if (src.emissiveEnable && src.ext.emissiveStrength > 1.0f) r.flags |= 8u;
             r.shadingModel = (uint32_t)std::max(0, src.shadingModel);
             r.alphaThreshold = src.alphaThreshold;
             r.diffuseAlpha = pm.diffuse.w;
+            // S2a, before S2b: a transmissive material must not draw as an opaque wall. The raster / RT PBR branch
+            // multiplies its output alpha by (1 - 0.85 * transmission) (shaders/mmd.hlsl, PbrTransmission); the ray
+            // paths read PbrAlpha / the PMX coverage, so PT / offline GI keep the opaque PBR look until S2b. The
+            // material's own diffuse alpha is left alone for the same reason.
+            const float transmission = std::clamp(src.ext.transmission, 0.0f, 1.0f);
             r.params.x = (float)src.albedoSubEnable;
             r.params.y = (float)src.albedoApplyDiffuse;
+            r.transmission = {transmission, src.ext.ior, src.ext.volumeThickness, src.ext.volumeAttenuationDistance};
+            r.attenuation = {src.ext.volumeAttenuationColor.x, src.ext.volumeAttenuationColor.y,
+                             src.ext.volumeAttenuationColor.z, src.ext.clearcoat};
+            r.coat = {src.ext.clearcoatRoughness, src.ext.specularFactor, src.ext.uvRotation, src.ext.sheenRoughness};
+            r.sheen = {src.ext.sheenColorFactor.x, src.ext.sheenColorFactor.y, src.ext.sheenColorFactor.z, -1.0f};
+            if (src.ext.transmissionTex.kind == PbrTexKind::File && src.ext.transmissionTex.fileIndex >= 0 &&
+                (size_t)src.ext.transmissionTex.fileIndex < pbrTextureSrvs_.size() &&
+                pbrTextureSrvs_[(size_t)src.ext.transmissionTex.fileIndex] != DescriptorHeap::kInvalid)
+                r.sheen.w = (float)pbrTextureSrvs_[(size_t)src.ext.transmissionTex.fileIndex];
             for (int si = 0; si < kPbrSlotCount; ++si) {
                 const PbrSlot& s = src.slots[si];
                 GpuPbrSlot& d = r.slots[si];
@@ -545,7 +561,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
                 d.loopU = s.loopU;
                 d.loopV = s.loopV;
                 d.value = {s.value[0], s.value[1], s.value[2], s.hasScale ? s.scale : 0.0f};
-                d.uvScale = {s.uvScaleU, s.uvScaleV, 0.0f, 0.0f};
+                d.uvScale = {s.uvScaleU, s.uvScaleV, s.uvOffsetU, s.uvOffsetV};
                 if (s.tex.kind == PbrTexKind::File) {
                     d.textureSrv = (s.tex.fileIndex >= 0 && (size_t)s.tex.fileIndex < pbrTextureSrvs_.size() &&
                                     pbrTextureSrvs_[(size_t)s.tex.fileIndex] != DescriptorHeap::kInvalid)
@@ -870,21 +886,30 @@ void GpuModel::SetPbrOverrides(uint64_t frame, const std::vector<PbrOverride>& l
         }
         if (o.emissive) {
             GpuPbrSlot& s = m.slots[(int)PbrSlotId::Emissive];
-            if (s.textureSrv < 0) {
+            const bool hdr = o.emissive->x > 1.0f || o.emissive->y > 1.0f || o.emissive->z > 1.0f;
+            if (s.textureSrv < 0 && !hdr) {
                 s.applyScale = 0;   // no map: the sRGB-encoded constant
                 s.value.x = encode(o.emissive->x);
                 s.value.y = encode(o.emissive->y);
                 s.value.z = encode(o.emissive->z);
+            } else if (s.textureSrv < 0) {
+                s.applyScale = 0;   // no map, HDR colour: PbrEmissive reads a linear value
+                s.value.x = std::max(0.0f, o.emissive->x);
+                s.value.y = std::max(0.0f, o.emissive->y);
+                s.value.z = std::max(0.0f, o.emissive->z);
             } else {
                 s.applyScale = 1;   // a map: the LINEAR colour multiplies the decoded map
-                s.value.x = std::clamp(o.emissive->x, 0.0f, 1.0f);
-                s.value.y = std::clamp(o.emissive->y, 0.0f, 1.0f);
-                s.value.z = std::clamp(o.emissive->z, 0.0f, 1.0f);
+                s.value.x = std::max(0.0f, o.emissive->x);
+                s.value.y = std::max(0.0f, o.emissive->y);
+                s.value.z = std::max(0.0f, o.emissive->z);
             }
             const bool on = o.emissive->x > 0.0f || o.emissive->y > 0.0f || o.emissive->z > 0.0f;
             m.flags = on ? (m.flags | 4u) : (m.flags & ~4u);   // GpuPbrFlags bit 2: emissive
+            m.flags = (on && hdr) ? (m.flags | 8u) : (m.flags & ~8u);   // bit 3: HDR (not clamped)
         }
         if (o.alpha) m.diffuseAlpha = std::clamp(*o.alpha, 0.0f, 1.0f);
+        if (o.transmission) m.transmission.x = std::clamp(*o.transmission, 0.0f, 1.0f);
+        if (o.ior) m.transmission.y = std::clamp(*o.ior, 1.0f, 3.0f);
     }
     pbrRingVersion_[r] = version;
 }

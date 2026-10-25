@@ -55,6 +55,8 @@ uint64_t HashMaterialRules(const std::vector<StageMaterialRule>& rules) {
         if (r.metallic) h = HashFloat(h, *r.metallic);
         if (r.emissive) h = HashFloat(HashFloat(HashFloat(h, r.emissive->x), r.emissive->y), r.emissive->z);
         if (r.emissiveStrength) h = HashFloat(h, *r.emissiveStrength);
+        if (r.transmission) h = HashFloat(h, *r.transmission);
+        if (r.ior) h = HashFloat(h, *r.ior);
         if (r.alpha) h = HashFloat(h, *r.alpha);
         if (r.castShadow) h = HashMix(h, *r.castShadow ? 3u : 5u);
         if (r.receiveShadow) h = HashMix(h, *r.receiveShadow ? 7u : 11u);
@@ -70,8 +72,8 @@ void ApplyStageMaterialList(GpuModel& gpu, int part, const StageMaterialBinding&
     const size_t materialCount = gpu.Materials().size();
     for (size_t m = 0; m < materialCount; ++m) {
         const StageMaterialRule v = StageEffectiveMaterialValues(rules, binding, m);
-        if (!(v.baseColor || v.roughness || v.metallic || v.emissive || v.emissiveStrength || v.alpha ||
-              v.castShadow || v.receiveShadow))
+        if (!(v.baseColor || v.roughness || v.metallic || v.emissive || v.emissiveStrength || v.transmission || v.ior ||
+              v.alpha || v.castShadow || v.receiveShadow))
             continue;
         PbrOverride o;
         o.material = m;
@@ -84,6 +86,8 @@ void ApplyStageMaterialList(GpuModel& gpu, int part, const StageMaterialBinding&
                                            v.emissive->z * strength};
         }
         if (v.alpha) o.alpha = *v.alpha;
+        if (v.transmission) o.transmission = *v.transmission;
+        if (v.ior) o.ior = *v.ior;
         if (v.castShadow) o.castShadow = *v.castShadow;
         if (v.receiveShadow) o.receiveShadow = *v.receiveShadow;
         list.push_back(std::move(o));
@@ -112,10 +116,11 @@ const std::vector<studio::SceneLight>& StageRuntime::Apply(double timeSeconds, u
     appliedFrame_ = frame;
     const StageEvalResult eval = EvaluateStage(*manifest_, variant_, StageParamValues{}, timeSeconds);
 
-    // Lights: the manifest's rig with the evaluator's light targets replayed in assignment order (cues animate the
-    // params the targets read, so the rig follows the song).
-    if (!manifest_->lights.empty()) {
+    // Lights: the manifest's rig (plus the parts' glTF lights when "gltfLights") with the evaluator's light targets
+    // replayed in assignment order (cues animate the params the targets read, so the rig follows the song).
+    if (!manifest_->lights.empty() || (!gltfLights_.empty() && manifest_->gltfLights)) {
         lights_ = manifest_->lights;
+        if (manifest_->gltfLights) lights_.insert(lights_.end(), gltfLights_.begin(), gltfLights_.end());
         for (const StageAssignment& a : eval.targets) {
             const StageTargetSpec spec = ResolveStageTarget(*manifest_, a.target);
             if (!spec.ok || spec.kind != StageTargetSpec::Kind::Lights) continue;   // screens / packs / env: ignored

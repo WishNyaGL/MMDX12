@@ -5,6 +5,7 @@
 #include "asset/ImageLoader.h"
 #include "asset/MmeAssign.h"
 #include "asset/RayMaterial.h"
+#include "asset/StageLights.h"
 
 #include <ShlObj.h>
 #include <shellapi.h>
@@ -2080,9 +2081,23 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         }
         s->stage = std::make_shared<StageRuntime>();
         s->stage->Init(pkg.stageManifest, pkg.stageVariant, std::move(parts));
+        // S2a: the parts' glTF punctual lights ("gltfLights": true) join the rig, named after their glTF nodes.
+        std::vector<studio::SceneLight> gltfLights;
+        if (pkg.stageManifest->gltfLights) {
+            std::vector<std::string> taken;
+            for (const studio::SceneLight& l : pkg.stageManifest->lights) taken.push_back(l.name);
+            for (const LoadedModelCpu& part : pkg.stageParts)
+                if (part.pmx) {
+                    std::vector<studio::SceneLight> added = PartGltfLights(*pkg.stageManifest, *part.pmx, taken);
+                    gltfLights.insert(gltfLights.end(), added.begin(), added.end());
+                }
+            s->stage->SetGltfLights(gltfLights);
+        }
+        const size_t gltfLightsCount = gltfLights.size();
         LOG_INFO("MMDX stage: %s variant '%s' parts %d lights %d rules %d", pkg.stageManifest->id.c_str(),
                  pkg.stageVariant.c_str(), (int)s->stage->Manifest()->models.size(),
-                 (int)pkg.stageManifest->lights.size(), (int)pkg.stageManifest->materials.size());
+                 (int)pkg.stageManifest->lights.size() + (int)gltfLightsCount,
+                 (int)pkg.stageManifest->materials.size());
     }
 
     // M5c: MME effect objects (an accessory `.x` + its same-stem `.fx`). --mme-object, else the persisted play-mode
