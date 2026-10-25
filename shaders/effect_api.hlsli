@@ -15,11 +15,13 @@
 // Must equal kPackApiVersion (render/ShaderPack.h). One manifest version for surface and effect packs.
 #define PACK_API_VERSION 5
 
-// gP0.xy (fullscreen.hlsli's PassCB, b1) = the output size in pixels; time / frame come from SceneConstants.
+// gP0.xy (fullscreen.hlsli's PassCB, b1) = the output size in pixels; frame comes from SceneConstants.
 // gP1 = (focus z (<= 0: autofocus), focus aperture scale, the user's DoF aperture, the user's max CoC radius in output
-// px); gP2 = (this draw's target size in px, pass index (-1 = PackEffect / PackEffectState), 0).
+// px); gP2 = (this draw's target size in px, pass index (-1 = PackEffect / PackEffectState), 0);
+// gP3.x = the scene / timeline seconds of the frame being rendered (constant while the timeline is paused; the
+// offline GI / video paths pass the rendered frame's time, not a wall clock).
 #define gEffectOutputSize float2(gP0.x, gP0.y)
-#define gEffectTime gTime
+#define gEffectTime gP3.x
 #define gEffectFrameIndex gFrameIndex
 
 #if defined(PACK_CAP_PARAMS_EXT) && PACK_CAP_PARAMS_EXT

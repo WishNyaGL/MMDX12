@@ -32,7 +32,7 @@ Effects of both stages can be mixed in one stack: each stage runs its own effect
 float3 PackEffect(PackEffectInput i) { return i.color.rgb; }
 ```
 
-`PackEffectInput`: `uv` (0..1, top left = 0,0), `pixel`, `outputSize`, `time` (seconds), `frameIndex`, `color` (the frame so
+`PackEffectInput`: `uv` (0..1, top left = 0,0), `pixel`, `outputSize`, `time` (the frame's scene / timeline seconds; constant while the timeline is paused), `frameIndex`, `color` (the frame so
 far, alpha kept), `depth` (raw device depth, 1 = background), `normal` (view space, oct-encoded; undefined on the background), `motion`
 (uv(current) - uv(previous)).
 
@@ -101,7 +101,7 @@ float3 PackEffect(PackEffectInput i) {
   - `float prevState[16]`: previous state values (all zeros when `reset` is true).
   - `bool reset`: true if state was reset this frame.
   - `float dt`: delta time in seconds.
-  - `float time`: current time in seconds.
+  - `float time`: the frame's scene / timeline seconds (constant while paused).
   - `float frameIndex`: current frame number.
   - `float2 outputSize`: dimensions of the render target.
 - `PackState(i)` reads float `i` (0 <= i < stateFloats) of the state updated for this frame. For non-state packs (`PACK_STATE=0`), `PackState(i)` evaluates to `0.0`.
@@ -110,20 +110,29 @@ float3 PackEffect(PackEffectInput i) {
 
 ### Reset, dt, and advance rules
 
+- **Time**: `time` (in `PackEffectInput`, `PackStateInput` and `PackPassInput`) is the scene / timeline seconds of the
+  frame being rendered (`FrameView::sceneTime`), not a wall clock. The play view, the studio timeline, real-time video
+  renders and the offline GI job all pass the rendered frame's time; a paused timeline gives a constant time. It is
+  separate from `gTime` / `SceneConstants::time` (still the render clock), and `frameIndex` is unchanged.
 - **Reset**: `reset` is true when:
   - The stack entry is created, reordered, or its pack reloads.
   - The entry did not run in the previous executed frame of the pass instance.
   - Camera cut / teleport (`FrameView::cameraCut`).
+  - Seek / jump: the scene time moved backwards, or the frame's scene delta is more than 0.25 s.
+  - The timeline is paused (every paused frame runs the still-render rule below).
   - Output size changed / window resized.
   - Explicitly requested by offline job or caller (`effectStateReset`).
-  When `reset` is true, `prevState` is guaranteed to be all zeros.
-- **dt**:
-  - Interactive playback: `frameTimeMs * 0.001`, clamped to [1/240, 0.1] seconds.
-  - Deterministic runs (`--frames`, `--ui-script`, MCP / headless): fixed `1/60` seconds.
-  - Offline video: fixed `1/fps` seconds.
-- **Advance**:
-  - Interactive viewport advances once per presented frame.
-  - Path-traced video: state advances only on the last of the `iterCount` passes per frame (`effectStateAdvance` false beforehand).
+  When `reset` is true (step 0 of the converge), `prevState` is guaranteed to be all zeros.
+- **dt / advance**:
+  - Timeline playing with 0 < `sceneElapsed` <= 0.25 s: one state step with `dt = sceneElapsed`. An explicit
+    `FrameView::effectDt` (offline video `1/fps`, deterministic runs) overrides the dt value.
+  - The same scene time rendered again while playing (`sceneElapsed` 0): no state step; `PackState` reads the latest
+    state.
+  - Timeline paused: exactly the still-render rule, every paused frame; reset on step 0, then 64 steps of `dt = 1/60`.
+    Camera and parameter edits while paused are therefore reflected at once and the result is deterministic.
+  - Seek / jump (`cameraCut`, |delta| > 0.25 s, backwards): reset + the same 64-step converge (`dt = 1/60`).
+  - Path-traced video: state advances only on the last of the `iterCount` passes per frame (`effectStateAdvance` false
+    beforehand).
   - Offline GI:
     - Videos: 1 state pass per output image with `dt = 1/fps`, resetting on first frame or jump cut. State slots persist across frames of the video.
     - Stills: runs the state pass 64 times on the same image with `dt = 1/60` (reset only on step 0) to converge temporal state before running `PackEffect` once.
@@ -164,7 +173,8 @@ float4 Blur(PackPassInput i)   { return PackPassSample(0, i.uv); }   // pass 0's
 float3 PackEffect(PackEffectInput i) { return i.color.rgb + PackPassSample(1, i.uv).rgb; }
 ```
 
-- `PackPassInput`: `uv` and `pixel` of this pass's target, `size` (its pixels), `outputSize`, `time`, `frameIndex`,
+- `PackPassInput`: `uv` and `pixel` of this pass's target, `size` (its pixels), `outputSize`, `time` (the frame's scene /
+  timeline seconds), `frameIndex`,
   `dt`, `pass` (its index). The frame inputs (`gEffectSource`, depth, normal, velocity), the pack textures, the
   parameters and the state are bound in every pass.
 - `PackPassSample(n, uv)` (bilinear, clamp), `PackPassLoad(n, pixel)`, `PackPassSize(n)` read pass `n`'s target. A pass

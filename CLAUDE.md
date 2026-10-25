@@ -416,10 +416,13 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
 - World effects (docs/shader_world_api.md, contract `render/WorldTypes.h`): `"type": "world"` packs (`world.hlsl`, a
   pack.json `"world"` block: particles / fields / heightfield surfaces) drawn by `WorldPass` (`render/PassWorld.cpp`):
   deterministic fixed-step GPU simulation toward `WorldInstance::time` (re-simulation on seeks: persistent fields from 0 on
-  their own k / rate grid, the rest over the rewind window; per-frame upload chunks, persistent field descriptors),
+  their own k / rate grid, the rest over the rewind window; per-frame upload chunks, persistent field descriptors).
+  The particle steps end on one global grid (k * `step`, no partial steps) and drawing is interpolated between the last
+  two grid steps (`gParticleParams.x` = a, respawns / teleports drawn at their position), so high-fps playback is smooth;
   surfaces in the scene MSAA targets (raster / RT; host-lit with sun shadow from the cascades + `PackHemiAmbient`), particles
   after the composite into `lit` (`WorldParticlesPass`, soft depth fade; never in SSR / SSAO), PT / offline GI through the
-  outline layer. Characters interact through a collider track (feet / toes / wrists, 30 Hz, no physics; play mode builds
+  outline layer. Characters interact through a collider track (feet / toes / wrists, plus head / upper body / shoulders /
+  lower body for packs that require `world.body`, 30 Hz, no physics; play mode builds
   it once per scene: `WORLD colliders ready` log line). Play mode: `AppSettings::worldStack` (`--world id|none`, the 화면 효과
   panel's 월드 이펙트 section, manager "월드에 추가"); studio: outliner 월드 entities with placement + keyable params
   (`RowKind::WorldParam`, saved in .mmdxproj). Surfaces also get the scene's spots / points + their soft / hard shadow
@@ -430,7 +433,11 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   2048^2 depth map of stage + prop models, back faces culled, read conservatively 3x3 by `PackGround[Height]`;
   `"extent": "camera"` surfaces = 3 nested LOD grids around the camera, `"ground": true` = height above the ground,
   clipped where there is none), `world.overlay` (premultiplied over the lit scene, negative slope bias, normal / velocity
-  untouched; keep it ~2 cm above the ground). Built-in `shaders/packs/snow` 2.0 ("눈"): snow in the camera box, cover on
+  untouched; keep it ~2 cm above the ground), `world.body` (body colliders: head r 0.9, upper body 2 / upper body r 1.2,
+  left / right shoulder / arm r 0.7, lower body r 1.3, flag `kColliderBody = 8`; packs without it see only the old
+  feet / hands colliders in the old order), `world.lights` (the scene's sun + punctual direct lighting and shadows through
+  `PackSunLight` / `PackPunctualLight` / `PackDirectDiffuse` / `PackDirectThin`: shadow maps in raster, one TLAS ray per
+  light in RT / PT / offline GI; non-lights packs keep the old bindings and zero cost). Built-in `shaders/packs/snow` 2.0 ("눈"): snow in the camera box, cover on
   every upward ground surface, performer-anchored footprints, landing particles that thin out on trodden snow. No world
   gizmo / transform keys yet. Zero cost without worlds.
 - MME (docs/mme/mme_design.md; compatibility list docs/mme/compat_list.md): own .fx parser / preprocessor / IR in

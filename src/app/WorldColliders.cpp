@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 
 namespace mmdx {
 
@@ -15,6 +16,15 @@ constexpr const char* kLeftToe = "\xE5\xB7\xA6\xE3\x81\xA4\xE3\x81\xBE\xE5\x85\x
 constexpr const char* kRightToe = "\xE5\x8F\xB3\xE3\x81\xA4\xE3\x81\xBE\xE5\x85\x88";   // 右つま先
 constexpr const char* kLeftWrist = "\xE5\xB7\xA6\xE6\x89\x8B\xE9\xA6\x96";       // 左手首
 constexpr const char* kRightWrist = "\xE5\x8F\xB3\xE6\x89\x8B\xE9\xA6\x96";      // 右手首
+// Body colliders ("world.body" packs only): head, upper body, shoulders (arm fallback), lower body.
+constexpr const char* kHeadBone = "\xE9\xA0\xAD";                              // 頭
+constexpr const char* kUpperBody2 = "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB" "2";  // 上半身2
+constexpr const char* kUpperBody = "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB";       // 上半身
+constexpr const char* kLeftShoulder = "\xE5\xB7\xA6\xE8\x82\xA9";                // 左肩
+constexpr const char* kRightShoulder = "\xE5\x8F\xB3\xE8\x82\xA9";               // 右肩
+constexpr const char* kLeftArm = "\xE5\xB7\xA6\xE8\x85\x95";                     // 左腕
+constexpr const char* kRightArm = "\xE5\x8F\xB3\xE8\x85\x95";                    // 右腕
+constexpr const char* kLowerBody = "\xE4\xB8\x8B\xE5\x8D\x8A\xE8\xBA\xAB";       // 下半身
 
 struct BoneCollider {
     int bone = -1;
@@ -81,20 +91,42 @@ std::shared_ptr<const WorldColliderTrack> BuildColliderTrack(const std::vector<C
         }
         add(kLeftWrist, 0.4f, kColliderHand | kColliderLeft);
         add(kRightWrist, 0.4f, kColliderHand);
+        // Body colliders after the feet / hands, for packs that require "world.body" (PassWorld filters them out
+        // for the other packs, which keep the old list / order).
+        const auto addFirst = [&](std::initializer_list<const char*> names, float radius, uint32_t flags) {
+            for (const char* name : names) {
+                const int b = src.pmx->FindBone(name);
+                if (b >= 0) {
+                    cc.bones.push_back({b, radius, flags});
+                    return;
+                }
+            }
+        };
+        addFirst({kHeadBone}, 0.9f, kColliderBody);
+        addFirst({kUpperBody2, kUpperBody}, 1.2f, kColliderBody);
+        addFirst({kLeftShoulder, kLeftArm}, 0.7f, kColliderBody | kColliderLeft);
+        addFirst({kRightShoulder, kRightArm}, 0.7f, kColliderBody);
+        addFirst({kLowerBody}, 1.3f, kColliderBody);
         total += (uint32_t)cc.bones.size();
-        if (total > kWorldMaxColliders) break;
         characters.push_back(std::move(cc));
     }
+    // Over the limit: drop body colliders first (last character first), so the packs without "world.body" keep the
+    // feet / hands of as many characters as before; then trim the remaining colliders from the end.
+    for (auto it = characters.rbegin(); it != characters.rend() && total > kWorldMaxColliders; ++it) {
+        auto& bones = it->bones;
+        const size_t before = bones.size();
+        bones.erase(std::remove_if(bones.begin(), bones.end(),
+                                   [](const BoneCollider& b) { return (b.flags & kColliderBody) != 0; }),
+                    bones.end());
+        total -= (uint32_t)(before - bones.size());
+    }
     if (total > kWorldMaxColliders) {
-        total = kWorldMaxColliders;
         uint32_t kept = 0;
         for (CharacterColliders& cc : characters) {
-            if (kept + cc.bones.size() > total) {
-                cc.bones.resize(total - kept);
-            }
+            if (kept + cc.bones.size() > kWorldMaxColliders) cc.bones.resize(kWorldMaxColliders - kept);
             kept += (uint32_t)cc.bones.size();
-            if (kept >= total) break;
         }
+        total = kept;
     }
     track->perSample = total;
     track->version = version;

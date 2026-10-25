@@ -223,7 +223,8 @@ inline constexpr PackCapability kPackCapabilities[] = {
     {"passes.mips", 0}, {"params.ext", 0},
     // World packs (docs/shader_world_api.md): the camera, the performer anchor, the ground map, the overlay blend.
     // apiVersion 0: never implied by the version, the pack must declare them in "requires".
-    {"world.camera", 0}, {"world.anchor", 0}, {"world.ground", 0}, {"world.overlay", 0},
+    {"world.camera", 0}, {"world.anchor", 0}, {"world.ground", 0}, {"world.overlay", 0}, {"world.body", 0},
+    {"world.lights", 0},
 };
 
 enum class ShaderPackParamType : uint8_t {

@@ -2617,6 +2617,7 @@ void App::BuildFrameView(float frame, FrameView& view) {    view.frame = frame;
     // M8a: the MME scene clock = seconds since the song / motion start (paused = constant, seeks jump).
     view.sceneTime = (float)playTime_;
     view.sceneElapsed = lastRenderedTime_ < 0 ? 0.0f : (float)step;
+    view.timelinePlaying = playing_;
     lastRenderedTime_ = playTime_;
     // M8b: the song's video layers, with the video time = the song time (the background pass loops it).
     if (scene_) {

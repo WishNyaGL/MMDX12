@@ -27,7 +27,7 @@ struct WorldCollider {
     DirectX::XMFLOAT3 vel{0, 0, 0};   // units per second
     uint32_t flags = 0;               // WorldColliderFlags
 };
-enum WorldColliderFlags : uint32_t { kColliderFoot = 1u, kColliderHand = 2u, kColliderLeft = 4u };
+enum WorldColliderFlags : uint32_t { kColliderFoot = 1u, kColliderHand = 2u, kColliderLeft = 4u, kColliderBody = 8u };
 
 // Every character's colliders sampled at a fixed rate over the whole timeline (without physics: feet and hands are
 // driven by motion + IK), so any time can be evaluated without posing the live models.

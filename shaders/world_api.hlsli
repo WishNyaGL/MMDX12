@@ -97,6 +97,9 @@ cbuffer WorldCB : register(b1) {
     // Offline GI: the iteration's lens / shutter view-projection (gOfflineParams.x = 1 when set)
     float4x4 gOfflineViewProj;
     float4 gOfflineParams;
+    // The drawn particles: x: the interpolation factor a = 1 - (simTime - time) / stepDt, y: the frame delta
+    // (scene elapsed, 0 when paused), z: stepDt, w: the teleport bound (0.5 x the camera-space wrap size; 0 = none)
+    float4 gParticleParams;
 };
 
 // The clip position of a world point: the offline iteration's camera (DoF / motion blur) or the frame camera.
@@ -205,6 +208,57 @@ inline float3 PackHemiAmbient(float3 n) {
 
 // Forward declaration of PackSunShadow, implemented by host
 float PackSunShadow(float3 worldPos);
+
+// ---- the scene's direct lighting (PACK_CAP_WORLD_LIGHTS) ----------------------------------
+// A general light sample: L = the unit vector toward the light, radiance = colour x intensity x the light's
+// distance falloff x the spot cone x the light's visibility at that point (0 when the light does not reach).
+// Shadows come from the cascaded / spot / point maps in raster frames and from a ray query against the scene TLAS
+// in RT / PT / offline GI frames.
+#if defined(PACK_CAP_WORLD_LIGHTS) && PACK_CAP_WORLD_LIGHTS
+struct PackLightSample {
+    float3 L;
+    float3 radiance;
+};
+
+// The sun: radiance 0 when the scene has no sun. L is PackSunDir().
+PackLightSample PackSunLight(float3 posWorld);
+// The scene's punctual lights (spots / points), the same lights, falloff and shadows the stage floor and the world
+// surfaces use.
+uint PackPunctualCount();
+PackLightSample PackPunctualLight(uint i, float3 posWorld);
+
+// Lambert direct light (sun + punctual): radiance x saturate(dot(n, L)) per light, summed.
+inline float3 PackDirectDiffuse(float3 pos, float3 n) {
+    float3 sum = 0;
+    PackLightSample sun = PackSunLight(pos);
+    sum += sun.radiance * saturate(dot(n, sun.L));
+    uint count = PackPunctualCount();
+    for (uint i = 0; i < count; ++i) {
+        PackLightSample s = PackPunctualLight(i, pos);
+        sum += s.radiance * saturate(dot(n, s.L));
+    }
+    return sum;
+}
+
+// Two-sided thin-sheet direct light (leaves, paper, fabric, petals, snow flakes): the normal is first flipped to face
+// the viewer, then each light contributes its front Lambert term plus diffuse transmission of the light arriving from
+// behind: radiance x (saturate(dot(n, L)) + saturate(transmission) x saturate(dot(-n, L))). `transmission` is the
+// sheet's diffuse transmission (0 = opaque, 1 = as much behind-light as front-light); the per-light weight stays
+// within [0, 1], so the helper never amplifies a light. viewDir points from the surface toward the viewer.
+inline float3 PackDirectThin(float3 pos, float3 n, float3 viewDir, float3 transmission) {
+    if (dot(n, viewDir) < 0.0) n = -n;
+    float3 t = saturate(transmission);
+    float3 sum = 0;
+    PackLightSample sun = PackSunLight(pos);
+    sum += sun.radiance * (saturate(dot(n, sun.L)) + t * saturate(dot(-n, sun.L)));
+    uint count = PackPunctualCount();
+    for (uint i = 0; i < count; ++i) {
+        PackLightSample s = PackPunctualLight(i, pos);
+        sum += s.radiance * (saturate(dot(n, s.L)) + t * saturate(dot(-n, s.L)));
+    }
+    return sum;
+}
+#endif // PACK_CAP_WORLD_LIGHTS
 
 // Samplers
 SamplerState gPoint : register(s0);

@@ -2330,3 +2330,41 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 - Notes: the D: drive vanished mid-session; the repo is back on F: (build/ reconfigured, CLAUDE.md build line). Studio PT
   looks hazy on Base Stage (0007): the same in play mode (pre-existing). GI preview while playing restarts every frame (noisy).
 - Next: interactive GI preview by hand (navigation feel, UI stutter during the 6 prepass frames at large viewports).
+
+## 2026-10-24/25 - Effects on timeline time, world param refresh, world.body / world.lights, interpolated world particles
+- Report (4 points): (1) eye adaptation and (2) lens rain ran on the client frame (`gTime` = `temporalIndex_ / 60`, state dt =
+  wall-clock frame time): not deterministic, frozen in GI, running while the timeline was paused; (3) world param edits
+  (density, petal size) showed only after a seek; (4) sakura "petals settle on the character" did nothing + black dots.
+- Effect time (`PassEffect.cpp`, `effect_api.hlsli`): `gEffectTime` = `gP3.x` = the frame's scene / timeline seconds (not
+  `gTime`; `OfflineJobDesc::sceneTime` for the GI paths, studio GI viewport included). State stepping follows the timeline:
+  playing = one step of dt = `sceneElapsed`; the same time again = no step; paused / seek / cut = the still rule (reset +
+  64 steps of 1/60), so a paused frame is deterministic and camera edits show at once. `FrameView::timelinePlaying`.
+  Measured (rain_lens + eye_adaptation, same seek, paused, `--frames` 60 vs 150): 89,628 px differ before, 1,720 after (TAA tail).
+  The effect clock is continuous time, never the 30 fps VMD frame: 180 fps playback runs the effects every frame.
+- World param refresh (`PassWorld.cpp`): a hash of the instance params; a change on the SAME time as the last frame
+  (paused / repeated) re-simulates like a seek, a change while the time moves (keyed params) does not. (Review fix: the
+  worker compared with `simTime`, which runs up to one grid step ahead of the drawn time during playback.)
+- `world.body` capability: body colliders (head r 0.9, upper body 2 / upper body r 1.2, shoulder / arm r 0.7, lower body
+  r 1.3, `kColliderBody = 8`); packs without it see the old feet / hands list and order. Over the 64 limit the body
+  colliders are dropped first (review fix; the worker's truncation could also drop other characters' feet; head bone name was 頭部, is 頭).
+- `world.lights` capability (general, no pack-specific code): `PackSunLight`, `PackPunctualCount` / `PackPunctualLight`,
+  `PackDirectDiffuse`, `PackDirectThin` (two-sided thin sheet: front Lambert + diffuse transmission, never > 1 per light).
+  Shadows: cascade + spot / point maps in raster, one ray query per light (TLAS) in RT / PT / offline GI (second graphics
+  root signature + `ps_6_5` PSO variants, all-or-nothing fallback). Review fix: the RT spot / point rays follow mmd.hlsl
+  (only shadow-casting lights, characters only, sun ray 2000). Non-lights packs keep their root signature / PSOs.
+- World particles: simulation steps end on one global grid (k * `step` from 0, no partial steps); the vertex shader draws
+  `lerp(prevPos, pos, a)` (a = 1 - (simTime - time) / step), respawns / teleports / wrap jumps are not lerped, wrap applied
+  after the lerp, motion vectors from the same lerp at `time - sceneElapsed`. 60 Hz stairs at 120+ fps are gone (not seen
+  by eye: headless captures only). `WorldCbData` 416 -> 432 bytes.
+- sakura pack 1.2.0 (not in this repo: sibling repo `MMDX12_PackUpdates`, local only, with RELEASE_MEMO.md): black dots =
+  the billboard normal pointed away from the camera; landing = `SakuraBodyLanding` (+ `spawn_height` default 12 -> 24: at
+  <= 12 petals never reached the head); thin translucency (`thin_translucency`, `translucency_tint`, legacy `translucency`
+  scales it). Ship it with the next engine release (pack `requires` `world.body` + `world.lights`).
+- Workers: opencode deepseek-v4.1-flash-free#low did the engine specs (A, C, D: 13-40 min each) but timed out four times
+  on the visual sakura job; antigravity gemini-3.8-flash-high finished it in 21 min. Claude reviewed everything. Worker
+  claims that were wrong: "1,419 petal pixels on the head" (the capture showed only sky).
+- Verified: build, 0 [E], raster / RT / PT / offline GI captures of the pack, stick on/off A/B (body-shaped blobs), back
+  view with petals on hair / jacket / skirt, determinism A/B above. NOT verified: smoothness at 120+ fps by eye,
+  back-lit glow strength, sakura on dark concert lighting, PT / GI of the pack beyond the worker's captures.
+- Left for the user: look at the updated sakura and the engine-affected packs (eye_adaptation, rain_lens, rain, fireflies,
+  ground_mist, snow) in `build/` (installed there), then release together with more features (not released yet).

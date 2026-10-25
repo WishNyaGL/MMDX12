@@ -72,10 +72,20 @@ struct RtGeometry {
     float4 texMul, texAdd, sphereMul, sphereAdd, toonMul, toonAdd;   // material morph factors
 };
 
+// World packs (world.hlsl, world.lights) use a separate set of registers: space2 already holds the particle buffers
+// there, so the TLAS / geometry / bindless bindings live at t20 / t21 space0 and t0 space7 / space8. The helpers
+// below are identical.
+#if defined(RT_COMMON_ALT_SPACES)
+RaytracingAccelerationStructure gTlas : register(t20, space0);
+StructuredBuffer<RtGeometry> gGeometries : register(t21, space0);
+Texture2D gBindlessTex[] : register(t0, space7);
+ByteAddressBuffer gBindlessBuf[] : register(t0, space8);
+#else
 RaytracingAccelerationStructure gTlas : register(t0, space1);
 StructuredBuffer<RtGeometry> gGeometries : register(t1, space1);
 Texture2D gBindlessTex[] : register(t0, space2);
 ByteAddressBuffer gBindlessBuf[] : register(t0, space3);
+#endif
 SamplerState gRtWrap : register(s4);
 
 static const uint kRtVertexStride = 48;

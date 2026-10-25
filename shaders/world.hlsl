@@ -2,7 +2,19 @@
 // Compiled per world pack with MMDX_PACK pointing to the pack's world.hlsl.
 #include "common.hlsli"
 #include "shadow_common.hlsli"
+#ifdef RT_SHADOWS
+// The ray-query shadow path (world.lights in RT / PT / offline GI): the TLAS and its geometry table. The alternate
+// register set avoids the particle buffers in space2 (rt_common.hlsli RT_COMMON_ALT_SPACES).
+#define RT_COMMON_ALT_SPACES 1
+#include "rt_common.hlsli"
+#endif
 #include "world_api.hlsli"
+
+// The host's own light sample: the public PackLightSample exists only for packs that require world.lights.
+struct WorldLightSample {
+    float3 L;
+    float3 radiance;
+};
 
 Texture2DArray<float> gWorldShadowMap : register(t15, space0);
 SamplerComparisonState gWorldShadowCmp : register(s3);
@@ -18,38 +30,87 @@ StructuredBuffer<Light> gWorldLights : register(t16, space0);
 Texture2DArray<float> gWorldSpotShadowMap : register(t17, space0);
 Texture2DArray<float> gWorldPointShadowMap : register(t18, space0);
 
+static uint WorldPunctualCount() {
+    if ((gWorldLightFlags & 1u) == 0u) return 0u;
+    return min((uint)gNumLights, 16u);
+}
+
+// One scene punctual light at a world point (the general lighting API, docs/shader_world_api.md "world.lights"):
+// the light's direction, colour x intensity x falloff x cone x visibility. Visibility comes from the shared spot /
+// point shadow maps in raster frames, from a ray query against the scene TLAS in RT / PT / offline GI frames.
+// `biasNormal` is the receiver normal the shadow-map taps are offset along (the public sample has no normal and
+// uses up; the host surface lighting passes the shaded normal, so its frames stay exactly as before).
+static WorldLightSample WorldPunctualLight(uint i, float3 wp, float3 biasNormal) {
+    WorldLightSample s;
+    s.L = float3(0.0, 1.0, 0.0);
+    s.radiance = 0.0;
+    if ((gWorldLightFlags & 1u) == 0u) return s;
+    uint count = min((uint)gNumLights, 16u);
+    if (i >= count) return s;
+    Light l = gWorldLights[i];
+    if (l.affectDiffuse <= 0.0) return s;
+    float3 d = l.pos - wp;
+    float dist = length(d);
+    float3 ld = d / max(dist, 1e-4);
+    float atten = PunctualFalloff(dist, l.invRange, l.falloff);
+    if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
+    else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
+    if (atten <= 0.0) return s;
+    float rawVis = 1.0;
+#ifdef RT_SHADOWS
+    // A short ray toward the light, with the scene's rules (mmd.hlsl SpotShadowRt / PointShadowRt): only lights that
+    // cast shadows, occluded by characters only. The origin is biased a little toward the light.
+    if (l.shadowType >= 0.5)
+        rawVis = TraceShadowRayMasked(wp + ld * 0.02, ld, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+#else
+    if (l.cosOuter > -1.0) {
+        if (gWorldLightFlags & 2u) rawVis = SpotShadow(l, wp, biasNormal, dist, gWorldShadowCmp, gWorldSpotShadowMap);
+    } else {
+        if (gWorldLightFlags & 4u) rawVis = PointShadow(l, wp, biasNormal, dist, gWorldShadowCmp, gWorldPointShadowMap);
+    }
+#endif
+    s.L = ld;
+    s.radiance = l.color * ShadowTransmission(rawVis, l.shadowDensity, l.shadowColor) * atten;
+    return s;
+}
+
+#if defined(PACK_CAP_WORLD_LIGHTS) && PACK_CAP_WORLD_LIGHTS
+static PackLightSample PublishLight(WorldLightSample s) {
+    PackLightSample o;
+    o.L = s.L;
+    o.radiance = s.radiance;
+    return o;
+}
+
+PackLightSample PackPunctualLight(uint i, float3 wp) {
+    return PublishLight(WorldPunctualLight(i, wp, float3(0.0, 1.0, 0.0)));
+}
+
+uint PackPunctualCount() {
+    return WorldPunctualCount();
+}
+#endif
+
 // The scene's punctual lights on a world surface (diffuse only): the scene's PunctualDiffuse, with the
 // shared spot / point shadow-map visibility (hard or soft, like the scene).
 float3 WorldPunctualDiffuse(float3 wp, float3 n) {
-    if ((gWorldLightFlags & 1u) == 0u) return 0.0;
     float3 sum = 0;
-    uint count = min((uint)gNumLights, 16u);
+    uint count = WorldPunctualCount();
     for (uint i = 0; i < count; ++i) {
-        Light l = gWorldLights[i];
-        if (l.affectDiffuse <= 0.0) continue;
-        float3 d = l.pos - wp;
-        float dist = length(d);
-        float3 ld = d / max(dist, 1e-4);
-        float atten = PunctualFalloff(dist, l.invRange, l.falloff);
-        if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
-        else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
-        float rawVis = 1.0;
-        if (atten > 0.0) {
-            if (l.cosOuter > -1.0) {
-                if (gWorldLightFlags & 2u) rawVis = SpotShadow(l, wp, n, dist, gWorldShadowCmp, gWorldSpotShadowMap);
-            } else {
-                if (gWorldLightFlags & 4u) rawVis = PointShadow(l, wp, n, dist, gWorldShadowCmp, gWorldPointShadowMap);
-            }
-        }
-        float3 shadowTerm = ShadowTransmission(rawVis, l.shadowDensity, l.shadowColor);
-        sum += l.color * shadowTerm * atten * saturate(dot(n, ld));
+        WorldLightSample s = WorldPunctualLight(i, wp, n);
+        sum += s.radiance * saturate(dot(n, s.L));
     }
     return sum;
 }
 
-// Sun visibility from the scene's cascaded shadow map (raster camera views; 1 where no cascade covers the point,
-// e.g. ray-traced / path-traced frames, which do not render the map).
+// Sun visibility: the scene's cascaded shadow map in raster camera views; a ray query against the scene TLAS in
+// RT / PT / offline GI (where the cascade map is not rendered). 1 where no cascade covers the point.
 float PackSunShadow(float3 worldPos) {
+#ifdef RT_SHADOWS
+    if (gSunDir.w <= 0.5) return 1.0;
+    float3 L = gSunDir.xyz;
+    return TraceShadowRay(worldPos + L * 0.02, L, 2000.0);   // the scene's sun ray length (mmd.hlsl)
+#else
     if (gSunDir.w <= 0.5 || gCascadeSplits.w < 0.5) return 1.0;
     float viewZ = mul(float4(worldPos, 1.0), gView).z;
     if (viewZ > gCascadeSplits.z) return 1.0;
@@ -65,7 +126,19 @@ float PackSunShadow(float3 worldPos) {
             sum += gWorldShadowMap.SampleCmpLevelZero(gWorldShadowCmp, float3(uv + float2(x, y) * texel, c), p.z - 0.0004);
     float fade = saturate((gCascadeSplits.z - viewZ) / (gCascadeSplits.z * 0.15));
     return lerp(1.0, sum / 9.0, fade);
+#endif
 }
+
+#if defined(PACK_CAP_WORLD_LIGHTS) && PACK_CAP_WORLD_LIGHTS
+PackLightSample PackSunLight(float3 posWorld) {
+    PackLightSample s;
+    s.L = gSunDir.xyz;
+    s.radiance = 0.0;
+    if (gSunDir.w <= 0.5) return s;
+    s.radiance = PackSunColor() * PackSunShadow(posWorld);
+    return s;
+}
+#endif
 
 #if defined(WORLD_CLEAR)
 RWStructuredBuffer<PackParticle> gParticles : register(u0);
@@ -388,6 +461,17 @@ StructuredBuffer<PackParticle> gParticles : register(t0, space2);
 StructuredBuffer<float4> gPrevPos : register(t1, space2);
 #endif
 
+// The camera-space wrap: the particle is drawn in the box of size `size` around `cam` (the host moves the tile with
+// the camera). The interpolation happens in unwrapped space, then both drawn positions are wrapped, so a wrap never
+// leaves a streak across the tile edge.
+static float3 WorldWrapCamera(float3 p, float size, float3 cam) {
+    float3 w;
+    w.x = cam.x + (frac((p.x - cam.x) / size + 0.5) - 0.5) * size;
+    w.y = p.y;
+    w.z = cam.z + (frac((p.z - cam.z) / size + 0.5) - 0.5) * size;
+    return w;
+}
+
 struct ParticleVsOut {
     float4 posH : SV_Position;
     float2 uv : TEXCOORD0;
@@ -412,25 +496,37 @@ ParticleVsOut VSWorldParticle(uint vertexId : SV_VertexID) {
 
 #if defined(WORLD_STATELESS)
     PackParticle p = WORLD_SPAWN_FN(pId, gWorldTime.x);
-    float3 prevPos = p.pos - p.vel * gWorldTime.y;
+    float3 drawPos = p.pos;
+    float3 prevDrawPos = p.pos - p.vel * gWorldTime.y;
+    float drawSize = p.size;
 #else
     PackParticle p = gParticles[pId];
-    float3 prevPos = gPrevPos[pId].xyz;
+    // The simulation is fixed-step (step = the simulation rate): the drawn particle interpolates between the last two
+    // grid steps, a = 1 - (simTime - time) / stepDt in [0, 1]. A particle that respawned / teleported in the last step
+    // (a clear's zero prevPos, a wrap-sized jump, or a fresh age) is drawn at its new position. The previous frame's
+    // drawn position (motion vectors) is the same interpolation at time - frameDelta; where that lies before prevPos's
+    // step, prevPos is the previous drawn position.
+    float4 prev = gPrevPos[pId];
+    float a = saturate(gParticleParams.x);
+    float aPrev = 1.0 - (gWorldTime.z - (gWorldTime.x - gParticleParams.y)) / max(gWorldTime.y, 1e-6);
+    aPrev = aPrev > 1.0 ? 0.0 : saturate(aPrev);
+    bool snapped = p.age < gWorldTime.y ||
+                   (gParticleParams.w > 0.0 && length(p.pos - prev.xyz) > gParticleParams.w) ||
+                   (dot(prev.xyz, prev.xyz) < 1e-12 && dot(p.pos, p.pos) > 1e-12);
+    float3 drawPos = snapped ? p.pos : lerp(prev.xyz, p.pos, a);
+    float3 prevDrawPos = snapped ? p.pos : lerp(prev.xyz, p.pos, aPrev);
+    float drawSize = p.size;
+    if (!snapped && prev.w > 0.0) drawSize = lerp(prev.w, p.size, a);   // the size rides in prevPos.w
 #endif
 
 #if defined(PACK_CAP_WORLD_CAMERA) && PACK_CAP_WORLD_CAMERA
     // The camera-space wrap: the particle is drawn in the box of gWorldExtra.x world units around the camera (the
-    // pack keeps it in its own tile; the host moves the tile with the camera). The previous position is the wrapped
-    // one minus the frame's motion, so the wrap never leaves a velocity streak.
+    // pack keeps it in its own tile; the host moves the tile with the camera).
     if (gWorldExtra.x > 0.0 && gWorldExtra.y > 0.5) {
         float size = gWorldExtra.x;
         float3 cam = PackWrapCentre(size);   // the box ahead of the camera
-        float3 wrapped;
-        wrapped.x = cam.x + (frac((p.pos.x - cam.x) / size + 0.5) - 0.5) * size;
-        wrapped.y = p.pos.y;
-        wrapped.z = cam.z + (frac((p.pos.z - cam.z) / size + 0.5) - 0.5) * size;
-        prevPos = wrapped - (p.pos - prevPos);
-        p.pos = wrapped;
+        drawPos = WorldWrapCamera(drawPos, size, cam);
+        prevDrawPos = WorldWrapCamera(prevDrawPos, size, cam);
     }
 #endif
 
@@ -446,19 +542,19 @@ ParticleVsOut VSWorldParticle(uint vertexId : SV_VertexID) {
     float2 offset = cornerOffsets[corner];
     float3 camRight = gInvView[0].xyz;
     float3 camUp = gInvView[1].xyz;
-    float3 posWorld = p.pos + (camRight * offset.x + camUp * offset.y) * p.size;
+    float3 posWorld = drawPos + (camRight * offset.x + camUp * offset.y) * drawSize;
 
     o.uv = offset + 0.5;
     o.posWorld = posWorld;
     o.viewDir = normalize(gEyePos.xyz - posWorld);
     o.color = p.color;
     o.data = p.data;
-    o.size = p.size;
+    o.size = drawSize;
     o.age = p.age;
     o.posH = WorldClip(posWorld);
     o.curClip = mul(float4(posWorld, 1.0), gViewProjNoJitter);
 
-    float3 prevWorldPos = prevPos + (camRight * offset.x + camUp * offset.y) * p.size;
+    float3 prevWorldPos = prevDrawPos + (camRight * offset.x + camUp * offset.y) * drawSize;
     o.prevClip = mul(float4(prevWorldPos, 1.0), gPrevViewProjNoJitter);
     return o;
 }

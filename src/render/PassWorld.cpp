@@ -3,6 +3,7 @@
 // for world packs across raster, ray-traced, path-traced, and offline GI render paths.
 #include "render/Passes.h"
 #include "render/PassCommon.h"
+#include "render/RayTracing.h"
 #include "render/Renderer.h"
 #include "render/ShaderInterop.h"
 #include "render/ShaderPack.h"
@@ -12,6 +13,7 @@
 #include <directx/d3dx12.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -32,6 +34,32 @@ float ParticleWrap(const ShaderPack& pack, const PackWorldParticleSystem& p, con
         if (q.key == p.wrapParam) v = q.def;
     if (auto it = params.find(p.wrapParam); it != params.end()) v = it->second;
     return std::clamp(v * p.wrapScale, 1.0f, 4096.0f);
+}
+
+// A hash of the instance's pack id + evaluated parameters: a changed param set re-simulates a still / paused frame.
+uint64_t HashWorldParams(const WorldInstance& inst) {
+    uint64_t h = 14695981039346656037ull;
+    const auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    for (unsigned char c : inst.pack) mix(c);
+    for (const auto& kv : inst.params) {
+        for (unsigned char c : kv.first) mix(c);
+        uint32_t bits = 0;
+        std::memcpy(&bits, &kv.second, sizeof(bits));
+        mix(bits);
+    }
+    return h;
+}
+
+// The colliders a pack sees: body colliders (kColliderBody) only for packs that require "world.body", so the
+// existing packs keep their old collider list (count and order) unchanged.
+void SampleColliders(const WorldInstance& inst, const ShaderPack& pack, double t, std::vector<WorldCollider>& out) {
+    out.clear();
+    if (inst.colliders) inst.colliders->Sample(t, out);
+    if (!pack.HasCap("world.body")) {
+        out.erase(std::remove_if(out.begin(), out.end(),
+                                 [](const WorldCollider& c) { return (c.flags & kColliderBody) != 0; }),
+                  out.end());
+    }
 }
 
 struct GpuWorldColliderData {
@@ -73,8 +101,12 @@ struct WorldCbData {
     // world surfaces / particles take the renderer's DoF and motion blur; offlineParams.x = 1 when set.
     XMFLOAT4X4 offlineViewProj;
     XMFLOAT4 offlineParams;
+    // Drawn particles (the fixed-step simulation is interpolated): x: the interpolation factor a = 1 - (simTime -
+    // time) / stepDt, y: the frame delta (sceneElapsed, 0 when paused), z: stepDt, w: the teleport bound (0.5 x the
+    // camera-space wrap size; 0 = no bound).
+    XMFLOAT4 particleParams;
 };
-static_assert(sizeof(WorldCbData) == 416);   // matches WorldCB in world_api.hlsli
+static_assert(sizeof(WorldCbData) == 432);   // matches WorldCB in world_api.hlsli
 
 // The ground height map: a top-down orthographic depth render of the stage / prop models.
 inline constexpr uint32_t kWorldGroundMapSize = 2048;
@@ -126,6 +158,9 @@ struct WorldPass::Impl {
     ComPtr<ID3D12RootSignature> particleComputeRootSig;
     ComPtr<ID3D12RootSignature> fieldComputeRootSig;
     ComPtr<ID3D12RootSignature> graphicsRootSig;
+    // world.lights packs: the same signature plus the ray-query bindings (TLAS, geometry table, bindless heap, s4).
+    // Non-lights packs keep graphicsRootSig, so their PSOs are exactly as before.
+    ComPtr<ID3D12RootSignature> graphicsRootSigLights;
 
     // Default descriptors / fallbacks
     Texture defaultWhiteTex;
@@ -159,6 +194,8 @@ struct WorldPass::Impl {
     struct PackPipelines {
         std::string packId;
         uint32_t generation = 0;
+        // world.lights: both the raster and the ray-query (RT / PT / offline GI) draw PSOs compiled for this pack.
+        bool rtReady = false;
 
         ComPtr<ID3D12PipelineState> psoClear;
         struct ParticlePso {
@@ -167,6 +204,10 @@ struct WorldPass::Impl {
             ComPtr<ID3D12PipelineState> psoDraw;
             ComPtr<ID3D12PipelineState> psoDrawPost;
             ComPtr<ID3D12PipelineState> psoDrawOffline;
+            // world.lights in RT / PT / offline GI: the same draws with the ray-query shadow path (ps_6_5).
+            ComPtr<ID3D12PipelineState> psoDrawRt;
+            ComPtr<ID3D12PipelineState> psoDrawPostRt;
+            ComPtr<ID3D12PipelineState> psoDrawOfflineRt;
         };
         std::vector<ParticlePso> particles;
 
@@ -180,6 +221,10 @@ struct WorldPass::Impl {
             ComPtr<ID3D12PipelineState> psoDrawOffline;
             ComPtr<ID3D12PipelineState> psoDrawOverlay;         // "blend": "overlay"
             ComPtr<ID3D12PipelineState> psoDrawOfflineOverlay;
+            ComPtr<ID3D12PipelineState> psoDrawRt;               // world.lights: ray-query shadow path
+            ComPtr<ID3D12PipelineState> psoDrawOfflineRt;
+            ComPtr<ID3D12PipelineState> psoDrawRtOverlay;
+            ComPtr<ID3D12PipelineState> psoDrawOfflineRtOverlay;
         };
         std::vector<SurfacePso> surfaces;
     };
@@ -190,7 +235,10 @@ struct WorldPass::Impl {
         uint32_t uid = 0;
         std::string packId;
         uint64_t colliderVersion = 0;
-        double simTime = 0.0;
+        uint64_t paramsHash = 0;   // pack id + evaluated params: a change re-simulates a paused / still frame
+        double simTime = 0.0;      // always a grid point: simStep * stepDt
+        uint64_t simStep = 0;      // the global grid step (from timeline 0) simTime stands at
+        double lastTime = -1.0;    // the previous frame's target time (a param change on the same time re-simulates)
         bool initialized = false;
         // The field's anchor (world.anchor): the mean xz of the foot colliders over the whole collider track, in the
         // entity's local space. Constant for the instance, so the re-simulation stays deterministic.
@@ -396,7 +444,7 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
             return false;
     }
 
-    // 3. Graphics Root Signature
+    // 3. Graphics Root Signatures: the common one, and (world.lights) one with the ray-query bindings.
     {
         CD3DX12_DESCRIPTOR_RANGE shadowRange;
         shadowRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 15, 0); // t15 space0 ShadowMap
@@ -412,35 +460,60 @@ bool WorldPass::Impl::Init(Dx12Context& ctx, const std::filesystem::path& dir, u
         CD3DX12_DESCRIPTOR_RANGE pointShadowRange;
         pointShadowRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 18, 0); // t18 space0 PointShadowMap
 
-        CD3DX12_ROOT_PARAMETER p[15];
-        p[0].InitAsConstantBufferView(0);                 // b0 SceneConstants
-        p[1].InitAsConstantBufferView(1);                 // b1 WorldCB
-        p[2].InitAsConstantBufferView(4);                 // b4 PackParamsExt
-        p[3].InitAsShaderResourceView(10, 0);             // t10 space0 Colliders
-        p[4].InitAsDescriptorTable(1, &fieldRange);       // t0..t3 space4 Fields
-        p[5].InitAsDescriptorTable(1, &packTexRange);     // t0..t31 space5 PackTex
-        p[6].InitAsShaderResourceView(0, 2);              // t0 space2 gParticles
-        p[7].InitAsShaderResourceView(1, 2);              // t1 space2 gPrevPos
-        p[8].InitAsDescriptorTable(1, &shadowRange);      // t15 space0 ShadowMap
-        p[9].InitAsDescriptorTable(1, &sceneDepthRange);  // t0 space6 SceneDepth
-        p[10].InitAsShaderResourceView(16, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // t16 space0 Lights
-        p[11].InitAsDescriptorTable(1, &spotShadowRange, D3D12_SHADER_VISIBILITY_PIXEL);   // t17 space0
-        p[12].InitAsDescriptorTable(1, &pointShadowRange, D3D12_SHADER_VISIBILITY_PIXEL); // t18 space0
-        p[13].InitAsConstants(1, 5, 0, D3D12_SHADER_VISIBILITY_PIXEL); // b5 world light flags
-        p[14].InitAsDescriptorTable(1, &groundRange);     // t19 space0 GroundMap
+        // world.lights ray-query path: the TLAS, its geometry table, the bindless heap segments (the world registers
+        // of rt_common.hlsli RT_COMMON_ALT_SPACES: t20 / t21 space0, t0 space7 / space8).
+        CD3DX12_DESCRIPTOR_RANGE texAll, bufAll;
+        texAll.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 7, 0);
+        bufAll.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 8, 0);
 
-        CD3DX12_ROOT_SIGNATURE_DESC rs;
-        rs.Init(15, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
-        ComPtr<ID3DBlob> blob, err;
-        if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
-            LOG_ERROR("WorldPass: failed to serialize graphicsRootSig: %s",
-                      err ? (const char*)err->GetBufferPointer() : "unknown");
-            return false;
-        }
-        if (!CheckHr(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                                 IID_PPV_ARGS(&graphicsRootSig)),
-                     "WorldPass: CreateRootSignature graphics"))
-            return false;
+        auto createGraphicsRootSig = [&](bool lights, ComPtr<ID3D12RootSignature>& out) -> bool {
+            CD3DX12_ROOT_PARAMETER p[19];
+            p[0].InitAsConstantBufferView(0);                 // b0 SceneConstants
+            p[1].InitAsConstantBufferView(1);                 // b1 WorldCB
+            p[2].InitAsConstantBufferView(4);                 // b4 PackParamsExt
+            p[3].InitAsShaderResourceView(10, 0);             // t10 space0 Colliders
+            p[4].InitAsDescriptorTable(1, &fieldRange);       // t0..t3 space4 Fields
+            p[5].InitAsDescriptorTable(1, &packTexRange);     // t0..t31 space5 PackTex
+            p[6].InitAsShaderResourceView(0, 2);              // t0 space2 gParticles
+            p[7].InitAsShaderResourceView(1, 2);              // t1 space2 gPrevPos
+            p[8].InitAsDescriptorTable(1, &shadowRange);      // t15 space0 ShadowMap
+            p[9].InitAsDescriptorTable(1, &sceneDepthRange);  // t0 space6 SceneDepth
+            p[10].InitAsShaderResourceView(16, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // t16 space0 Lights
+            p[11].InitAsDescriptorTable(1, &spotShadowRange, D3D12_SHADER_VISIBILITY_PIXEL);   // t17 space0
+            p[12].InitAsDescriptorTable(1, &pointShadowRange, D3D12_SHADER_VISIBILITY_PIXEL); // t18 space0
+            p[13].InitAsConstants(1, 5, 0, D3D12_SHADER_VISIBILITY_PIXEL); // b5 world light flags
+            p[14].InitAsDescriptorTable(1, &groundRange);     // t19 space0 GroundMap
+            if (lights) {
+                p[15].InitAsShaderResourceView(20, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // t20 space0 TLAS
+                p[16].InitAsShaderResourceView(21, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // t21 space0 RtGeometry[]
+                p[17].InitAsDescriptorTable(1, &texAll, D3D12_SHADER_VISIBILITY_PIXEL);   // t0 space7
+                p[18].InitAsDescriptorTable(1, &bufAll, D3D12_SHADER_VISIBILITY_PIXEL);   // t0 space8
+            }
+
+            CD3DX12_STATIC_SAMPLER_DESC rsSamplers[5];
+            for (int i = 0; i < 4; ++i) rsSamplers[i] = samplers[i];
+            if (lights) {
+                // rt_common.hlsli's gRtWrap (bindless texture sampling in the shadow ray's alpha test).
+                rsSamplers[4].Init(4, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                                   D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP, 0, 16,
+                                   D3D12_COMPARISON_FUNC_NEVER, D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK, 0.0f,
+                                   D3D12_FLOAT32_MAX, D3D12_SHADER_VISIBILITY_PIXEL);
+            }
+
+            CD3DX12_ROOT_SIGNATURE_DESC rs;
+            rs.Init(lights ? 19 : 15, p, lights ? 5 : 4, rsSamplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+            ComPtr<ID3DBlob> blob, err;
+            if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
+                LOG_ERROR("WorldPass: failed to serialize the graphics root signature: %s",
+                          err ? (const char*)err->GetBufferPointer() : "unknown");
+                return false;
+            }
+            return CheckHr(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                       IID_PPV_ARGS(&out)),
+                           "WorldPass: CreateRootSignature graphics");
+        };
+        if (!createGraphicsRootSig(false, graphicsRootSig)) return false;
+        if (!createGraphicsRootSig(true, graphicsRootSigLights)) return false;
     }
 
     // 4. The ground map's pipeline: the shadow pass's VS (mmd.hlsl's VSShadow, with the skinning) drawn with an
@@ -852,6 +925,11 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
     if (pack.HasCap("world.anchor")) baseDefines.push_back({"PACK_CAP_WORLD_ANCHOR", "1"});
     if (pack.HasCap("world.ground")) baseDefines.push_back({"PACK_CAP_WORLD_GROUND", "1"});
     if (pack.HasCap("world.overlay")) baseDefines.push_back({"PACK_CAP_WORLD_OVERLAY", "1"});
+    if (pack.HasCap("world.body")) baseDefines.push_back({"PACK_CAP_WORLD_BODY", "1"});
+    const bool worldLights = pack.HasCap("world.lights");
+    if (worldLights) baseDefines.push_back({"PACK_CAP_WORLD_LIGHTS", "1"});
+    // The ray-query shadow path (RT / PT / offline GI): the same PSOs with the ps_6_5 variant, only for lights packs.
+    const bool lightsRt = worldLights && RtPipelinesSupported(ctx);
 
     // 1. CSWorldClear
     {
@@ -919,6 +997,16 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
             ShaderDefines dPost = d;
             if (p.blend == PackWorldParticleSystem::Blend::Add) dPost.push_back({"WORLD_PARTICLE_ADD", "1"});
             ComPtr<ID3DBlob> psPost = CompileShaderDxc(hostShader, "PSWorldParticlePost", "ps_6_0", dPost, &err);
+            ComPtr<ID3DBlob> vsRt, psRt, psPostRt;
+            if (lightsRt) {
+                ShaderDefines dRt = d;
+                dRt.push_back({"RT_SHADOWS", "1"});
+                ShaderDefines dPostRt = dPost;
+                dPostRt.push_back({"RT_SHADOWS", "1"});
+                vsRt = CompileShaderDxc(hostShader, "VSWorldParticle", "vs_6_5", dRt, &err);
+                psRt = CompileShaderDxc(hostShader, "PSWorldParticle", "ps_6_5", dRt, &err);
+                psPostRt = CompileShaderDxc(hostShader, "PSWorldParticlePost", "ps_6_5", dPostRt, &err);
+            }
             if (vs && ps) {
                 D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
                 pso.pRootSignature = graphicsRootSig.Get();
@@ -964,8 +1052,11 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                 pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
                 pso.SampleDesc.Count = msaa;
                 CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pPipe.psoDraw)), "WorldPass: pPipe.psoDraw");
+                const D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDrawDesc = pso;
 
                 // Post-composite variant (1 RTV = lit, no MSAA, no depth target; depth comes from the depth SRV)
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC psoPostDesc{};
+                bool havePostDesc = false;
                 if (psPost) {
                     pso.PS = {psPost->GetBufferPointer(), psPost->GetBufferSize()};
                     pso.NumRenderTargets = 1;
@@ -978,6 +1069,8 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                     pso.BlendState.RenderTarget[0] = rtBlend;
                     CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pPipe.psoDrawPost)),
                             "WorldPass: pPipe.psoDrawPost");
+                    psoPostDesc = pso;
+                    havePostDesc = true;
                     pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
                     pso.DepthStencilState.DepthEnable = TRUE;
                 } else {
@@ -993,6 +1086,30 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                 pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
                 pso.SampleDesc.Count = 4;
                 CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pPipe.psoDrawOffline)), "WorldPass: pPipe.psoDrawOffline");
+
+                // world.lights: the ray-query shadow variants (RT / PT / offline GI), same descriptors.
+                if (vsRt && psRt) {
+                    D3D12_GRAPHICS_PIPELINE_STATE_DESC rtDesc = psoDrawDesc;
+                    rtDesc.pRootSignature = graphicsRootSigLights.Get();
+                    rtDesc.VS = {vsRt->GetBufferPointer(), vsRt->GetBufferSize()};
+                    rtDesc.PS = {psRt->GetBufferPointer(), psRt->GetBufferSize()};
+                    CheckHr(device->CreateGraphicsPipelineState(&rtDesc, IID_PPV_ARGS(&pPipe.psoDrawRt)),
+                            "WorldPass: pPipe.psoDrawRt");
+                    if (havePostDesc && psPostRt) {
+                        D3D12_GRAPHICS_PIPELINE_STATE_DESC rtPost = psoPostDesc;
+                        rtPost.pRootSignature = graphicsRootSigLights.Get();
+                        rtPost.VS = rtDesc.VS;
+                        rtPost.PS = {psPostRt->GetBufferPointer(), psPostRt->GetBufferSize()};
+                        CheckHr(device->CreateGraphicsPipelineState(&rtPost, IID_PPV_ARGS(&pPipe.psoDrawPostRt)),
+                                "WorldPass: pPipe.psoDrawPostRt");
+                    }
+                    D3D12_GRAPHICS_PIPELINE_STATE_DESC rtOff = pso;
+                    rtOff.pRootSignature = graphicsRootSigLights.Get();
+                    rtOff.VS = rtDesc.VS;
+                    rtOff.PS = rtDesc.PS;
+                    CheckHr(device->CreateGraphicsPipelineState(&rtOff, IID_PPV_ARGS(&pPipe.psoDrawOfflineRt)),
+                            "WorldPass: pPipe.psoDrawOfflineRt");
+                }
             } else {
                 LOG_ERROR("WorldPack '%s' particle '%s': Draw PSO failed: %s",
                           pack.id.c_str(), p.name.c_str(), err.c_str());
@@ -1038,6 +1155,13 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
             std::string err;
             ComPtr<ID3DBlob> vs = CompileShaderDxc(hostShader, "VSWorldSurface", "vs_6_0", d, &err);
             ComPtr<ID3DBlob> ps = CompileShaderDxc(hostShader, "PSWorldSurface", "ps_6_0", d, &err);
+            ComPtr<ID3DBlob> vsRt, psRt;
+            if (lightsRt) {
+                ShaderDefines dRt = d;
+                dRt.push_back({"RT_SHADOWS", "1"});
+                vsRt = CompileShaderDxc(hostShader, "VSWorldSurface", "vs_6_5", dRt, &err);
+                psRt = CompileShaderDxc(hostShader, "PSWorldSurface", "ps_6_5", dRt, &err);
+            }
             if (vs && ps) {
                 D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
                 pso.pRootSignature = graphicsRootSig.Get();
@@ -1059,6 +1183,9 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                 pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
                 pso.SampleDesc.Count = msaa;
                 CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDraw)), "WorldPass: sPipe.psoDraw");
+                const D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDrawDesc = pso;
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDrawOverlayDesc{};
+                bool haveOverlayDesc = false;
 
                 if (overlay) {
                     // The overlay blend: the premultiplied colour over the already-lit scene colour (the destination
@@ -1082,6 +1209,8 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                     pso.RasterizerState.SlopeScaledDepthBias = -2.0f;   // standard Z: negative = towards the camera
                     CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDrawOverlay)),
                             "WorldPass: sPipe.psoDrawOverlay");
+                    psoDrawOverlayDesc = pso;
+                    haveOverlayDesc = true;
                     pso.RasterizerState.SlopeScaledDepthBias = 0.0f;
                     pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
                     pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
@@ -1094,6 +1223,9 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                 pso.RTVFormats[2] = DXGI_FORMAT_UNKNOWN;
                 pso.SampleDesc.Count = 4;
                 CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDrawOffline)), "WorldPass: sPipe.psoDrawOffline");
+                const D3D12_GRAPHICS_PIPELINE_STATE_DESC psoOfflineDesc = pso;
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC psoOfflineOverlayDesc{};
+                bool haveOfflineOverlayDesc = false;
                 if (overlay) {
                     pso.BlendState.IndependentBlendEnable = TRUE;   // RT1 / RT2 keep the stage's normal / velocity
                     pso.BlendState.RenderTarget[0].BlendEnable = TRUE;
@@ -1108,9 +1240,59 @@ WorldPass::Impl::PackPipelines* WorldPass::Impl::GetOrCompilePipelines(Dx12Conte
                     pso.RasterizerState.SlopeScaledDepthBias = -2.0f;   // standard Z: negative = towards the camera
                     CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&sPipe.psoDrawOfflineOverlay)),
                             "WorldPass: sPipe.psoDrawOfflineOverlay");
+                    psoOfflineOverlayDesc = pso;
+                    haveOfflineOverlayDesc = true;
+                }
+
+                // world.lights: the ray-query shadow variants (RT / PT / offline GI), same descriptors.
+                if (vsRt && psRt) {
+                    auto makeRt = [&](const D3D12_GRAPHICS_PIPELINE_STATE_DESC& base,
+                                      ComPtr<ID3D12PipelineState>& out, const char* what) {
+                        D3D12_GRAPHICS_PIPELINE_STATE_DESC rt = base;
+                        rt.pRootSignature = graphicsRootSigLights.Get();
+                        rt.VS = {vsRt->GetBufferPointer(), vsRt->GetBufferSize()};
+                        rt.PS = {psRt->GetBufferPointer(), psRt->GetBufferSize()};
+                        CheckHr(device->CreateGraphicsPipelineState(&rt, IID_PPV_ARGS(&out)), what);
+                    };
+                    makeRt(psoDrawDesc, sPipe.psoDrawRt, "WorldPass: sPipe.psoDrawRt");
+                    makeRt(psoOfflineDesc, sPipe.psoDrawOfflineRt, "WorldPass: sPipe.psoDrawOfflineRt");
+                    if (haveOverlayDesc)
+                        makeRt(psoDrawOverlayDesc, sPipe.psoDrawRtOverlay, "WorldPass: sPipe.psoDrawRtOverlay");
+                    if (haveOfflineOverlayDesc)
+                        makeRt(psoOfflineOverlayDesc, sPipe.psoDrawOfflineRtOverlay,
+                               "WorldPass: sPipe.psoDrawOfflineRtOverlay");
                 }
             } else {
                 LOG_ERROR("WorldPack '%s' surface: Draw PSO failed: %s", pack.id.c_str(), err.c_str());
+            }
+        }
+    }
+
+    // world.lights: the ray-query variants are all-or-nothing. A failed compile falls back to the raster variants
+    // (and the common root signature) for every draw of this pack.
+    if (lightsRt) {
+        bool ok = graphicsRootSigLights != nullptr;
+        for (const auto& pp : pipes.particles) {
+            ok = ok && pp.psoDrawRt && pp.psoDrawOfflineRt;
+            if (pp.psoDrawPost) ok = ok && pp.psoDrawPostRt;
+        }
+        for (const auto& sp : pipes.surfaces) {
+            ok = ok && sp.psoDrawRt && sp.psoDrawOfflineRt;
+            if (sp.psoDrawOverlay) ok = ok && sp.psoDrawRtOverlay;
+            if (sp.psoDrawOfflineOverlay) ok = ok && sp.psoDrawOfflineRtOverlay;
+        }
+        pipes.rtReady = ok;
+        if (!ok) {
+            for (auto& pp : pipes.particles) {
+                pp.psoDrawRt.Reset();
+                pp.psoDrawPostRt.Reset();
+                pp.psoDrawOfflineRt.Reset();
+            }
+            for (auto& sp : pipes.surfaces) {
+                sp.psoDrawRt.Reset();
+                sp.psoDrawOfflineRt.Reset();
+                sp.psoDrawRtOverlay.Reset();
+                sp.psoDrawOfflineRtOverlay.Reset();
             }
         }
     }
@@ -1206,9 +1388,19 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
     const uint64_t curColliderVer = inst.colliders ? inst.colliders->version : 0;
 
     bool needResim = !state.initialized || (state.colliderVersion != curColliderVer);
+    // A parameter edit (density, petal size ...) shows at once on a paused / repeated frame (the same time as the last
+    // one); while the time moves (playback, video frames) a change (keyed params) does not force a re-simulation.
+    // simTime cannot tell: it runs up to one grid step ahead of the drawn time during playback too.
+    const uint64_t curParamsHash = HashWorldParams(inst);
+    if (state.paramsHash != curParamsHash) {
+        state.paramsHash = curParamsHash;
+        if (state.initialized && std::fabs(inst.time - state.lastTime) < 1e-9) needResim = true;
+    }
+    state.lastTime = inst.time;
     if (!needResim) {
-        if (inst.exact && inst.time < state.simTime) needResim = true;
-        else if (inst.time < state.simTime) needResim = true;
+        // The drawn time may lie up to one step before simTime (the interpolation between the last two grid steps);
+        // older than prevPos's step needs the history of a re-simulation.
+        if (inst.time < state.simTime - (double)stepDt - 1e-6) needResim = true;
         else if (inst.time - state.simTime > 0.25) needResim = true;
     }
 
@@ -1284,7 +1476,7 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
         auto& fTex = state.fields[fi];
         const double pDt = 1.0 / fTex.rate;
         const double t = (double)k * pDt;
-        if (inst.colliders) inst.colliders->Sample(t, sampledColliders);
+        if (inst.colliders) SampleColliders(inst, pack, t, sampledColliders);
         else sampledColliders.clear();
         const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
         wrapSize = 0.0f;   // a field step never runs in camera space
@@ -1363,18 +1555,28 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
             }
         }
 
-        // 3. Re-simulate particles + transient fields over rewind window
+        // 3. Re-simulate particles + transient fields over the rewind window, on the global step grid: every step ends
+        // at k * stepDt (k from timeline 0), from the grid point at or before inst.time - rewind to the first grid
+        // point at or after inst.time (no partial steps).
+        const double stepD = (double)stepDt;
         const double tStart = std::max(0.0, inst.time - (double)rewindSec);
-        uint32_t steps = (uint32_t)std::ceil((inst.time - tStart) / (double)stepDt);
-        if (!pc.offscreen && steps > 4000) steps = 4000;
+        uint64_t kStart = (uint64_t)std::floor(tStart / stepD + 1e-9);
+        const uint64_t kEnd = (uint64_t)std::ceil(inst.time / stepD - 1e-9);
+        uint32_t steps = kEnd > kStart ? (uint32_t)(kEnd - kStart) : 0u;
+        if (!pc.offscreen && steps > 4000) {   // keep the part of the window closest to the drawn time
+            steps = 4000;
+            kStart = kEnd - steps;
+        }
 
         LOG_INFO("WORLD resim uid=%u pack='%s': %u steps (%.2f s -> %.2f s)",
-                 inst.uid, pack.id.c_str(), steps, (float)tStart, (float)inst.time);
+                 inst.uid, pack.id.c_str(), steps, (float)((double)kStart * stepD), (float)((double)kEnd * stepD));
 
-        double tCur = tStart;
+        uint64_t kCur = kStart;
         for (uint32_t s = 0; s < steps; ++s) {
-            const double tNext = std::min(tStart + (double)(s + 1) * (double)stepDt, inst.time);
-            if (inst.colliders) inst.colliders->Sample(tNext, sampledColliders);
+            const double tCur = (double)kCur * stepD;
+            const double tNext = (double)(kCur + 1) * stepD;
+            ++kCur;
+            if (inst.colliders) SampleColliders(inst, pack, tNext, sampledColliders);
             const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
 
             // Step transient fields
@@ -1446,14 +1648,16 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
                 };
                 cmd->ResourceBarrier(2, b);
             }
-            tCur = tNext;
         }
-        state.simTime = inst.time;
+        state.simStep = kEnd;
+        state.simTime = (double)kEnd * stepD;
     } else {
-        // Normal live playback forward steps
-        while (state.simTime + (double)stepDt * 0.5 < inst.time) {
-            const double tNext = std::min(state.simTime + (double)stepDt, inst.time);
-            if (inst.colliders) inst.colliders->Sample(tNext, sampledColliders);
+        // Normal live playback forward steps, on the global grid: each step ends at gridStep * stepDt and the loop
+        // stops at the first grid point >= inst.time (simTime is always a grid point).
+        while (state.simTime < inst.time - 1e-9) {
+            const double tCur = state.simTime;
+            const double tNext = (double)(state.simStep + 1) * (double)stepDt;
+            if (inst.colliders) SampleColliders(inst, pack, tNext, sampledColliders);
             const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
 
             // Step transient fields (persistent ones follow their own grid below)
@@ -1470,7 +1674,7 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
 
                 wrapSize = 0.0f;   // a field step never runs in camera space
                 cameraSpace = 0.0f;
-                const auto cb = makeWorldCb((float)tNext, stepDt, (float)state.simTime, 0,
+                const auto cb = makeWorldCb((float)tNext, stepDt, (float)tCur, 0,
                                             (uint32_t)sampledColliders.size(), (uint32_t)state.fields.size(),
                                             (uint32_t)fi, fTex.size);
                 const D3D12_GPU_VIRTUAL_ADDRESS cbVa = AllocWorldCb(cb);
@@ -1506,7 +1710,7 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
                 cmd->SetComputeRootDescriptorTable(5, packTexTable);
                 cmd->SetComputeRootDescriptorTable(8, GroundTable(ctx));
 
-                const auto cb = makeWorldCb((float)tNext, stepDt, (float)state.simTime, 0,
+                const auto cb = makeWorldCb((float)tNext, stepDt, (float)tCur, 0,
                                             (uint32_t)sampledColliders.size(), (uint32_t)state.fields.size(),
                                             (uint32_t)pi, pBuf.count);
                 const D3D12_GPU_VIRTUAL_ADDRESS cbVa = AllocWorldCb(cb);
@@ -1527,6 +1731,7 @@ void WorldPass::Impl::SimulateInstance(PassContext& pc, const WorldInstance& ins
                 };
                 cmd->ResourceBarrier(2, b);
             }
+            state.simStep += 1;
             state.simTime = tNext;
         }
         for (size_t fi = 0; fi < state.fields.size(); ++fi) {
@@ -1546,7 +1751,11 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     Dx12Context& ctx = pc.ctx;
 
-    cmd->SetGraphicsRootSignature(graphicsRootSig.Get());
+    // world.lights: in RT / PT / offline GI (a TLAS for this frame) the pack's ray-query PSOs trace the scene's sun
+    // and punctual shadows. Without a TLAS (raster) the raster PSOs use the shadow maps, exactly as before.
+    const bool worldLights = pack.HasCap("world.lights");
+    const bool useRt = worldLights && pipes.rtReady && pc.rt != nullptr;
+    cmd->SetGraphicsRootSignature(useRt ? graphicsRootSigLights.Get() : graphicsRootSig.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     const D3D12_GPU_VIRTUAL_ADDRESS paramsExtVa = AllocParamsExt(pack, inst.params);
@@ -1584,10 +1793,14 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
     if (pc.targets.pointShadowMap.res) lightFlags |= 4u;  // the point shadow map is bound
 
     std::vector<WorldCollider> sampledColliders;
-    if (inst.colliders) inst.colliders->Sample(inst.time, sampledColliders);
+    if (inst.colliders) SampleColliders(inst, pack, inst.time, sampledColliders);
     const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
 
     const float stepDt = pack.world->step > 0.0f ? pack.world->step : (1.0f / 60.0f);
+    // The drawn state is interpolated between the last two grid steps (docs/shader_world_api.md): a = 1 - (simTime -
+    // time) / stepDt; the motion vectors use the same rule at time - frameDelta (sceneElapsed, 0 when paused).
+    const float interpA = (float)std::clamp(1.0 - (state.simTime - (double)inst.time) / (double)stepDt, 0.0, 1.0);
+    const float frameDelta = pc.view.sceneElapsed > 0.0f ? pc.view.sceneElapsed : 0.0f;
 
     // The field's anchor (world.anchor) and the current draw's wrap / surface parameters.
     UpdateAnchor(inst, state);
@@ -1608,6 +1821,7 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
         cb.groundMap = groundMapParams;
         cb.groundRect = groundRectParams;
         cb.surfaceParams = surfaceParams;
+        cb.particleParams = XMFLOAT4(interpA, frameDelta, stepDt, wrapSize > 0.0f ? 0.5f * wrapSize : 0.0f);
         if (offline && offlineVpSet) {
             cb.offlineViewProj = offlineVp;
             cb.offlineParams = XMFLOAT4(1.0f, 0.0f, 0.0f, 0.0f);
@@ -1651,6 +1865,14 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
     cmd->SetGraphicsRoot32BitConstant(13, lightFlags, 0);
     // The ground map (t19 space0): the depth map, or the 1x1 fallback when there is none.
     cmd->SetGraphicsRootDescriptorTable(14, GroundTable(ctx));
+    if (useRt) {
+        // The ray-query bindings of graphicsRootSigLights (rt_common.hlsli): TLAS, geometry table, bindless heap.
+        cmd->SetGraphicsRootShaderResourceView(15, pc.rt->Tlas());
+        cmd->SetGraphicsRootShaderResourceView(16, pc.rt->Geometries());
+        const D3D12_GPU_DESCRIPTOR_HANDLE heapBase = ctx.SrvHeap().Gpu(0);
+        cmd->SetGraphicsRootDescriptorTable(17, heapBase);
+        cmd->SetGraphicsRootDescriptorTable(18, heapBase);
+    }
 
     // 1. Draw Surfaces (opaque, depth write)
     for (size_t si = 0; si < pack.world->surfaces.size(); ++si) {
@@ -1662,6 +1884,14 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
             pso = offline ? sPipe.psoDrawOfflineOverlay.Get() : sPipe.psoDrawOverlay.Get();
         else
             pso = offline ? sPipe.psoDrawOffline.Get() : sPipe.psoDraw.Get();
+        if (useRt) {
+            ID3D12PipelineState* rtPso = nullptr;
+            if (overlay)
+                rtPso = offline ? sPipe.psoDrawOfflineRtOverlay.Get() : sPipe.psoDrawRtOverlay.Get();
+            else
+                rtPso = offline ? sPipe.psoDrawOfflineRt.Get() : sPipe.psoDrawRt.Get();
+            if (rtPso) pso = rtPso;
+        }
         if (!pso) continue;
 
         uint32_t fieldIndex = 0;   // the surface's "field" by name (worldParams.z)
@@ -1698,6 +1928,10 @@ void WorldPass::Impl::DrawInstance(PassContext& pc, const WorldInstance& inst, c
         auto& pPipe = pipes.particles[pi];
         auto& pBuf = state.particles[pi];
         ID3D12PipelineState* pso = offline ? pPipe.psoDrawOffline.Get() : pPipe.psoDraw.Get();
+        if (useRt) {
+            ID3D12PipelineState* rtPso = offline ? pPipe.psoDrawOfflineRt.Get() : pPipe.psoDrawRt.Get();
+            if (rtPso) pso = rtPso;
+        }
         if (!pso) continue;
 
         // The camera-space wrap (world.camera): the host draws the particle in a box around the camera.
@@ -1774,6 +2008,10 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
         auto* pipes = GetOrCompilePipelines(ctx, *pack);
         if (!pipes) continue;
 
+        const bool worldLights = pack->HasCap("world.lights");
+        const bool useRt = worldLights && pipes->rtReady && pc.rt != nullptr;
+        cmd->SetGraphicsRootSignature(useRt ? graphicsRootSigLights.Get() : graphicsRootSig.Get());
+
         auto& state = GetOrCreateInstanceState(ctx, inst, *pack);
         if (state.fieldDesc == DescriptorHeap::kInvalid) continue;
 
@@ -1787,10 +2025,14 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
         }
 
         std::vector<WorldCollider> sampledColliders;
-        if (inst.colliders) inst.colliders->Sample(inst.time, sampledColliders);
+        if (inst.colliders) SampleColliders(inst, *pack, inst.time, sampledColliders);
         const D3D12_GPU_VIRTUAL_ADDRESS colVa = AllocColliders(sampledColliders);
 
         const float instStepDt = pack->world->step > 0.0f ? pack->world->step : (1.0f / 60.0f);
+        // The same interpolation the scene pass draws with (the particles' lit result must match the depth / colour
+        // the scene pass wrote for them).
+        const float interpA = (float)std::clamp(1.0 - (state.simTime - (double)inst.time) / (double)instStepDt, 0.0, 1.0);
+        const float frameDelta = pc.view.sceneElapsed > 0.0f ? pc.view.sceneElapsed : 0.0f;
         UpdateAnchor(inst, state);
         float wrapSize = 0.0f;
         float cameraSpace = 0.0f;
@@ -1806,6 +2048,7 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
             cb.worldExtra = XMFLOAT4(wrapSize, cameraSpace, state.anchorX, state.anchorZ);
             cb.groundMap = groundMapParams;
             cb.groundRect = groundRectParams;
+            cb.particleParams = XMFLOAT4(interpA, frameDelta, instStepDt, wrapSize > 0.0f ? 0.5f * wrapSize : 0.0f);
 
             const LightParams& lp = pc.view.light;
             XMVECTOR L = XMVector3Normalize(XMLoadFloat3(&lp.direction));
@@ -1846,6 +2089,13 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
         cmd->SetGraphicsRootDescriptorTable(12, pointShadowTable);
         cmd->SetGraphicsRoot32BitConstant(13, lightFlags, 0);
         cmd->SetGraphicsRootDescriptorTable(14, GroundTable(ctx));
+        if (useRt) {
+            cmd->SetGraphicsRootShaderResourceView(15, pc.rt->Tlas());
+            cmd->SetGraphicsRootShaderResourceView(16, pc.rt->Geometries());
+            const D3D12_GPU_DESCRIPTOR_HANDLE heapBase = ctx.SrvHeap().Gpu(0);
+            cmd->SetGraphicsRootDescriptorTable(17, heapBase);
+            cmd->SetGraphicsRootDescriptorTable(18, heapBase);
+        }
 
         for (size_t pi = 0; pi < pack->world->particles.size(); ++pi) {
             const auto& p = pack->world->particles[pi];
@@ -1860,7 +2110,9 @@ void WorldPass::Impl::DrawParticlesPost(PassContext& pc) {
 
             const auto cb = makeWorldCb((uint32_t)pi, p.count);
             cmd->SetGraphicsRootConstantBufferView(1, AllocWorldCb(cb));
-            cmd->SetPipelineState(pPipe.psoDrawPost.Get());
+            ID3D12PipelineState* drawPso = pPipe.psoDrawPost.Get();
+            if (useRt && pPipe.psoDrawPostRt) drawPso = pPipe.psoDrawPostRt.Get();
+            cmd->SetPipelineState(drawPso);
 
             if (!p.simulate.empty()) {
                 cmd->SetGraphicsRootShaderResourceView(6, pBuf.buffer->GetGPUVirtualAddress());

@@ -592,9 +592,10 @@ bool PackEffectPass::RunEntry(PassContext& pc, const EntryRun& r) {
         extVa = extParamsRing_->GetGPUVirtualAddress() + extParamsOffset_;
         extParamsOffset_ = (extParamsOffset_ + kBlock) % (kBlock * kExtRingBlocks);
     }
-    // gP0 = (outW, outH, dt, reset), gP1 = focus (effect_api.hlsli), gP2 = (target w, h, pass index (-1 = none), 0)
+    // gP0 = (outW, outH, dt, reset), gP1 = focus (effect_api.hlsli), gP2 = (target w, h, pass index (-1 = none), 0),
+    // gP3 = (sceneTime, 0, 0, 0)
     float c[16] = {(float)r.outW, (float)r.outH, r.dt, 0.0f, r.focus[0], r.focus[1], r.focus[2], r.focus[3],
-                   (float)r.outW, (float)r.outH, -1.0f, 0.0f};
+                   (float)r.outW, (float)r.outH, -1.0f, 0.0f, r.sceneTime, 0.0f, 0.0f, 0.0f};
 
     if (pack.stateFloats > 0) {
         StateKey key{r.stackIndex, r.entry->pack};
@@ -773,11 +774,31 @@ void PackEffectPass::RunStack(PassContext& pc, bool preBloom) {
     const bool outputSizeChanged = resetRequested_;
     resetRequested_ = false;
 
+    // Effect time / state stepping follow the timeline (not a wall clock):
+    // - playing, 0 < sceneElapsed <= 0.25: one step of dt = sceneElapsed (an explicit effectDt overrides dt)
+    // - the same scene time rendered again while playing: no step (read the latest state)
+    // - paused: exactly the still render (reset on step 0, 64 steps of 1/60) every frame, so camera / param edits
+    //   while paused show at once and the result is deterministic
+    // - seek / jump (cameraCut, > 0.25 s, backwards): reset + the same 64-step converge
+    const float sceneDt = pc.view.sceneElapsed;
+    const bool backwards = hasLastSceneTime_ && pc.view.sceneTime < lastSceneTime_ - 1e-6f;
+    const bool sceneSeek = pc.view.cameraCut || backwards || sceneDt > 0.25f;
+    const bool pausedStill = !pc.view.timelinePlaying && sceneDt <= 0.0f && !sceneSeek;
+    lastSceneTime_ = pc.view.sceneTime;
+    hasLastSceneTime_ = true;
+
     float dt = 0.0f;
-    if (pc.view.effectDt > 0.0f) {
-        dt = pc.view.effectDt;
-    } else {
-        dt = std::clamp(pc.frameTimeMs * 0.001f, 1.0f / 240.0f, 0.1f);
+    uint32_t stateSteps = 0;
+    bool resetState = pc.view.cameraCut || pc.view.effectStateReset || outputSizeChanged;
+    if (pc.view.effectStateAdvance && !pc.offscreen) {
+        if (pausedStill || sceneSeek) {
+            dt = 1.0f / 60.0f;
+            resetState = true;
+            stateSteps = 64u;
+        } else if (sceneDt > 0.0f) {
+            dt = pc.view.effectDt > 0.0f ? pc.view.effectDt : sceneDt;
+            stateSteps = 1u;
+        }
     }
 
     Texture* src = preBloom ? (t.hdrFinal ? t.hdrFinal : &t.lit) : &t.ldr;
@@ -796,8 +817,9 @@ void PackEffectPass::RunStack(PassContext& pc, bool preBloom) {
     run.outW = t.outWidth;
     run.outH = t.outHeight;
     run.dt = dt;
-    run.resetState = pc.view.cameraCut || pc.view.effectStateReset || outputSizeChanged;
-    run.stateSteps = (pc.view.effectStateAdvance && !pc.offscreen) ? 1u : 0u;
+    run.sceneTime = pc.view.sceneTime;
+    run.resetState = resetState;
+    run.stateSteps = stateSteps;
     FocusConstants(pc, t.outHeight, pc.settings.dofAperture, run.focus);
 
     uint32_t cur = 0, ran = 0;
@@ -912,6 +934,7 @@ bool PackEffectPass::RunOffline(PassContext& pc, const std::vector<EffectStackEn
     run.outW = io.width;
     run.outH = io.height;
     run.dt = dt;
+    run.sceneTime = job ? job->sceneTime : pc.view.sceneTime;
     run.resetState = jobReset;
     run.stateSteps = isStill ? 64u : 1u;
     FocusConstants(pc, io.height, job ? job->dofAperture : pc.settings.dofAperture, run.focus);

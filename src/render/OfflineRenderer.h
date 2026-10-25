@@ -85,6 +85,7 @@ struct OfflineJobDesc {
     // pack post effects on the sRGB image (MmePostPass::RunOffline). Empty = no effects.
     std::vector<MmeEffectEntry> mmeEffects;
     float effectDt = 0.0f;           // >0: dt in seconds (1/fps for video)
+    float sceneTime = 0.0f;          // the rendered frame's scene / timeline seconds (effect time)
     bool still = false;              // true for still renders (state pass runs 64 times)
     bool effectReset = false;        // reset effect state (first frame, cut)
     // Transparent-background export (P2.3): primary camera-ray misses output the background override colour

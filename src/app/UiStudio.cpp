@@ -827,6 +827,7 @@ void App::BuildStudioFrameView(FrameView& view) {
     // timeline (paused = constant).
     view.sceneTime = (float)d.time;
     view.sceneElapsed = lastRenderedTime_ < 0 ? 0.0f : (float)std::fabs(d.time - lastRenderedTime_);
+    view.timelinePlaying = d.playing;
     view.mmeEditMode = true;
     view.cameraCut = lastRenderedTime_ < 0 || std::fabs(d.time - lastRenderedTime_) > 0.25;
     lastRenderedTime_ = d.time;

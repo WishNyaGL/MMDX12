@@ -370,6 +370,7 @@ struct FrameView {
     // wall clock since effect load instead (spec draft §4.6).
     float sceneTime = 0.0f;
     float sceneElapsed = 0.0f;
+    bool timelinePlaying = false;   // the timeline is playing this frame (paused = still frames, see PassEffect)
     bool mmeEditMode = false;
     // M8b: the video layers of this frame (background behind the scene, overlay over the final image). Empty when
     // the song has no video package / videos are off.

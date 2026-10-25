@@ -89,10 +89,14 @@ without them renders exactly as before.
 | `world.anchor` | The performer-anchored fields (the field follows the performers) | `fields[].anchor: "performers"` |
 | `world.ground` | The ground height map and the camera-centred, ground-following surfaces | `surfaces[].extent: "camera"`, `surfaces[].radius`, `surfaces[].ground` |
 | `world.overlay` | The overlay surfaces (a wet floor / decal over the lit scene) | `surfaces[].blend: "overlay"` |
+| `world.body` | The body colliders (head, upper body, shoulders / arms, lower body) on top of the feet / hands | - |
+| `world.lights` | The scene's sun and punctual direct lighting, with the scene's shadows (`PackSunLight`, `PackPunctualLight`, `PackDirectDiffuse`, `PackDirectThin`) | - |
 
-The world shaders are compiled with `PACK_CAP_WORLD_CAMERA`, `PACK_CAP_WORLD_ANCHOR`, `PACK_CAP_WORLD_GROUND` and
-`PACK_CAP_WORLD_OVERLAY` defined to `1` when the pack requires the matching capability. The API functions and the
-struct fields below exist only under their macro, so a pack that does not require a capability cannot use it.
+The world shaders are compiled with `PACK_CAP_WORLD_CAMERA`, `PACK_CAP_WORLD_ANCHOR`, `PACK_CAP_WORLD_GROUND`,
+`PACK_CAP_WORLD_OVERLAY`, `PACK_CAP_WORLD_BODY` and `PACK_CAP_WORLD_LIGHTS` defined to `1` when the pack requires the
+matching capability. The API functions and the struct fields below exist only under their macro, so a pack that does
+not require a capability cannot use it. Packs without `world.body` see only the old (feet / toes / wrists) colliders,
+in the old order and count.
 
 ### `"world"` Object Properties
 - `"step"`: Fixed simulation step size in seconds. Allowed range: `1/240` (0.004167) to `1/15` (0.066667). Default: `1/60` (0.0166667).
@@ -276,8 +280,8 @@ struct PackParticleShadeIn {
   - `PackWorldToLocal(posWorld)` / `PackLocalToWorld(posLocal)` (points)
   - `PackWorldToLocalVec(vecWorld)` / `PackLocalToWorldVec(vecLocal)` (vectors)
 - **Colliders**:
-  - `PackColliderCount()`: Number of active scene colliders this frame.
-  - `PackCollider(i)`: Returns `PackColliderData` with `pos` (float3), `radius` (float), `vel` (float3), and `flags` (uint). Flags indicate body parts: `kColliderFoot = 1`, `kColliderHand = 2`, `kColliderLeft = 4`.
+  - `PackColliderCount()`: Number of active scene colliders this frame (body colliders are included only for packs whose `requires` contains `world.body`).
+  - `PackCollider(i)`: Returns `PackColliderData` with `pos` (float3), `radius` (float), `vel` (float3), and `flags` (uint). Flags indicate body parts: `kColliderFoot = 1`, `kColliderHand = 2`, `kColliderLeft = 4`, `kColliderBody = 8`.
 - **Fields**: 
   - `PackFieldSample(fieldIndex, posLocalXZ)`: Bilinear sample of field `fieldIndex` (0 .. 3) at local XZ coordinates.
     With `"world.anchor"` the local XZ include the field's centre, so the sample is taken relative to it; outside the
@@ -310,7 +314,13 @@ struct PackParticleShadeIn {
   - `PackHemiAmbient(normal)`: the scene's sky / ground hemisphere light for a world-space normal (ambient that
     follows the stage lighting; `PackAmbient()` is only the ground colour).
   - `PackSunShadow(worldPos)`: Sun shadow visibility factor in [0, 1], from the scene's cascaded shadow map in
-    raster camera views; 1 in ray-traced / path-traced frames and offline GI (no shadow map there in v1).
+    raster camera views and from a ray query against the scene TLAS in ray-traced / path-traced frames and offline GI;
+    1 where no shadow covers the point.
+  - `PackSunLight(posWorld)`, `PackPunctualCount()`, `PackPunctualLight(i, posWorld)` (`world.lights`): The scene's
+    direct lights as `PackLightSample { L, radiance }`, where `radiance` already includes colour, intensity, distance
+    falloff, spot cone and visibility (see §6.5).
+  - `PackDirectDiffuse(pos, n)`, `PackDirectThin(pos, n, viewDir, transmission)` (`world.lights`): Lambert and
+    two-sided thin-sheet direct lighting from the sun and every punctual light (see §6.5).
 - **Deterministic Hashing**:
   - `PackRandom(seed)` / `PackRandom(seed, salt)` / `PackRandom(seed, salt1, salt2)`: PCG-based deterministic pseudo-random float in [0, 1).
   - `PackRandom2(seed, salt)` / `PackRandom3(seed, salt)`.
@@ -323,6 +333,8 @@ World pack simulations run in fixed time increments `step` and are completely de
 
 1. **Forward Live Playback**:
    When time progresses normally ($0 \le \Delta t \le 0.25\text{ s}$), the engine steps forward by fixed `step` intervals up to the target time.
+   A change of the instance's parameters while the target time is not advancing (paused, scrubbed, a repeated frame, or `inst.exact`) re-simulates exactly like a seek, so slider edits show at once; during live playback a keyed parameter change does not force a re-simulation.
+   The simulation runs on one global grid: every stateful step ends at $k \cdot \text{step}$ ($k$ from timeline 0, no partial steps), and `step` is the simulation rate only — drawing is interpolated between the last two grid steps (a particle at $\text{lerp}(prevPos, pos, a)$ with $a = 1 - (simTime - time)/\text{step}$), so 120–240 fps playback no longer shows 60 Hz stairs.
 2. **Timeline Seek & Re-simulation**:
    When jumping backwards or forward by $> 0.25\text{ s}$ (or when `inst.exact` is true):
    - **Persistent fields** (e.g., ground deformation tracks) re-simulate from $t = 0$ to $t_{target}$ at their declared `"rate"` (default 10 Hz).
@@ -351,9 +363,9 @@ over the whole tile) and let the host move the box. Do not re-anchor particles t
 move with the camera (no parallax, rain "on the lens"). Ground layers that should cover the same area can centre their
 falloff on `PackWrapCentre(W)` too.
 
-The wrap happens in world space, after the pack's local -> world transform. The previous position used for the motion
-vectors is `wrapped - (pos - prevPos)`, so a wrap never leaves a velocity streak: the particle's screen motion is its
-own motion, not the jump of the wrap.
+The wrap happens in world space, after the pack's local -> world transform. The previous drawn position (the motion
+vectors) is the interpolation of (pos, prevPos) wrapped the same way, so a wrap never leaves a velocity streak: the
+particle's screen motion is its own motion, not the jump of the wrap.
 
 ### 6.2 The ground height map (`world.ground`)
 
@@ -402,6 +414,45 @@ scene's spots / points): output = `lit * alpha + emission`.
 Keep an overlay a couple of centimetres above the ground (e.g. `0.02`): `PackGroundHeight` is conservative (the
 top-most surface of the 3 x 3 ground texels around the point, ~0.85 world units each on a large stage), but a layer of
 a few millimetres still sinks under a sloped floor at grazing angles.
+
+### 6.5 Scene direct lighting (`world.lights`)
+
+A pack that requires `world.lights` can light its particles and surfaces with the same sun and punctual lights as the
+lit scene. The capability adds `PackLightSample` and the sampling / shading helpers listed in §4; a pack without it
+compiles and renders exactly as before (the sprite / surface lighting stays the old fixed sun + hemisphere, and the
+particle pipeline keeps its old root signature and bindings).
+
+```hlsl
+struct PackLightSample {
+    float3 L;         // unit vector toward the light
+    float3 radiance;  // colour x intensity x falloff x spot cone x visibility (0 when the light does not reach)
+};
+```
+
+- `PackSunLight(posWorld)` returns the scene's sun, or radiance 0 when the scene has no sun. `L` is `PackSunDir()`.
+- `PackPunctualCount()` / `PackPunctualLight(i, posWorld)` return the scene's spots and points (the same lights, range
+  falloff and area / spot terms the stage floor uses). The index order is the scene's light order, up to 16 lights.
+- `PackDirectDiffuse(pos, n)` sums `radiance * saturate(dot(n, L))` over the sun and every punctual light.
+- `PackDirectThin(pos, n, viewDir, transmission)` is for two-sided sheets (leaves, petals, paper, fabric). It flips
+  `n` to face the viewer, then adds each light's front term plus diffuse transmission from behind:
+  `radiance * (saturate(dot(n, L)) + saturate(transmission) * saturate(dot(-n, L)))`. The weight stays in [0, 1], so
+  the helper never amplifies a light; `viewDir` points from the surface toward the viewer.
+
+Visibility uses the scene's real shadows: the cascaded sun shadow map and the spot / point shadow maps in raster
+frames, and one short ray query per light per pixel against the scene TLAS in ray-traced, path-traced and offline GI
+frames. The API is a sample, not an emitter: a world pack does not cast shadows into the scene in v1, so it can be
+lit by the scene without changing the scene's own shadowing.
+
+A typical thin-sheet pack:
+
+```hlsl
+float4 ShadeLeaf(PackParticleShadeIn i) {
+    float3 n = float3(0, 0, 1);  // the sheet's normal, in world space
+    float3 direct = PackDirectThin(i.posWorld, n, i.viewDir, float3(0.65, 0.65, 0.65));
+    float3 ambient = PackHemiAmbient(n) * 0.5;
+    return float4(i.particle.color.rgb * (direct + ambient), 1.0);
+}
+```
 
 ---
 

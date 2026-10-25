@@ -661,6 +661,7 @@ void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
     if (video) {
         jd.effectReset = (offline_.frame == 0) || jumpCut || view.cameraCut;   // GI images count in frame (renderedFrame is the real-time renderers')
     }
+    jd.sceneTime = view.sceneTime;   // effect time = the rendered frame's timeline seconds
     // the irradiance cache prepass is the render's GI: every image, video frames included
     if (!renderer_.BeginOffline(cmd, view, jd)) {
         LOG_ERROR("offline render: could not start (ray tracing scene not built: %zu models)", view.models.size());
@@ -706,6 +707,7 @@ void App::RecordStudioGiViewport(ID3D12GraphicsCommandList* cmd, FrameView& view
                                      d.AspectRatio());
     if (!options_.mmeSet) job.mmeEffects = StudioMmeEntries();
     job.effects = StudioEvaluatedEffects((float)(d.time * kMmdFps));
+    job.sceneTime = view.sceneTime;   // effect time = the edited timeline frame
     job.minSamples = 16;
     job.maxSamples = 512;
     job.errorThreshold = 2.0f * kOfflineErrorThreshold;

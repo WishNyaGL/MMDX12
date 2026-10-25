@@ -578,6 +578,8 @@ int wmain(int argc, wchar_t** argv) {
             if (pack.HasCap("world.anchor")) baseDefines.push_back({"PACK_CAP_WORLD_ANCHOR", "1"});
             if (pack.HasCap("world.ground")) baseDefines.push_back({"PACK_CAP_WORLD_GROUND", "1"});
             if (pack.HasCap("world.overlay")) baseDefines.push_back({"PACK_CAP_WORLD_OVERLAY", "1"});
+            if (pack.HasCap("world.body")) baseDefines.push_back({"PACK_CAP_WORLD_BODY", "1"});
+            if (pack.HasCap("world.lights")) baseDefines.push_back({"PACK_CAP_WORLD_LIGHTS", "1"});
             if (pack.world) {
                 for (const auto& ps : pack.world->particles) {
                     if (!ps.simulate.empty()) {

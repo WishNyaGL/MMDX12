@@ -421,6 +421,7 @@ private:
         Texture *src = nullptr, *dst = nullptr, *depth = nullptr, *velocity = nullptr, *normal = nullptr, *id = nullptr;
         uint32_t outW = 0, outH = 0;
         float dt = 0.0f;
+        float sceneTime = 0.0f;       // gP3.x: the frame's scene / timeline seconds (effect time)
         bool resetState = false;      // camera cut / resize / job reset
         uint32_t stateSteps = 0;      // state updates this run (0 = none, unless the slot has no valid state yet)
         float focus[4] = {};          // gP1: focus z, focus aperture, user DoF aperture, max CoC px
@@ -468,6 +469,9 @@ private:
     std::map<StateKey, HistorySlot> historySlots_;
     uint64_t passExecutionCount_ = 0;
     bool resetRequested_ = false;
+    // The previous frame's scene time (seek / backwards jumps reset the effect state; see RunStack).
+    float lastSceneTime_ = 0.0f;
+    bool hasLastSceneTime_ = false;
     ComPtr<ID3D12Resource> extParamsRing_;
     uint8_t* extParamsMapped_ = nullptr;
     size_t extParamsOffset_ = 0;
