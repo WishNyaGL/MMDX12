@@ -1,4 +1,5 @@
 #include "app/StageRuntime.h"
+#include "asset/StageLights.h"
 
 #include <algorithm>
 #include <cstring>
@@ -144,6 +145,10 @@ const std::vector<studio::SceneLight>& StageRuntime::Apply(double timeSeconds, u
     } else {
         lights_.clear();
     }
+    // S9: environment.fogVolumes become FogVolume lights of the rig (static: they are placement, not cues). They are
+    // appended after the manifest's lights so a light index binding keeps its meaning.
+    for (size_t i = 0; i < manifest_->environment.fogVolumes.size(); ++i)
+        lights_.push_back(StageFogVolumeLight(manifest_->environment.fogVolumes[i], i));
 
     // Materials: the manifest's rules plus the targets. Called every frame: SetPbrOverrides writes only ring entry
     // frame % 3 and skips it when that entry already holds this version, so the GPU is still touched only on changes,

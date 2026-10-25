@@ -21,6 +21,7 @@ namespace {
 constexpr uint32_t kCbSlots = Dx12Context::kFramesInFlight + 1;  // + RenderToImage
 constexpr uint32_t kOffscreenSlot = Dx12Context::kFramesInFlight;
 constexpr uint32_t kLightBytes = Renderer::kMaxPunctualLights * sizeof(GpuLight);
+constexpr uint32_t kFogBytes = Renderer::kMaxFogVolumes * sizeof(GpuFogVolume);
 
 // post.hlsl's interleaved gradient noise (float2 unjitter(pos.xy)). Mirrored here to invert the per-pixel
 // dither when a transparent export is read back, so a flat background decodes to alpha 0 exactly.
@@ -236,7 +237,8 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
 
     sceneCb_ = CreateMappedUpload(ctx.Device(), (uint64_t)kSceneCbSize * kCbSlots * (1 + kMaxExtraViews), &sceneCbMapped_, L"scene.cb");
     lightBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kLightBytes * kCbSlots, &lightBufMapped_, L"scene.lights");
-    if (!sceneCb_ || !lightBuf_) return false;
+    fogBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kFogBytes * kCbSlots, &fogBufMapped_, L"scene.fogvolumes");
+    if (!sceneCb_ || !lightBuf_ || !fogBuf_) return false;
 
     backdropSrv_ = ctx.SrvHeap().Allocate(1);
 
@@ -573,11 +575,28 @@ uint32_t Renderer::FillGpuLights(const LightParams& light, GpuLight* out, uint32
         } else {
             g.pointShadowSlice = -1.0f;
         }
-        g._pad = 0.0f;
+        g._pad = p.volumetric;
         g.areaWidth = p.areaSize.x;
         g.areaHeight = p.areaSize.y;
         g.isArea = (p.areaSize.x > 0.0f && p.areaSize.y > 0.0f) ? 1.0f : 0.0f;
-        g._pad2 = 0.0f;
+        g._pad2 = p.volumetricG;
+    }
+    return (uint32_t)count;
+}
+
+// S9: the local fog volumes of the frame (GpuFogVolume, see ShaderInterop.h). Zeroed beyond the count by the caller.
+uint32_t Renderer::FillGpuFogVolumes(const LightParams& light, GpuFogVolume* out) {
+    const size_t count = std::min<size_t>(light.fogVolumes.size(), kMaxFogVolumes);
+    for (size_t i = 0; i < count; ++i) {
+        const FogVolume& f = light.fogVolumes[i];
+        GpuFogVolume& g = out[i];
+        g.center = f.position;
+        g.density = std::max(f.density, 0.0f);
+        g.extent = {std::max(std::fabs(f.extent.x), 1e-3f), std::max(std::fabs(f.extent.y), 1e-3f),
+                    std::max(std::fabs(f.extent.z), 1e-3f)};
+        g.edge = std::clamp(f.edge, 0.0f, 1.0f);
+        g.color = f.color;
+        g.sphere = f.sphere ? 1 : 0;
     }
     return (uint32_t)count;
 }
@@ -595,6 +614,10 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
                                   : kMaxPunctualLights;
     FillGpuLights(view.light, lights, pointCap);
     memcpy(lightBufMapped_ + (size_t)cbSlot * kLightBytes, lights, sizeof(lights));
+    // S9: the frame's local fog volumes (zeroed beyond the count, so a stale slot never lingers)
+    GpuFogVolume fog[kMaxFogVolumes] = {};
+    const uint32_t fogCount = FillGpuFogVolumes(view.light, fog);
+    memcpy(fogBufMapped_ + (size_t)cbSlot * kFogBytes, fog, sizeof(fog));
 
     // Temporal history survives only consecutive on-screen frames without a camera cut.
     bool historyValid = !offscreen && havePrev_ && prevTaa_ && settings_.taa && !view.cameraCut;
@@ -684,6 +707,8 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
                    lightBuf_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kLightBytes,
                    frame, historyValid, offscreen, &builtin_, path, rt, up,
                    jitterPx_[0], jitterPx_[1], frameTimeMs_};
+    // S9: the frame's local fog volumes for the volumetric passes (0 = none: they read no buffer)
+    pc.fogVolumes = fogCount ? fogBuf_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kFogBytes : 0;
     pc.mme = mme_.get();
     pc.mmeSkin = mmeSkin_.get();
     pc.sceneConstantsCpu = &sc;
@@ -1433,9 +1458,11 @@ void Renderer::Shutdown() {
     builtin_.white.Reset();
     if (sceneCb_ && sceneCbMapped_) sceneCb_->Unmap(0, nullptr);
     if (lightBuf_ && lightBufMapped_) lightBuf_->Unmap(0, nullptr);
-    sceneCbMapped_ = lightBufMapped_ = nullptr;
+    if (fogBuf_ && fogBufMapped_) fogBuf_->Unmap(0, nullptr);
+    sceneCbMapped_ = lightBufMapped_ = fogBufMapped_ = nullptr;
     sceneCb_.Reset();
     lightBuf_.Reset();
+    fogBuf_.Reset();
     offList_.Reset();
     offAlloc_.Reset();
     if (readbackFence_) {

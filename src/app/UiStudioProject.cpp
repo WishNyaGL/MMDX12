@@ -1111,6 +1111,10 @@ void App::DrawStudioAddMenu() {
                 ImGui::CloseCurrentPopup();
                 StudioAddLight(LightKind::Area);
             }
+            if (MenuItemChip("##add_fv", Tr("안개 볼륨"), icon::Globe)) {
+                ImGui::CloseCurrentPopup();
+                StudioAddLight(LightKind::FogVolume);
+            }
             bool hasSun = false, hasAmbient = false;
             for (const auto& l : d.lights) {
                 if (l.kind == LightKind::Sun) hasSun = true;

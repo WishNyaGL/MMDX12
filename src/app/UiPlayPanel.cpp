@@ -34,8 +34,14 @@ void App::DrawScreenEffectControls(float width) {
     bool fx = bloomFx;
     fx |= Switch("##dof", Tr("피사계 심도"), &settings_.dof, Tr("캐릭터에 초점을 맞추고 배경을 흐림"));
     if (settings_.dof) { Gap(6.0f); fx |= SliderRow("##dofap", Tr("조리개"), &settings_.dofAperture, 0.2f, 3.0f, "%.2f"); Gap(6.0f); }
-    fx |= Switch("##vol", Tr("볼류메트릭 라이트"), &settings_.volumetric, Tr("빛줄기와 조명 산란"));
-    if (settings_.volumetric) { Gap(6.0f); fx |= SliderRow("##vold", Tr("안개 밀도"), &settings_.volumetricDensity, 0.25f, 4.0f, "%.2f"); Gap(6.0f); }
+    // S9: a fog stage turns the haze on for its scene (stageFogVolumetric_); switching it here is the user's choice.
+    bool volumetric = settings_.volumetric || stageFogVolumetric_;
+    if (Switch("##vol", Tr("볼류메트릭 라이트"), &volumetric, Tr("빛줄기와 조명 산란"))) {
+        settings_.volumetric = volumetric;
+        stageFogVolumetric_ = false;
+        fx = true;
+    }
+    if (volumetric) { Gap(6.0f); fx |= SliderRow("##vold", Tr("안개 밀도"), &settings_.volumetricDensity, 0.25f, 4.0f, "%.2f"); Gap(6.0f); }
     // DLSS Frame Generation (play scene only; the panel is only drawn in play mode).
     {
         const bool fgOk = renderer_.FrameGenAvailable();

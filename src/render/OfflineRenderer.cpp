@@ -28,6 +28,7 @@ namespace {
 
 constexpr uint32_t kSlots = Dx12Context::kFramesInFlight;
 constexpr uint32_t kLightBytes = Renderer::kMaxPunctualLights * sizeof(GpuLight);
+constexpr uint32_t kFogBytes = Renderer::kMaxFogVolumes * sizeof(GpuFogVolume);
 constexpr uint32_t kEdgeIterations = 64;   // outline layers averaged for DoF / motion blur
 constexpr float kConvolutionBloomGain = 6.0f;        // as the real-time convolution bloom output
 constexpr float kConvolutionBloomIntensity = 0.12f;  // CSFinalize multiplier of the convolved bloom  // outline layers averaged for motion blur / depth of field
@@ -165,9 +166,10 @@ struct OfflineRenderer::Impl {
     Texture icFinal;                   // smoothed finest level: the irradiance cache CSRender reads
     bool icValid = false;              // icFinal holds this image's cache
     // per-image constants (UPLOAD heap, persistently mapped, written only in Begin while the GPU is idle)
-    ComPtr<ID3D12Resource> sceneCb, lightBuf;
+    ComPtr<ID3D12Resource> sceneCb, lightBuf, fogBuf;
     uint8_t* sceneCbMapped = nullptr;
     uint8_t* lightMapped = nullptr;
+    uint8_t* fogMapped = nullptr;
     // readbacks, one entry per frame slot
     ComPtr<ID3D12Resource> counterReadback;       // kFramesInFlight * 512 bytes
     ComPtr<ID3D12QueryHeap> timestampHeap;        // 2 * kFramesInFlight
@@ -215,6 +217,8 @@ struct OfflineRenderer::Impl {
         pc.mme = mme;
         pc.mmeSkin = mmeSkin;
         pc.sceneConstantsCpu = &sceneCpu;
+        // S9: the job's local fog volumes for the volumetric march (0 = none, the shader reads no buffer)
+        pc.fogVolumes = view.light.fogVolumes.empty() || !fogBuf ? 0 : fogBuf->GetGPUVirtualAddress();
         return pc;
     }
     void UavBarrier(ID3D12GraphicsCommandList* cmd) {
@@ -991,9 +995,23 @@ void OfflineRenderer::Impl::Volumetric(PassContext& pc) {
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     gbuf.Transition(cmd, kSrvAll);
     volA.Transition(cmd, kUav);
-    const float c0[16] = {0.005f * job.volumetricDensity, 0.02f, 400.0f, 0.55f,
-                          (float)width, (float)height, 3.0f, 0.3f,
-                          (float)(serial & 0xFFFFu), 0.25f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    // S9: the fog's anisotropy (a stage's, else the job's; -1 = the built-in constants), the local volumes.
+    const float fogG = view.light.volumetricAnisotropy > -0.99f ? view.light.volumetricAnisotropy
+                                                             : job.volumetricAnisotropy;
+    const float sunG = view.light.sunVolumetricG > -0.99f ? view.light.sunVolumetricG
+                                                       : (fogG > -0.99f ? fogG : 0.55f);
+    const float punctualG = fogG > -0.99f ? fogG : 0.3f;
+    const uint32_t fogCount = (uint32_t)std::min<size_t>(view.light.fogVolumes.size(), Renderer::kMaxFogVolumes);
+    // S9: the job's medium is the frame's (a stage's environment.fog is already in view.light).
+    const float falloff = view.light.volumetricFalloff >= 0.0f ? view.light.volumetricFalloff : 0.02f;
+    const DirectX::XMFLOAT3 tint = view.light.volumetricColor;
+    // S9: a stage's environment.fog density replaces the built-in 0.005 base; the user's density still scales it.
+    const float sigma0 = (view.light.volumetricSigma0 >= 0.0f ? view.light.volumetricSigma0 : 0.005f) *
+                         job.volumetricDensity;
+    const float c0[16] = {sigma0, falloff, VolumetricMediumRadius(view.light), sunG,
+                          (float)width, (float)height, 3.0f, punctualG,
+                          (float)(serial & 0xFFFFu), 0.25f, 0.45f, tint.z,
+                          (float)fogCount, view.light.sunVolumetric, tint.x, tint.y};
     volMarch.Dispatch(pc, pc.transient.SrvTable(*ctx, {&gbuf}), pc.transient.UavTable(*ctx, {&volA}), c0, 16,
                       Groups(volA.width), Groups(volA.height));
     UavBarrier(cmd);
@@ -1264,7 +1282,9 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
     // Per-image constants (persistently mapped; written only in Begin while the GPU is idle).
     m.sceneCb = CreateMappedUpload(device, kSceneCbSize, &m.sceneCbMapped, L"offline.sceneCb");
     m.lightBuf = CreateMappedUpload(device, kLightBytes, &m.lightMapped, L"offline.lights");
-    if (!m.sceneCb || !m.lightBuf) return false;
+    // S9: the local fog volumes of the job (GpuFogVolume; zeroed entries when the job has none)
+    m.fogBuf = CreateMappedUpload(device, kFogBytes, &m.fogMapped, L"offline.fogvolumes");
+    if (!m.sceneCb || !m.lightBuf || !m.fogBuf) return false;
 
     // Readbacks, one entry per frame slot.
     D3D12_HEAP_PROPERTIES readback{D3D12_HEAP_TYPE_READBACK};
@@ -1314,9 +1334,11 @@ void OfflineRenderer::Shutdown() {
         t->Release(ctx);
     if (m.sceneCb && m.sceneCbMapped) m.sceneCb->Unmap(0, nullptr);
     if (m.lightBuf && m.lightMapped) m.lightBuf->Unmap(0, nullptr);
-    m.sceneCbMapped = m.lightMapped = nullptr;
+    if (m.fogBuf && m.fogMapped) m.fogBuf->Unmap(0, nullptr);
+    m.sceneCbMapped = m.lightMapped = m.fogMapped = nullptr;
     m.sceneCb.Reset();
     m.lightBuf.Reset();
+    m.fogBuf.Reset();
     m.counterReadback.Reset();
     m.timestampReadback.Reset();
     m.timestampHeap.Reset();
@@ -1341,7 +1363,8 @@ void OfflineRenderer::Shutdown() {
 void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient,
                             const BuiltinTextures* builtin, RtScene& rt, const FrameView& view,
                             const SceneConstants& sc, const GpuLight* lights, uint32_t lightCount,
-                            const OfflineJobDesc& job, uint64_t frame, MmeRuntime* mme, MmeSkin* mmeSkin) {
+                            const GpuFogVolume* fogVolumes, uint32_t fogVolumeCount, const OfflineJobDesc& job,
+                            uint64_t frame, MmeRuntime* mme, MmeSkin* mmeSkin) {
     if (!impl_) return;
     Impl& m = *impl_;
 
@@ -1387,6 +1410,11 @@ void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors
     memcpy(m.sceneCbMapped, &sc, sizeof(sc));
     memset(m.lightMapped, 0, kLightBytes);
     memcpy(m.lightMapped, lights, (size_t)std::min(lightCount, Renderer::kMaxPunctualLights) * sizeof(GpuLight));
+    // S9: the local fog volumes (zeroed past the count; an empty list leaves every entry zero = no medium)
+    memset(m.fogMapped, 0, kFogBytes);
+    if (fogVolumes && fogVolumeCount)
+        memcpy(m.fogMapped, fogVolumes,
+               (size_t)std::min(fogVolumeCount, Renderer::kMaxFogVolumes) * sizeof(GpuFogVolume));
 
     // 3. image targets
     const bool created = m.EnsureTargets(m.job.width, m.job.height);

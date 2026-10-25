@@ -20,6 +20,10 @@ namespace mmdx {
 // sun (its direction is the travel direction). `uid` is 0; the caller assigns identities.
 studio::SceneLight ImportedLightToSceneLight(const ImportedLight& light);
 
+// S9: one `environment.fogVolumes` entry as a LightKind::FogVolume scene light of the rig (uid 0: the caller assigns
+// it; the name is the entry's `id`, else "안개 <index + 1>"). Never keyed: the values of the stage are static.
+studio::SceneLight StageFogVolumeLight(const StageFogVolume& volume, size_t index);
+
 // The glTF lights of one loaded part, in the manifest's rig order (empty unless `manifest.gltfLights`). Names follow the
 // glTF node, made unique against `taken` (and against each other) with a numeric suffix; `taken` is extended.
 std::vector<studio::SceneLight> PartGltfLights(const StageManifest& manifest, const PmxModel& part,

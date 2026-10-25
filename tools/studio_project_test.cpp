@@ -66,6 +66,8 @@ static std::string DiffValues(const LightValues& a, const LightValues& b) {
     if (a.coneOuter != b.coneOuter) return "coneOuter";
     if (a.coneInner != b.coneInner) return "coneInner";
     if (a.size.x != b.size.x || a.size.y != b.size.y) return "size";
+    if (!SameVec3(a.extent, b.extent)) return "extent";
+    if (a.volumetric != b.volumetric) return "volumetric";
     return "";
 }
 
@@ -100,6 +102,9 @@ static std::string DiffLight(const SceneLight& a, const SceneLight& b) {
     if (a.affectDiffuse != b.affectDiffuse) return "affectDiffuse";
     if (a.affectSpecular != b.affectSpecular) return "affectSpecular";
     if (a.viewportVisible != b.viewportVisible) return "viewportVisible";
+    if (a.volumetricG != b.volumetricG) return "volumetricG";
+    if (a.fogShape != b.fogShape) return "fogShape";
+    if (a.fogEdge != b.fogEdge) return "fogEdge";
     return "";
 }
 
@@ -1069,6 +1074,83 @@ static void TestAreaLightProject() {
     }
 }
 
+// S9: a FogVolume light round trip (extent, density and tint in values; the per-light anisotropy, the shape and the
+// edge band), and the stage fog volumes that feed such lights.
+static void TestFogVolumeProject() {
+    const std::filesystem::path projDir = kTemp / "fogvolume";
+    std::filesystem::create_directories(projDir);
+    const std::filesystem::path projFile = projDir / "fog.mmdxproj";
+
+    ProjectData data;
+    SceneLight fv;
+    fv.uid = 2;
+    fv.name = "\xEC\x95\x88\xEA\xB0\x9C \xEB\xB0\x95\xEC\x8A\xA4";  // 안개 박스
+    fv.kind = LightKind::FogVolume;
+    fv.v.position = {0.0f, 22.0f, -4.0f};
+    fv.v.extent = {35.0f, 18.5f, 28.0f};
+    fv.v.intensity = 2.25f;    // density multiplier
+    fv.v.color = {0.7f, 0.8f, 0.9f};
+    fv.volumetricG = 0.85f;
+    fv.fogShape = FogShape::Sphere;
+    fv.fogEdge = 0.6f;
+    LightKey k0, k1;
+    k0.frame = 0;
+    k0.v = fv.v;
+    k1.frame = 60;
+    k1.v = fv.v;
+    k1.v.intensity = 4.0f;
+    k1.v.extent = {50.0f, 20.0f, 40.0f};
+    fv.keys = {k0, k1};
+    data.editor.lights = {fv};
+
+    std::string err;
+    Check(SaveProject(projFile, data, &err), "SaveProject with a fog volume", "%s", err.c_str());
+    {
+        std::ifstream in(projFile, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+        const nlohmann::json& l = j["editor"]["lights"][0];
+        Check(l["kind"] == "fog_volume" && l["values"].contains("extent") && l["values"]["extent"].size() == 3 &&
+                  !l["values"].contains("volumetric"),
+              "fog volume: kind and extent are written; a default volumetric (1) is omitted");
+        Check(l.contains("volumetricG") && l["volumetricG"].get<float>() == 0.85f && l["fogShape"] == "sphere" &&
+                  Near(l["fogEdge"].get<float>(), 0.6f, 1e-4f),
+              "fog volume: anisotropy, shape and edge are written");
+        Check(l["keys"].size() == 2 && l["keys"][1]["values"]["extent"][0].get<float>() == 50.0f,
+              "fog volume: key values carry the extent");
+    }
+
+    ProjectData loaded;
+    std::vector<std::string> warnings;
+    Check(LoadProject(projFile, loaded, &err, &warnings) && warnings.empty(), "LoadProject with a fog volume", "%s", err.c_str());
+    Check(loaded.editor.lights.size() == 1, "1 fog volume loaded");
+    if (loaded.editor.lights.size() == 1) {
+        const SceneLight& got = loaded.editor.lights[0];
+        const std::string diff = DiffLight(fv, got);
+        Check(diff.empty(), "fog volume round-trip field by field", "differs: %s", diff.c_str());
+        Check(fv == got, "fog volume round-trip exactly (operator==)");
+    }
+
+    // A fog volume light without the new keys loads with the defaults (an old file).
+    {
+        const std::filesystem::path oldFile = projDir / "old.mmdxproj";
+        {
+            std::ofstream f(oldFile, std::ios::binary);
+            f << "{\"format\":\"mmdx12-studio-project\",\"version\":2,\"models\":[],\"camera\":null,\"audio\":null,"
+                 "\"editor\":{\"lights\":[{\"kind\":\"fog_volume\",\"uid\":3,\"values\":{\"position\":[1,2,3]}}]}}";
+        }
+        ProjectData d;
+        warnings.clear();
+        Check(LoadProject(oldFile, d, &err, &warnings) && d.editor.lights.size() == 1, "fog volume without the new keys loads");
+        if (d.editor.lights.size() == 1) {
+            const SceneLight& got = d.editor.lights[0];
+            Check(got.volumetricG == -1.0f && got.fogShape == FogShape::Box && got.v.extent.x == 20.0f &&
+                      got.v.extent.y == 10.0f && got.v.volumetric == 1.0f,
+                  "fog volume defaults: anisotropy -1, box, extent {20,10,20}, volumetric 1");
+        }
+    }
+}
+
 // Version 1 projects: the old lighting source + key override + spot rig become scene lights.
 static void TestLegacyConversion() {
     const std::filesystem::path projDir = kTemp / "legacy";
@@ -1707,6 +1789,7 @@ int main() {
     TestSceneLightFile();
     TestSceneLightReading();
     TestAreaLightProject();
+    TestFogVolumeProject();
     TestLegacyConversion();
     TestLegacyLightMigration();
     TestDuplicateNamesAndCleanup();

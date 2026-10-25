@@ -218,7 +218,10 @@ int SelfTest() {
       "sockets": [{"name": "world", "position": [0, 0, 0]}, {"name": "node_socket", "node": "Box"}],
       "cameras": [{"name": "wide", "position": [0, 20, -60], "target": [0, 10, 0], "fov": 40}],
       "screens": [{"id": "led", "materials": ["led*"], "source": "image", "file": "led.png", "width": 512, "height": 256}],
-      "environment": {"fog": {"density": 0.03, "color": [0.5, 0.6, 0.7], "anisotropy": 0.5}},
+      "environment": {"fog": {"density": 0.03, "color": [0.5, 0.6, 0.7], "anisotropy": 0.5},
+                      "fogVolumes": [{"id": "beam", "shape": "box", "position": [0, 20, 0],
+                                      "extent": [30, 20, 30], "density": 2.0, "color": [0.8, 0.9, 1.0], "edge": 0.4},
+                                     {"shape": "sphere", "extent": [20, 20, 20], "density": 0.5}]},
       "packs": [{"folder": "packs/floor", "role": "surface", "materials": ["cove*"], "params": {"tint": 0.5}},
                 {"folder": "packs/haze", "role": "world", "socket": "world"}],
       "groups": [{"id": "look", "label": {"en": "Look"}}],
@@ -352,6 +355,10 @@ int SelfTest() {
     check(m.lights.size() == 3 && m.lights[1].kind == mmdx::studio::LightKind::Spot, "lights parsed with kinds");
     check(m.screens.size() == 1 && m.screens[0].width == 512, "screens parsed");
     check(m.environment.fog.present && m.environment.fog.density == 0.03f, "fog parsed");
+    check(m.environment.fogVolumes.size() == 2 && !m.environment.fogVolumes[0].sphere &&
+              m.environment.fogVolumes[1].sphere && m.environment.fogVolumes[0].density == 2.0f &&
+              m.environment.fogVolumes[0].id == "beam" && m.environment.fogVolumes[0].extent.y == 20.0f,
+          "environment.fogVolumes parsed (shape, extent, density, id)");
     check(m.packs.size() == 2 && m.packs[1].role == mmdx::StagePackRole::World, "packs parsed");
     check(m.cameras.size() == 1 && m.cameras[0].fov == 40.0f, "cameras parsed");
     check(m.sockets.size() == 2 && m.sockets[1].node == "Box", "sockets parsed");

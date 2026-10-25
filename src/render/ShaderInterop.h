@@ -146,13 +146,22 @@ struct GpuLight {
     float affectDiffuse;         // 1.0 = on, 0.0 = off
     float affectSpecular;        // 1.0 = on, 0.0 = off
     float pointShadowSlice;      // point shadow base slice (6 * shadowed point index), -1 = none
-    float _pad;
+    float _pad;                  // S9: how much of the light shows in the haze (1 = physical, 0 = invisible in the medium)
     float areaWidth;
     float areaHeight;
     float isArea;                // 1.0 = area light, 0.0 = punctual point/spot
-    float _pad2;
+    float _pad2;                 // S9: this light's scattering anisotropy (VolLight::aniso); -1 = the fog's own
 };
 static_assert(sizeof(GpuLight) == 112, "GpuLight layout");
+
+// S9: StructuredBuffer element for local participating-medium volumes (Renderer::kMaxFogVolumes, t3 space1).
+// centre/radius describe the shape; box uses the half extents, sphere the radii.
+struct GpuFogVolume {
+    DirectX::XMFLOAT3 center; float density;   // density = multiplier added to the global medium inside
+    DirectX::XMFLOAT3 extent; float edge;      // half size; 0..1 soft border band
+    DirectX::XMFLOAT3 color; int sphere;       // medium tint (linear); 1 = ellipsoid, 0 = box
+};
+static_assert(sizeof(GpuFogVolume) == 48, "GpuFogVolume layout");
 
 // Vertex buffer slot 0 (static, DEFAULT heap). 60 bytes.
 struct GpuVertex {

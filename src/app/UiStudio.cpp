@@ -1169,6 +1169,22 @@ void App::DrawStudioStagePanel(float w) {
         ImGui::PopID();
         return;
     }
+    // S9: the stage's participating media, shown as the project's overrides (the fog the stage sets while it is loaded).
+    if (man->environment.fog.present) {
+        const StageFog& fog = man->environment.fog;
+        char value[160];
+        std::snprintf(value, sizeof(value), "%s  ·  %.4f  ·  %.2f  ·  %.3f", Tr("환경 안개"), fog.density, fog.anisotropy,
+                      fog.heightFalloff);
+        labelRow(Tr("안개"), value);
+        char c[96];
+        std::snprintf(c, sizeof(c), "%.2f, %.2f, %.2f", fog.color.x, fog.color.y, fog.color.z);
+        labelRow(Tr("안개 색"), c);
+        if (!man->environment.fogVolumes.empty()) {
+            char n[64];
+            std::snprintf(n, sizeof(n), "%d", (int)man->environment.fogVolumes.size());
+            labelRow(Tr("안개 볼륨"), n);
+        }
+    }
 
     // variant combo (the stage's own; the parts share it). Applying one replaces the stages list: leave this frame.
     if (man->variants.size() >= 2) {
@@ -1287,6 +1303,18 @@ void App::BuildStudioFrameView(FrameView& view) {
 
     LightAnchors anchors = StudioBuildLightAnchors();
     BuildSceneLighting(d.lights, d.camera.light, d.time, anchors, view.light);
+    // S9: a stage's environment.fog is the project's medium while that stage is in the scene (the stage panel shows the
+    // same values; a later stage in the list wins, as its rig would).
+    for (const StudioStage& s : d.stages) {
+        if (!s.manifest) continue;
+        const StageFog& fog = s.manifest->environment.fog;
+        if (!fog.present) continue;
+        view.light.volumetricSigma0 = std::max(fog.density, 0.0f);
+        view.light.volumetricColor = fog.color;
+        view.light.volumetricFalloff = std::max(fog.heightFalloff, 0.0f);
+        view.light.volumetricAnisotropy = std::clamp(fog.anisotropy, -0.9f, 0.95f);
+        view.light.volumetricRadius = fog.radius;
+    }
     StudioApplyLightTracks(view);
     // DoF: the focus track over the automatic focus (UiStudioFocus.cpp)
     StudioComputeFocus(view);

@@ -46,6 +46,9 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     }
     GpuLight lights[kMaxPunctualLights] = {};
     const uint32_t count = FillGpuLights(view.light, lights);
+    // S9: the frame's local fog volumes (GpuFogVolume, zeroed past the count)
+    GpuFogVolume fogVolumes[kMaxFogVolumes] = {};
+    const uint32_t fogCount = FillGpuFogVolumes(view.light, fogVolumes);
     // Background AVI (背景AVI): the exact frame for the rendered time (view.videoExact) before the TLAS / draws.
     if (screenVideo_) screenVideo_->Update(*ctx_, cmd, view);
     if (!rt_->Build(cmd, view.models, ctx_->FrameNumber(), ctx_->FrameSlot())) return false;
@@ -53,8 +56,8 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     // fallback for callers that did not (the renderer's current MME list).
     OfflineJobDesc jobWithMme = job;
     if (jobWithMme.mmeEffects.empty()) jobWithMme.mmeEffects = settings_.mmeEffects;
-    offline_->Begin(cmd, transient_, &builtin_, *rt_, view, sc, lights, count, jobWithMme, ctx_->FrameNumber(),
-                    mme_.get(), mmeSkin_.get());
+    offline_->Begin(cmd, transient_, &builtin_, *rt_, view, sc, lights, count, fogVolumes, fogCount, jobWithMme,
+                    ctx_->FrameNumber(), mme_.get(), mmeSkin_.get());
     float area[4];
     ViewportArea(settings_, (float)ctx_->Width(), (float)ctx_->Height(), area);
     if (offlinePresent_) offline_->Present(cmd, transient_, presentRect_, area);

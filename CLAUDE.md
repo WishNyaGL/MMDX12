@@ -239,6 +239,18 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     Measure pass effects with a seed pair (same settings, different `pc.frame` seed) on a static region; a "converged" reference
     carries bias. Scratch runs must not copy the user's `mmdx12.ini` (its effect stack changes brightness per pass).
     Pass implementations live in `Passes.cpp` and `Pass*.cpp` (shared helpers in `PassCommon.h`). Volumetric and the FFT bloom are `ComputePipeline` (cs_6_5) and silently disable themselves without DXR-class hardware.
+    Volumetric haze (S9, `shaders/volumetric_common.hlsli` shared by `volumetric.hlsl` and `offline_volumetric.hlsl`):
+    every light scales its own in-scattering by `LightValues::volumetric` (`GpuLight::_pad` / `VolLight::volumetric`) and
+    uses `SceneLight::volumetricG` as its Henyey-Greenstein `g` (`_pad2` / `VolLight::aniso`; absent = the fog's own).
+    `RenderSettings::volumetricAnisotropy` (-1 = the built-in sun 0.55 / punctual 0.3) is the fog's `g`, set by a stage's
+    `environment.fog.anisotropy`. Local `LightKind::FogVolume` lights become `LightParams::fogVolumes` -> `GpuFogVolume`
+    (StructuredBuffer, root SRV t4 space1 = `PassContext::fogVolumes`) and add a tinted extinction inside their box /
+    ellipsoid (density = a multiple of the base sigma0). The frame's medium (sigma0 / falloff / tint / radius) is
+    `LightParams::volumetric*`, filled from a stage's `environment.fog`; the haze sphere (`VolumetricMediumRadius`:
+    180 or the stage's `radius`, grown to hold every fog volume) is marched up to `VolumetricMaxDistance` (400, or far
+    enough to cross the sphere from a distant eye). g = -1 means unset everywhere (negative g is valid backscatter).
+    A fog stage turns the haze on for its play scene only (`App::stageFogVolumetric_`, never saved in the ini).
+    Defaults (no volumes, share 1, g unset, eye within 220 of the origin) reproduce the pre-S9 image.
     AutoLuminous (そぼろ convention, native): `GpuModel::Create` flags a non-PBR material with black specular and
     specular power >= 100 as `MatFlag_AutoLuminous` (cleared for pack-shaded materials); `AutoLumEmission`
     (common.hlsli) adds diffuse x texture x (power - 100) / 10 x 4 as HDR after lighting in the raster / RT PS, PT and

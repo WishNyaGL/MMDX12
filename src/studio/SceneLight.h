@@ -7,6 +7,8 @@
 //     that light track drives the sun's colour and direction.
 //   - Ambient: the environment (sky, ground, hemisphere strength; at most one per scene). Not keyable.
 //   - Point / Spot: punctual lights. A spot aims by hand, at a character, or sways like the concert preset's beams.
+//   - FogVolume (S9): a local participating-medium volume (box or sphere): its `intensity` adds to the global haze density
+//     inside it and its `color` tints that part of the medium. It never lights a surface and has no shadow.
 //
 // SceneLightToJson / SceneLightFromJson (asset/SceneLightJson.h) are the ONE implementation of the "lights" file
 // schema: a project file's editor.lights array and an MMDX stage's stage.json "lights" array both use them
@@ -19,7 +21,9 @@
 
 namespace mmdx::studio {
 
-enum class LightKind : uint8_t { Sun = 0, Point = 1, Spot = 2, Ambient = 3, Area = 4 };
+enum class LightKind : uint8_t { Sun = 0, Point = 1, Spot = 2, Ambient = 3, Area = 4, FogVolume = 5 };
+// S9: the shape of a FogVolume light's local medium (project-file names "box" / "sphere").
+enum class FogShape : uint8_t { Box = 0, Sphere = 1 };
 enum class AimMode : uint8_t { Manual = 0, Target = 1, Sway = 2 };
 enum class TargetPart : uint8_t { Centre = 0, Head = 1 };
 enum class ShadowType : uint8_t { NoCast = 0, Hard = 1, Soft = 2 };
@@ -37,6 +41,9 @@ const char* ShadowTypeName(ShadowType t);
 bool ParseShadowType(const std::string& s, ShadowType& out);
 const char* FalloffTypeName(FalloffType f);
 bool ParseFalloffType(const std::string& s, FalloffType& out);
+// "box" / "sphere".
+const char* FogShapeName(FogShape s);
+bool ParseFogShape(const std::string& s, FogShape& out);
 
 // The keyable values. The base values of a light and every key hold all of them; the ones a kind does not use stay at
 // their defaults.
@@ -50,6 +57,8 @@ struct LightValues {
     float coneOuter = 0.24f;                         // spot: outer half-angle, radians
     float coneInner = 0.15f;                         // spot: inner half-angle, radians, <= coneOuter
     DirectX::XMFLOAT2 size{20, 20};                  // area: width, height (MMD units)
+    DirectX::XMFLOAT3 extent{20, 10, 20};            // fog volume: half size (box) / radii (sphere), MMD units
+    float volumetric = 1.0f;                         // S9: how much of the light shows in the haze (0 = none, 5..10 = bold beam)
     bool operator==(const LightValues& o) const;     // exact, every field
 };
 
@@ -79,6 +88,14 @@ struct SceneLight {
                                       // models instead, since model uids are not saved (App converts on save / load).
     TargetPart targetPart = TargetPart::Centre;
     float swayPhase = 0.0f;           // Sway: phase of the sway (per spot)
+
+    // S9: per-light haze behaviour. volumetricG is the Henyey-Greenstein anisotropy of this light's in-scattering in
+    // -0.9..0.95; -1 = use the fog's own (RenderSettings::volumetricAnisotropy).
+    float volumetricG = -1.0f;
+
+    // S9 FogVolume: the shape of the local medium and the soft falloff band at its border (0..1 of the half size).
+    FogShape fogShape = FogShape::Box;
+    float fogEdge = 0.35f;
 
     // Ambient: the environment. The hemisphere strength is v.intensity.
     DirectX::XMFLOAT3 skyZenith{0.32f, 0.55f, 0.85f};

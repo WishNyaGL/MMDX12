@@ -58,7 +58,7 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S7 | Many lights: punctual cap 16 -> 256, clustered raster lighting, shadow budget, PT / GI light sampling, volumetric over all lights | |
 | S7b | Spot cookies / gobos: a projected texture per spot (stage-bundled PNGs, rotatable, keyable) in raster / RT / PT / GI and the volumetric beams | |
 | S8 | Emissive lights: emissive-triangle NEE in PT / GI (screens and LED walls light the scene), raster screen lights | |
-| S9 | Participating media in PT / offline GI (haze for beams), stage `environment.fog` | |
+| S9 | Haze without heavy fog: per-light volumetric scattering + anisotropy, local fog volumes, stage `environment.fog` / `environment.fogVolumes` (done) | |
 | S10 | Planar mirrors in raster (RT / PT / GI reflect natively) | |
 | S11 | Compressed textures: DDS BCn (+ glTF `MSFT_texture_dds`), VRAM budget report | |
 | S12 | Gallery screen + stage store (index, resumable download, install, update, revoke) | |

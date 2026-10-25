@@ -75,6 +75,8 @@ struct OfflineJobDesc {
     BloomLook bloomLook;             // RenderSettings::bloomLook
     bool volumetric = false;         // sun shafts + spotlight cones, sun shadowed with ray queries
     float volumetricDensity = 1.0f;  // 0.25 .. 4
+    // S9: the fog's Henyey-Greenstein anisotropy; -1 = the built-in constants (sun 0.55, punctual 0.3).
+    float volumetricAnisotropy = -1.0f;
     // Thin-lens depth of field focused on FrameView::focusDistance; the lens radius scales with dofAperture and
     // FrameView::apertureScale. Off: a pinhole camera (everything sharp). The render benchmark keeps the defaults.
     bool dof = true;
@@ -126,8 +128,8 @@ public:
     // ctx.FrameNumber() (bone/morph ring entry for the outline pass).
     void Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, const BuiltinTextures* builtin,
                RtScene& rt, const FrameView& view, const SceneConstants& sc, const GpuLight* lights,
-               uint32_t lightCount, const OfflineJobDesc& job, uint64_t frame, MmeRuntime* mme = nullptr,
-               MmeSkin* mmeSkin = nullptr);
+               uint32_t lightCount, const GpuFogVolume* fogVolumes, uint32_t fogVolumeCount, const OfflineJobDesc& job,
+               uint64_t frame, MmeRuntime* mme = nullptr, MmeSkin* mmeSkin = nullptr);
     // Records this frame's share of work (no-op when Idle or Done).
     void Render(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, const BuiltinTextures* builtin,
                 RtScene& rt);

@@ -4,8 +4,8 @@
 // outlines and grading).
 //   CSVolMarch: t0 gbuffer (world normal, view depth; 1e6 = sky), u0 out (half resolution RGBA16F:
 //               in-scattered radiance, transmittance); volumetric_common.hlsli, spots shadowed with ray queries
-//     gP0 = (sigma0, heightFalloff, maxDistance, sunG), gP1 = (image width, image height, spotBoost, punctualG)
-//     gP2 = (per-image seed, ambient scale, pointBoost, 0)
+//     gP0 = (sigma0, heightFalloff, medium radius, sunG), gP1 = (image width, image height, spotBoost, punctualG)
+//     gP2 = (per-image seed, ambient scale, pointBoost, tint.b), gP3 = (numFogVolumes, sun volumetric share, tint.rg)
 //   CSVolBlur: t0 gbuffer, t1 src (half resolution), u0 out; gP0.xy = integer pixel direction
 #include "rt_common.hlsli"
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
@@ -43,7 +43,9 @@ void CSVolMarch(uint3 id : SV_DispatchThreadID) {
     float3 vd = normalize(v.xyz / v.w);
     float3 dir = normalize(mul(vd, (float3x3)gInvView));
     float3 eye = gInvView[3].xyz;
-    float dist = z > 1e5 ? gP0.z : min(z / max(vd.z, 1e-3), gP0.z);
+    // S9: gP0.z = the haze sphere's radius; the march reaches across it from a distant eye (400 as before nearby)
+    const float maxDist = max(400.0, length(eye) + gP0.z);
+    float dist = z > 1e5 ? maxDist : min(z / max(vd.z, 1e-3), maxDist);
 
     VolParams vp;
     vp.sigma0 = gP0.x;
@@ -52,6 +54,9 @@ void CSVolMarch(uint3 id : SV_DispatchThreadID) {
     vp.punctualG = gP1.w;
     vp.spotBoost = gP1.z;
     vp.pointBoost = gP2.z;
+    vp.numFog = (uint)max(gP3.x, 0.0);      // S9: local fog volumes (0 = the height fog alone, no buffer read)
+    vp.sunVolumetric = gP3.y;               // S9: the sun's haze share
+    vp.tint = float3(gP3.z, gP3.w, gP2.w);  // S9: the medium tint (a stage fog colour; (1,1,1) = plain)
     vp.sunShadowDist = 1e9;   // ray queries: shadowed over the whole ray
     vp.sunSteps = 96;
     vp.spotSteps = 48;
@@ -61,7 +66,7 @@ void CSVolMarch(uint3 id : SV_DispatchThreadID) {
     vp.jitter = frac(Ign(float2(id.xy) + 5.588238 * fmod(gP2.x, 64.0)));
     vp.ambient = (gSkyZenith + gSkyHorizon + gGroundColor) * (1.0 / 3.0) * gSunIntensity * gP2.y;
     vp.mediumCenter = float3(0.0, 0.0, 0.0);
-    vp.mediumRadius = 180.0;
+    vp.mediumRadius = gP0.z;
 
     float3 sunCol = SrgbToLinear(gLightColor) / SrgbToLinear(float3(0.6, 0.6, 0.6)) * gSunIntensity;
     gOut[id.xy] = IntegrateVolume(eye, dir, dist, (uint)gNumLights, gLightDir, sunCol, vp);

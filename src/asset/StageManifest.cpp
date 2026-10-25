@@ -854,12 +854,44 @@ void ParseEnvironment(const nlohmann::json& j, StageManifest& out, ParseCtx& ctx
         f.density = (float)ReadDouble(*fog, "density", f.density);
         f.anisotropy = (float)ReadDouble(*fog, "anisotropy", f.anisotropy);
         f.heightFalloff = (float)ReadDouble(*fog, "heightFalloff", f.heightFalloff);
+        f.radius = (float)ReadDouble(*fog, "radius", f.radius);
         if (const auto it = fog->find("color"); it != fog->end()) {
             DirectX::XMFLOAT3 c;
             if (ReadVec3(*it, c)) f.color = c;
             else ctx.Add("environment.fog: \"color\" is not [r,g,b]");
         }
         out.environment.fog = f;
+    }
+    // S9: local fog volumes. Each becomes a FogVolume light on the stage's rig (kind, extent, density, tint, edge).
+    if (const nlohmann::json* arr = ArrayAt(*env, "fogVolumes")) {
+        for (const auto& v : *arr) {
+            if (!v.is_object()) {
+                ctx.Add("environment.fogVolumes: entry is not an object");
+                continue;
+            }
+            StageFogVolume fv;
+            fv.id = Trimmed(ReadString(v, "id"));
+            const std::string shape = Lower(ReadString(v, "shape", "box"));
+            if (shape == "sphere") {
+                fv.sphere = true;
+            } else if (shape != "box") {
+                const std::string what = fv.id.empty() ? "#" + std::to_string(out.environment.fogVolumes.size()) : fv.id;
+                ctx.Add("environment.fogVolumes: " + what + ": unknown shape \"" + shape + "\"");
+            }
+            auto readV = [&](const char* key, DirectX::XMFLOAT3& dst) {
+                const auto it = v.find(key);
+                if (it == v.end()) return;
+                DirectX::XMFLOAT3 c;
+                if (ReadVec3(*it, c)) dst = c;
+                else ctx.Add(std::string("environment.fogVolumes: \"") + key + "\" is not [x,y,z]");
+            };
+            readV("position", fv.position);
+            readV("extent", fv.extent);
+            readV("color", fv.color);
+            fv.density = (float)ReadDouble(v, "density", fv.density);
+            fv.edge = (float)ReadDouble(v, "edge", fv.edge);
+            out.environment.fogVolumes.push_back(std::move(fv));
+        }
     }
     if (const nlohmann::json* amb = ObjectAt(*env, "ambient")) {
         StageAmbient a;
@@ -1329,6 +1361,16 @@ std::vector<std::string> ValidateStageManifest(const StageManifest& manifest) {
         }
         if (suns > 1) err("lights: at most one sun light");
         if (ambients > 1) err("lights: at most one ambient light");
+    }
+
+    // S9: local fog volumes (environment.fogVolumes). A zero / inverted extent has no volume to fill.
+    for (size_t i = 0; i < manifest.environment.fogVolumes.size(); ++i) {
+        const StageFogVolume& f = manifest.environment.fogVolumes[i];
+        const std::string at = "environment.fogVolumes[" + std::to_string(i) + "]";
+        if (f.extent.x <= 0.0f || f.extent.y <= 0.0f || f.extent.z <= 0.0f)
+            err(at + ": extent must be positive [x,y,z] (half size, MMD units)");
+        if (f.edge < 0.0f || f.edge > 1.0f) err(at + ": edge must be 0..1");
+        if (f.density < 0.0f) err(at + ": negative density");
     }
 
     // sockets / cameras

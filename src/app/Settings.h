@@ -60,6 +60,9 @@ struct AppSettings {
     float dofAperture = 1.0f;        // 0.2 .. 3.0
     bool volumetric = false;
     float volumetricDensity = 1.0f;  // 0.25 .. 4.0
+    // S9: the fog's Henyey-Greenstein anisotropy (a stage "environment.fog.anisotropy" sets it); -1 = the built-in
+    // constants of the volumetric pass (sun 0.55, punctual 0.3).
+    float volumetricAnisotropy = -1.0f;
     bool bloomConvolution = false;
     float bloomIntensity = 0.35f;    // 0 .. 1.5
     float bloomThreshold = 1.1f;     // 0.2 .. 4

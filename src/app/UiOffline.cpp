@@ -36,6 +36,7 @@ OfflineJobDesc MakeJobDesc(const AppOptions& o, const AppSettings& st, const Vid
     j.bloomLook = st.bloomLook;
     j.volumetric = video ? v.volumetric : st.volumetric;
     j.volumetricDensity = video ? v.volumetricDensity : st.volumetricDensity;
+    j.volumetricAnisotropy = st.volumetricAnisotropy;
     j.dof = video ? v.dof : st.dof;
     j.dofAperture = video ? v.dofAperture : st.dofAperture;
     // Shader packs: the same effect stack as the real-time frame (a video's real-time renderers get it from VideoRealtimeSettings)
@@ -655,6 +656,7 @@ void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
     }
     OfflineJobDesc jd = MakeJobDesc(options_, settings_, offline_.video, video, true,
                                     (offline_.studio && studio_) ? studio_->AspectRatio() : 0.0f);
+    if (!video && stageFogVolumetric_) jd.volumetric = true;   // S9: a still keeps the fog stage's haze
     // M6b: while the studio is open its own MME post stack replaces the play-mode one (unless --mme overrides);
     // a project's stack is what offline renders from the studio use.
     if (offline_.studio && studio_ && !options_.mmeSet) jd.mmeEffects = StudioMmeEntries();
@@ -1232,6 +1234,7 @@ RenderSettings App::VideoRealtimeSettings(const VideoRenderConfig& cfg) const {
     rs.bloomLook = settings_.bloomLook;
     rs.volumetric = cfg.volumetric;
     rs.volumetricDensity = cfg.volumetricDensity;
+    rs.volumetricAnisotropy = settings_.volumetricAnisotropy;
     rs.dof = cfg.dof;
     rs.dofAperture = cfg.dofAperture;
     rs.exportAlpha = cfg.alpha;   // transparent export: sky writes alpha 0 and the frame is read as straight RGBA

@@ -1,5 +1,7 @@
 #pragma once
 #include <DirectXMath.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -163,6 +165,9 @@ struct RenderSettings {
     float dofMaxRadius = 14.0f;     // max CoC radius in output pixels at 1080p (scaled with output height)
     bool volumetric = false;        // ray-marched sun shafts + spotlight cones (height fog medium)
     float volumetricDensity = 1.0f; // 0..4, scales the medium density
+    // S9: the haze. volumetricAnisotropy is the Henyey-Greenstein g of the medium itself (the sun and punctual terms use
+    // it unless a light has its own volumetricG); -1 = the built-in constants (sun 0.55, punctual 0.3) as before.
+    float volumetricAnisotropy = -1.0f;
     float lutIntensity = 1.0f;      // 0..1 blend toward the colour LUT (Renderer::SetColorLut); no LUT = off
     float exposure = 1.0f;
     float contrast = 1.06f;
@@ -233,6 +238,21 @@ struct PunctualLight {
     bool affectSpecular = true;
     bool castPointShadow = false;  // opt-in point-light shadow; set by BuildSceneLighting (studio only)
     DirectX::XMFLOAT2 areaSize{0, 0}; // width, height (zero = not an area light)
+    // S9: how much of the light shows in the haze (0 = invisible in the medium, 1 = the physical amount) and the
+    // Henyey-Greenstein anisotropy of this light's in-scattering (-0.9..0.95; -1 = the fog's own).
+    float volumetric = 1.0f;
+    float volumetricG = -1.0f;
+};
+
+// S9: a local participating-medium volume (studio LightKind::FogVolume). Its density adds to the global height fog
+// inside the shape and its colour tints that part of the medium; it lights no surface.
+struct FogVolume {
+    DirectX::XMFLOAT3 position{0, 20, 0};  // world centre (MMD units)
+    DirectX::XMFLOAT3 extent{20, 10, 20};  // half size: box half extents, sphere radii
+    DirectX::XMFLOAT3 color{1, 1, 1};      // medium tint (linear)
+    float density = 1.0f;                  // multiplier added to the global medium inside the volume
+    float edge = 0.35f;                    // 0..1 soft falloff band at the border (of the half size)
+    bool sphere = false;                   // box or ellipsoid
 };
 
 struct LightParams {
@@ -247,6 +267,21 @@ struct LightParams {
     float rimStrength = 0.35f;   // anime rim light on characters
     DirectX::XMFLOAT3 rimColor{1.0f, 0.97f, 0.92f};
     std::vector<PunctualLight> punctual;  // up to Renderer::kMaxPunctualLights used
+    float sunVolumetric = 1.0f;           // S9: the sun's share of the haze (LightValues::volumetric)
+    float sunVolumetricG = -1.0f;         // S9: the sun's scattering anisotropy (-1 = the fog's)
+    std::vector<FogVolume> fogVolumes;    // S9: local medium volumes, up to Renderer::kMaxFogVolumes used
+    // S9: the global medium (a stage's environment.fog fills these; BuildSceneLighting leaves the defaults, which are the
+    // constants the volumetric pass always used): sigma0 < 0 = 0.005 * RenderSettings::volumetricDensity, the exponential
+    // height decay per MMD unit (< 0 = the path's own: real-time 0.012, offline GI 0.02) and the medium's scattering
+    // tint (white = plain).
+    float volumetricSigma0 = -1.0f;
+    float volumetricFalloff = -1.0f;
+    DirectX::XMFLOAT3 volumetricColor{1, 1, 1};
+    // S9: the fog's Henyey-Greenstein g of this frame (a loaded stage's environment.fog.anisotropy); -1 = the
+    // RenderSettings value, and with that also -1 the built-in constants (sun 0.55, punctual 0.3).
+    float volumetricAnisotropy = -1.0f;
+    // S9: radius of the haze sphere around the origin (a stage's environment.fog.radius); <= 0 = the built-in 180.
+    float volumetricRadius = -1.0f;
 
     // Sun shadow properties
     LightShadowType sunShadow = LightShadowType::Hard;
@@ -254,6 +289,21 @@ struct LightParams {
     float sunShadowDensity = 1.0f;
     DirectX::XMFLOAT3 sunShadowColor{0, 0, 0};
 };
+
+// S9: the haze sphere's radius for the volumetric passes: the frame's (or 180), grown to enclose every fog volume.
+inline float VolumetricMediumRadius(const LightParams& light) {
+    float r = light.volumetricRadius > 0.0f ? light.volumetricRadius : 180.0f;
+    for (const FogVolume& f : light.fogVolumes) {
+        const DirectX::XMFLOAT3& p = f.position;
+        const DirectX::XMFLOAT3& e = f.extent;
+        r = std::max(r, std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z) + std::sqrt(e.x * e.x + e.y * e.y + e.z * e.z));
+    }
+    return r;
+}
+// The march length cap: the old 400, or far enough to cross the whole sphere from a distant eye.
+inline float VolumetricMaxDistance(const DirectX::XMFLOAT3& eye, float radius) {
+    return std::max(400.0f, std::sqrt(eye.x * eye.x + eye.y * eye.y + eye.z * eye.z) + radius);
+}
 
 // Offline renderer scene extras (the render benchmark scene). Ignored by the real-time passes.
 // An analytic glass box (rounded edges, refraction with dispersion, Beer-Lambert absorption) and

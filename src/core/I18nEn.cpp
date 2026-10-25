@@ -1349,6 +1349,18 @@ const Entry kEnglish[] = {
     {"효과 순서 변경", "Reorder effects"},
     {"우클릭", "Right click"},
     {"키 메뉴 · 구간 시작 / 끝 / 해제", "Key menu · range start / end / clear"},
+    {"가장자리", "Edge"},
+    {"구", "Sphere"},
+    {"모양", "Shape"},
+    {"밀도", "Density"},
+    {"산란 방향", "Scatter direction"},
+    {"상자", "Box"},
+    {"안개 따름", "Follows fog"},
+    {"안개 볼륨", "Fog volumes"},
+    {"안개 산란", "Haze scattering"},
+    {"안개 색", "Fog color"},
+    {"안개", "Fog"},
+    {"환경 안개", "Environment fog"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

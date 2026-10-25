@@ -3,7 +3,7 @@
 // accumulation (the march is jittered per frame) and a light depth-aware separable blur.
 //   CSMarch:    t0 depth (full res), t1 sun cascades, t2 spot shadow maps, u0 out (half res: L, T)
 //     gP0 = (sigma0, heightFalloff, maxDistance, sunG), gP1 = (1/outW, 1/outH, spotBoost, punctualG)
-//     gP2 = (ambient scale, pointBoost, 0, 0)
+//     gP2 = (ambient scale, pointBoost, numFogVolumes, sun volumetric share), gP3 = (medium tint, medium radius)
 //   CSTemporal: t0 current march, t1 history (previous frame), t2 depth, u0 out history
 //     gP0 = (history valid 0/1, current weight, maxDistance, 0)
 //   CSBlur:     t0 src (half res), t1 depth (full res), u0 out; gP0.xy = integer pixel direction.
@@ -81,6 +81,9 @@ void CSMarch(uint3 id : SV_DispatchThreadID) {
     vp.punctualG = gP1.w;
     vp.spotBoost = gP1.z;
     vp.pointBoost = gP2.y;
+    vp.numFog = (uint)max(gP2.z, 0.0);      // S9: local fog volumes (0 = the height fog alone, no buffer read)
+    vp.sunVolumetric = gP2.w;               // S9: the sun's haze share
+    vp.tint = gP3.xyz;                      // S9: the medium tint (a stage fog colour; (1,1,1) = plain)
     // sun shadows exist up to the far end of the last cascade (view z)
     vp.sunShadowDist = gCascadeSplits.w > 0.5 ? gCascadeSplits.z / max(dirV.z, 1e-3) : 0.0;
     vp.sunSteps = 32;
@@ -91,7 +94,7 @@ void CSMarch(uint3 id : SV_DispatchThreadID) {
     vp.jitter = frac(Ign(float2(p) + 5.588238 * (float)((uint)gFrameIndex & 63u)));
     vp.ambient = (gSkyZenith + gSkyHorizon + gGroundColor) * (1.0 / 3.0) * gSunIntensity * gP2.x;
     vp.mediumCenter = float3(0.0, 0.0, 0.0);
-    vp.mediumRadius = 180.0;
+    vp.mediumRadius = gP3.w;                // S9: 180 unless a stage / its fog volumes need more
 
     // sun colour relative to the default 0.6 grey MMD light
     float3 sunCol = SrgbToLinear(gLightColor) / SrgbToLinear(float3(0.6, 0.6, 0.6)) * gSunIntensity;

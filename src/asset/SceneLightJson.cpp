@@ -50,11 +50,15 @@ const nlohmann::json* ObjectAt(const nlohmann::json& j, const char* key) {
 nlohmann::json Vec3Json(const DirectX::XMFLOAT3& v) { return nlohmann::json::array({v.x, v.y, v.z}); }
 
 nlohmann::json LightValuesJson(const LightValues& v) {
-    return {
+    nlohmann::json j = {
         {"position", Vec3Json(v.position)}, {"aim", Vec3Json(v.aim)},     {"direction", Vec3Json(v.direction)},
         {"color", Vec3Json(v.color)},       {"intensity", v.intensity},   {"range", v.range},
         {"coneOuter", v.coneOuter},         {"coneInner", v.coneInner},   {"size", {v.size.x, v.size.y}},
     };
+    // S9: omitted while at the default, so a file of an older scene is byte-identical.
+    if (v.extent.x != 20.0f || v.extent.y != 10.0f || v.extent.z != 20.0f) j["extent"] = Vec3Json(v.extent);
+    if (v.volumetric != 1.0f) j["volumetric"] = v.volumetric;
+    return j;
 }
 
 void ReadLightValues(const nlohmann::json& j, LightValues& v) {
@@ -67,6 +71,8 @@ void ReadLightValues(const nlohmann::json& j, LightValues& v) {
     v.coneOuter = (float)ReadDouble(j, "coneOuter", v.coneOuter);
     v.coneInner = (float)ReadDouble(j, "coneInner", v.coneInner);
     v.size = ReadVec2(j, "size", v.size);
+    v.extent = ReadVec3(j, "extent", v.extent);
+    v.volumetric = (float)ReadDouble(j, "volumetric", v.volumetric);
 }
 
 } // namespace
@@ -89,6 +95,13 @@ nlohmann::json SceneLightToJson(const SceneLight& l) {
                    {"density", l.shadowDensity},
                    {"color", Vec3Json(l.shadowColor)}};
     j["falloff"] = FalloffTypeName(l.falloff);
+    // S9: the haze behaviour of the light. Written only when it differs from the default, so files of scenes older
+    // than S9 are unchanged.
+    if (l.volumetricG != -1.0f) j["volumetricG"] = l.volumetricG;
+    if (l.kind == LightKind::FogVolume) {
+        j["fogShape"] = FogShapeName(l.fogShape);
+        j["fogEdge"] = l.fogEdge;
+    }
     j["affectDiffuse"] = l.affectDiffuse;
     j["affectSpecular"] = l.affectSpecular;
     j["viewportVisible"] = l.viewportVisible;
@@ -134,6 +147,10 @@ bool SceneLightFromJson(const nlohmann::json& jl, SceneLight& l, std::vector<std
         l.shadowColor = ReadVec3(*s, "color", l.shadowColor);
     }
     ParseFalloffType(ReadString(jl, "falloff", ""), l.falloff);
+    // S9: the haze behaviour (absent = the defaults: the fog's own anisotropy, a box, a 0.35 edge band).
+    l.volumetricG = (float)ReadDouble(jl, "volumetricG", l.volumetricG);
+    ParseFogShape(ReadString(jl, "fogShape", ""), l.fogShape);
+    l.fogEdge = (float)ReadDouble(jl, "fogEdge", l.fogEdge);
     l.affectDiffuse = ReadBool(jl, "affectDiffuse", l.affectDiffuse);
     l.affectSpecular = ReadBool(jl, "affectSpecular", l.affectSpecular);
     l.viewportVisible = ReadBool(jl, "viewportVisible", l.viewportVisible);

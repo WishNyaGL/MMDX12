@@ -28,6 +28,7 @@ const char* LightKindName(LightKind k) {
     case LightKind::Spot: return "spot";
     case LightKind::Ambient: return "ambient";
     case LightKind::Area: return "area";
+    case LightKind::FogVolume: return "fog_volume";
     case LightKind::Sun: break;
     }
     return "sun";
@@ -39,6 +40,7 @@ bool ParseLightKind(const std::string& s, LightKind& out) {
     if (s == "spot") { out = LightKind::Spot; return true; }
     if (s == "ambient") { out = LightKind::Ambient; return true; }
     if (s == "area") { out = LightKind::Area; return true; }
+    if (s == "fog_volume" || s == "fogvolume") { out = LightKind::FogVolume; return true; }
     return false;
 }
 
@@ -98,10 +100,18 @@ bool ParseFalloffType(const std::string& s, FalloffType& out) {
     return false;
 }
 
+const char* FogShapeName(FogShape s) { return s == FogShape::Sphere ? "sphere" : "box"; }
+
+bool ParseFogShape(const std::string& s, FogShape& out) {
+    if (s == "box") { out = FogShape::Box; return true; }
+    if (s == "sphere") { out = FogShape::Sphere; return true; }
+    return false;
+}
+
 bool LightValues::operator==(const LightValues& o) const {
     return Same(position, o.position) && Same(aim, o.aim) && Same(direction, o.direction) && Same(color, o.color) &&
            intensity == o.intensity && range == o.range && coneOuter == o.coneOuter && coneInner == o.coneInner &&
-           size.x == o.size.x && size.y == o.size.y;
+           size.x == o.size.x && size.y == o.size.y && Same(extent, o.extent) && volumetric == o.volumetric;
 }
 
 bool LightKey::operator==(const LightKey& o) const { return frame == o.frame && v == o.v; }
@@ -110,6 +120,7 @@ bool SceneLight::operator==(const SceneLight& o) const {
     return uid == o.uid && name == o.name && kind == o.kind && enabled == o.enabled && v == o.v && keys == o.keys &&
            vmdLink == o.vmdLink && rimStrength == o.rimStrength && Same(rimColor, o.rimColor) &&
            aimMode == o.aimMode && targetUid == o.targetUid && targetPart == o.targetPart && swayPhase == o.swayPhase &&
+           volumetricG == o.volumetricG && fogShape == o.fogShape && fogEdge == o.fogEdge &&
            Same(skyZenith, o.skyZenith) && Same(skyHorizon, o.skyHorizon) && Same(groundColor, o.groundColor) &&
            shadow == o.shadow && shadowSoftness == o.shadowSoftness && shadowDensity == o.shadowDensity &&
            Same(shadowColor, o.shadowColor) && falloff == o.falloff && affectDiffuse == o.affectDiffuse &&
@@ -138,6 +149,8 @@ LightValues SampleLightValues(const SceneLight& light, int frame) {
     out.coneOuter = Lerp(a.v.coneOuter, b.v.coneOuter, t);
     out.coneInner = Lerp(a.v.coneInner, b.v.coneInner, t);
     out.size = {Lerp(a.v.size.x, b.v.size.x, t), Lerp(a.v.size.y, b.v.size.y, t)};
+    out.extent = Lerp3(a.v.extent, b.v.extent, t);
+    out.volumetric = Lerp(a.v.volumetric, b.v.volumetric, t);
     return out;
 }
 

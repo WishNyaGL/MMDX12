@@ -42,6 +42,7 @@ struct RenderInitProgress {
 class Renderer {
 public:
     static constexpr uint32_t kMaxPunctualLights = 16;
+    static constexpr uint32_t kMaxFogVolumes = 16;   // S9: local fog volumes bound to the volumetric passes
     Renderer() = default;
     ~Renderer();
 
@@ -178,6 +179,8 @@ private:
     // written (<= kMaxPunctualLights).
     // pointCap: point lights that get a shadow slice (raster: the map's capacity; ray-traced paths: no cap).
     static uint32_t FillGpuLights(const LightParams& light, GpuLight* out, uint32_t pointCap = kMaxPunctualLights);
+    // S9: the same for the local fog volumes (<= kMaxFogVolumes); returns the count written.
+    static uint32_t FillGpuFogVolumes(const LightParams& light, GpuFogVolume* out);
 
     Dx12Context* ctx_ = nullptr;
     std::filesystem::path shaderDir_;
@@ -235,6 +238,9 @@ private:
     ComPtr<ID3D12Resource> sceneCb_, lightBuf_;
     uint8_t* sceneCbMapped_ = nullptr;
     uint8_t* lightBufMapped_ = nullptr;
+    // S9: local fog volumes of the frame (StructuredBuffer<GpuFogVolume>, same slot layout as the lights)
+    ComPtr<ID3D12Resource> fogBuf_;
+    uint8_t* fogBufMapped_ = nullptr;
     // temporal state
     DirectX::XMFLOAT4X4 prevViewProj_{};
     DirectX::XMFLOAT3 prevEye_{};

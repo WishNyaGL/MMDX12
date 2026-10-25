@@ -156,6 +156,9 @@ void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std
         out.sunShadowSoftness = sun->shadowSoftness;
         out.sunShadowDensity = sun->shadowDensity;
         out.sunShadowColor = sun->shadowColor;
+        // S9: the sun's share of the haze and its own scattering anisotropy
+        out.sunVolumetric = v.volumetric;
+        out.sunVolumetricG = sun->volumetricG;
         // linked to the camera VMD: its light track decides the colour and direction while it has keys
         if (sun->vmdLink && !cameraLight.empty()) {
             const studio::LightKf k = studio::SampleLight(cameraLight, frameF);
@@ -185,14 +188,32 @@ void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std
     }
 
     for (const studio::SceneLight& l : lights) {
-        if (!l.enabled || (l.kind != LightKind::Point && l.kind != LightKind::Spot && l.kind != LightKind::Area)) continue;
-        if (out.punctual.size() >= Renderer::kMaxPunctualLights) break;
+        if (!l.enabled) continue;
+        if (l.kind == studio::LightKind::FogVolume) {
+            if (out.fogVolumes.size() >= Renderer::kMaxFogVolumes) continue;
+            const studio::LightValues v = studio::SampleLightValues(l, frame);
+            FogVolume f;
+            f.position = v.position;
+            f.extent = v.extent;
+            f.color = v.color;
+            f.density = v.intensity;
+            f.edge = std::clamp(l.fogEdge, 0.0f, 1.0f);
+            f.sphere = l.fogShape == studio::FogShape::Sphere;
+            out.fogVolumes.push_back(f);
+            continue;
+        }
+        if (l.kind != LightKind::Point && l.kind != LightKind::Spot && l.kind != LightKind::Area) continue;
+        // A full punctual list skips further punctual lights but keeps looking: S9 fog volumes may follow them in the
+        // list (a stage's rig appends them after its lights).
+        if (out.punctual.size() >= Renderer::kMaxPunctualLights) continue;
         const studio::LightValues v = studio::SampleLightValues(l, frame);
         PunctualLight p;
         p.position = v.position;
         p.range = v.range;
         p.color = v.color;
         p.intensity = v.intensity;
+        p.volumetric = v.volumetric;
+        p.volumetricG = l.volumetricG;
         p.shadow = (LightShadowType)l.shadow;
         p.shadowSoftness = l.shadowSoftness;
         p.shadowDensity = l.shadowDensity;

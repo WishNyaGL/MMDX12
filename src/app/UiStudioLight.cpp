@@ -126,6 +126,25 @@ void App::StudioAddLight(LightKind kind) {
         l.name = "메인 조명";
     } else if (kind == LightKind::Ambient) {
         l.name = "환경광";
+    } else if (kind == LightKind::FogVolume) {
+        // S9: a box of local medium around the performer. intensity = the density it adds to the global haze.
+        l.v.position = {focus.x + 0.0f, focus.y + 6.0f, focus.z};
+        l.v.extent = {30.0f, 14.0f, 30.0f};
+        l.v.intensity = 1.0f;
+        l.v.color = {1.0f, 1.0f, 1.0f};
+        l.fogShape = FogShape::Box;
+        l.fogEdge = 0.35f;
+        l.shadow = ShadowType::NoCast;
+        int n = 1;
+        while (true) {
+            std::string candidate = "안개 " + std::to_string(n);
+            bool taken = false;
+            for (const auto& ex : d.lights) {
+                if (ex.name == candidate) { taken = true; break; }
+            }
+            if (!taken) { l.name = candidate; break; }
+            ++n;
+        }
     }
 
     std::vector<SceneLight> before = d.lights;
@@ -172,7 +191,7 @@ void App::StudioApplyStageLightRig(uint32_t stageUid) {
     StudioStage* stage = d.FindStage(stageUid);
     if (!stage || !stage->manifest) return;
     const std::shared_ptr<const StageManifest> manifest = stage->manifest;
-    if (manifest->lights.empty() && !manifest->gltfLights) return;
+    if (manifest->lights.empty() && manifest->environment.fogVolumes.empty() && !manifest->gltfLights) return;
     std::vector<SceneLight> before = d.lights;
     std::vector<SceneLight> after = manifest->lights;
     if (manifest->gltfLights) {
@@ -186,6 +205,9 @@ void App::StudioApplyStageLightRig(uint32_t stageUid) {
             after.insert(after.end(), added.begin(), added.end());
         }
     }
+    // S9: the stage's local fog volumes become FogVolume lights of the rig (placement only, never cue driven).
+    for (size_t i = 0; i < manifest->environment.fogVolumes.size(); ++i)
+        after.push_back(StageFogVolumeLight(manifest->environment.fogVolumes[i], i));
     if (after.empty()) return;
     for (SceneLight& l : after) {
         l.uid = d.nextLightUid++;   // the stage's order is its identity; uids are per project
@@ -198,6 +220,11 @@ void App::StudioApplyStageLightRig(uint32_t stageUid) {
     d.selectedLightUid = 0;
     ++d.projectVersion;
     d.rowsKey = ~0ull;
+    // S9: a stage with an environment.fog turns the volumetric haze on (the user's switch can still turn it off).
+    if (manifest->environment.fog.present && !settings_.volumetric) {
+        settings_.volumetric = true;
+        ApplyRenderSettings();
+    }
     toast_ = {Tr("스테이지 조명을 불러왔어요"),
               manifest->DisplayName(StageLanguage()) + "  ·  " + std::to_string(after.size()) + Tr("개 조명"),
               {}, false, timeSeconds_ + 4.0};
@@ -256,6 +283,7 @@ void App::DrawStudioLightOutliner() {
         else if (l.kind == LightKind::Spot) { glyph = icon::Aperture; sub = Tr("스팟"); }
         else if (l.kind == LightKind::Ambient) { glyph = icon::Globe; sub = Tr("환경광"); }
         else if (l.kind == LightKind::Area) { glyph = icon::Image; sub = Tr("면광원"); }
+        else if (l.kind == LightKind::FogVolume) { glyph = icon::Globe; sub = Tr("안개 볼륨"); }
 
         char subBuf[64];
         if (!l.keys.empty()) {
@@ -494,7 +522,8 @@ void App::DrawStudioLightInspector(float w) {
         const char* kindLabel = light->kind == LightKind::Sun ? Tr("태양") :
                                 light->kind == LightKind::Point ? Tr("점광원") :
                                 light->kind == LightKind::Spot ? Tr("스팟") :
-                                light->kind == LightKind::Area ? Tr("면광원") : Tr("환경광");
+                                light->kind == LightKind::Area ? Tr("면광원") :
+                                light->kind == LightKind::FogVolume ? Tr("안개 볼륨") : Tr("환경광");
         Text(cdl, Font::Regular, size::Caption, ImGui::GetCursorScreenPos(), p.ink3, kindLabel);
         ImGui::Dummy(ImVec2(w, Dp(16.0f)));
 
@@ -813,10 +842,46 @@ void App::DrawStudioLightInspector(float w) {
         basePropEdit(Tr("강도"),
             [&] { return ImGui::DragFloat("##ambstrength", &strength, 0.02f, 0.0f, 10.0f, "%.2f"); },
             [&](SceneLight& l) { l.v.intensity = std::max(0.0f, strength); });
+
+    } else if (light->kind == LightKind::FogVolume) {
+        // S9: a local medium volume. It lights nothing; its density adds to the global haze inside the shape.
+        float pos[3] = {cur.position.x, cur.position.y, cur.position.z};
+        keyedEdit(Tr("위치"),
+            [&] { return ImGui::DragFloat3("##fogpos", pos, 0.1f, 0.0f, 0.0f, "%.1f"); },
+            [&](LightValues& v) { v.position = {pos[0], pos[1], pos[2]}; }, "position");
+
+        float ext[3] = {cur.extent.x, cur.extent.y, cur.extent.z};
+        keyedEdit(Tr("크기"),
+            [&] { return ImGui::DragFloat3("##fogextent", ext, 0.5f, 0.5f, 5000.0f, "%.1f"); },
+            [&](LightValues& v) {
+                v.extent = {std::max(0.5f, ext[0]), std::max(0.5f, ext[1]), std::max(0.5f, ext[2])};
+            }, "extent");
+
+        float density = cur.intensity;
+        keyedEdit(Tr("밀도"),
+            [&] { return ImGui::DragFloat("##fogdensity", &density, 0.02f, 0.0f, 20.0f, "%.2f"); },
+            [&](LightValues& v) { v.intensity = std::max(0.0f, density); }, "intensity");
+
+        float col[3] = {cur.color.x, cur.color.y, cur.color.z};
+        keyedEdit(Tr("색"),
+            [&] { return ui::ColorField("##fogcol", col); },
+            [&](LightValues& v) { v.color = {col[0], col[1], col[2]}; }, "color");
+
+        const char* shapes[] = {Tr("상자"), Tr("구")};
+        int shape = (int)light->fogShape;
+        basePropEdit(Tr("모양"), [&] {
+            bool changed = Segmented("##fogshape", shapes, 2, &shape, (w - Dp(72.0f)) / Dpi(), 30.0f);
+            return changed;
+        }, [&](SceneLight& l) { l.fogShape = (FogShape)shape; });
+
+        float edge = light->fogEdge;
+        basePropEdit(Tr("가장자리"),
+            [&] { return ImGui::SliderFloat("##fogedge", &edge, 0.0f, 1.0f, "%.2f"); },
+            [&](SceneLight& l) { l.fogEdge = std::clamp(edge, 0.0f, 1.0f); });
     }
 
     // Shadow section (sun, point, spot)
-    if (light->kind != LightKind::Ambient) {
+    if (light->kind != LightKind::Ambient && light->kind != LightKind::FogVolume) {
         separator(8.0f);
         SectionLabel(Tr("그림자"));
 
@@ -882,8 +947,31 @@ void App::DrawStudioLightInspector(float w) {
         ImGui::Dummy(ImVec2(w, Dp(6.0f)));
     }
 
-    // Switches (point, spot, sun)
-    if (light->kind != LightKind::Ambient) {
+    // S9: haze (every light that shows in the medium: sun, point, spot, area)
+    if (light->kind == LightKind::Sun || light->kind == LightKind::Point || light->kind == LightKind::Spot ||
+        light->kind == LightKind::Area) {
+        separator(8.0f);
+        SectionLabel(Tr("안개"));
+
+        float scattering = cur.volumetric;
+        keyedEdit(Tr("안개 산란"),
+            [&] { return ImGui::SliderFloat("##volumetric", &scattering, 0.0f, 20.0f, "%.2f"); },
+            [&](LightValues& v) { v.volumetric = std::max(0.0f, scattering); }, "volumetric");
+        // unchecked = the fog's own anisotropy (-1); checked = this light's g (negative values scatter backwards)
+        bool ownG = light->volumetricG > -0.99f;
+        float aniso = ownG ? light->volumetricG : 0.6f;
+        basePropEdit(Tr("산란 방향"),
+            [&] {
+                bool changed = ImGui::Checkbox("##volumetricgown", &ownG);
+                ImGui::SameLine();
+                if (ownG) changed |= ImGui::SliderFloat("##volumetricg", &aniso, -0.9f, 0.95f, "%.2f");
+                else ImGui::TextDisabled("%s", Tr("안개 따름"));
+                return changed;
+            },
+            [&](SceneLight& l) { l.volumetricG = ownG ? std::clamp(aniso, -0.9f, 0.95f) : -1.0f; });
+    }
+
+    if (light->kind != LightKind::Ambient && light->kind != LightKind::FogVolume) {
         separator(8.0f);
         bool diff = light->affectDiffuse;
         if (Switch("##diffuse", Tr("디퓨즈 영향"), &diff)) {

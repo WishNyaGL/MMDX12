@@ -135,6 +135,9 @@ struct PassContext {
     // DLSS-RR runs this frame (PathTraced, DLSS active, RR available, switch on): PathTracePass writes
     // the guide targets instead of running its temporal / a-trous denoiser.
     bool dlssRr = false;
+    // S9: StructuredBuffer<GpuFogVolume> of pc.view.light.fogVolumes (t4 space1) for the volumetric passes; 0 when
+    // there is no volume (the shaders then read no buffer at all).
+    D3D12_GPU_VIRTUAL_ADDRESS fogVolumes = 0;
 };
 
 class IRenderPass {
@@ -209,6 +212,7 @@ private:
 //   7: table, unbounded Texture2D t0 space2 starting at SrvHeap index 0
 //   8: table, unbounded ByteAddressBuffer t0 space3 starting at SrvHeap index 0
 //   9: root SRV t3 space1 StructuredBuffer<float4> gPackExtSlots (pc.rt ? pc.rt->PackExtSlots() : 0)
+//  10: root SRV t4 space1 StructuredBuffer<GpuFogVolume> (pc.fogVolumes; 0 = no local fog volume)
 //   static samplers s0 point clamp, s1 linear clamp, s2 linear wrap, s4 linear wrap.
 // Shaders are compiled with CompileShaderDxc as cs_6_5. Root parameters 4/5 are bound to
 // pc.rt (0 when null; shaders must not touch the TLAS then).

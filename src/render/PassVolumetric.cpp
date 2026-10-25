@@ -3,6 +3,7 @@
 // into lit as lit * transmittance + in-scattered light.
 #include "render/Passes.h"
 #include "render/PassCommon.h"
+#include "render/Renderer.h"
 #include "core/Log.h"
 
 namespace mmdx {
@@ -52,18 +53,37 @@ void VolumetricPass::Execute(PassContext& pc) {
         historyReady_ = false;
         return;
     }
-    const float maxDistance = 400.0f;
+    // S9: the haze sphere (a stage's radius, grown to hold its fog volumes) and a march long enough to cross it from
+    // the eye (400 as before while the eye is within 220 of the origin)
+    const float mediumRadius = VolumetricMediumRadius(pc.view.light);
+    const float maxDistance = VolumetricMaxDistance(pc.view.camera.eye, mediumRadius);
+    // S9: the fog's anisotropy (-1 = the built-in constants), the local volumes and the medium of the frame (a stage's
+    // environment.fog fills LightParams::volumetric*; the defaults are the constants the pass always used).
+    const float fogG = pc.view.light.volumetricAnisotropy > -0.99f ? pc.view.light.volumetricAnisotropy
+                                                                 : pc.settings.volumetricAnisotropy;
+    const float sunG = pc.view.light.sunVolumetricG > -0.99f
+                           ? pc.view.light.sunVolumetricG
+                           : (fogG > -0.99f ? fogG : 0.55f);
+    const float punctualG = fogG > -0.99f ? fogG : 0.3f;
+    const uint32_t fogCount = (uint32_t)std::min<size_t>(pc.view.light.fogVolumes.size(), Renderer::kMaxFogVolumes);
 
     // 1. march (jittered per frame) -> raw_
     raw_.Transition(cmd, kUav);
     t.depth.Transition(cmd, kSrvAll);
     t.shadowMap.Transition(cmd, kSrvAll);
     t.spotShadowMap.Transition(cmd, kSrvAll);
-    const float c0[12] = {0.005f * pc.settings.volumetricDensity, 0.012f, maxDistance, 0.55f,
-                          1.0f / raw_.width, 1.0f / raw_.height, 6.0f, 0.3f,
-                          0.25f, 0.45f, 0.0f, 0.0f};
+    // S9: a stage's environment.fog density replaces the built-in 0.005 base; the user's density slider still scales it.
+    const float sigma0 = (pc.view.light.volumetricSigma0 >= 0.0f ? pc.view.light.volumetricSigma0 : 0.005f) *
+                         pc.settings.volumetricDensity;
+    const float falloff = pc.view.light.volumetricFalloff >= 0.0f ? pc.view.light.volumetricFalloff : 0.012f;
+    const DirectX::XMFLOAT3& tint = pc.view.light.volumetricColor;
+    const float c0[16] = {sigma0, falloff, maxDistance, sunG,
+                          1.0f / raw_.width, 1.0f / raw_.height, 6.0f, punctualG,
+                          0.25f, 0.45f, (float)fogCount, pc.view.light.sunVolumetric,
+                          tint.x, tint.y, tint.z, mediumRadius};
+    const uint32_t c0Size = 16;
     march_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&t.depth, &t.shadowMap, &t.spotShadowMap}),
-                    pc.transient.UavTable(pc.ctx, {&raw_}), c0, 12, Groups(raw_.width), Groups(raw_.height));
+                    pc.transient.UavTable(pc.ctx, {&raw_}), c0, c0Size, Groups(raw_.width), Groups(raw_.height));
 
     // 2. temporal accumulation -> history_[cur] (history only across consecutive frames, no cuts)
     const bool valid = historyReady_ && pc.frame == lastFrame_ + 1 && !pc.view.cameraCut;

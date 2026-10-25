@@ -52,6 +52,10 @@ public:
     // opts in with "gltfLights": true. Called once at load; empty = none.
     void SetGltfLights(std::vector<studio::SceneLight> lights) { gltfLights_ = std::move(lights); }
 
+    // S9: the stage has an `environment.fog` block: it turns the volumetric haze on and sets its density / colour /
+    // anisotropy / height falloff while the stage is loaded (the user's volumetric switch can still turn it off).
+    bool HasFog() const { return manifest_ && manifest_->environment.fog.present; }
+
     // The rig at the last Apply (the manifest's lights with the targets applied, plus the glTF lights when enabled;
     // empty when the stage has none).
     const std::vector<studio::SceneLight>& Lights() const { return lights_; }

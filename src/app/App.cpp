@@ -1702,8 +1702,9 @@ void App::ApplyRenderSettings() {
     rs.ptBounces = (uint32_t)settings_.ptBounces;
     rs.dof = settings_.dof;
     rs.dofAperture = settings_.dofAperture;
-    rs.volumetric = settings_.volumetric;
+    rs.volumetric = settings_.volumetric || stageFogVolumetric_;
     rs.volumetricDensity = settings_.volumetricDensity;
+    rs.volumetricAnisotropy = settings_.volumetricAnisotropy;
     rs.bloomConvolution = settings_.bloomConvolution;
     rs.bloomIntensity = settings_.bloomIntensity;
     rs.bloomThreshold = settings_.bloomThreshold;
@@ -1863,6 +1864,17 @@ void App::PollLoad() {
         // chosen for other stages stays as it is.
         if (scene_->stage && scene_->stage->HasLights() && settings_.lighting < kLightingPresetCount)
             playLighting_ = (int)LightingPreset::Stage;
+        // S9: a stage's environment.fog turns the volumetric haze on and sets its anisotropy while the stage is loaded
+        // (the user's volumetric switch can still turn the pass off afterwards).
+        // The switch is this scene's (stageFogVolumetric_), never written into the saved settings.
+        settings_.volumetricAnisotropy = -1.0f;
+        stageFogVolumetric_ = false;
+        if (scene_->stage && scene_->stage->HasFog()) {
+            const StageFog& fog = scene_->stage->Manifest()->environment.fog;
+            stageFogVolumetric_ = true;
+            settings_.volumetricAnisotropy = std::clamp(fog.anisotropy, -0.9f, 0.95f);
+            ApplyRenderSettings();
+        }
         useMotionCamera_ = scene_->camera != nullptr && !options_.freeCamera;
         if (options_.hasCamera) {
             const float* c = options_.camera;
@@ -2223,6 +2235,10 @@ void App::UnloadScene() {
     audio_.Unload();
     playing_ = false;
     playLighting_ = -1;   // S1b: the next scene picks its own default (stage rig / the saved preset)
+    if (stageFogVolumetric_) {   // S9: the stage fog's haze ends with its scene
+        stageFogVolumetric_ = false;
+        ApplyRenderSettings();
+    }
 }
 
 // Auto workflow (완전 자동), play scenes only: a required CONTROLOBJECT controller was missing, but its file may
@@ -2636,6 +2652,16 @@ void App::BuildFrameView(float frame, FrameView& view) {
             stageAnchors.characters.push_back(c);
         }
         BuildSceneLighting(*stageRig, scene_->lightTrack, stageSeconds, stageAnchors, view.light);
+        // S9: a stage's environment.fog drives the haze's tint, density and height falloff while the stage is loaded; the
+        // user's volumetric switch still decides whether the pass runs at all (the anisotropy is a render setting, set
+        // when the scene loads).
+        if (const StageFog& fog = scene_->stage->Manifest()->environment.fog; fog.present) {
+            view.light.volumetricSigma0 = std::max(fog.density, 0.0f);
+            view.light.volumetricColor = fog.color;
+            view.light.volumetricFalloff = std::max(fog.heightFalloff, 0.0f);
+            view.light.volumetricAnisotropy = std::clamp(fog.anisotropy, -0.9f, 0.95f);
+            view.light.volumetricRadius = fog.radius;
+        }
     } else {
         // "스테이지 조명" without a stage rig (or a classic stage): the Studio preset, as before.
         BuildLighting(preset == LightingPreset::Stage ? LightingPreset::Studio : preset, playTime_, focus, view.light);

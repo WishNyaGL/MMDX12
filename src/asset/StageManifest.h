@@ -107,6 +107,7 @@ struct StageFog {
     DirectX::XMFLOAT3 color{0.6f, 0.65f, 0.75f};
     float anisotropy = 0.4f;
     float heightFalloff = 0.0f;
+    float radius = 0.0f;   // S9: the haze fills a sphere of this radius around the origin (<= 0: the built-in 180)
 };
 
 struct StageAmbient {
@@ -115,9 +116,23 @@ struct StageAmbient {
     std::optional<float> intensity;
 };
 
+// S9: a local participating-medium volume of a stage ("environment.fogVolumes"). Becomes a LightKind::FogVolume light
+// of the stage's rig: `density` is the light's intensity (added to the global medium inside the volume) and `color` its
+// tint. `edge` is the soft falloff band at the border, 0..1 of the half size.
+struct StageFogVolume {
+    std::string id;                       // optional name (the light's name; "fog <index>" when empty)
+    bool sphere = false;                  // "shape": "box" (default) / "sphere"
+    DirectX::XMFLOAT3 position{0, 20, 0};
+    DirectX::XMFLOAT3 extent{20, 10, 20}; // half size, MMD units
+    float density = 1.0f;
+    DirectX::XMFLOAT3 color{1, 1, 1};
+    float edge = 0.35f;
+};
+
 struct StageEnvironment {
     StageFog fog;
     StageAmbient ambient;
+    std::vector<StageFogVolume> fogVolumes;
 };
 
 // A bundled pack folder ("surface" + material globs, "world" + socket, "screen" + screen id) and its initial

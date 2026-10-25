@@ -8,6 +8,9 @@
 // extinction, white). Transmittance is integrated in closed form, so every light sample is
 // weighted by the exact T(t) and the unshadowed part of the sun term is exact:
 //   integral sigma(t) T(t) dt over [a, b] = T(a) - T(b).
+// S9: local fog volumes (gVolFog, t4 space1) add a tinted extinction inside their box / ellipsoid, and every light
+// scales its own in-scattering by its volumetric share and its anisotropy (Henyey-Greenstein). VolParams::numFog == 0
+// and a share of 1 with the fog's g reproduce the image of a build without S9 bit for bit.
 // The medium is bounded by a sphere around the stage (VolParams::mediumRadius).
 // Light shafts come from the visibility terms: the sun is marched only where shadow data exists
 // (shadow-cascade range, or the whole ray with ray queries); each spot light is marched only
@@ -22,10 +25,19 @@ struct VolLight {
     float3 dir;   float cosInner;
     float shadowSlice; float shadowType; float shadowSoftness; float shadowDensity;
     float3 shadowColor; float falloff;
-    float affectDiffuse; float affectSpecular; float pointShadowSlice; float _pad;
-    float areaWidth; float areaHeight; float isArea; float _pad2;
+    float affectDiffuse; float affectSpecular; float pointShadowSlice; float volumetric; // S9: haze share
+    float areaWidth; float areaHeight; float isArea; float aniso;          // S9: scattering anisotropy (-1: the fog's)
 };
 StructuredBuffer<VolLight> gVolLights : register(t2, space1);
+
+// S9: local participating-medium volumes (GpuFogVolume in ShaderInterop.h): density is added to the global height fog
+// inside the shape (density = a multiple of the base sigma0; box, or ellipsoid with sphere != 0) and color tints the medium there. edge is the soft border band.
+struct VolFog {
+    float3 center;  float density;
+    float3 extent;  float edge;
+    float3 color;   int sphere;
+};
+StructuredBuffer<VolFog> gVolFog : register(t4, space1);
 
 float VolSunVisibility(float3 wp);
 float VolSpotVisibility(VolLight l, float3 wp);
@@ -47,6 +59,9 @@ struct VolParams {
     float3 ambient;      // isotropic in-scattered radiance from the sky dome (already scaled)
     float3 mediumCenter; // the haze fills a sphere around the stage (none outside), so distant
     float mediumRadius;  // scenery and the sky are not fogged out
+    uint numFog;         // S9: local fog volumes in gVolFog (0 = none read: the image is the height fog alone)
+    float sunVolumetric; // S9: the sun's share of the haze (LightValues::volumetric)
+    float3 tint;         // S9: the medium's scattering tint (a stage environment.fog.color; white = plain haze)
 };
 
 float VolHG(float c, float g) {
@@ -60,16 +75,40 @@ float VolOpticalDepthAbove(float y0, float dy, float t, VolParams p) {
     float k = p.falloff * dy;
     return abs(k * t) < 1e-3 ? base * t * (1.0 - 0.5 * k * t) : base * (1.0 - exp(-k * t)) / k;
 }
+// ---- S9 local fog volumes --------------------------------------------------
+// Defined after the ray / shape tests below; declared here for VolOpticalDepth.
+float VolFogOpticalDepth(float3 o, float3 d, float t, VolParams p);
+
+// Fraction of the local medium at wp (0 outside, 1 deep inside) with the soft border band `edge`: box = the distance to
+// the faces in units of the half extents, ellipsoid = the radius in units of the radii.
+float VolFogShape(const VolFog f, float3 wp) {
+    float3 e = max(abs(f.extent), 1e-4);
+    float m;
+    if (f.sphere != 0) {
+        m = length((wp - f.center) / e);
+    } else {
+        float3 q = abs(wp - f.center) / e;
+        m = max(max(q.x, q.y), max(q.z, 0.0));
+    }
+    return saturate((1.0 - m) / max(f.edge, 1e-3));
+}
+
 float VolOpticalDepth(float3 o, float3 d, float t, VolParams p) {
     float tc = abs(d.y) > 1e-6 ? -o.y / d.y : -1.0;   // crossing of the y = 0 plane
+    float base;
     if (o.y >= 0.0) {
-        if (d.y < 0.0 && tc < t) return VolOpticalDepthAbove(o.y, d.y, tc, p) + p.sigma0 * (t - tc);
-        return VolOpticalDepthAbove(o.y, d.y, t, p);
+        if (d.y < 0.0 && tc < t) base = VolOpticalDepthAbove(o.y, d.y, tc, p) + p.sigma0 * (t - tc);
+        else base = VolOpticalDepthAbove(o.y, d.y, t, p);
+    } else if (d.y > 0.0 && tc < t) {
+        base = p.sigma0 * tc + VolOpticalDepthAbove(0.0, d.y, t - tc, p);
+    } else {
+        base = p.sigma0 * t;
     }
-    if (d.y > 0.0 && tc < t) return p.sigma0 * tc + VolOpticalDepthAbove(0.0, d.y, t - tc, p);
-    return p.sigma0 * t;
+    return base + VolFogOpticalDepth(o, d, t, p);
 }
-float VolSigma(float3 wp, VolParams p) { return p.sigma0 * exp(-p.falloff * max(wp.y, 0.0)); }
+float VolSigma(float3 wp, VolParams p) {
+    return p.sigma0 * exp(-p.falloff * max(wp.y, 0.0));
+}
 
 // Ray / sphere: [t0, t1] clipped to [0, tMax]; empty when t0 >= t1.
 float2 VolRaySphere(float3 o, float3 d, float3 c, float r, float tMax) {
@@ -121,6 +160,60 @@ float2 VolRayCone(float3 o, float3 d, float3 apex, float3 axis, float cosA, floa
     return float2(t0, t1);
 }
 
+// ---- S9 local fog volumes: shape tests and the tinted extinction they add ----
+// Ray / axis-aligned ellipsoid (radii e around c) in the forward direction, unclipped (the caller clips to the march
+// range): the unit sphere in the scaled space, where t stays the world ray parameter.
+float2 VolRayEllipsoidForward(float3 o, float3 d, float3 c, float3 e) {
+    float3 oc = (o - c) / e;
+    float3 ds = d / e;
+    float a = dot(ds, ds);
+    float b = dot(oc, ds);
+    float h = b * b - a * (dot(oc, oc) - 1.0);
+    if (h <= 0.0) return float2(1, 0);
+    h = sqrt(h);
+    return float2((-b - h) / a, (-b + h) / a);
+}
+
+// Ray / axis-aligned box (half extents e around c), forward and unclipped.
+float2 VolRayBoxForward(float3 o, float3 d, float3 c, float3 e) {
+    // an axis-parallel component stays inside its slab: a tiny nudge keeps the division finite
+    float3 dd;
+    dd.x = abs(d.x) < 1e-6 ? (d.x < 0.0 ? -1e-6 : 1e-6) : d.x;
+    dd.y = abs(d.y) < 1e-6 ? (d.y < 0.0 ? -1e-6 : 1e-6) : d.y;
+    dd.z = abs(d.z) < 1e-6 ? (d.z < 0.0 ? -1e-6 : 1e-6) : d.z;
+    float3 ta = (c - e - o) / dd;
+    float3 tb = (c + e - o) / dd;
+    float3 tlo = min(ta, tb), thi = max(ta, tb);
+    return float2(max(max(tlo.x, tlo.y), tlo.z), min(min(thi.x, thi.y), thi.z));
+}
+
+// Extinction the local volumes add at wp, per channel (tinted). Zero when numFog == 0.
+float3 VolFogSigma(float3 wp, VolParams p) {
+    float3 sum = 0;
+    for (uint i = 0; i < p.numFog; ++i) {
+        VolFog f = gVolFog[i];
+        if (f.density <= 0.0) continue;
+        sum += f.color * (f.density * p.sigma0 * VolFogShape(f, wp));   // density = a multiple of the base medium
+    }
+    return sum;
+}
+
+// Optical depth the local volumes add over [0, t] along o + d t: the ray / shape overlap length times the density (the
+// soft border band is left out here; the tint shows in the in-scattering, not as a hard transmittance edge).
+float VolFogOpticalDepth(float3 o, float3 d, float t, VolParams p) {
+    float sum = 0.0;
+    for (uint i = 0; i < p.numFog; ++i) {
+        VolFog f = gVolFog[i];
+        if (f.density <= 0.0) continue;
+        const float3 e = max(abs(f.extent), 1e-4);
+        const float2 seg = f.sphere != 0 ? VolRayEllipsoidForward(o, d, f.center, e)
+                                         : VolRayBoxForward(o, d, f.center, e);
+        const float lo = max(seg.x, 0.0), hi = min(seg.y, t);
+        if (hi > lo) sum += f.density * p.sigma0 * (hi - lo);
+    }
+    return sum;
+}
+
 float VolPunctualAtten(VolLight l, float3 wp, out float3 ld) {
     float3 dv = l.pos - wp;
     float dL = length(dv);
@@ -144,7 +237,9 @@ float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float
     float3 L = p.ambient * (1.0 - Tend);
 
     // ---- sun: shadowed march over the shadow range, analytic (fully lit) tail beyond
-    float3 sunScale = sunCol * VolHG(dot(dir, -sunDir), p.sunG);
+    // S9: sunVolumetric scales the whole term (0 = the sun leaves no haze); sunG is the fog's anisotropy unless the
+    // sun light carries its own (VolParams::sunG is already resolved by the caller).
+    float3 sunScale = sunCol * VolHG(dot(dir, -sunDir), p.sunG) * p.sunVolumetric;
     float tS = min(dist, p.sunShadowDist);
     if (tS > 0.0 && p.sunSteps > 0) {
         uint n = clamp((uint)ceil(tS / p.sunStepLen), 4u, p.sunSteps);
@@ -166,6 +261,9 @@ float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float
     // ---- spot cones / point spheres: samples only where the light reaches
     for (uint li = 0; li < numLights; ++li) {
         VolLight l = gVolLights[li];
+        // S9: the light's own haze share (0 = invisible in the medium) and scattering anisotropy (-1 = the fog's)
+        if (l.volumetric <= 0.0) continue;
+        const float g = l.aniso > -0.99 ? l.aniso : p.punctualG;   // -1 = unset (valid g is -0.9..0.95)
         float range = 1.0 / max(l.invRange, 1e-6);
         float2 seg = VolRaySphere(eye, dir, l.pos, range, dist);
         bool spot = l.cosOuter > -1.0;
@@ -174,7 +272,7 @@ float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float
         uint n = spot ? clamp((uint)ceil((seg.y - seg.x) / p.spotStepLen), 3u, max(p.spotSteps, 3u)) : p.pointSteps;
         if (n == 0) continue;
         float stepLen = (seg.y - seg.x) / (float)n;
-        float g = spot ? p.spotBoost : p.pointBoost;
+        float boost = spot ? p.spotBoost : p.pointBoost;
         float3 acc = 0;
         for (uint i = 0; i < n; ++i) {
             float t = seg.x + ((float)i + p.jitter) * stepLen;
@@ -184,11 +282,13 @@ float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float
             if (atten <= 0.0) continue;
             float vis = spot ? VolSpotVisibility(l, wp) : 1.0;
             float T = exp(-VolOpticalDepth(eye, dir, t, p));
-            acc += atten * vis * VolHG(dot(dir, ld), p.punctualG) * VolSigma(wp, p) * T;
+            // S9: the global height fog sigma plus the local volumes' tinted extinction at this sample
+            float3 sigma = VolSigma(wp, p) + (p.numFog > 0 ? VolFogSigma(wp, p) : 0.0);
+            acc += atten * vis * VolHG(dot(dir, ld), g) * sigma * T;
         }
-        L += l.color * g * acc * stepLen;
+        L += l.color * (boost * l.volumetric) * acc * stepLen;
     }
-    return float4(L, Tend);
+    return float4(L * p.tint, Tend);
 }
 
 #endif

@@ -41,6 +41,8 @@ struct LightAnchors {
 //   - environment: the first enabled ambient light (sky colours, hemisphere strength); without one the hemisphere
 //     strength is 0 and the default sky colours stay.
 //   - punctual: the enabled point and spot lights in list order, at most Renderer::kMaxPunctualLights.
+//   - fogVolumes: the enabled FogVolume lights in list order, at most Renderer::kMaxFogVolumes (S9; they never light a
+//     surface, only the haze).
 // With the lights of PresetLights(p, focus) the result equals BuildLighting(p, songSeconds, focus). Pure function.
 void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std::vector<studio::LightKf>& cameraLight,
                         double songSeconds, const LightAnchors& anchors, LightParams& out);

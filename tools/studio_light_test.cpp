@@ -784,6 +784,106 @@ static void TestAreaLight() {
     Check(!playLightingHasArea, "BuildLighting never produces area lights");
 }
 
+// S9: per-light haze share / anisotropy and the local fog volumes that BuildSceneLighting resolves.
+static void TestFogVolumes() {
+    LightAnchors anchors;
+    SceneLight sun;
+    sun.uid = 1;
+    sun.kind = LightKind::Sun;
+    sun.v.volumetric = 3.5f;
+    sun.volumetricG = 0.8f;
+    SceneLight spot = MakeSpot(0, 50, 0);
+    spot.uid = 2;
+    spot.v.volumetric = 0.0f;   // invisible in the haze
+    spot.volumetricG = -0.6f;
+    SceneLight vol;
+    vol.uid = 3;
+    vol.kind = LightKind::FogVolume;
+    vol.name = "안개";
+    vol.v.position = {1.0f, 20.0f, -3.0f};
+    vol.v.extent = {30.0f, 12.0f, 25.0f};
+    vol.v.intensity = 2.5f;     // density multiplier
+    vol.v.color = {0.6f, 0.7f, 0.8f};
+    vol.fogShape = FogShape::Sphere;
+    vol.fogEdge = 0.7f;
+
+    LightParams out;
+    BuildSceneLighting({sun, spot, vol}, {}, 0.0, anchors, out);
+    Check(out.punctual.size() == 1, "a fog volume never becomes a punctual light");
+    Check(!out.punctual.empty() && out.punctual[0].volumetric == 0.0f && Near(out.punctual[0].volumetricG, -0.6f, 1e-6f),
+          "BuildSceneLighting carries the punctual light's volumetric share and anisotropy");
+    Check(Near(out.sunVolumetric, 3.5f, 1e-6f) && Near(out.sunVolumetricG, 0.8f, 1e-6f),
+          "BuildSceneLighting carries the sun's volumetric share and anisotropy");
+    Check(out.fogVolumes.size() == 1, "1 fog volume resolved");
+    if (out.fogVolumes.size() == 1) {
+        const FogVolume& f = out.fogVolumes[0];
+        Check(Near3(f.position, {1.0f, 20.0f, -3.0f}, 1e-5f) && Near3(f.extent, {30.0f, 12.0f, 25.0f}, 1e-5f) &&
+                  Near(f.density, 2.5f, 1e-6f) && Near3(f.color, {0.6f, 0.7f, 0.8f}, 1e-5f) && f.sphere &&
+                  Near(f.edge, 0.7f, 1e-6f),
+              "fog volume carries centre, extent, density, tint, shape and edge");
+    }
+
+    // The default share / anisotropy are the pre-S9 values (1 / -1 = the fog's own).
+    const SceneLight def;
+    Check(def.v.volumetric == 1.0f && def.volumetricG == -1.0f && def.fogShape == FogShape::Box &&
+              def.v.extent.x == 20.0f && def.v.extent.y == 10.0f && def.v.extent.z == 20.0f,
+          "S9 defaults: volumetric 1, anisotropy -1, box, extent {20,10,20}");
+    SceneLight plain = MakeSpot(3, 40, 0);
+    plain.uid = 9;
+    LightParams plainOut;
+    BuildSceneLighting({plain}, {}, 0.0, anchors, plainOut);
+    Check(plainOut.sunVolumetric == 1.0f && plainOut.sunVolumetricG == -1.0f && plainOut.fogVolumes.empty() &&
+              !plainOut.punctual.empty() && plainOut.punctual[0].volumetric == 1.0f &&
+              plainOut.punctual[0].volumetricG == -1.0f,
+          "a scene without a fog volume and with default lights keeps the pre-S9 haze values");
+
+    // A disabled fog volume contributes nothing; a keyed one is sampled.
+    SceneLight off = vol;
+    off.uid = 4;
+    off.enabled = false;
+    LightParams offOut;
+    BuildSceneLighting({off}, {}, 0.0, anchors, offOut);
+    Check(offOut.fogVolumes.empty(), "a disabled fog volume is not resolved");
+
+    SceneLight keyed = vol;
+    keyed.uid = 5;
+    LightKey k0, k1;
+    k0.frame = 0;
+    k0.v = keyed.v;
+    k1.frame = 30;
+    k1.v = keyed.v;
+    k1.v.intensity = 6.0f;
+    k1.v.extent = {50.0f, 20.0f, 40.0f};
+    keyed.keys = {k0, k1};
+    LightParams mid;
+    BuildSceneLighting({keyed}, {}, 15.0 / (double)kMmdFps, anchors, mid);
+    Check(mid.fogVolumes.size() == 1 && Near(mid.fogVolumes[0].density, 4.25f, 1e-4f) &&
+              Near(mid.fogVolumes[0].extent.x, 40.0f, 1e-4f),
+          "a keyed fog volume is sampled (density and extent interpolate)");
+
+    // The fog volume cap.
+    std::vector<SceneLight> many;
+    for (int i = 0; i < (int)Renderer::kMaxFogVolumes + 4; ++i) {
+        SceneLight v = vol;
+        v.uid = (uint32_t)(100 + i);
+        many.push_back(v);
+    }
+    LightParams capped;
+    BuildSceneLighting(many, {}, 0.0, anchors, capped);
+    Check(capped.fogVolumes.size() == Renderer::kMaxFogVolumes, "fog volumes are capped at kMaxFogVolumes");
+
+    // Kind names / parsing round trip.
+    LightKind kind = LightKind::Point;
+    Check(std::string(LightKindName(LightKind::FogVolume)) == "fog_volume" &&
+              ParseLightKind("fog_volume", kind) && kind == LightKind::FogVolume,
+          "fog volume kind name and parse");
+    FogShape shape = FogShape::Box;
+    Check(std::string(FogShapeName(FogShape::Sphere)) == "sphere" && ParseFogShape("sphere", shape) &&
+              shape == FogShape::Sphere && ParseFogShape("box", shape) && shape == FogShape::Box &&
+              !ParseFogShape("cone", shape),
+          "fog shape names and parse");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // unbuffered: a crash mid-test loses buffered PASS lines
     TestPresetRegression();
@@ -800,6 +900,7 @@ int main() {
     TestSongCameraLightTrack();
     TestPerLightProperties();
     TestAreaLight();
+    TestFogVolumes();
     std::printf("studio_light_test: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed > 0 ? 1 : 0;
 }

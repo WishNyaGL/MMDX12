@@ -61,7 +61,7 @@ throws.
 | `sockets` | array | named transforms (pack / camera / prop anchors) |
 | `cameras` | array | named static cameras (S4) |
 | `screens` | array | LED / video surfaces (S5, S8) |
-| `environment` | object | `fog`, `ambient` (S9 / later) |
+| `environment` | object | `fog`, `fogVolumes`, `ambient` (S9 / later) |
 | `packs` | array | bundled packs with a role and initial params (S6) |
 | `groups`, `params`, `variants`, `defaultVariant` | array / string | the exposed parameter surface |
 | `bindings` | array | param → target assignments |
@@ -182,11 +182,18 @@ binding key); `uid` is ignored in a stage (the stage's order is its identity).
 ```
 
 Fields (all optional except `kind` and `name`; a missing one keeps the `SceneLight` default):
-`kind` (`sun` / `point` / `spot` / `ambient` / `area`), `enabled`, `values` (`position`, `aim`, `direction`, `color`,
-`intensity`, `range`, `coneOuter`, `coneInner` radians, `size`), `sun` (`vmdLink`, `rimStrength`, `rimColor`), `spot`
+`kind` (`sun` / `point` / `spot` / `ambient` / `area` / `fog_volume`), `enabled`, `values` (`position`, `aim`, `direction`, `color`,
+`intensity`, `range`, `coneOuter`, `coneInner` radians, `size`, `extent`, `volumetric`), `sun` (`vmdLink`, `rimStrength`, `rimColor`), `spot`
 (`aim` = `manual` / `target` / `sway`, `target`, `part` = `centre` / `head`, `swayPhase`), `sky` (`zenith`,
 `horizon`, `ground`), `shadow` (`type` = `nocast` / `hard` / `soft`, `softness`, `density`, `color`), `falloff`
 (`none` / `linear` / `inverse_square`), `affectDiffuse`, `affectSpecular`, `viewportVisible`, `keys`.
+
+S9 haze fields: `values.volumetric` (0..20, how much of the light shows in the volumetric haze; 1 = the physical share,
+0 = the light is invisible in the medium) and `volumetricG` (the light's Henyey-Greenstein anisotropy, -0.9..0.95; absent
+= the fog's own, from `environment.fog.anisotropy`). A `fog_volume` light is a local participating-medium volume: it lights
+no surface, `values.position` is its centre, `values.extent` the half size, `values.intensity` the extra density as a multiple of the
+base haze density (`fog.density`) added inside it (4 = five times as hazy there), `values.color` the medium tint, `fogShape` (`box` / `sphere`) the shape and `fogEdge` (0..1) the soft
+border band. Both keys are omitted from a written file while at their defaults, so older files are unchanged.
 
 Rules: at most one `sun` and one `ambient`; `coneInner <= coneOuter`; a `sun` cannot carry `keys` (use cues on its
 `intensity` / `color` / `direction` instead). Play mode's lighting picker gains a "스테이지 조명" entry in S1b.
@@ -272,14 +279,26 @@ and holds `pack.json`).
 ```json
 "environment": {
   "fog": {"density": 0.02, "color": [0.55, 0.6, 0.72], "anisotropy": 0.55, "heightFalloff": 0.03},
+  "fogVolumes": [
+    {"id": "beam", "shape": "box", "position": [0, 20, 0], "extent": [30, 20, 30],
+     "density": 2.0, "color": [0.8, 0.9, 1.0], "edge": 0.4}
+  ],
   "ambient": {"intensity": 0.08, "skyZenith": [0.03, 0.04, 0.08], "skyHorizon": [0.1, 0.12, 0.2],
               "ground": [0.05, 0.05, 0.06]}
 }
 ```
 
 `fog.density` is the participating-media density (S9), `anisotropy` the Henyey-Greenstein `g`, `heightFalloff` the
-exponential height decay per unit. `ambient` overrides the ambient light's sky / ground colours and hemisphere
-strength. Parsed only for now.
+exponential height decay per unit, `radius` the haze sphere around the origin (default 180 units; grown automatically
+to hold every fog volume, so an arena that spans 500 units sets e.g. 450). While a stage with an `environment.fog` block is loaded it turns the volumetric pass
+on and sets its values (in play mode and in the studio; the user's volumetric switch still turns the pass off). The
+user's density slider scales `density`.
+
+`environment.fogVolumes` (S9) are local medium volumes: each becomes a `fog_volume` light of the stage's rig (appended
+after `lights`, so a light index keeps its meaning). `shape` is `box` (default) or `sphere`, `position` the centre,
+`extent` the half size (sphere: the three radii), `density` the extra density as a multiple of `fog.density`, `color` the tint and `edge`
+(0..1) the soft border band; `id` names the light (default `안개 <n>`). `ambient` overrides the ambient light's sky /
+ground colours and hemisphere strength.
 
 ## `packs`
 

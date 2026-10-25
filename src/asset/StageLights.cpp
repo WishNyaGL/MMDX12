@@ -67,4 +67,19 @@ std::vector<studio::SceneLight> PartGltfLights(const StageManifest& manifest, co
     return out;
 }
 
+studio::SceneLight StageFogVolumeLight(const StageFogVolume& volume, size_t index) {
+    studio::SceneLight out;
+    out.kind = studio::LightKind::FogVolume;
+    out.name = volume.id.empty() ? "안개 " + std::to_string(index + 1) : volume.id;
+    out.enabled = true;
+    out.v.position = volume.position;
+    out.v.extent = volume.extent;
+    out.v.intensity = std::max(0.0f, volume.density);
+    out.v.color = volume.color;
+    out.fogShape = volume.sphere ? studio::FogShape::Sphere : studio::FogShape::Box;
+    out.fogEdge = std::clamp(volume.edge, 0.0f, 1.0f);
+    out.shadow = studio::ShadowType::NoCast;
+    return out;
+}
+
 } // namespace mmdx

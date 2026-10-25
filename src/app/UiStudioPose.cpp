@@ -803,6 +803,7 @@ void App::StudioViewportLightHandles(bool hovered) {
         if (l.kind == LightKind::Sun) glyph = icon::Sun;
         else if (l.kind == LightKind::Spot) glyph = icon::Aperture;
         else if (l.kind == LightKind::Area) glyph = icon::Image;
+        else if (l.kind == LightKind::FogVolume) glyph = icon::Globe;
         ui::Icon(dl, glyph, 12.0f, screenPos, glyphCol);
     }
 
@@ -1157,6 +1158,64 @@ void App::StudioViewportLightHandles(bool hovered) {
                     StudioBeginLightEdit(light->uid, willKey);
                     studioViewDrag_ = 8;
                 }
+            }
+        }
+    } else if (light->kind == LightKind::FogVolume) {
+        // S9: the local medium's wireframe: a box (12 edges) or an ellipsoid (three great circles), plus the position
+        // gizmo. Drawn thin and cyan-dim so it reads as a volume, not a solid.
+        const XMFLOAT3 c = cur.position;
+        const XMFLOAT3 e{std::max(0.5f, cur.extent.x), std::max(0.5f, cur.extent.y), std::max(0.5f, cur.extent.z)};
+        studioLightPosFrame_ = GizmoFrame{};
+        studioLightPosFrame_.center = c;
+        const ImU32 wire = IM_COL32(120, 210, 255, 170);
+        const ImU32 wireDark = IM_COL32(20, 20, 20, 140);
+        auto line = [&](const XMFLOAT3& p0, const XMFLOAT3& p1) {
+            ImVec2 sa, sb;
+            if (ProjectSegment(studioVp_, p0, p1, sa, sb)) {
+                dl->AddLine(sa, sb, wireDark, 2.5f);
+                dl->AddLine(sa, sb, wire, 1.2f);
+            }
+        };
+        if (light->fogShape == FogShape::Sphere) {
+            constexpr int kSamples = 40;
+            for (int axis = 0; axis < 3; ++axis) {
+                for (int k = 0; k < kSamples; ++k) {
+                    const float a0 = 2.0f * 3.14159265f * (float)k / kSamples;
+                    const float a1 = 2.0f * 3.14159265f * (float)(k + 1) / kSamples;
+                    auto at = [&](float a) {
+                        XMFLOAT3 p = c;
+                        if (axis == 0) { p.y += e.y * std::sin(a); p.z += e.z * std::cos(a); }
+                        else if (axis == 1) { p.x += e.x * std::sin(a); p.z += e.z * std::cos(a); }
+                        else { p.x += e.x * std::sin(a); p.y += e.y * std::cos(a); }
+                        return p;
+                    };
+                    line(at(a0), at(a1));
+                }
+            }
+        } else {
+            XMFLOAT3 corner[8];
+            for (int i = 0; i < 8; ++i) {
+                corner[i] = {c.x + ((i & 1) ? e.x : -e.x), c.y + ((i & 2) ? e.y : -e.y), c.z + ((i & 4) ? e.z : -e.z)};
+            }
+            static const int kEdges[12][2] = {{0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}};
+            for (const auto& ed : kEdges) line(corner[ed[0]], corner[ed[1]]);
+        }
+
+        if (studioViewDrag_ != 8)
+            studioLightHotGizmo_ = hovered ? GizmoHitTest(studioVp_, studioLightPosFrame_, GizmoMode::Translate, gs, mouse)
+                                           : GizmoPart::None;
+        DrawGizmo(dl, studioVp_, studioLightPosFrame_, GizmoMode::Translate, gs,
+                  studioViewDrag_ == 8 ? GizmoPart::None : studioLightHotGizmo_,
+                  (studioViewDrag_ == 8 && studioLightDragPart_ == LightDragPart::PosGizmo) ? studioLightGizmoDrag_.part : GizmoPart::None);
+        if (studioViewDrag_ == 1 && hovered && !io.KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+            studioLightHotGizmo_ != GizmoPart::None) {
+            studioLightGizmoDrag_ = BeginGizmoDrag(studioVp_, studioLightPosFrame_, GizmoMode::Translate, gs, studioLightHotGizmo_, mouse);
+            if (studioLightGizmoDrag_.part != GizmoPart::None) {
+                studioLightDragPart_ = LightDragPart::PosGizmo;
+                studioLightValuesBase_ = cur;
+                const bool willKey = (FindKey(light->keys, frame) != nullptr) || d.autoKey;
+                StudioBeginLightEdit(light->uid, willKey);
+                studioViewDrag_ = 8;
             }
         }
     } else if (light->kind == LightKind::Sun) {

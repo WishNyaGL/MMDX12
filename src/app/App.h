@@ -1241,6 +1241,7 @@ private:
         if (scene_ && scene_->stage && scene_->stage->HasLights()) return LightingPreset::Stage;
         return (LightingPreset)settings_.lighting;
     }
+    bool stageFogVolumetric_ = false;   // S9: the play scene's stage has environment.fog: haze on for this scene only
     int playLighting_ = -1;   // S1b: this scene's lighting choice (-1 = the default: the stage rig when it has lights,
                               // else settings_.lighting); "스테이지 조명" is never written to the ini
     // Sets this scene's lighting choice; an ordinary preset also becomes the saved default for other stages.
