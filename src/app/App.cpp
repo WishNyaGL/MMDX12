@@ -131,6 +131,8 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.debugLayer = true;
         } else if (arg == L"--screen") {
             opt.startScreen = WideToUtf8(next());
+        } else if (arg == L"--gallery-index") {
+            opt.galleryIndex = WideToUtf8(next());
         } else if (arg == L"--ui-scale") {
             opt.uiScale = (float)_wtof(next().c_str());
         } else if (arg == L"--project") {
@@ -1083,7 +1085,7 @@ void App::RenderFrame() {
         thumbsClearPending_ = false;
     }
     if (screen_ == Screen::Select || screen_ == Screen::BenchLobby || screen_ == Screen::Loading || screen_ == Screen::Shaders ||
-        screen_ == Screen::Mme || (screen_ == Screen::Studio && studioThumbsShown_))
+        screen_ == Screen::Mme || screen_ == Screen::Gallery || (screen_ == Screen::Studio && studioThumbsShown_))
         thumbs_.Pump();
     else if (screen_ == Screen::Play && studioThumbsShown_)   // the play bar's pack picker: image previews only
         thumbs_.Pump(true);
@@ -1105,6 +1107,7 @@ void App::RenderFrame() {
     PollLoad();
     PollDroppedFiles();
     PollShaderPacks();
+    PollStageStore();
     PollProbeScene();
     UpdateUpdate();
     UpdateComponentUi();
@@ -1138,6 +1141,7 @@ void App::RenderFrame() {
     case Screen::BenchLobby: DrawBenchLobby(); break;
     case Screen::Shaders: DrawShaders(); DrawRayMmeConfirm(); break;
     case Screen::Mme: DrawMme(); DrawRayMmeConfirm(); break;
+    case Screen::Gallery: DrawGallery(); DrawRayMmeConfirm(); break;
     case Screen::BenchRun: DrawBenchRunOverlay(); break;
     case Screen::BenchResult: DrawBenchResult(); break;
     case Screen::BenchRender: DrawRenderBenchOverlay(); break;
@@ -1428,6 +1432,8 @@ void App::ApplyStartScreen() {
         shaderTab_ = options_.startScreen == "shaders-online" ? 1 : options_.startScreen == "shaders-mme" ? 2 : 0;
     } else if (options_.startScreen == "mme") {
         screen_ = Screen::Mme;
+    } else if (options_.startScreen == "gallery") {
+        screen_ = Screen::Gallery;
     } else if (options_.startScreen == "settings") {
         lobbyTab_ = 2;
     } else if (options_.startScreen == "studio") {
@@ -1563,7 +1569,10 @@ void App::PollScan() {
     }
 
     if (pendingLibraryResult_) {
-        const bool isSafe = (screen_ == Screen::Select || screen_ == Screen::BenchLobby) && !loadFuture_.valid();
+        // the gallery is as safe as the lobby: it owns no scene, and a freshly installed stage should already be
+        // in gallery / library the moment the user looks at them
+        const bool isSafe = (screen_ == Screen::Select || screen_ == Screen::BenchLobby || screen_ == Screen::Gallery) &&
+                            !loadFuture_.valid();
         if (isSafe) {
             ApplyRevalidatedLibrary(std::move(*pendingLibraryResult_));
             pendingLibraryResult_.reset();

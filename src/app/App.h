@@ -12,6 +12,7 @@
 #include "app/SceneLoader.h"
 #include "app/Settings.h"
 #include "app/ShaderPackStore.h"
+#include "app/StageStore.h"
 #include "app/ThumbnailCache.h"
 #include "app/Updater.h"
 #include "app/VideoEncoder.h"
@@ -248,6 +249,7 @@ struct AppOptions {
     std::string songAudio;          // --song-audio <substring>: pick an audio version of the song for this run
     std::string stageVariant;       // --stage-variant <id>: the MMDX stage's variant for this run (wins over the saved)
     std::string startScreen;  // --screen select|bench: open that screen after the scan; --frames then counts every frame  // --free-camera: start in the orbit camera instead of the VMD camera
+    std::string galleryIndex;  // --gallery-index <url|path>: the stage gallery's index for this run (default: the online one)
     std::string updateFeed;   // --update-feed: feed URL / file override (empty: the default feed)
     int updateRelaunchFrames = 0;  // --update-relaunch-frames: relaunch the updated app with --frames (E2E)
     bool applyUpdate = false; // --apply-update (internal): apply a staged update, then exit
@@ -281,7 +283,7 @@ public:
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 private:
-    enum class Screen { Scanning, Select, Loading, Play, BenchLobby, BenchRun, BenchResult, Offline, BenchRender, Studio, Shaders, Mme };
+    enum class Screen { Scanning, Select, Loading, Play, BenchLobby, BenchRun, BenchResult, Offline, BenchRender, Studio, Shaders, Mme, Gallery };
     enum class LoadTarget { Play, Benchmark, RenderBench, OfflineVideo, Studio };
 
     struct SceneRuntime {
@@ -1195,6 +1197,20 @@ private:
     uint32_t shaderPackWriteTimesGen_ = 0;
     std::unordered_map<std::string, std::filesystem::file_time_type> shaderPackWriteTimes_;
     std::string shaderSelInstalled_, shaderSelRemote_;
+    // Stage gallery (UiGallery.cpp, Screen::Gallery, top tab "갤러리"): the online stage store and its selection.
+    StageStore stageStore_;
+    char galleryFilter_[128] = {};
+    std::string gallerySel_;
+    bool galleryIndexApplied_ = false;   // the --gallery-index / default index was started this run
+    void DrawGallery();
+    void DrawGalleryDetail(float x0, float y0, float x1, float y1);
+    void RefreshStageGallery();
+    uint64_t RemoteStageThumb(const RemoteStage& stage);
+    void PollStageStore();                     // every frame: index fetch, previews, installs -> toasts
+    // True while the stage folder of `id` (a "stages:" library id or a bare folder name) is used by a scene / studio.
+    bool StageInUse(const std::string& id) const;
+    // The background library rescan that makes a freshly installed stage appear in the lobby's stage list.
+    void RefreshLibraryForStage();
     // M6b: shader manager MME tab (docs/mme/mme_design.md §2.13). The selected library effect and its async
     // diagnostics compile (spinner while running).
     std::string shaderSelMme_;

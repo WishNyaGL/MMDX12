@@ -105,17 +105,19 @@ void App::DrawAppBar(int activeNav) {
 
     // Primary navigation.
     ImGui::SetCursorScreenPos(ImVec2(navX, (h - Dp(38.0f)) * 0.5f));
-    const char* nav[] = {Tr("라이브러리"), Tr("이펙트"), Tr("MME"), Tr("벤치마크")};
-    const char* navIcons[] = {icon::Stack, icon::Diamond, icon::Sparkle, icon::Gauge};
+    const char* nav[] = {Tr("라이브러리"), Tr("이펙트"), Tr("갤러리"), Tr("MME"), Tr("벤치마크")};
+    const char* navIcons[] = {icon::Stack, icon::Diamond, icon::Globe, icon::Sparkle, icon::Gauge};
     int sel = activeNav;
-    const bool navChanged = Segmented("##nav", nav, 4, &sel, 0.0f, 38.0f, navIcons);
+    const bool navChanged = Segmented("##nav", nav, 5, &sel, 0.0f, 38.0f, navIcons);
     const float navEnd = ImGui::GetItemRectMax().x;   // the right cluster must not run into the tabs
     if (navChanged) {
-        if (sel == 3) {
+        if (sel == 4) {
             screen_ = Screen::BenchLobby;
             RefreshLeaderboard();
-        } else if (sel == 2) {
+        } else if (sel == 3) {
             screen_ = Screen::Mme;
+        } else if (sel == 2) {
+            screen_ = Screen::Gallery;
         } else if (sel == 1) {
             screen_ = Screen::Shaders;
         } else {

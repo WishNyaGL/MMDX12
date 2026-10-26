@@ -417,6 +417,164 @@ bool DownloadToFile(const std::string& url, const fs::path& dest, std::atomic<ui
     return true;
 }
 
+// --- resumable download ---------------------------------------------------------------------
+
+fs::path PartPathFor(const fs::path& dest) { return fs::path(dest).concat(L".part"); }
+
+std::string ResumeRangeHeader(uint64_t partBytes) {
+    if (partBytes == 0) return {};
+    return "Range: bytes=" + std::to_string(partBytes) + "-";
+}
+
+ResumeAction ResumeDecision(int httpStatus, uint64_t requestOffset) {
+    if (httpStatus == 206) return requestOffset > 0 ? ResumeAction::Append : ResumeAction::Start;
+    if (httpStatus == 200) return ResumeAction::Start;   // the server ignored the range: the body is the whole file
+    if (httpStatus == 416) return ResumeAction::Start;   // the .part is not a prefix of the file: refetch it
+    return ResumeAction::Fail;
+}
+
+namespace {
+
+bool LocalFileSize(const fs::path& p, uint64_t& out) {
+    std::error_code ec;
+    if (!fs::is_regular_file(p, ec)) return false;
+    const uintmax_t size = fs::file_size(p, ec);
+    if (ec) return false;
+    out = (uint64_t)size;
+    return true;
+}
+
+// The HTTP body -> `dest` (+ ".part"), resuming from an existing .part when the server allows it.
+bool HttpDownloadResumable(const std::string& url, const fs::path& dest, std::atomic<uint64_t>* done,
+                           std::atomic<uint64_t>* total, std::atomic<bool>* cancel, std::string& error) {
+    const fs::path part = PartPathFor(dest);
+    std::error_code ec;
+    fs::create_directories(part.parent_path(), ec);
+    uint64_t have = 0;
+    if (!LocalFileSize(part, have)) have = 0;
+
+    URL_COMPONENTS uc{};
+    uc.dwStructSize = sizeof(uc);
+    uc.dwSchemeLength = (DWORD)-1;
+    uc.dwHostNameLength = (DWORD)-1;
+    uc.dwUrlPathLength = (DWORD)-1;
+    uc.dwExtraInfoLength = (DWORD)-1;
+    const std::wstring wide = Utf8ToWide(url);
+    if (!WinHttpCrackUrl(wide.c_str(), (DWORD)wide.size(), 0, &uc)) {
+        error = "network error (WinHTTP " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    const std::wstring host(uc.lpszHostName, uc.dwHostNameLength);
+    const std::wstring path = std::wstring(uc.lpszUrlPath, uc.dwUrlPathLength) +
+                              std::wstring(uc.lpszExtraInfo, uc.dwExtraInfoLength);
+    const bool https = _wcsicmp(std::wstring(uc.lpszScheme, uc.dwSchemeLength).c_str(), L"https") == 0;
+
+    const auto fail = [&](const std::string& why) {
+        error = why;
+        return false;
+    };
+
+    struct H {
+        HINTERNET h = nullptr;
+        ~H() { if (h) WinHttpCloseHandle(h); }
+        explicit operator bool() const { return h != nullptr; }
+    };
+    H session(WinHttpOpen(L"MMDX12", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+                          WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!session) return fail("network error (WinHTTP " + std::to_string(GetLastError()) + ")");
+    WinHttpSetTimeouts(session.h, 5000, 5000, 10000, 60000);
+    H connect(WinHttpConnect(session.h, host.c_str(), uc.nPort, 0));
+    if (!connect) return fail("network error (WinHTTP " + std::to_string(GetLastError()) + ")");
+    H request(WinHttpOpenRequest(connect.h, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, https ? WINHTTP_FLAG_SECURE : 0));
+    if (!request) return fail("network error (WinHTTP " + std::to_string(GetLastError()) + ")");
+
+    const std::string range = ResumeRangeHeader(have);
+    const std::wstring rangeW = Utf8ToWide(range);
+    if (!WinHttpSendRequest(request.h, range.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : rangeW.c_str(),
+                            range.empty() ? 0 : (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(request.h, nullptr))
+        return fail("network error (WinHTTP " + std::to_string(GetLastError()) + ")");
+
+    DWORD status = 0, size = sizeof(status);
+    WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
+    const ResumeAction action = ResumeDecision((int)status, have);
+    if (action == ResumeAction::Fail) return fail("HTTP " + std::to_string(status));
+    if (action == ResumeAction::Start) have = 0;
+
+    // The expected total: the resumed prefix plus this body ("Content-Length" is the body alone; a chunked response
+    // reports none, which leaves `total` at 0 and the UI showing an indeterminate bar).
+    if (total) {
+        DWORD bodyLength = 0, lenSize = sizeof(bodyLength);
+        WinHttpQueryHeaders(request.h, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &bodyLength, &lenSize, WINHTTP_NO_HEADER_INDEX);
+        total->store(have + (uint64_t)bodyLength, std::memory_order_relaxed);
+    }
+    if (done) done->store(have, std::memory_order_relaxed);
+
+    std::ofstream out(part, action == ResumeAction::Append ? (std::ios::binary | std::ios::app)
+                                                           : (std::ios::binary | std::ios::trunc));
+    if (!out) return fail("cannot write " + PathToUtf8(part));
+    char chunk[1 << 16];
+    bool failed = false;
+    for (;;) {
+        if (cancel && cancel->load(std::memory_order_relaxed)) return fail("cancelled");
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request.h, &available)) {
+            failed = true;
+            break;
+        }
+        if (available == 0) break;
+        while (available > 0) {
+            if (cancel && cancel->load(std::memory_order_relaxed)) return fail("cancelled");
+            const DWORD want = (DWORD)std::min<uint64_t>(available, sizeof(chunk));
+            DWORD got = 0;
+            if (!WinHttpReadData(request.h, chunk, want, &got) || got == 0) {
+                available = 0;
+                failed = true;
+                break;
+            }
+            out.write(chunk, (std::streamsize)got);
+            if (!out) return fail("cannot write " + PathToUtf8(part));
+            if (done) done->fetch_add(got, std::memory_order_relaxed);
+            available -= got;
+        }
+        if (failed) break;
+    }
+    out.close();
+    if (!out) return fail("cannot write " + PathToUtf8(part));
+    if (failed) return fail("network error (download cut short)");
+
+    fs::rename(part, dest, ec);
+    if (ec) return fail("cannot rename " + PathToUtf8(part) + " (" + ec.message() + ")");
+    if (total) total->store(fs::file_size(dest, ec), std::memory_order_relaxed);
+    if (done) done->store(fs::file_size(dest, ec), std::memory_order_relaxed);
+    return true;
+}
+
+} // namespace
+
+bool DownloadToFileResumable(const std::string& url, const fs::path& dest, std::atomic<uint64_t>* done,
+                             std::atomic<uint64_t>* total, std::atomic<bool>* cancel, std::string& error) {
+    if (IsLocalSource(url)) {
+        const fs::path src = LocalPathOf(url);
+        std::error_code ec;
+        fs::create_directories(dest.parent_path(), ec);
+        fs::remove(PartPathFor(dest), ec);   // a local copy never resumes
+        fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            error = "cannot copy " + PathToUtf8(src) + " (" + ec.message() + ")";
+            return false;
+        }
+        const uint64_t size = (uint64_t)fs::file_size(dest, ec);
+        if (total) total->store(size, std::memory_order_relaxed);
+        if (done) done->fetch_add(size, std::memory_order_relaxed);
+        return true;
+    }
+    return HttpDownloadResumable(url, dest, done, total, cancel, error);
+}
+
 // Extract a zip with the Windows built-in tar.exe (bsdtar, System32, ships with Windows 10
 // 1803+; it reads zip archives natively). Hidden: CREATE_NO_WINDOW, output piped away.
 bool ExtractZip(const fs::path& zip, const fs::path& destDir, std::string& error) {

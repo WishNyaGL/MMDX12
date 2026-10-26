@@ -40,6 +40,7 @@ const char* App::ScreenName(Screen s) const {
     case Screen::BenchRender: return "bench_render";
     case Screen::Studio: return "studio";
     case Screen::Mme: return "mme";
+    case Screen::Gallery: return "gallery";
     }
     return "unknown";
 }

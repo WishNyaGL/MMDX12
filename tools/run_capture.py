@@ -37,7 +37,7 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 VALUE_FLAGS = {
     "--library", "--character", "--stage", "--song", "--formation", "--song-audio", "--stage-variant",
     "--seek", "--benchmark", "--bench-frames", "--bench-spp", "--frames", "--capture", "--capture-scene",
-    "--ui-script", "--width", "--height", "--screen", "--ui-scale", "--project", "--theme", "--lang",
+    "--ui-script", "--width", "--height", "--screen", "--gallery-index", "--ui-scale", "--project", "--theme", "--lang",
     "--lighting", "--quality", "--render", "--shading", "--upscaler", "--upscale-quality", "--dlss-model",
     "--dlss-rr", "--frame-gen", "--dof", "--volumetric", "--volumetric-density", "--bloom-conv",
     "--bloom-kernel", "--bloom-blend", "--bloom-depth-mask", "--bloom-intensity", "--bloom-threshold",
@@ -56,7 +56,7 @@ SELF_QUIT_FLAGS = {"--offline-still", "--offline-video", "--offline-probe"}
 SELF_QUIT_BENCHMARKS = {"dx12-gi-render"}   # the real-time categories wait on their result screen
 # App::ApplyStartScreen / App.h: the --screen values the app acts on (anything else falls back to the lobby).
 SCREENS = {"select", "bench", "bench-gi", "stages", "songs", "shaders", "shaders-online", "shaders-mme", "mme",
-           "settings", "studio", "video"}
+           "settings", "studio", "video", "gallery"}
 # src/app/Benchmark.h kBenchCategories.
 BENCHMARKS = {"dx12-raster-fhd", "dx12-raster-4k", "dx12-rt-fhd", "dx12-rt-4k", "dx12-pt-fhd", "dx12-pt-4k",
               "dx12-gi-render"}
@@ -215,10 +215,16 @@ def check_preflight(app_args, library, allow_library=False, allow_gui=False):
         issues.append("--autoplay needs both --character and --song: without them the app stays in the lobby "
                       "and --frames never counts")
 
-    if library is None:
+    # The cache validates the names given; a run that names nothing (a --screen capture) needs no cache: the app
+    # itself rescans the library on a build dir's first start and writes it.
+    needs_names = bool(info["character"] or info["song"] or
+                       (info["stage"] and info["stage"].strip().lower() != "none"))
+    if library is None and needs_names:
         issues.append("no library cache: run the app once in this build dir so it writes "
                       + LIBRARY_CACHE + " (the cache validates --character/--song/--stage names)")
         return issues
+    if library is None:
+        return issues   # a screen-only capture: nothing to validate against the cache
 
     if info["character"]:
         if find_entry(library["characters"], info["character"]) is None:
