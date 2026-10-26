@@ -605,13 +605,13 @@ float3 MediumPunctualSegment(float3 o, float3 d, float tEnd, inout uint rng) {
     uint pickedIndex = 0;
     float w = 0.0;
     float acc = 0.0;
-    [loop] for (uint i = 0; i < nl; ++i) {
-        PtLight l = gPtLights[i];
+    [loop] for (uint j = 0; j < nl; ++j) {
+        PtLight l = gPtLights[j];
         if (l.volumetric <= 0.0) continue;
         w = MediumPickScore(l, o, d, tEnd);
         if (w <= 0.0) continue;
         picked = l;
-        pickedIndex = i;
+        pickedIndex = j;
         if (u <= acc + w) break;
         acc += w;
     }
