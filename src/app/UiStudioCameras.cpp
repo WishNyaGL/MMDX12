@@ -164,7 +164,7 @@ void App::DrawStudioCameraOutliner() {
         const ImVec2 b(a.x + w, a.y + rowH);
         const bool selected = d.selectedModel == -1 && d.selectedLightUid == 0 && studioSelectedWorld_ == 0 &&
                               d.selectedCameraUid == uid;
-        ImGui::InvisibleButton("##row", ImVec2(w - Dp(72.0f), rowH));
+        ImGui::InvisibleButton("##row", ImVec2(w - Dp(104.0f), rowH));
         uiprobe::Info(ImGui::GetItemID(), "##row", cam ? cam->name.c_str() : Tr("메인 카메라"));
         const bool hovered = ImGui::IsItemHovered();
         if (ImGui::IsItemClicked()) StudioSelectCamera(uid);
@@ -180,7 +180,7 @@ void App::DrawStudioCameraOutliner() {
         const ImU32 fg = selected ? p.accentInk : p.ink;
         Icon(cdl, uid == 0 ? icon::VideoCamera : icon::Camera, 16.0f, ImVec2(a.x + Dp(26.0f), a.y + rowH * 0.5f),
              selected ? p.accentInk : p.ink2);
-        const float tx = a.x + Dp(44.0f), maxX = b.x - Dp(76.0f);
+        const float tx = a.x + Dp(44.0f), maxX = b.x - Dp(108.0f);
         char sub[96];
         const size_t keys = d.CameraKeys(uid).size();
         std::string caption = cam ? cam->name : std::string(Tr("메인 카메라"));
@@ -197,17 +197,22 @@ void App::DrawStudioCameraOutliner() {
         }
         TextEllipsis(cdl, Font::Semibold, size::Small, ImVec2(tx, a.y + Dp(4.0f)), maxX, fg, caption.c_str());
         TextEllipsis(cdl, Font::Regular, size::Caption, ImVec2(tx, a.y + Dp(21.0f)), maxX, p.ink3, sub);
-        // Right side: the main camera's possess button (the viewport then moves it), an extra camera's eye (the viewport
-        // overlay of its frustum); the menu button shows on hover.
+        // Right side, every camera: possess (the viewport shows and moves this camera; renders keep the main one); an
+        // extra camera also has its eye (the viewport overlay of its frustum); the menu button shows on hover.
+        const bool possessedHere = d.possessCamera && d.selectedCameraUid == uid;
         ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(40.0f), a.y + Dp(6.0f)));
-        if (!cam) {
-            if (IconButton("##possess", icon::Crosshair,
-                           d.possessCamera ? Tr("카메라 빙의 해제  (Esc)") : Tr("카메라 빙의: 뷰포트 조작이 메인 카메라를 움직여요"),
-                           d.possessCamera, 28.0f)) {
-                StudioSelectCamera(0);
-                StudioPossess(!d.possessCamera);
+        if (IconButton("##possess", icon::Crosshair,
+                       possessedHere ? Tr("카메라 빙의 해제  (Esc)") : Tr("카메라 빙의: 뷰포트 조작이 이 카메라를 움직여요"),
+                       possessedHere, 28.0f)) {
+            if (possessedHere) {
+                StudioPossess(false);
+            } else {
+                StudioSelectCamera(uid);   // possession edits the selected camera (selecting drops the old possession)
+                StudioPossess(true);
             }
-        } else if (IconButton("##vis", cam->visible ? icon::Eye : icon::EyeSlash,
+        }
+        ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(72.0f), a.y + Dp(6.0f)));
+        if (cam && IconButton("##vis", cam->visible ? icon::Eye : icon::EyeSlash,
                               cam->visible ? Tr("뷰포트에서 숨기기") : Tr("뷰포트에 보이기"), false, 28.0f)) {
             std::vector<studio::StudioCamera> before = d.cameras;
             if (studio::StudioCamera* c = d.FindCamera(uid)) {
@@ -218,14 +223,14 @@ void App::DrawStudioCameraOutliner() {
             }
         }
         if (rowHot || selected) {
-            ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(72.0f), a.y + Dp(6.0f)));
+            ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(cam ? 104.0f : 72.0f), a.y + Dp(6.0f)));
             if (IconButton("##more", icon::DotsThree, Tr("카메라 메뉴"), false, 28.0f)) ImGui::OpenPopup("##cammenu");
         }
         if (ImGui::BeginPopup("##cammenu")) {
             if (!cam) {
-                if (MenuItem("##campossessm", d.possessCamera ? Tr("카메라 빙의 해제") : Tr("카메라 빙의"), icon::Crosshair)) {
+                if (MenuItem("##campossessm", possessedHere ? Tr("카메라 빙의 해제") : Tr("카메라 빙의"), icon::Crosshair)) {
                     StudioSelectCamera(0);
-                    StudioPossess(!d.possessCamera);
+                    StudioPossess(!possessedHere);
                     ImGui::CloseCurrentPopup();
                 }
                 if (MenuItem("##camkeym", Tr("현재 시점을 키로 등록"), icon::Plus)) {
@@ -234,6 +239,15 @@ void App::DrawStudioCameraOutliner() {
                     ImGui::CloseCurrentPopup();
                 }
             } else {
+                if (MenuItem("##campossessx", possessedHere ? Tr("카메라 빙의 해제") : Tr("카메라 빙의"), icon::Crosshair)) {
+                    if (possessedHere) {
+                        StudioPossess(false);
+                    } else {
+                        StudioSelectCamera(uid);
+                        StudioPossess(true);
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
                 if (MenuItem("##camkeyx", Tr("현재 뷰를 키로 등록"), icon::Plus)) {
                     StudioSelectCamera(uid);
                     StudioKeyExtraCameraFromView();

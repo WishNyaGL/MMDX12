@@ -653,7 +653,7 @@ void App::UpdateStudioScene() {
             if (mp->IsProp() == (pass == 1)) StudioUpdateModel(*mp, slot, frame, physicsDt, resetPhysics);
 
     d.RefreshCameraEvals();  // S4: the main camera + one evaluator per extra camera
-    if (!d.HasCameraKeys()) d.useMotionCamera = false;  // S4: any camera's keys keep the camera view alive
+    if (!StudioShownCameraEval()) d.useMotionCamera = false;  // the main camera's keys (or a possessed screen camera's)
 }
 
 void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float physicsDt, bool resetPhysics) {
@@ -759,10 +759,9 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
 void App::StudioCamera(CameraParams& camera) const {
     const StudioDoc& d = *studio_;
     const float frame = (float)(d.time * kMmdFps);
-    // S4: the active camera at this frame (the switch track; a project without switch keys = the main camera). While
-    // possessing, the camera being edited (the selected one): possession writes the selected camera's keys, and showing
-    // the switch track's camera instead made an extra camera impossible to possess (the view never moved).
-    const std::shared_ptr<CameraMotion>& eval = d.cameraEval;  // the output camera: always the main one
+    // The main camera (the output), except while possessing a stage-screen camera: the viewport then shows the camera
+    // being edited (renders drop possession first, so they always get the main camera).
+    const std::shared_ptr<CameraMotion>& eval = StudioShownCameraEval();
     if (d.useMotionCamera && eval) {
         CameraPose pose = eval->Evaluate(frame);
         if (!StudioCameraPerspective(frame)) {
@@ -2038,7 +2037,7 @@ void App::StudioPushTrackEdit(const char* name, const std::vector<TrackState>& b
 // Viewport navigation starts from the motion camera's current view, so the free camera begins where it was.
 void App::StudioTakeFreeCamera() {
     StudioDoc& d = *studio_;
-    const std::shared_ptr<CameraMotion>& eval = d.cameraEval;  // the viewport's camera view is the main camera
+    const std::shared_ptr<CameraMotion>& eval = StudioShownCameraEval();  // the camera the viewport shows
     if (!d.useMotionCamera || !eval) return;
     freeCam_ = FreeFromPose(eval->Evaluate((float)(d.time * kMmdFps)));
     d.useMotionCamera = false;
@@ -2087,11 +2086,18 @@ CameraKf App::StudioViewedCamera(int frame) const {
     return k;
 }
 
+const std::shared_ptr<CameraMotion>& App::StudioShownCameraEval() const {
+    const StudioDoc& d = *studio_;
+    if (d.possessCamera && d.selectedCameraUid != 0 && d.SelectedCameraEval()) return d.SelectedCameraEval();
+    return d.cameraEval;
+}
+
 CameraKf App::StudioViewportCameraKey(int frame) const {
     const StudioDoc& d = *studio_;
     CameraKf k;
-    if (d.useMotionCamera && !d.camera.camera.empty()) {
-        k = SampleCamera(d.camera.camera, frame);   // looking through the main camera
+    const std::vector<CameraKf>& shown = d.possessCamera ? d.SelectedCameraTrack().camera : d.camera.camera;
+    if (d.useMotionCamera && !shown.empty()) {
+        k = SampleCamera(shown, frame);   // looking through the main camera (or the possessed one)
     } else {
         FillLinearCameraInterp(k.interp);
         PoseFromFree(freeCam_.target, freeCam_.yaw, freeCam_.pitch, freeCam_.distance, freeCam_.fovDeg, k);
@@ -6451,7 +6457,11 @@ void App::DrawStudioViewport(float x0, float y0, float x1, float y1) {
 
     // view label (top left of the viewport) and the pose toolbar next to it, over the bone overlay
     const Palette& p = P();
-    const char* label = d.possessCamera ? Tr("카메라 빙의 중")
+    std::string possessLabel;   // possessing a stage-screen camera: say which
+    if (d.possessCamera && d.selectedCameraUid != 0)
+        possessLabel = d.CameraLabel(d.selectedCameraUid) + " " + Tr("빙의 중");
+    const char* label = !possessLabel.empty() ? possessLabel.c_str()
+                      : d.possessCamera ? Tr("카메라 빙의 중")
                       : d.useMotionCamera && d.cameraEval ? Tr("카메라 모션")
                                                                           : Tr("자유 카메라");
     ImVec2 bs;

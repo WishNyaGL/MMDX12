@@ -192,13 +192,17 @@ void App::DrawStudioCameraPanel(float w) {
         separator(2.0f);
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
-        ImGui::TextUnformatted(Tr("무대 스크린에 띄우는 카메라예요. 영상 출력과 뷰포트의 카메라 모션은 메인 카메라만 써요."));
+        ImGui::TextUnformatted(Tr("무대 스크린에 띄우는 카메라예요. 영상 출력은 메인 카메라만 써요. 빙의하면 뷰포트로 이 카메라를 움직여요."));
         ImGui::PopStyleColor();
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(w, Dp(6.0f)));
-        if (Button("##camkeyx", Tr("현재 뷰를 키로 등록"), icon::Plus, ButtonKind::Secondary, ImVec2((w - bw) / Dpi() - 6.0f, btn)))
+        if (Button("##camkeyx", Tr("현재 뷰를 키로 등록"), icon::Plus, ButtonKind::Secondary, ImVec2((w - 2.0f * bw) / Dpi() - 12.0f, btn)))
             StudioKeyExtraCameraFromView();
         Tooltip(Tr("뷰포트에 보이는 시점을 재생 헤드에 이 카메라의 키로 넣어요"));
+        ImGui::SameLine(0, Dp(6.0f));
+        if (IconButton("##campossessx", icon::Crosshair, d.possessCamera ? Tr("카메라 빙의 해제  (Esc)") : Tr("카메라 빙의: 뷰포트 조작이 이 카메라를 움직여요"),
+                       d.possessCamera, btn))
+            StudioPossess(!d.possessCamera);
         ImGui::SameLine(0, Dp(6.0f));
         if (IconButton("##campath", d.showCameraPath ? icon::Eye : icon::EyeSlash,
                        d.showCameraPath ? Tr("경로·핸들 숨기기 (자유 카메라로 볼 때 표시)") : Tr("경로·핸들 표시 (자유 카메라로 볼 때)"),
@@ -568,12 +572,13 @@ App::FreeCamera App::FreeFromKey(const CameraKf& k) {
 void App::StudioPossess(bool on) {
     StudioDoc& d = *studio_;
     if (on == d.possessCamera) return;
-    if (on && d.selectedCameraUid != 0) return;   // only the main camera is looked through (and so possessed)
     if (studioKeyEdit_ && studioKeyLive_) StudioEndKeyEdit();
+    // leaving a stage-screen camera: the free view takes over where it looked (the camera view is the main camera's)
+    if (!on && d.selectedCameraUid != 0) StudioTakeFreeCamera();
     d.possessCamera = on;
     if (on) {
         d.selectedModel = -1;  // the camera row is the possessed object
-        if (d.cameraEval) d.useMotionCamera = true;  // look through the main camera
+        if (d.SelectedCameraEval()) d.useMotionCamera = true;  // look through the camera that is being edited
         studioCamHandle_ = 0;
     }
 }
@@ -676,7 +681,7 @@ void App::DrawStudioCameraPath(float x0, float y0, float x1, float y1) {
     using namespace ui;
     StudioDoc& d = *studio_;
     const bool cameraSelected = (d.selectedModel < 0 && d.selectedLightUid == 0);
-    if (!cameraSelected || !d.showCameraPath || (d.useMotionCamera && d.cameraEval) || !d.SelectedCameraEval())
+    if (!cameraSelected || !d.showCameraPath || (d.useMotionCamera && StudioShownCameraEval()) || !d.SelectedCameraEval())
         return;
     StudioUpdateCameraPath();
     if (studioCamPath_.empty()) return;
@@ -757,7 +762,7 @@ void App::StudioCameraPathWindow(int& lo, int& hi) const {
 
 bool App::StudioPickCameraKey(ImVec2 mouse) {
     StudioDoc& d = *studio_;
-    if (d.selectedModel >= 0 || d.selectedLightUid != 0 || !d.showCameraPath || (d.useMotionCamera && d.cameraEval) ||
+    if (d.selectedModel >= 0 || d.selectedLightUid != 0 || !d.showCameraPath || (d.useMotionCamera && StudioShownCameraEval()) ||
         !d.SelectedCameraEval())
         return false;
     StudioUpdateCameraPath();

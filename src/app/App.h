@@ -603,6 +603,8 @@ private:
     // The viewport's view now as a camera key at `frame`: the free view, or the main camera while looking through it
     // (what "새 카메라" / an extra camera's "현재 뷰로 키 등록" take).
     studio::CameraKf StudioViewportCameraKey(int frame) const;
+    // The camera view the viewport shows: the main camera (the output), or a possessed stage-screen camera.
+    const std::shared_ptr<CameraMotion>& StudioShownCameraEval() const;
     void StudioKeyExtraCameraFromView();             // the selected extra camera gets the viewport's view as a key
     void StudioFocusSelection();                     // F: frame the picked bone / selected model
     float studioFlyMul_ = 1.0f;                      // RMB + WASD fly speed multiplier (wheel while flying)

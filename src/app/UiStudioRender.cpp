@@ -121,7 +121,7 @@ void App::StudioPoseForRender(float frame) {
     // S3: the stage targets at the rendered frame (materials + the stage rig lights), before the models' UpdateMaterials
     StudioApplyStageTargets();
     d.RefreshCameraEvals();
-    if (!d.HasCameraKeys()) d.useMotionCamera = false;  // S4: any camera's keys keep the camera view alive
+    if (!StudioShownCameraEval()) d.useMotionCamera = false;  // the main camera's keys (or a possessed screen camera's)
     const uint64_t slot = ctx_.FrameNumber();
     for (int pass = 0; pass < 2; ++pass)  // props last: they follow a bone of a model posed in the first pass
         for (auto& mp : d.models)

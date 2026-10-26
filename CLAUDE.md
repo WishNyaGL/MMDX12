@@ -516,8 +516,9 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     rename, delete, "새 카메라" from the current view, "스테이지 카메라" = one static-key camera per stage.json camera).
     The main camera alone is the output: the viewport's camera view, play-through, offline stills and videos all use
     `cameraEval` (MMD compatible; a hard cut is a 1-frame key pair in the main track, there is no switch track). The
-    extra cameras feed the stage screens only (`uid:<n>` screen sources): never looked through, never possessed
-    (`StudioPossess` refuses them), placed with the viewport's view ("현재 뷰를 키로 등록", `StudioViewportCameraKey`)
+    extra cameras feed the stage screens only (`uid:<n>` screen sources). Possessing one is an editing view: the
+    viewport shows and moves it (`StudioShownCameraEval`), leaving hands the view to the free camera, and renders drop
+    possession first. They are also placed with the viewport's view ("현재 뷰를 키로 등록", `StudioViewportCameraKey`)
     or their eye / target handles in the free view, and their inspector / timeline show their camera keys only (the
     light / self-shadow / focus tracks are the main camera's). Evaluators: one `CameraMotion` per camera rebuilt in
     `RefreshCameraEvals` from `cameraVersion`. Undo: camera keys through `TrackState::cameraUid` (the same track

@@ -409,7 +409,7 @@ void App::StartOfflineVideo(double startSeconds, double endSeconds, bool fromLob
         rs.shading = ViewShading::Lit;  // the studio shading mode is an editing view only
         renderer_.SetSettings(rs);
         // the project's camera motion when there is one, else the view the editor shows
-        // S4: any camera's keys (the main one's or an extra one's through the switch track)
+        StudioPossess(false);   // a possessed stage-screen camera is an editing view: renders use the main camera
         if (studio_->HasCameraKeys()) studio_->useMotionCamera = true;   // StudioPoseForRender builds the evaluators
     }
     if (offline_.realtime) {
