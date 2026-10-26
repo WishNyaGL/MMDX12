@@ -68,10 +68,11 @@ progress.md is the session log. Read its latest entry first.
   Renderer, updated before the scene passes) and binds it to the materials the screen claims through
   `GpuModel::BindMaterialTexture`, marked `MatFlag_Screen` (the texture is the emission; raster / RT / PT / offline GI
   read it via `ScreenEmission` in `shaders/common.hlsli`). Sources: `none` (black), `image` (decoded once),
-  `video` (`render/VideoTexture.*`, one decoder per video screen, exact frames offline) and `camera` (the scene
+  `video` (`render/VideoTexture.*`, one decoder per video screen, exact frames offline), `camera` (the scene
   re-rendered from that camera into the screen before the main scene: raster lit, own constant-buffer / light slots,
-  no TAA / upscaler / DoF / volumetrics / effects / MME / packs, at most 960x540, two feeds per frame round robin);
-  `program` stays unimplemented (S6, black + one `[W]`). The app fills `FrameView::screens` (`ScreenView` per screen per
+  no TAA / upscaler / DoF / volumetrics / effects / MME / packs, at most 960x540, two feeds per frame round robin) and
+  `program` (S6: a bundled screen pack, `screen.hlsl` -> `PackScreen`, drawn into the screen texture once per frame by
+  its own fullscreen PSO — see "Shader packs" below). The app fills `FrameView::screens` (`ScreenView` per screen per
   part) from `app/StageRuntime` (play) / `StudioStageScreens` (studio, `camera` may be `uid:<n>` = an S4 studio camera);
   the studio's stage panel writes per-screen overrides into the project (`"screens"`, version 6) and the ui-script
   command `studioscreen <stage index> <screen id> <none|image|video|camera> [file|camera]` sets one (`studiostate` logs
@@ -613,6 +614,32 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   light in RT / PT / offline GI; non-lights packs keep the old bindings and zero cost). Built-in `shaders/packs/snow` 2.0 ("눈"): snow in the camera box, cover on
   every upward ground surface, performer-anchored footprints, landing particles that thin out on trodden snow. No world
   gizmo / transform keys yet. Zero cost without worlds.
+- Stage-bundled packs (S6, docs/stage_format.md `packs`): a stage folder may bundle packs of three roles, registered by
+  `RegisterStagePacks` (play-mode scene load, studio add / open) as `stage:<stage id>/<pack folder>` through
+  `ShaderPackRegistry::RegisterStagePack` (`PackSource::Stage`, the installed `LoadPackFolder` parser, one `[W]` and the
+  stage keeps loading on a broken pack). They never appear in the manager / pickers / gallery and are never hot
+  reloaded (`Packs()` / `Scan()` stay installed-only; `Find()` sees both, `stagePacks_` is the separate list).
+  `surface` = the first entry whose `materials` globs hit a part's materials (`ResolveStageSurfacePack` computes the
+  `StageSurfacePack` once: pack id + `kMaterialPackOff` for every material it does not claim); every frame
+  `ApplyStageSurfacePack` calls `GpuModel::SetShaderPack` with the entry's current params (a stage part takes surface
+  packs only, `GpuModel::SetShaderPack` drops other types for `ModelRole::Stage`; `ShaderPack::ClassifyStage` = the
+  pack's own class rules, else its FIRST rule's class, else Body, so unclaimed stage materials never fall back to a
+  bare Body class). Raster and RT draw that pack; PT / offline GI keep their character-only `pt_surface.hlsl` hook
+  (`render/PtPackVariants.*`), so a stage part's PT / GI shading stays the engine's even with a surface pack.
+  `world` = `AppendStageWorldPacks` appends one `WorldInstance` per entry after the user's
+  `worldStack` (play) / the project's world entities (studio) at its socket (the socket node bone's world matrix x the
+  explicit offset, resolved after the parts are posed; uid = `kStageWorldUidBase` + the entry index, so nothing is an
+  editable outliner entity). `screen` = a bundled `"type": "screen"` pack: `StageScreens` renders it into the screen's
+  own RGBA8 render-target texture with a fullscreen PSO (DXC `ps_6_0`, host `shaders/stage_screen.hlsl`, contract
+  `shaders/screen_api.hlsli` / docs/shader_screen_api.md: `float4 PackScreen(PackScreenInput)` with uv, size, the song /
+  timeline seconds, the pack params as 16 root constants at b2 and the v2 texture table) once per frame before the scene
+  passes, so PT / offline GI / camera feeds read this frame's content and an offline render is exact. A screen is driven
+  by either `screens[].source == "program"` (`file` = the pack folder) or a `packs[]` entry with `role: "screen"` +
+  `screen` = its id (the `packs[]` entry wins; both go through `ResolveStageScreens`, which also replays
+  `packs.<index>.params.<key>` targets into `ScreenView::params`). `params` of a manifest entry are the initial values;
+  `packs.<index>.params.<key>` binding targets override them per frame for all three roles. Zero cost without entries:
+  no registry entries, no PSOs, no render targets, identical frames. Fixture: `tools/stagegen/stagegen.py --only
+  pack_test` (one pack of each role; `tools/stage_check` + `pack_check --compile` pass on it).
 - MME (docs/mme/mme_design.md; compatibility list docs/mme/compat_list.md): own .fx parser / preprocessor / IR in
   `asset/Mme*`, FXC SM5 wrappers `render/MmeCompiler` (object mode = host MRT), `render/MmeRuntime` (instances per
   (file, objectMode), targets, samplers, constant ring), `MmeScriptVM`, `MmeSemantics` (CONTROLOBJECT: missing object =

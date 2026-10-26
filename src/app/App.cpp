@@ -2114,12 +2114,15 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     }
     // S1b: an MMDX stage's runtime: the manifest, its variant, and the rule -> material binding of every loaded part.
     if (pkg.stageManifest) {
+        // S6: the stage's bundled packs join the registry ("stage:<id>/<folder>"); a broken one is one [W].
+        RegisterStagePacks(*pkg.stageManifest);
         std::vector<StageRuntimePart> parts;
         for (size_t i = 0; i < s->stageGpu.size() && i < pkg.stagePartBindings.size(); ++i) {
             StageRuntimePart p;
             p.part = (int)i;
             p.gpu = s->stageGpu[i].get();
             p.binding = pkg.stagePartBindings[i];
+            p.surfacePack = ResolveStageSurfacePack(*pkg.stageManifest, *p.gpu);   // S6: resolved once per part
             parts.push_back(std::move(p));
         }
         s->stage = std::make_shared<StageRuntime>();
@@ -2255,6 +2258,9 @@ void App::UnloadScene() {
     renderer_.ReleaseVideoLayers();   // M8b: stop the song's video decode threads, free their buffers
     haveLastLiveCamera_ = false;
     if (scene_ && scene_->colliderFuture.valid()) scene_->colliderFuture.wait();
+    // S6: the scene's stage-bundled packs leave the registry with it (a reloaded stage re-reads its folders)
+    if (scene_ && scene_->stage && scene_->stage->Valid())
+        ShaderPacks().UnregisterStagePacks(scene_->stage->Manifest()->id);
     scene_.reset();
     mmeControllerQueue_.clear();      // auto-loaded MME controllers are per scene (freed with it)
     mmeControllerQueued_.clear();
@@ -2808,6 +2814,10 @@ void App::BuildFrameView(float frame, FrameView& view) {
     // World entities: one instance per enabled stack entry (identity transform), on the song clock used for the frame.
     PumpColliderTrack();
     if (scene_) {
+        const double worldTime = offline_.mode != OfflineMode::None && scene_->motionFps > 0.0f
+                                     ? (double)frame / scene_->motionFps
+                                     : playTime_;
+        const bool worldExact = !playing_ || offline_.mode != OfflineMode::None;
         uint32_t uid = 0;
         for (const EffectStackEntry& e : settings_.worldStack) {
             ++uid;
@@ -2816,12 +2826,27 @@ void App::BuildFrameView(float frame, FrameView& view) {
             w.uid = uid;
             w.pack = e.pack;
             w.params = e.params;
-            w.time = offline_.mode != OfflineMode::None && scene_->motionFps > 0.0f
-                         ? (double)frame / scene_->motionFps
-                         : playTime_;
-            w.exact = !playing_ || offline_.mode != OfflineMode::None;
+            w.time = worldTime;
+            w.exact = worldExact;
             w.colliders = scene_->colliders;
             view.worlds.push_back(std::move(w));
+        }
+        // S6: the stage's bundled world packs, appended after the user's stack, each at its socket (the socket's node
+        // bone world matrix x its explicit offset; the parts are posed by now).
+        if (scene_->stage && scene_->stage->Valid() && !scene_->stage->Manifest()->packs.empty()) {
+            const StageManifest& man = *scene_->stage->Manifest();
+            const auto resolveNode = [&](const std::string& node, DirectX::XMFLOAT4X4& out) {
+                for (size_t i = 0; i < scene_->stages.size() && i < scene_->stageGpu.size(); ++i) {
+                    const ModelInstance& inst = *scene_->stages[i];
+                    const int bone = inst.Model().FindBone(node);
+                    if (bone < 0) continue;
+                    out = inst.BoneWorld(bone);
+                    return true;
+                }
+                return false;
+            };
+            AppendStageWorldPacks(man, scene_->stage->Packs(), worldTime, worldExact, scene_->colliders,
+                                  kStageWorldUidBase, resolveNode, view.worlds);
         }
     }
 }

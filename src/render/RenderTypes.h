@@ -394,6 +394,11 @@ struct ScreenView {
     StageScreenSource source = StageScreenSource::None;
     std::filesystem::path path;         // image / video file (absolute; empty = not resolved / no file)
     CameraParams camera;                // source camera: a stage camera name resolved by the app, or a studio camera
+    // S6: the "program" source's pack (a bundled stage pack id, "stage:<stage id>/<folder>") and its parameter values at
+    // this frame (the manifest's `packs[].params` with the packs.<index>.params.<key> targets applied). Empty pack =
+    // nothing to draw (black).
+    std::string pack;
+    std::map<std::string, float> params;
     uint32_t width = 1920, height = 1080;   // the LED pixel grid (the texture is capped at 2048)
     float brightness = 1.0f;
     bool enabled = true;                // off = black (the surface stays dark)

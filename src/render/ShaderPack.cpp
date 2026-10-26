@@ -397,6 +397,19 @@ PackClass ShaderPack::Classify(const std::string& name, const std::string& nameE
     return PackClass::Body;
 }
 
+PackClass ShaderPack::ClassifyStage(const std::string& name, const std::string& nameEn,
+                                    const std::string& texture) const {
+    for (const Rule& r : rules) {
+        for (const std::string& m : r.match)
+            if (name.find(m) != std::string::npos || nameEn.find(m) != std::string::npos) return r.cls;
+        for (const std::string& t : r.texture)
+            if (texture.find(t) != std::string::npos) return r.cls;
+    }
+    // no rule names this stage material: the pack's own first class rule (a stage pack's author writes one rule for the
+    // look it wants, e.g. "class": "weapon"; Body would be indistinguishable from "no rule at all")
+    return rules.empty() ? PackClass::Body : rules.front().cls;
+}
+
 static float SrgbTransferToLinear(float c) {
     c = std::clamp(c, 0.0f, 1.0f);
     return c <= 0.04045f ? (c / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
@@ -572,8 +585,10 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
         out.type = PackType::Look;
     } else if (type == "world") {
         out.type = PackType::World;
+    } else if (type == "screen") {
+        out.type = PackType::Screen;
     } else {
-        problems.push_back("type '" + Str(j, "type") + "' must be \"surface\", \"effect\", \"look\" or \"world\"");
+        problems.push_back("type '" + Str(j, "type") + "' must be \"surface\", \"effect\", \"look\", \"world\" or \"screen\"");
     }
 
     // look: the LookData block of a look pack (render/LookPreset.h); a "look" key on any other pack is a problem
@@ -893,7 +908,8 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
 
     // classes: class body/skin/face/eye/hair with a match array; unknown classes are a problem
     if (auto it = j.find("classes"); it != j.end()) {
-        if (out.type == PackType::Look || out.type == PackType::World) problems.push_back("classes are not supported for this pack type");
+        if (out.type == PackType::Look || out.type == PackType::World || out.type == PackType::Screen)
+            problems.push_back("classes are not supported for this pack type");
     }
     if (auto it = j.find("classes"); it != j.end() && it->is_array()) {
         for (const auto& r : *it) {
@@ -1340,6 +1356,8 @@ bool ParseShaderPackManifest(const std::string& json, const std::filesystem::pat
         if (!fs::is_regular_file(dir / L"effect.hlsl", ec)) problems.push_back("effect packs need effect.hlsl");
     } else if (out.type == PackType::World) {
         if (!fs::is_regular_file(dir / L"world.hlsl", ec)) problems.push_back("world packs need world.hlsl");
+    } else if (out.type == PackType::Screen) {
+        if (!fs::is_regular_file(dir / L"screen.hlsl", ec)) problems.push_back("screen packs need screen.hlsl");
     } else if (out.type == PackType::Surface) {
         if (!fs::is_regular_file(dir / L"surface.hlsl", ec)) {
             problems.push_back("surface.hlsl is missing");
@@ -1465,7 +1483,48 @@ bool ShaderPackRegistry::PollChanges(double nowSeconds) {
 const ShaderPack* ShaderPackRegistry::Find(const std::string& id) const {
     for (const ShaderPack& p : packs_)
         if (p.id == id) return &p;
+    for (const ShaderPack& p : stagePacks_)
+        if (p.id == id) return &p;
     return nullptr;
+}
+
+// S6: "stage:<stage id>/<pack folder>". The folder is the manifest's own relative path, so two packs of one stage stay
+// distinct even when they share a leaf folder name, and a stage id keeps them apart from every other stage.
+std::string StagePackId(const std::string& stageId, const std::string& folder) {
+    return "stage:" + stageId + "/" + folder;
+}
+
+const ShaderPack* ShaderPackRegistry::RegisterStagePack(const std::string& id, const std::filesystem::path& dir) {
+    for (const ShaderPack& p : stagePacks_)
+        if (p.id == id) return &p;   // registered once per stage folder
+    // the same loader as an installed pack (manifest parser, PACK_HAS_EDGE probe); failures stay local to this stage
+    ShaderPack pack;
+    if (!LoadPackFolder(dir, PackSource::Stage, pack)) {
+        LOG_WARN("stage pack '%s': no readable pack.json (%s; the stage keeps loading)", id.c_str(),
+                 PathToUtf8(dir).c_str());
+        return nullptr;
+    }
+    // the registry id is the stage's, never the folder's own: keep the manifest's metadata, replace the id
+    pack.id = id;
+    if (!pack.Selectable()) {
+        LOG_WARN("stage pack '%s': %s (%s; the stage keeps loading)", id.c_str(), pack.statusMessage.c_str(),
+                 PathToUtf8(dir).c_str());
+        return nullptr;
+    }
+    LOG_INFO("stage pack '%s': %s (%s)", id.c_str(), pack.name.Get(PackLanguage()).c_str(),
+             PathToUtf8(dir).c_str());
+    stagePacks_.push_back(std::move(pack));
+    ++generation_;
+    return &stagePacks_.back();
+}
+
+void ShaderPackRegistry::UnregisterStagePacks(const std::string& stageId) {
+    const std::string prefix = "stage:" + stageId + "/";
+    const size_t before = stagePacks_.size();
+    stagePacks_.erase(std::remove_if(stagePacks_.begin(), stagePacks_.end(),
+                                     [&](const ShaderPack& p) { return p.id.rfind(prefix, 0) == 0; }),
+                      stagePacks_.end());
+    if (stagePacks_.size() != before) ++generation_;
 }
 
 void ShaderPackRegistry::ReportCompiled(const std::string& id) {

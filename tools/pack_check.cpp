@@ -215,6 +215,8 @@ bool PrintManifest(const ShaderPack& pack, const std::string& error) {
                        si, srf.field.c_str(), srf.grid, srf.height.c_str(), srf.shade.c_str());
             }
         }
+    } else if (pack.type == mmdx::PackType::Screen) {
+        printf("  type: screen (screen.hlsl -> PackScreen, docs/shader_screen_api.md)\n");
     } else {
         printf("  type: surface\n");
         printf("  pt_surface: %s\n", pack.hasPtSurface ? "yes" : "no");
@@ -351,6 +353,7 @@ void CheckTextureIndices(const ShaderPack& pack, const fs::path& dir, bool& ok) 
     const uint32_t count = (uint32_t)pack.textures.size();
     const wchar_t* shaderFile = pack.type == mmdx::PackType::Effect ? L"effect.hlsl"
                               : pack.type == mmdx::PackType::World  ? L"world.hlsl"
+                              : pack.type == mmdx::PackType::Screen ? L"screen.hlsl"
                                                                     : L"surface.hlsl";
     if (fs::is_regular_file(dir / shaderFile, ec)) {
         FILE* f = _wfopen((dir / shaderFile).c_str(), L"rb");
@@ -649,6 +652,37 @@ int wmain(int argc, wchar_t** argv) {
                     if (!vsBlob || !psBlob) { printf("[problem] surface compile failed\n"); ok = false; }
                     else { printf("compile ok (vs: %zu, ps: %zu bytes)\n", vsBlob->GetBufferSize(), psBlob->GetBufferSize()); }
                 }
+            }
+        } else if (pack.type == mmdx::PackType::Screen) {
+            // S6: a stage screen pack (screen.hlsl -> PackScreen) compiles through stage_screen.hlsl, like the app does
+            const fs::path hostHlsl = mmdx::ExecutableDir() / L"shaders" / L"stage_screen.hlsl";
+            if (!fs::is_regular_file(hostHlsl, ec)) {
+                printf("[problem] %s not found\n", mmdx::PathToUtf8(hostHlsl).c_str());
+                return 1;
+            }
+            fs::path rel = fs::relative(pack.dir / L"screen.hlsl", hostHlsl.parent_path(), ec);
+            if (ec || rel.empty()) rel = pack.dir / L"screen.hlsl";
+            std::string inc = mmdx::PathToUtf8(rel);
+            std::replace(inc.begin(), inc.end(), '\\', '/');
+            uint32_t clampMask = 0;
+            const uint32_t texCount = (uint32_t)std::min<size_t>(pack.textures.size(), kMaxTextures);
+            for (uint32_t i = 0; i < texCount; ++i)
+                if (pack.textures[i].clamp) clampMask |= 1u << i;
+            std::vector<std::pair<std::string, std::string>> defines = {
+                {"MMDX_PACK", "\"" + inc + "\""},
+                {"PACK_TEX_COUNT", std::to_string(texCount)},
+                {"PACK_TEX_CLAMP_MASK", std::to_string(clampMask) + "u"}};
+            printf("compile: PSPackScreen of %s (ps_6_0, MMDX_PACK = %s, %u textures)\n",
+                   mmdx::PathToUtf8(hostHlsl.filename()).c_str(), inc.c_str(), texCount);
+            std::string errors;
+            const mmdx::ComPtr vsBlob = mmdx::CompileShaderDxc(hostHlsl, "VSFullscreen", "vs_6_0", defines, &errors);
+            const mmdx::ComPtr psBlob = mmdx::CompileShaderDxc(hostHlsl, "PSPackScreen", "ps_6_0", defines, &errors);
+            if (!errors.empty()) printf("%s\n", errors.c_str());
+            if (!vsBlob || !psBlob) {
+                printf("[problem] screen shader compile failed\n");
+                ok = false;
+            } else {
+                printf("compile ok (vs: %zu, ps: %zu bytes)\n", vsBlob->GetBufferSize(), psBlob->GetBufferSize());
             }
         } else {
         const fs::path mmdHlsl = mmdx::ExecutableDir() / L"shaders" / (effect ? L"effect.hlsl" : L"mmd.hlsl");

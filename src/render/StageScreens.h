@@ -10,7 +10,10 @@
 //   camera  - a FEED: the renderer rasterizes the scene from that camera into the screen texture before the main scene
 //             (the callback below); a screen shown inside a feed keeps its previous content (no recursion). At most
 //             kMaxFeedsPerFrame feeds re-render per frame (round robin beyond that).
-//   program - not implemented (S6): black, one [W] line per load.
+//   program - S6: a bundled screen pack (pack.json "type": "screen", screen.hlsl -> PackScreen) draws the content into
+//             the screen texture with a fullscreen PSO (DXC ps_6_0, MMDX_PACK = the pack's screen.hlsl), once per frame
+//             before the scene passes. The pack reads the song / timeline time, so offline renders are exact. The
+//             pack's parameters are the manifest's `packs[].params` with the packs.<index>.params.<key> targets.
 //
 // Zero screens = zero cost: nothing is created and nothing is bound. Textures are created / freed on change only.
 #include "render/RenderPass.h"

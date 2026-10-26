@@ -3,12 +3,15 @@
 // passes and the constant-buffer slots.
 #include "render/StageScreens.h"
 #include "render/GpuModel.h"
+#include "render/PackTextures.h"
+#include "render/ShaderPack.h"
 #include "render/VideoTexture.h"
 #include "asset/ImageLoader.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -39,6 +42,15 @@ struct ModelBinding {
     std::vector<uint32_t> materials;
 };
 
+// S6: one screen pack's PSO (a fullscreen pass into the screen texture). Compiled on first use; a compile error is one
+// [W] and the screen keeps its last content (black before the first frame).
+struct ProgramPipe {
+    ComPtr<ID3D12RootSignature> rootSig;
+    ComPtr<ID3D12PipelineState> pso;
+    PackTextures::Set textures;       // the pack's "textures" (t0..t15, space5)
+    bool failed = false;
+};
+
 } // namespace
 
 struct StageScreens::Impl {
@@ -48,11 +60,12 @@ struct StageScreens::Impl {
         std::vector<uint32_t> materials;
         StageScreenSource source = StageScreenSource::None;
         std::filesystem::path path;
+        std::string pack;                 // S6 "program": the bundled screen pack id
         uint32_t width = 0, height = 0;   // texture size (capped)
         float brightness = 1.0f;
         bool enabled = true;
         uint64_t generation = 0;          // bumped when the bound texture changes
-        Texture tex;                      // image / camera feed texture (owned)
+        Texture tex;                      // image / camera feed / program texture (owned)
         ComPtr<ID3D12Resource> imageRes;  // UploadBatch image texture (no RTV; the SRV source)
         VideoTexture video;               // video source (one decoder per video screen)
         std::filesystem::path failedPath; // a file whose load failed: warn once, show black
@@ -63,11 +76,10 @@ struct StageScreens::Impl {
     };
 
     std::vector<Slot> slots;
-    ComPtr<ID3D12Resource> black;          // 1x1 black texture for source none / program / off
+    ComPtr<ID3D12Resource> black;          // 1x1 black texture for source none / off
     std::unordered_map<uint64_t, ModelBinding> bound;
+    std::map<std::string, ProgramPipe> programs;   // pack id -> its pipeline (stage packs never hot reload)
     uint32_t feedCursor = 0;               // round robin over the camera feeds
-
-    bool warnedProgram = false;
 };
 
 StageScreens::StageScreens() : impl_(std::make_unique<Impl>()) {}
@@ -79,9 +91,121 @@ void StageScreens::ForgetModel(uint64_t uid) {
 
 namespace {
 
-// A 1x1 black texture for a screen with no source (none / program / off): the surface stays black instead of
-// showing the material's own texture. A texture cannot live in an UPLOAD heap, so the value is copied in once through
-// a tiny upload buffer on the frame's command list.
+// S6: the fullscreen PSO of one screen pack: b1 16 root constants (gP0 = size, time, frame), b2 the pack's 16
+// params, t0..t15 space5 its textures. No b0: a screen pack reads no scene constants (screen_api.hlsli), so the pass
+// needs nothing from the frame's constant buffer and works in every render path (raster / PT / offline GI).
+bool CreateProgramPipe(Dx12Context& ctx, const std::filesystem::path& shaderDir, const ShaderPack& pack,
+                       ProgramPipe& out) {
+    ID3D12Device* device = ctx.Device();
+    CD3DX12_DESCRIPTOR_RANGE packTex;
+    packTex.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kPackMaxTextures, 0, 5);
+    CD3DX12_ROOT_PARAMETER params[3];
+    params[0].InitAsConstants(16, 1);                    // gP0 = (width, height, time, frameIndex)
+    params[1].InitAsConstants(16, 2);                    // the pack's 16 parameters (PackParam)
+    params[2].InitAsDescriptorTable(1, &packTex, D3D12_SHADER_VISIBILITY_PIXEL);
+    // s0 point clamp, s1 linear clamp, s2 linear wrap: fullscreen.hlsli's gPoint / gLinear / gLinearWrap, which
+    // screen_api.hlsli samples through.
+    CD3DX12_STATIC_SAMPLER_DESC samplers[3];
+    samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                     D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    samplers[1].Init(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                     D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    samplers[2].Init(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                     D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+    CD3DX12_ROOT_SIGNATURE_DESC rs;
+    rs.Init(3, params, 3, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+    ComPtr<ID3DBlob> blob, err;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
+        LOG_WARN("stage screen pack '%s': root signature serialization failed", pack.id.c_str());
+        return false;
+    }
+    if (!CheckHr(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                             IID_PPV_ARGS(&out.rootSig)),
+                 "stage screen pack: CreateRootSignature"))
+        return false;
+    // the pack's screen.hlsl as an include path relative to stage_screen.hlsl (a stage pack lives anywhere)
+    const std::filesystem::path file = shaderDir / L"stage_screen.hlsl";
+    std::error_code ec;
+    std::filesystem::path rel = std::filesystem::relative(pack.dir / L"screen.hlsl", shaderDir, ec);
+    if (ec || rel.empty()) rel = pack.dir / L"screen.hlsl";
+    std::string inc = PathToUtf8(rel);
+    std::replace(inc.begin(), inc.end(), '\\', '/');
+    const uint32_t texCount = (uint32_t)std::min<size_t>(pack.textures.size(), kPackMaxTextures);
+    uint32_t clampMask = 0;
+    for (uint32_t i = 0; i < texCount; ++i)
+        if (pack.textures[i].clamp) clampMask |= 1u << i;
+    ShaderDefines defines = {{"MMDX_PACK", "\"" + inc + "\""},
+                             {"PACK_TEX_COUNT", std::to_string(texCount)},
+                             {"PACK_TEX_CLAMP_MASK", std::to_string(clampMask) + "u"}};
+    std::string errors;
+    ComPtr<ID3DBlob> vs = CompileShaderDxc(file, "VSFullscreen", "vs_6_0", defines, &errors);
+    ComPtr<ID3DBlob> ps = vs ? CompileShaderDxc(file, "PSPackScreen", "ps_6_0", defines, &errors) : nullptr;
+    if (!vs || !ps) {
+        LOG_WARN("stage screen pack '%s': compile failed (the screen stays black)%s%s", pack.id.c_str(),
+                 errors.empty() ? "" : ": ", errors.c_str());
+        return false;
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = out.rootSig.Get();
+    pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    pso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;   // the screen texture (display-referred, as image / video)
+    pso.SampleDesc.Count = 1;
+    if (!CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&out.pso)), "stage screen pack: PSO"))
+        return false;
+    if (!pack.textures.empty()) {
+        PackTextures::Upload(ctx, pack, out.textures, {});
+        if (out.textures.srv == DescriptorHeap::kInvalid) {
+            LOG_WARN("stage screen pack '%s': pack textures unavailable (white is used)", pack.id.c_str());
+            out.textures.srv = DescriptorHeap::kInvalid;
+            out.textures.tex.clear();
+        }
+    }
+    LOG_INFO("stage screen pack '%s': compiled (%s)", pack.id.c_str(), inc.c_str());
+    return true;
+}
+
+// Draws one program screen: the pack's PSO over the screen's own texture, at `time` seconds. The texture is left in
+// ALL_SHADER_RESOURCE (the raster material shaders and the PT / GI compute shaders read it).
+bool DrawProgramScreen(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, ProgramPipe& pipe, const ShaderPack& pack,
+                       Texture& target, float time, uint64_t frame, const std::map<std::string, float>& params) {
+    if (!pipe.pso || !target) return false;
+    ID3D12DescriptorHeap* heaps[] = {ctx.SrvHeap().Heap()};
+    cmd->SetDescriptorHeaps(1, heaps);
+    cmd->SetGraphicsRootSignature(pipe.rootSig.Get());
+    cmd->SetPipelineState(pipe.pso.Get());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmd->IASetVertexBuffers(0, 0, nullptr);
+    cmd->IASetIndexBuffer(nullptr);
+    const float cb[16] = {(float)target.width, (float)target.height, time, (float)(frame & 63ull), 0, 0, 0, 0,
+                          0, 0, 0, 0, 0, 0, 0, 0};
+    cmd->SetGraphicsRoot32BitConstants(0, 16, cb, 0);
+    const PackParamValues values = pack.Resolve(params);
+    cmd->SetGraphicsRoot32BitConstants(1, (uint32_t)kPackMaxParams, values.data(), 0);
+    if (pipe.textures.srv != DescriptorHeap::kInvalid)
+        cmd->SetGraphicsRootDescriptorTable(2, ctx.SrvHeap().Gpu(pipe.textures.srv));
+    target.Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = ctx.RtvHeap().Cpu(target.rtv);
+    cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, (float)target.width, (float)target.height, 0.0f, 1.0f};
+    cmd->RSSetViewports(1, &vp);
+    const D3D12_RECT sc{0, 0, (LONG)target.width, (LONG)target.height};
+    cmd->RSSetScissorRects(1, &sc);
+    cmd->DrawInstanced(3, 1, 0, 0);
+    target.Transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);   // PT / offline GI read it from compute
+    return true;
+}
+
+// A 1x1 black texture for a screen with no source (none / program without a pack / off): the surface stays black
+// instead of showing the material's own texture. A texture cannot live in an UPLOAD heap, so the value is copied in
+// once through a tiny upload buffer on the frame's command list.
 bool EnsureBlack(ComPtr<ID3D12Resource>& black, Dx12Context& ctx, ID3D12GraphicsCommandList* cmd) {
     if (black) return true;
     CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, 1, 1, 1, 1, 1, 0,
@@ -168,6 +292,18 @@ void StageScreens::Clear(Dx12Context& ctx) {
         s.imageRes.Reset();
     }
     impl.slots.clear();
+    // S6: the program packs' PSOs and their texture sets (SRVs freed once the GPU is done)
+    if (!impl.programs.empty()) {
+        ctx.WaitForGpu();
+        for (auto& [id, pipe] : impl.programs) {
+            if (pipe.textures.srv != DescriptorHeap::kInvalid)
+                ctx.SrvHeap().Free(pipe.textures.srv, pipe.textures.capacity);
+            pipe.textures.srv = DescriptorHeap::kInvalid;
+            pipe.pso.Reset();
+            pipe.rootSig.Reset();
+        }
+        impl.programs.clear();
+    }
     impl.black.Reset();
     impl.bound.clear();
     impl.feedCursor = 0;
@@ -215,31 +351,31 @@ void StageScreens::Render(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, cons
         s.width = std::clamp(sv.width, 1u, kScreenCap);
         s.height = std::clamp(sv.height, 1u, kScreenCap);
         const StageScreenSource source = sv.enabled ? sv.source : StageScreenSource::None;
-        if (source != s.source) {
-            // switching source drops the previous one (the video decoder, the image / feed texture)
-            if (s.source == StageScreenSource::Video) s.video.Release(ctx);
+        // drops whatever the slot held (the video decoder, the image / feed / program texture): a source switch and a
+        // program pack switch both need the old content gone
+        const auto releaseContent = [&]() {
+            if (s.video.IsOpen()) s.video.Release(ctx);
             if (s.tex) {
                 needWait = true;
                 s.tex.Release(ctx);
             }
             s.imageRes.Reset();
+            ++s.generation;
+        };
+        if (source != s.source) {
+            releaseContent();
             s.source = source;
             s.path.clear();
-            ++s.generation;
+        }
+        if (source == StageScreenSource::Program && s.pack != sv.pack) {
+            releaseContent();   // a different pack draws a different picture
+            s.pack = sv.pack;
         }
         if (source == StageScreenSource::Image || source == StageScreenSource::Video) {
             if (s.path != sv.path) {
-                if (s.video.IsOpen() || s.tex || s.imageRes) {
-                    s.video.Release(ctx);
-                    if (s.tex) {
-                        needWait = true;
-                        s.tex.Release(ctx);
-                    }
-                    s.imageRes.Reset();
-                }
+                if (s.video.IsOpen() || s.tex || s.imageRes) releaseContent();
                 s.path = sv.path;
                 s.failedPath.clear();
-                ++s.generation;
             }
         } else {
             s.path = sv.path;   // recorded for the log only
@@ -288,13 +424,24 @@ void StageScreens::Render(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, cons
                     LOG_WARN("stage screen '%s': feed texture creation failed", s.key.c_str());
             }
             break;
-        case StageScreenSource::Program:
-            if (!impl.warnedProgram) {
-                impl.warnedProgram = true;
-                LOG_WARN("stage screen '%s': the \"program\" source is not implemented yet (black)", s.key.c_str());
+        case StageScreenSource::Program: {
+            // S6: an RGBA8 render-target texture the pack draws into (same size rule as a screen; at most 2048).
+            if (s.pack.empty()) {
+                // no pack (the manifest's screen has no `file`, or the pack failed to register): black, one [W] at load
+                EnsureBlack(impl.black, ctx, cmd);
+                break;
             }
-            EnsureBlack(impl.black, ctx, cmd);
+            if (!s.tex) {
+                const float clear[4] = {0, 0, 0, 1};
+                if (s.tex.Create(ctx, s.width, s.height, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                 D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                 D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, L"screen.program", 1, 1, clear))
+                    ++s.generation;
+                else
+                    LOG_WARN("stage screen '%s': program texture creation failed", s.key.c_str());
+            }
             break;
+        }
         case StageScreenSource::None:
         default:
             EnsureBlack(impl.black, ctx, cmd);
@@ -308,6 +455,24 @@ void StageScreens::Render(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, cons
         if (s.source != StageScreenSource::Video || !s.video.IsOpen()) continue;
         if (!s.video.Update(ctx, cmd, ctx.FrameSlot(), (double)view.sceneTime, view.videoExact, view.cameraCut))
             continue;   // no frame yet: the previous texture stays
+    }
+
+    // 3b. S6 program screens: one fullscreen draw per screen pack into the screen's own texture, at the song / timeline
+    // time (exact for offline renders). A pack registers once per screen folder, so two screens sharing one pack share
+    // its PSO (each draws into its own texture).
+    for (size_t i = 0; i < impl.slots.size(); ++i) {
+        Impl::Slot& s = impl.slots[i];
+        if (s.source != StageScreenSource::Program || !s.tex || s.pack.empty()) continue;
+        const ShaderPack* pack = ShaderPacks().Find(s.pack);
+        if (!pack || pack->type != PackType::Screen || !pack->Selectable()) continue;   // one [W] at registration
+        auto it = impl.programs.find(s.pack);
+        if (it == impl.programs.end()) {
+            ProgramPipe pipe;
+            if (!CreateProgramPipe(ctx, shaderDir_, *pack, pipe)) pipe.failed = true;
+            it = impl.programs.emplace(s.pack, std::move(pipe)).first;
+        }
+        if (it->second.failed) continue;   // the screen keeps its previous content (black before the first frame)
+        DrawProgramScreen(ctx, cmd, it->second, *pack, s.tex, view.sceneTime, ctx.FrameNumber(), view.screens[i].params);
     }
 
     // 4. Camera feeds: render at most kMaxFeedsPerFrame per frame, round robin over the rest.
@@ -400,7 +565,7 @@ void StageScreens::Render(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, cons
                 res = s.imageRes.Get();
             else if (s.source == StageScreenSource::Video)
                 res = s.video.TextureResource();
-            else if (s.source == StageScreenSource::Camera)
+            else if (s.source == StageScreenSource::Camera || s.source == StageScreenSource::Program)
                 res = s.tex.res.Get();
             if (!res) res = impl.black.Get();
             if (!res) continue;

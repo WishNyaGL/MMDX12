@@ -720,6 +720,8 @@ void App::StudioPollJobs() {
                     }
                     sm->gpu->SetDefaultPackTextureFolder(pm.defaultPackTextureFolder);
                     sm->gpu->SetMaterialBlendHints(pm.materialBlend, pm.materialBlendDefault);
+                    // S6: the part's bundled surface pack (resolved once; the parameters follow the timeline every frame)
+                    if (pm.stageManifest) sm->stageSurfacePack = ResolveStageSurfacePack(*pm.stageManifest, *sm->gpu);
                     StudioSuggestShader(*sm);   // character with no shader choice: maybe suggest a pack
                     sm->inst->UpdatePose();
                 }
@@ -751,6 +753,10 @@ void App::StudioPollJobs() {
                         const uint32_t su = d.models[(size_t)at]->stageUid;
                         if (su) { newStage = su; break; }
                     }
+                    // S6: the added stage's bundled packs join the registry before the next frame uses them
+                    if (newStage)
+                        if (const studio::StudioStage* st = d.FindStage(newStage); st && st->manifest)
+                            RegisterStagePacks(*st->manifest);
                     if (newStage) StudioApplyStageLightRig(newStage);
                 }
                 LOG_INFO("studio: added %s (%d models)", job.label.c_str(), (int)d.models.size());
@@ -786,6 +792,14 @@ void App::StudioRemoveModel(int index) {
         const std::string stageName = stage ? (stage->manifest ? stage->manifest->DisplayName(StageLanguage())
                                                               : stage->stageId)
                                             : name;
+        // S6: the stage's bundled packs leave the registry with it (adding the stage again re-reads them), unless
+        // another entity of the same stage still uses them
+        if (stage && stage->manifest) {
+            bool shared = false;
+            for (const StudioStage& other : d.stages)
+                if (&other != stage && other.manifest && other.manifest->id == stage->manifest->id) shared = true;
+            if (!shared) ShaderPacks().UnregisterStagePacks(stage->manifest->id);
+        }
         std::set<uint32_t> partUids;
         std::set<int> propParents;
         for (auto& m : d.models) {
@@ -895,8 +909,11 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
     m.stageUid = pm.stageUid;
     m.stageBinding = pm.stageManifest ? MatchStageMaterialRules(pm.stageManifest->materials, *pm.pmx)
                                       : StageMaterialBinding{};
+    m.stageSurfacePack = {};   // S6: resolved once the GPU model exists (below)
     m.inst = std::make_unique<ModelInstance>(pm.pmx);
     m.gpu = std::move(gpu);
+    // S6: the part's bundled surface pack (resolved once; its params follow the timeline every frame)
+    if (m.stageManifest) m.stageSurfacePack = ResolveStageSurfacePack(*m.stageManifest, *m.gpu);
     m.defaultPackTextureFolder = pm.defaultPackTextureFolder;
     // keys stay keyed by name; tracks the new model lacks are kept (saved / exported as they were)
     m.motion.CanonicalizeNames(*m.pmx);
