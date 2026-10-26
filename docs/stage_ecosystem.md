@@ -57,7 +57,7 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S6 | Stage-bundled packs: screen packs (new type), surface packs on stage materials, world packs on sockets | done 2026-10-26 |
 | S7a | Many lights, part 1: punctual cap 16 -> 256, the 16 most important spots get shadow slices (importance + hysteresis), PT / GI light sampling by a power CDF, volumetric march over (up to 64) lights | done 2026-10-26 |
 | S7c | Many lights, part 2: clustered forward lighting (Forward+ with depth slices; no deferred: shader packs, MSAA, translucent hair and MME object effects need forward), the three Punctual* loops iterate a froxel's light list | done 2026-10-26 |
-| S7b | Spot cookies / gobos: a projected texture per spot (stage-bundled PNGs, rotatable, keyable) in raster / RT / PT / GI and the volumetric beams | |
+| S7b | Spot cookies / gobos: a projected texture per spot (stage-bundled PNGs, rotatable, keyable) in raster / RT / PT / GI and the volumetric beams | done 2026-10-26 |
 | S8 | Emissive lights: emissive-triangle NEE in PT / GI (screens and LED walls light the scene), raster screen lights | S8a done 2026-10-26 (PT / GI emissive NEE + MIS); S8b (raster screen lights) open |
 | S9 | Haze without heavy fog: per-light volumetric scattering + anisotropy, local fog volumes, stage `environment.fog` / `environment.fogVolumes` | done 2026-10-26 |
 | S9c | Fully path-traced haze in offline GI: the medium (height fog + fog volumes) inside every path segment, multiple scattering, scattering-event NEE to sun / punctual lights, medium transmittance on surface shadow rays, fogged irradiance cache (done 2026-10-26) | |

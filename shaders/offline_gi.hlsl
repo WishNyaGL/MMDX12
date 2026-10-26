@@ -38,6 +38,7 @@
 //   gP2 = (shutter time 0..1, focus distance (view z, <= 0: pinhole), lens radius, 0)
 #include "rt_common.hlsli"   // includes common.hlsli
 #include "light_pick.hlsli"   // S7a: the punctual-light CDF pick
+#include "gobo.hlsli"        // S7b: spot gobos (the light lists below)
 #include "offline_common.hlsli"
 #include "dielectric.hlsli"
 #include "offline_glass.hlsli"
@@ -463,7 +464,10 @@ float3 MediumNee(float3 p, float3 d, inout uint rng) {
                                : ShadowTransmission(0.0, l.shadowDensity, l.shadowColor));
             }
             vis *= MediumShadowT(p, ld, max(dL - 0.05, 0.0), rng);
-            L += l.color * (boost * l.volumetric) * (atten * HgEval(dot(d, ld), g)) * (total / w) * vis;
+            // S7b: a spot's gobo dims / tints its in-scattering at the sample point (+1 mip: the volume is noisy)
+            const float3 lc = spot ? l.color * GoboSample(GoboOf((uint)picked), p, l.pos, l.dir, l.cosOuter, 1.0)
+                                   : l.color;
+            L += lc * (boost * l.volumetric) * (atten * HgEval(dot(d, ld), g)) * (total / w) * vis;
         }
     }
 #endif
@@ -525,7 +529,8 @@ float MediumPickScore(PtLight l, float3 o, float3 d, float tEnd) {
 }
 
 // One equiangular sample of light `l` on the segment [0, tEnd] (0 when the segment misses it): see the block comment.
-float3 MediumPunctualLight(PtLight l, float3 o, float3 d, float tEnd, float scale, inout uint rng) {
+float3 MediumPunctualLight(PtLight l, uint lightIndex, float3 o, float3 d, float tEnd, float scale,
+                           inout uint rng) {
     const float2 s = MediumLightRange(l, o, d, tEnd);
     if (s.x >= s.y) return 0;
     float pdf;
@@ -552,7 +557,10 @@ float3 MediumPunctualLight(PtLight l, float3 o, float3 d, float tEnd, float scal
     vis *= MediumShadowT(p, ld, max(dL - 0.05, 0.0), rng);
     const float3 sigmaS = MediumAlbedo(p) * MediumSigma(p);
     const float Tview = MediumTransmittance(o, d, t, rng);
-    const float3 Li = l.color * (atten * (boost * l.volumetric)) * HgEval(dot(d, ld), g);
+    // S7b: a spot's gobo dims / tints its in-scattering at the sample point (+1 mip: the volume is noisy)
+    const float3 lc = l.cosOuter > -1.0 ? l.color * GoboSample(GoboOf(lightIndex), p, l.pos, l.dir, l.cosOuter, 1.0)
+                                        : l.color;
+    const float3 Li = lc * (atten * (boost * l.volumetric)) * HgEval(dot(d, ld), g);
     return sigmaS * Li * (Tview * scale * vis / pdf);
 }
 
@@ -568,7 +576,7 @@ float3 MediumPunctualSegment(float3 o, float3 d, float tEnd, inout uint rng) {
         [loop] for (uint i = 0; i < nl; ++i) {
             PtLight l = gPtLights[i];
             if (l.volumetric <= 0.0) continue;
-            L += MediumPunctualLight(l, o, d, tEnd, 1.0, rng);
+            L += MediumPunctualLight(l, i, o, d, tEnd, 1.0, rng);
         }
         return L;
     }
@@ -583,7 +591,7 @@ float3 MediumPunctualSegment(float3 o, float3 d, float tEnd, inout uint rng) {
         if (pdf <= 0.0) return 0;
         PtLight l = gPtLights[li];
         if (l.volumetric <= 0.0) return 0;
-        return MediumPunctualLight(l, o, d, tEnd, 1.0 / pdf, rng);
+        return MediumPunctualLight(l, li, o, d, tEnd, 1.0 / pdf, rng);
     }
     float total = 0.0;
     [loop] for (uint i = 0; i < nl; ++i) {
@@ -594,6 +602,7 @@ float3 MediumPunctualSegment(float3 o, float3 d, float tEnd, inout uint rng) {
     if (total <= 0.0) return 0;
     const float u = Rand(rng) * total;
     PtLight picked = gPtLights[0];
+    uint pickedIndex = 0;
     float w = 0.0;
     float acc = 0.0;
     [loop] for (uint i = 0; i < nl; ++i) {
@@ -602,11 +611,12 @@ float3 MediumPunctualSegment(float3 o, float3 d, float tEnd, inout uint rng) {
         w = MediumPickScore(l, o, d, tEnd);
         if (w <= 0.0) continue;
         picked = l;
+        pickedIndex = i;
         if (u <= acc + w) break;
         acc += w;
     }
     if (w <= 0.0) return 0;
-    return MediumPunctualLight(picked, o, d, tEnd, total / w, rng);
+    return MediumPunctualLight(picked, pickedIndex, o, d, tEnd, total / w, rng);
 }
 
 // One step through the medium along [0, tEnd] from o: a real collision consumes one event and reports the event point
@@ -669,7 +679,10 @@ float3 PunctualUnshadowed(Surf s, uint li, bool toon, out float3 ld, out float d
     float flat = s.flat ? 1.0 : 0.0;
     float diff = toon ? lerp(smoothstep(-0.05, 0.25, ndl), saturate(ndl * 0.3 + 0.7), flat) : ndl;
     if (atten <= 0.0 || diff <= 0.0 || l.affectDiffuse <= 0.5) return 0.0;
-    return PI * l.color * atten * diff;
+    // S7b: the spot's gobo scales the light's colour (this function only feeds the pick weights)
+    const float3 lc = (l.cosOuter > -1.0) ? l.color * GoboSample(GoboOf(li), s.pos, l.pos, l.dir, l.cosOuter, 0.0)
+                                          : l.color;
+    return PI * lc * atten * diff;
 }
 
 // S7a: how the punctual lights are sampled at one shading point. Up to kGiAllLights lights keep the exact estimator
@@ -682,8 +695,8 @@ static const uint kGiCdfSamples = 4u;
 // One punctual light's direct contribution at s: its unshadowed irradiance (PI * colour * atten * diff) and its
 // specular NEE radiance, both through the light's shadow ray (and the medium between). None of the picking weights:
 // the caller applies them.
-void PunctualOne(Surf s, PtLight l, float3 V, bool toon, float pSpec, float3 R, float cosHalfAngle, float omega,
-                 bool wantDiff, inout uint rng, out float3 diffIrradiance, out float3 specRadiance) {
+void PunctualOne(Surf s, PtLight l, uint lightIndex, float3 V, bool toon, float pSpec, float3 R, float cosHalfAngle,
+                 float omega, bool wantDiff, inout uint rng, out float3 diffIrradiance, out float3 specRadiance) {
     diffIrradiance = 0;
     specRadiance = 0;
     int shadowType = (int)l.shadowType;
@@ -736,9 +749,12 @@ void PunctualOne(Surf s, PtLight l, float3 V, bool toon, float pSpec, float3 R, 
     // S9c: the medium between the surface and the light dims / tints it as well (mode 0: 1, no random numbers)
     vis *= MediumShadowT(OffsetRayOrigin(s.pos, s.faceN), ld, max(dist - 0.05, 0.0), rng);
 
-    if (evalDiff) diffIrradiance = PI * l.color * atten * diff * vis;
+    // S7b: a spot's gobo multiplies the light's colour (both lobes)
+    const float3 lc = (l.cosOuter > -1.0) ? l.color * GoboSample(GoboOf(lightIndex), s.pos, l.pos, l.dir, l.cosOuter, 0.0)
+                                          : l.color;
+    if (evalDiff) diffIrradiance = PI * lc * atten * diff * vis;
     if (evalSpec)
-        specRadiance = pSpec * l.color * atten * vis * (s.pbr ? PtPbrEvalSpecular(s.pb, V, ld) : (1.0 / omega));
+        specRadiance = pSpec * lc * atten * vis * (s.pbr ? PtPbrEvalSpecular(s.pb, V, ld) : (1.0 / omega));
 }
 
 // S8a: emissive-triangle next-event estimation at a shading point (one sample, IN ADDITION to the sun / punctual NEE):
@@ -825,7 +841,7 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
                 u -= w;
                 if (u <= 0.0 || j == nl - 1u) {
                     float3 de, sp;
-                    PunctualOne(s, gPtLights[j], V, toon, pSpec, R, cosHalfAngle, omega, true, rng, de, sp);
+                    PunctualOne(s, gPtLights[j], j, V, toon, pSpec, R, cosHalfAngle, omega, true, rng, de, sp);
                     diffE = de * (total / w);
                     specR += sp;
                     pickedJ = (int)j;
@@ -837,7 +853,7 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
             for (uint k = 0; k < nl; ++k) {
                 if ((int)k == pickedJ) continue;
                 float3 de, sp;
-                PunctualOne(s, gPtLights[k], V, toon, pSpec, R, cosHalfAngle, omega, false, rng, de, sp);
+                PunctualOne(s, gPtLights[k], k, V, toon, pSpec, R, cosHalfAngle, omega, false, rng, de, sp);
                 specR += sp;
             }
         }
@@ -850,7 +866,7 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
         uint li = LightCdfPick(Rand(rng), nl, pdf);
         if (pdf <= 0.0) continue;
         float3 de, sp;
-        PunctualOne(s, gPtLights[li], V, toon, pSpec, R, cosHalfAngle, omega, true, rng, de, sp);
+        PunctualOne(s, gPtLights[li], li, V, toon, pSpec, R, cosHalfAngle, omega, true, rng, de, sp);
         const float w = 1.0 / (pdf * (float)kGiCdfSamples);
         diffE += de * w;
         specR += sp * w;
@@ -993,8 +1009,12 @@ float3 SkinTranslucency(Surf s, float skin, inout uint rng) {
         float atten = PunctualFalloff(dist, l.invRange, (int)l.falloff);
         if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
         else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
-        if (atten > 0.0 && dot(s.faceN, ld) < 0.2 && l.affectDiffuse > 0.5)
-            c += PI * l.color * atten * (1.0 / pickPdf) * SkinTransmittance(s, ld, dist, rng);
+        if (atten > 0.0 && dot(s.faceN, ld) < 0.2 && l.affectDiffuse > 0.5) {
+            // S7b: a spot's gobo scales the light's colour
+            const float3 lc = (l.cosOuter > -1.0) ? l.color * GoboSample(GoboOf(li), s.pos, l.pos, l.dir, l.cosOuter, 0.0)
+                                                  : l.color;
+            c += PI * lc * atten * (1.0 / pickPdf) * SkinTransmittance(s, ld, dist, rng);
+        }
     }
     return s.albedo / PI * c * kSkinTranslucency * skin;
 }

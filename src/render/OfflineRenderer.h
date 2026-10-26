@@ -148,7 +148,8 @@ public:
                RtScene& rt, const FrameView& view, const SceneConstants& sc, const GpuLight* lights,
                uint32_t lightCount, const float* lightCdf, uint32_t lightCdfCount, const GpuFogVolume* fogVolumes,
                uint32_t fogVolumeCount, const OfflineJobDesc& job, uint64_t frame,
-               const EmissiveTable& emissive = {}, MmeRuntime* mme = nullptr, MmeSkin* mmeSkin = nullptr);
+               const EmissiveTable& emissive = {}, MmeRuntime* mme = nullptr, MmeSkin* mmeSkin = nullptr,
+               const GpuGobo* gobos = nullptr);
     // Records this frame's share of work (no-op when Idle or Done).
     void Render(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, const BuiltinTextures* builtin,
                 RtScene& rt);
@@ -167,6 +168,9 @@ public:
     // SceneConstants::lightCdfParams.x): the shaders read it through the bindless buffer table. DescriptorHeap::kInvalid
     // before Initialize.
     uint32_t LightCdfSrv() const;
+    // S7b: the heap index of the raw ByteAddressBuffer SRV holding this renderer's gobo table (for
+    // SceneConstants::goboParams.x); DescriptorHeap::kInvalid before Initialize.
+    uint32_t GoboSrv() const;
     // S8a: the heap indices of this renderer's emissive-triangle pick table (triangle list, CDF, per-geometry base), for
     // SceneConstants::emissiveParams; DescriptorHeap::kInvalid before Initialize.
     struct EmissiveSrvs {

@@ -8,6 +8,8 @@
 //     gP2 = (per-image seed, ambient scale, pointBoost, tint.b), gP3 = (numFogVolumes, sun volumetric share, tint.rg)
 //   CSVolBlur: t0 gbuffer, t1 src (half resolution), u0 out; gP0.xy = integer pixel direction
 #include "rt_common.hlsli"
+#include "gobo.hlsli"   // S7b: spot gobos in the medium
+#define VOL_GOBO 1      // volumetric_common.hlsli applies the spot gobos (the offline march has the bindless tables)
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
 
 Texture2D<float4> gGbufT : register(t0);

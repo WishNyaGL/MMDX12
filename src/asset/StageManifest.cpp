@@ -339,6 +339,9 @@ StageTargetSpec::ValueType LightFieldType(const std::string& field) {
         {"shadowColor", StageTargetSpec::ValueType::Color},  {"rimStrength", StageTargetSpec::ValueType::Float},
         {"rimColor", StageTargetSpec::ValueType::Color},     {"swayPhase", StageTargetSpec::ValueType::Float},
         {"vmdLink", StageTargetSpec::ValueType::Bool},
+        // S7b: the spot gobo (rotation degrees, uv scale, deg/s spin, 0..1 focus)
+        {"gobo.rotation", StageTargetSpec::ValueType::Float}, {"gobo.scale", StageTargetSpec::ValueType::Float},
+        {"gobo.spin", StageTargetSpec::ValueType::Float},     {"gobo.focus", StageTargetSpec::ValueType::Float},
     };
     for (const auto& f : kFields)
         if (field == f.name) return f.type;
@@ -407,15 +410,26 @@ StageTargetSpec ResolveStageTarget(const StageManifest& manifest, const std::str
     const std::string field = rest.substr(last + 1);
     if (kind == "lights") {
         spec.kind = StageTargetSpec::Kind::Lights;
-        spec.type = LightFieldType(field);
+        // S7b: a gobo target nests one level ("lights.<name>.gobo.rotation"), so the last dot above split the owner
+        // into "<name>.gobo" and the field into "rotation": put the two back together as the field "gobo.rotation".
+        std::string lightOwner = owner;
+        std::string lightField = field;
+        if ((int)LightFieldType(field) == 255 && owner.size() > 5 && owner.compare(owner.size() - 5, 5, ".gobo") == 0)
+            lightField = "gobo." + field;
+        if (lightField != field) lightOwner = owner.substr(0, owner.size() - 5);
+        spec.type = LightFieldType(lightField);
         if ((int)spec.type == 255) {
             spec.error = "unknown light field \"" + field + "\"";
             return spec;
         }
-        if (!manifest.FindLight(owner)) {
-            spec.error = "no light named \"" + owner + "\"";
+        if (!manifest.FindLight(lightOwner)) {
+            spec.error = "no light named \"" + lightOwner + "\"";
             return spec;
         }
+        spec.owner = lightOwner;
+        spec.field = lightField;
+        spec.ok = true;
+        return spec;
     } else if (kind == "materials") {
         spec.kind = StageTargetSpec::Kind::Materials;
         spec.type = MaterialFieldType(field);
@@ -1352,6 +1366,13 @@ std::vector<std::string> ValidateStageManifest(const StageManifest& manifest) {
         if (l.v.coneInner > l.v.coneOuter) err("lights: " + l.name + ": coneInner > coneOuter");
         if (l.kind == studio::LightKind::Sun && l.keys.size() > 0)
             err("lights: " + l.name + ": a sun light cannot be keyed (a stage sun takes its keys from the cues)");
+        // S7b: the gobo block (the tool checks the file itself: existence, an image extension).
+        if (!l.gobo.empty()) {
+            std::string why;
+            if (!SafeRelativeFile(l.gobo, why)) err("lights: " + l.name + ": gobo.file: " + l.gobo + ": " + why);
+            if (!(l.goboScale > 0.0f)) err("lights: " + l.name + ": gobo.scale must be > 0");
+            if (l.goboFocus < 0.0f || l.goboFocus > 1.0f) err("lights: " + l.name + ": gobo.focus must be 0..1");
+        }
     }
     {
         int suns = 0, ambients = 0;

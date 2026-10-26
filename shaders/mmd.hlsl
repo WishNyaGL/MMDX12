@@ -10,6 +10,7 @@
 #endif
 #include "pbr_common.hlsli"   // includes dielectric.hlsli (S2b FresnelDielectric)
 #include "light_cluster.hlsli"   // S7c: the fragment's froxel light list (after pbr_common: gPbrBuf)
+#include "gobo.hlsli"            // S7b: spot gobos (the light loops below)
 
 cbuffer MaterialCB : register(b1) {
     float4 gDiffuse; float3 gSpecular; float gSpecularPower; float3 gAmbient; float gEdgeSize;
@@ -252,6 +253,9 @@ float3 PunctualDiffuse(float3 wp, float3 n, float toonSoft, float flat) {
         float atten = PunctualFalloff(dist, l.invRange, l.falloff);
         if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
         else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
+        // S7b: the spot's gobo multiplies the light's colour (a coloured stencil tints it; 1 without one)
+        const float3 lc = (l.cosOuter > -1.0) ? l.color * GoboSample(GoboOf(i), wp, l.pos, l.dir, l.cosOuter, 0.0)
+                                              : l.color;
         float rawVis = 1.0;
         if (atten > 0.0) {
             if (l.cosOuter > -1.0) {
@@ -268,7 +272,7 @@ float3 PunctualDiffuse(float3 wp, float3 n, float toonSoft, float flat) {
         float ndl = dot(n, ld);
         float diff = lerp(saturate(ndl), smoothstep(-0.05, 0.25, ndl), toonSoft);
         diff = lerp(diff, saturate(ndl * 0.3 + 0.7), flat);
-        sum += l.color * shadowTerm * atten * diff;
+        sum += lc * shadowTerm * atten * diff;
     }
     return sum;
 }
@@ -301,7 +305,10 @@ float3 PunctualSpecular(float3 wp, float3 n, float3 V, float power) {
         }
         float3 shadowTerm = ShadowTransmission(rawVis, l.shadowDensity, l.shadowColor);
         float3 h = normalize(ld + V);
-        sum += l.color * shadowTerm * atten * pow(saturate(dot(n, h)), power) * saturate(dot(n, ld));
+        // S7b: a spot's gobo multiplies the light's colour (the pattern shows in the specular lobe too)
+        const float3 lc = (l.cosOuter > -1.0) ? l.color * GoboSample(GoboOf(i), wp, l.pos, l.dir, l.cosOuter, 0.0)
+                                              : l.color;
+        sum += lc * shadowTerm * atten * pow(saturate(dot(n, h)), power) * saturate(dot(n, ld));
     }
     return sum;
 }
@@ -338,7 +345,10 @@ float3 PunctualSpecularGGX(float3 wp, float3 n, float3 V, float rough, float3 f0
 #endif
         }
         float3 shadowTerm = ShadowTransmission(rawVis, l.shadowDensity, l.shadowColor);
-        sum += SrgbToLinear(saturate(l.color)) * shadowTerm * atten * PbrSpecularGGX(n, V, ld, rough, f0);
+        // S7b: a spot's gobo multiplies the light's colour
+        const float3 lc = (l.cosOuter > -1.0) ? l.color * GoboSample(GoboOf(i), wp, l.pos, l.dir, l.cosOuter, 0.0)
+                                              : l.color;
+        sum += SrgbToLinear(saturate(lc)) * shadowTerm * atten * PbrSpecularGGX(n, V, ld, rough, f0);
     }
     return sum;
 }

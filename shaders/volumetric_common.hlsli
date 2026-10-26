@@ -265,7 +265,13 @@ float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float
             float T = exp(-VolOpticalDepth(eye, dir, t, p));
             // S9: the global height fog sigma plus the local volumes' tinted extinction at this sample
             float3 sigma = VolSigma(wp, p) + (p.numFog > 0 ? VolFogSigma(wp, p) : 0.0);
-            acc += atten * vis * VolHG(dot(dir, ld), g) * sigma * T;
+#ifdef VOL_GOBO
+            // S7b: a spot's gobo dims / tints its in-scattering at this sample point (+1 mip: the volume is noisy)
+            const float3 goboTint = spot ? GoboFactor(li, wp, l.pos, l.dir, l.cosOuter, 1.0) : float3(1, 1, 1);
+#else
+            const float3 goboTint = float3(1, 1, 1);   // the march (volumetric.hlsl) does not carry gobos
+#endif
+            acc += (atten * vis * VolHG(dot(dir, ld), g) * sigma * T) * goboTint;
         }
         L += l.color * (boost * l.volumetric) * acc * stepLen;
     }

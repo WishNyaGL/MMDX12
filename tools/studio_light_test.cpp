@@ -839,6 +839,30 @@ static void TestFogVolumes() {
               plainOut.punctual[0].volumetricG == -1.0f,
           "a scene without a fog volume and with default lights keeps the pre-S9 haze values");
 
+    // S7b: the gobo fields of a spot reach the renderer's light (a point light carries none: no cone to project into).
+    SceneLight goboSpot = MakeSpot(1, 60, 0);
+    goboSpot.uid = 11;
+    goboSpot.gobo = "gobos/ring.png";
+    goboSpot.goboRotation = 30.0f;
+    goboSpot.goboScale = 1.5f;
+    goboSpot.goboSpin = 45.0f;
+    goboSpot.goboFocus = 0.6f;
+    SceneLight goboPoint;
+    goboPoint.uid = 12;
+    goboPoint.kind = LightKind::Point;
+    goboPoint.gobo = "gobos/ring.png";   // not a spot: dropped by BuildSceneLighting
+    LightParams goboOut;
+    BuildSceneLighting({goboSpot, goboPoint}, {}, 0.0, anchors, goboOut);
+    Check(goboOut.punctual.size() == 2 && goboOut.punctual[0].gobo == "gobos/ring.png" &&
+              Near(goboOut.punctual[0].goboRotation, 30.0f, 1e-6f) && Near(goboOut.punctual[0].goboScale, 1.5f, 1e-6f) &&
+              Near(goboOut.punctual[0].goboSpin, 45.0f, 1e-6f) && Near(goboOut.punctual[0].goboFocus, 0.6f, 1e-6f),
+          "BuildSceneLighting carries a spot's gobo fields");
+    Check(goboOut.punctual.size() == 2 && goboOut.punctual[1].gobo.empty(), "a point light carries no gobo");
+    const SceneLight plainSpot;
+    Check(plainSpot.gobo.empty() && plainSpot.goboRotation == 0.0f && plainSpot.goboScale == 1.0f &&
+              plainSpot.goboSpin == 0.0f && plainSpot.goboFocus == 1.0f,
+          "S7b defaults: no gobo, rotation 0, scale 1, spin 0, focus 1");
+
     // A disabled fog volume contributes nothing; a keyed one is sampled.
     SceneLight off = vol;
     off.uid = 4;

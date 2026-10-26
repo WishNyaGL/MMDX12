@@ -92,6 +92,19 @@ progress.md is the session log. Read its latest entry first.
   offline GI reflect a mirror hit as a delta event (tint weight, cone lobe when rough; `prevBsdfValid = false`); quad /
   ortho views, feeds and `RenderToImage` show the tint only. No mirror material = no textures, no extra render, identical
   frame.
+- Spot gobos (S7b, docs/stage_format.md "`gobo`"): a spot may carry a projected stencil (`SceneLight::gobo` = a file
+  path + `goboRotation` / `goboScale` / `goboSpin` / `goboFocus`; a stage light's path is relative to the stage folder and
+  `app/StageRuntime` resolves it). `GpuLight` stays 112 B: the per-light gobo data is a second raw buffer
+  (`GpuGobo`: texture SrvHeap index, rotation radians incl. spin x `FrameView::sceneTime`, uv scale, focus mip bias),
+  uploaded per constant-buffer slot exactly like the light CDF (`Renderer::FillGoboTable`) and pointed at by
+  `SceneConstants::goboParams.x` (-1 = no gobo in the frame: no fetch, the old image). Textures are decoded once per path
+  (`asset/ImageLoader.h`, full mip chain) into the shared bindless `SrvHeap` and cached in `Renderer::gobos_`; a broken
+  file is one `[W]` and the light shines without it. `shaders/gobo.hlsli` is the one projection helper (spot frame, uv =
+  local.xy / local.z / tan(outer half angle) / scale, rotated, + 0.5; outside [0,1] = 0; the sample multiplies the
+  light's rgb), used by the raster scene loops (`mmd.hlsl`), `pathtrace.hlsl`, `offline_gi.hlsl` (surfaces, skin, medium
+  NEE) and the volumetric froxel injector / offline march (`volumetric_froxel.hlsl`, `offline_volumetric.hlsl`, the
+  `VOL_GOBO` branch of `volumetric_common.hlsli`, +1 mip to keep the haze quiet). Out of scope: the legacy per-pixel march
+  and the `world.lights` pack API.
 - No debugger is installed (no cdb). For crashes, use the dbghelp `CrashFilter` in `tools/render_smoke.cpp`.
 - Visual verification without a human: render a frame headlessly, then Read the PNG. First read "Running MMDX12.exe from the CLI" below.
   - Play scene: `MMDX12.exe --character <s> --stage <s|none> --song <s> --autoplay --seek <sec> --frames N --capture out.png`

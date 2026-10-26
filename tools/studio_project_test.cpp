@@ -106,6 +106,11 @@ static std::string DiffLight(const SceneLight& a, const SceneLight& b) {
     if (a.volumetricG != b.volumetricG) return "volumetricG";
     if (a.fogShape != b.fogShape) return "fogShape";
     if (a.fogEdge != b.fogEdge) return "fogEdge";
+    if (a.gobo != b.gobo) return "gobo";
+    if (a.goboRotation != b.goboRotation) return "goboRotation";
+    if (a.goboScale != b.goboScale) return "goboScale";
+    if (a.goboSpin != b.goboSpin) return "goboSpin";
+    if (a.goboFocus != b.goboFocus) return "goboFocus";
     return "";
 }
 
@@ -256,6 +261,12 @@ static std::vector<SceneLight> MakeTestLights() {
         l.kind = LightKind::Spot;
         l.enabled = false;
         l.aimMode = AimMode::Target;
+        // S7b: a gobo (a path with a non-default value in every field)
+        l.gobo = "gobos/ring.png";
+        l.goboRotation = 22.5f;
+        l.goboScale = 1.25f;
+        l.goboSpin = -40.0f;
+        l.goboFocus = 0.45f;
         out.push_back(l);
     }
     return out;

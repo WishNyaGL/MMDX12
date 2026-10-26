@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace mmdx {
@@ -236,6 +237,11 @@ private:
     // S9: the same for the local fog volumes (<= kMaxFogVolumes); returns the count written.
     static uint32_t FillGpuFogVolumes(const LightParams& light, GpuFogVolume* out);
 
+    // S7b: the frame's spot gobo table (one GpuGobo per punctual light, x = the gobo texture's SrvHeap index or -1);
+    // returns false when no light of the frame has a gobo (SceneConstants::goboParams.x = -1: zero cost, no fetch).
+    // Light paths are absolute; the textures are decoded / uploaded once per path and kept in `gobos_`.
+    bool FillGoboTable(Dx12Context& ctx, const LightParams& light, GpuGobo* out, float time);
+
     Dx12Context* ctx_ = nullptr;
     std::filesystem::path shaderDir_;
     RenderSettings settings_;
@@ -329,6 +335,22 @@ private:
     uint32_t emissiveCount_ = 0;                                   // entries of the current table (0 = no emitters)
     bool emissiveWarned_ = false;
     DirectX::XMFLOAT4 emissiveParams_ = {-1.0f, -1.0f, 0.0f, -1.0f};   // this frame's SceneConstants::emissiveParams
+    // S7b: the gobo texture cache (one entry per file: the texture, its SRV in the shared heap) and the frame's gobo
+    // table (kMaxPunctualLights GpuGobo entries, one raw SRV per constant-buffer slot like the light CDF).
+    struct GoboTexture {
+        ComPtr<ID3D12Resource> res;
+        uint32_t srv = DescriptorHeap::kInvalid;
+        bool failed = false;   // one [W] per broken file, then the light shines without a gobo
+    };
+    std::unordered_map<std::wstring, GoboTexture> gobos_;
+    std::vector<GpuGobo> goboTable_;
+    ComPtr<ID3D12Resource> goboBuf_;
+    uint8_t* goboBufMapped_ = nullptr;
+    uint32_t goboSrv_[64] = {};
+    uint32_t goboSrvCount_ = 0;
+    // S7b: the gobo paths that produced the texture cache (a path that disappears from the frame frees its texture).
+    std::vector<std::wstring> goboUsed_;
+    bool goboActive_ = false;   // this frame's scene has a gobo (RecordScene fills the table of its slot)
     // S7c: the LIGHTS line's cluster fields of the last log (the packed grid, 0 = no clusters): one line per change.
     uint32_t loggedClusterGrid_ = UINT32_MAX;
     std::vector<int> prevSpotPick_;

@@ -7,6 +7,7 @@
 #include "asset/PmxModel.h"
 #include "core/I18n.h"
 #include "core/Log.h"
+#include "core/TextUtil.h"
 #include <directx/d3dx12.h>
 #include <algorithm>
 #include <cmath>
@@ -278,6 +279,32 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     }
     lightCdfSrvCount_ = kTotalCbSlots;
 
+    // S7b: the frame's gobo table (one GpuGobo per punctual light, raw SRV per slot through the bindless buffer table,
+    // exactly like the light CDF). The gobo textures themselves are decoded lazily on the first frame a light uses one.
+    goboBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)(kMaxPunctualLights * sizeof(GpuGobo)) * kTotalCbSlots,
+                                  &goboBufMapped_, L"scene.gobos");
+    if (!goboBuf_) return false;
+    if (kTotalCbSlots > (uint32_t)std::size(goboSrv_)) {
+        LOG_ERROR("gobo table SRV table too small for %u slots", kTotalCbSlots);
+        return false;
+    }
+    for (uint32_t slot = 0; slot < kTotalCbSlots; ++slot) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;   // raw ByteAddressBuffer (the shaders' bindless buffer table)
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.NumElements = kMaxPunctualLights * (uint32_t)(sizeof(GpuGobo) / sizeof(uint32_t));
+        srv.Buffer.FirstElement = (UINT)slot * kMaxPunctualLights * (uint32_t)(sizeof(GpuGobo) / sizeof(uint32_t));
+        srv.Buffer.StructureByteStride = 0;
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        const uint32_t idx = ctx.SrvHeap().Allocate(1);
+        if (idx == DescriptorHeap::kInvalid) return false;
+        ctx.Device()->CreateShaderResourceView(goboBuf_.Get(), &srv, ctx.SrvHeap().Cpu(idx));
+        goboSrv_[slot] = idx;
+    }
+    goboSrvCount_ = kTotalCbSlots;
+    goboTable_.resize(kMaxPunctualLights);
+
     // S8a: the emissive-triangle pick table (one raw SRV each for the triangle list, its CDF and the per-geometry base
     // table; same slot layout as the light CDF). A frame without emitters leaves SceneConstants::emissiveParams.x = -1
     // and the path tracers skip every NEE / MIS branch.
@@ -492,11 +519,17 @@ bool Renderer::RenderScreenFeed(ID3D12GraphicsCommandList* cmd, const FrameView&
     sc.shading = 0.0f;   // always lit
     sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};   // S7c: the feed's camera is not the frame's cluster grid
     sc.emissiveParams = emissiveParams_;   // S8a: the frame's emissive-triangle pick table (raster feed: unused)
+    sc.goboParams = {goboActive_ ? (float)goboSrv_[cbSlot] : -1.0f, 0.0f, 0.0f, 0.0f};   // S7b: the frame's gobos
     memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
 
     // The feed reads the frame's lights + shadow maps: its own slot in the light buffer is a copy of the frame's.
     memcpy(lightBufMapped_ + (size_t)cbSlot * kLightBytes,
            lightBufMapped_ + (size_t)ctx_->FrameSlot() * kLightBytes, kLightBytes);
+    // S7b: the feed's gobo table is the frame's own (same light list), and the feed needs a copy in its own slot
+    if (goboActive_)
+        memcpy(goboBufMapped_ + (size_t)cbSlot * kMaxPunctualLights * sizeof(GpuGobo),
+               goboBufMapped_ + (size_t)ctx_->FrameSlot() * kMaxPunctualLights * sizeof(GpuGobo),
+               kMaxPunctualLights * sizeof(GpuGobo));
 
     bool drew = false;
     RenderSettings feedSettings = settings_;
@@ -627,9 +660,15 @@ bool Renderer::RenderMirror(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     sc.emissiveParams = {-1.0f, -1.0f, 0.0f, -1.0f};     // raster: unused
     sc.mirrorParams = {0.0f, -1.0f, -1.0f, 0.0f};        // no recursion: a mirror inside the reflection shows its tint
     sc.clipPlane = plane;                                // drop everything behind the mirror plane
+    // S7b: the reflection shows the frame's gobos (same light list, its own cb slot); copy the table into this slot
+    sc.goboParams = {goboActive_ ? (float)goboSrv_[cbSlot] : -1.0f, 0.0f, 0.0f, 0.0f};
     memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
     memcpy(lightBufMapped_ + (size_t)cbSlot * kLightBytes,
            lightBufMapped_ + (size_t)ctx_->FrameSlot() * kLightBytes, kLightBytes);
+    if (goboActive_)
+        memcpy(goboBufMapped_ + (size_t)cbSlot * kMaxPunctualLights * sizeof(GpuGobo),
+               goboBufMapped_ + (size_t)ctx_->FrameSlot() * kMaxPunctualLights * sizeof(GpuGobo),
+               kMaxPunctualLights * sizeof(GpuGobo));
 
     RenderSettings mirrorSettings = settings_;
     mirrorSettings.renderPath = RenderPath::Raster;
@@ -1055,6 +1094,7 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
     // whose cameras differ from the frame's cluster grid); RecordScene turns them on for the main view.
     sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};
     sc.emissiveParams = {-1.0f, -1.0f, 0.0f, -1.0f};   // S8a: RecordScene sets it after the RtScene build
+    sc.goboParams = {-1.0f, 0.0f, 0.0f, 0.0f};         // S7b: no gobos unless RecordScene filled the table
 }
 
 uint32_t Renderer::FillGpuLights(const LightParams& light, GpuLight* out, const std::vector<int>* spotSlices,
@@ -1202,6 +1242,88 @@ uint32_t Renderer::FillLightCdf(const LightParams& light, float* out, uint32_t c
     }
     out[count - 1] = 1.0f;
     return (uint32_t)count;
+}
+
+// S7b: the frame's spot gobo table (see ShaderInterop.h GpuGobo / shaders/gobo.hlsli). One entry per punctual light: the
+// gobo texture's SrvHeap index (-1 = this light has none), the rotation in radians (authored degrees + spin x time),
+// the uv scale and the focus's mip bias. A file is decoded and uploaded once (one texture, full mip chain, an _SRGB view
+// so the sample decodes to the linear space the light colour is in); a missing / undecodable file warns once and leaves
+// the light without a gobo. Returns false when the frame has no gobo at all, which leaves
+// SceneConstants::goboParams.x = -1 and the shaders skip the fetch entirely.
+bool Renderer::FillGoboTable(Dx12Context& ctx, const LightParams& light, GpuGobo* out, float time) {
+    const size_t count = std::min<size_t>(light.punctual.size(), kMaxPunctualLights);
+    // the whole table is reset (the upload copies every entry: a stale slot must read "no gobo", not heap index 0)
+    for (size_t i = 0; i < kMaxPunctualLights; ++i) out[i] = GpuGobo{-1.0f, 0.0f, 1.0f, 0.0f};
+    bool any = false;
+    goboUsed_.clear();
+    for (size_t i = 0; i < count; ++i) {
+        const PunctualLight& p = light.punctual[i];
+        GpuGobo& g = out[i];
+        // only a spot projects: a point / area light has no cone for a stencil
+        if (p.gobo.empty() || p.spotCosOuter <= -1.0f) continue;
+        const std::wstring key = Utf8ToWide(p.gobo);
+        auto it = gobos_.find(key);
+        if (it == gobos_.end()) {
+            GoboTexture tex;
+            ImageRGBA8 image;
+            std::string error;
+            if (!LoadImageRGBA8(Utf8ToPath(p.gobo), image, &error) || image.Empty()) {
+                LOG_WARN("gobo %s: %s (the light shines without a gobo)", p.gobo.c_str(),
+                         error.empty() ? "cannot decode the image" : error.c_str());
+                tex.failed = true;
+            } else {
+                UploadBatch batch(ctx);
+                // a typeless resource so the SRV below is _SRGB: the sample then decodes to linear, the space the
+                // light's colour is in (a stencil authored in sRGB stays perceptually correct on a floor)
+                tex.res = batch.CreateTextureTyped(image, DXGI_FORMAT_R8G8B8A8_TYPELESS, L"gobo");
+                batch.Submit();
+                if (!tex.res) {
+                    LOG_WARN("gobo %s: texture upload failed (the light shines without a gobo)", p.gobo.c_str());
+                    tex.failed = true;
+                } else {
+                    tex.srv = ctx.SrvHeap().Allocate(1);
+                    if (tex.srv == DescriptorHeap::kInvalid) {
+                        LOG_WARN("gobo %s: no free descriptor (the light shines without a gobo)", p.gobo.c_str());
+                        tex.res.Reset();
+                        tex.failed = true;
+                    } else {
+                        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+                        srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+                        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                        srv.Texture2D.MipLevels = UINT(-1);
+                        ctx.Device()->CreateShaderResourceView(tex.res.Get(), &srv, ctx.SrvHeap().Cpu(tex.srv));
+                        LOG_INFO("GOBO file=%s %ux%u", p.gobo.c_str(), image.Width(), image.Height());
+                    }
+                }
+            }
+            it = gobos_.emplace(key, std::move(tex)).first;
+        }
+        goboUsed_.push_back(key);
+        if (it->second.failed || it->second.srv == DescriptorHeap::kInvalid) continue;
+        g.srv = (float)it->second.srv;
+        g.rotation = DirectX::XMConvertToRadians(p.goboRotation) + DirectX::XMConvertToRadians(p.goboSpin) * time;
+        g.scale = std::max(p.goboScale, 1e-3f);
+        // focus 1 = sharp (mip 0); below it blurs toward the coarsest mip (6 covers a 2048-wide texture)
+        g.mipBias = std::max(0.0f, std::min(1.0f, p.goboFocus));
+        g.mipBias = (1.0f - g.mipBias) * 6.0f;
+        any = true;
+    }
+    // a file that no light of the frame uses any more frees its texture (a stage change, a new gobo picked)
+    if (gobos_.size() > goboUsed_.size()) {
+        std::vector<std::wstring> stale;
+        for (auto& [path, g] : gobos_)
+            if (std::find(goboUsed_.begin(), goboUsed_.end(), path) == goboUsed_.end()) stale.push_back(path);
+        for (const std::wstring& path : stale) {
+            auto it = gobos_.find(path);
+            if (it != gobos_.end()) {
+                if (it->second.res) ctx.DeferRelease(std::move(it->second.res));
+                if (it->second.srv != DescriptorHeap::kInvalid) ctx.SrvHeap().Free(it->second.srv, 1);
+                gobos_.erase(it);
+            }
+        }
+    }
+    return any;
 }
 
 // S8a: the emissive-triangle pick table of the last RtScene build. Per geometry (index = geometry id) the material's
@@ -1355,6 +1477,20 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     // S7a: the frame's light CDF (the PT / GI pick) lives in a raw SRV buffer of this slot
     const uint32_t cdfCount = FillLightCdf(view.light, lightCdfMapped_ + (size_t)cbSlot * kLightCdfMax, kLightCdfMax);
     sc.lightCdfParams = {(float)lightCdfSrv_[cbSlot], (float)cdfCount, 0.0f, 0.0f};
+    // S7b: the frame's spot gobos (the table of this slot through the bindless buffer table; -1 = no gobo in the frame,
+    // which keeps the old image at zero cost). Spin uses the scene clock, so a seeked offline / capture frame is exact.
+    {
+        std::vector<GpuGobo>& gobos = goboTable_;
+        const bool any = FillGoboTable(*ctx_, view.light, gobos.data(), view.sceneTime);
+        goboActive_ = any;
+        if (any) {
+            memcpy(goboBufMapped_ + (size_t)cbSlot * kMaxPunctualLights * sizeof(GpuGobo), gobos.data(),
+                   kMaxPunctualLights * sizeof(GpuGobo));
+            sc.goboParams = {(float)goboSrv_[cbSlot], 0.0f, 0.0f, 0.0f};
+        } else {
+            sc.goboParams = {-1.0f, 0.0f, 0.0f, 0.0f};
+        }
+    }
     // S7c: clustered light culling for the main camera view: only above kClusterMinLights lights (a frame with fewer
     // keeps the full per-light loop, byte for byte), never offscreen (RenderToImage), and only with the compute path
     // (PassLightCull's pipeline; the shadow map of the frame is not needed: the cull is frustum-only).
@@ -1589,6 +1725,8 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
             esc.edgeScale = pxH / 1080.0f;
             esc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};   // S7c: an extra view has its own camera
             esc.emissiveParams = {-1.0f, -1.0f, 0.0f, -1.0f};    // S8a: the ortho views draw raster
+            // S7b: the frame's gobo table is per light, so the extra view points at the frame's own table slot
+            esc.goboParams = sc.goboParams;
             const size_t slot = (size_t)kCbSlots + (size_t)cbSlot * kMaxExtraViews + e;
             memcpy(sceneCbMapped_ + slot * kSceneCbSize, &esc, sizeof(esc));
             pc.extraSceneConstants[e] = sceneCb_->GetGPUVirtualAddress() + (uint64_t)slot * kSceneCbSize;
@@ -2332,6 +2470,20 @@ void Renderer::Shutdown() {
     emissiveCount_ = 0;
     std::fill(std::begin(emissiveSlotKey_), std::end(emissiveSlotKey_), 0ull);
     emissiveParams_ = {-1.0f, -1.0f, 0.0f, -1.0f};
+    // S7b: the gobo table's SRVs / upload buffer and the cached gobo textures
+    if (goboBuf_ && goboBufMapped_) goboBuf_->Unmap(0, nullptr);
+    if (ctx_) {
+        for (uint32_t i = 0; i < goboSrvCount_; ++i)
+            if (goboSrv_[i] != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(goboSrv_[i], 1);
+        for (auto& [path, g] : gobos_)
+            if (g.srv != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(g.srv, 1);
+    }
+    std::fill(std::begin(goboSrv_), std::end(goboSrv_), DescriptorHeap::kInvalid);
+    goboSrvCount_ = 0;
+    goboBufMapped_ = nullptr;
+    goboBuf_.Reset();
+    gobos_.clear();
+    goboTable_.clear();
     sceneCbMapped_ = lightBufMapped_ = fogBufMapped_ = nullptr;
     lightCdfMapped_ = nullptr;
     sceneCb_.Reset();

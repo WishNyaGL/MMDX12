@@ -3,6 +3,7 @@
 // u0 light (divided by albedo on surfaces), u1/u2/u3/u4 primary G-buffer for denoising.
 #include "rt_common.hlsli"   // includes common.hlsli
 #include "light_pick.hlsli"   // S7a: the punctual-light CDF pick
+#include "gobo.hlsli"        // S7b: spot gobos (the light list below)
 #define PBR_SAMPLE_LEVEL0     // compute: no screen-space gradients
 #include "pt_pbr.hlsli"
 #include "emissive_nee.hlsli"   // S8a: emissive-triangle NEE + MIS (needs the PBR record decode)
@@ -619,15 +620,19 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                                                                             RT_MASK_CHARACTER)));
                         }
                         float3 shadowFactor = ShadowTransmission(rawVis, l.shadowDensity, l.shadowColor);
+                        // S7b: a spot's gobo multiplies the light's colour (both lobes)
+                        const float3 lc = (l.cosOuter > -1.0)
+                                              ? l.color * GoboSample(GoboOf(li), pos, l.pos, l.dir, l.cosOuter, 0.0)
+                                              : l.color;
                         if (evalDiff) {
-                            radiance += throughput * (1.0 - pSpec) * (isPbrHit ? pbr.diffuse : albedo) * l.color * shadowFactor * atten * diff * pickWeight;
+                            radiance += throughput * (1.0 - pSpec) * (isPbrHit ? pbr.diffuse : albedo) * lc * shadowFactor * atten * diff * pickWeight;
                         }
                         if (evalSpec) {
                             if (isPbrHit)   // GGX (the lobe already carries N.L)
-                                radiance += throughput * pSpec * l.color * shadowFactor * atten *
+                                radiance += throughput * pSpec * lc * shadowFactor * atten *
                                             PtPbrEvalSpecular(pbr, -dir, ld) * pickWeight;
                             else
-                                radiance += throughput * pSpec * l.color * shadowFactor * atten * (pickWeight / omega);
+                                radiance += throughput * pSpec * lc * shadowFactor * atten * (pickWeight / omega);
                         }
                     }
                 }

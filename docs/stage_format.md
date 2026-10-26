@@ -198,6 +198,40 @@ border band. Both keys are omitted from a written file while at their defaults, 
 Rules: at most one `sun` and one `ambient`; `coneInner <= coneOuter`; a `sun` cannot carry `keys` (use cues on its
 `intensity` / `color` / `direction` instead). Play mode's lighting picker gains a "스테이지 조명" entry in S1b.
 
+### `gobo` (S7b): a texture projected through a spot's cone
+
+A **spot** may carry a gobo: a greyscale or colour stencil projected through its cone, so the lit floor / wall / haze
+shows the texture's pattern instead of a plain pool. The light's colour multiplies the stencil's rgb, so a coloured
+image tints the light.
+
+```json
+{"kind": "spot", "name": "floor_ring",
+ "values": {"position": [-38, 105, 30], "aim": [-38, 0, 30], "coneOuter": 0.26, "coneInner": 0.16},
+ "gobo": {"file": "gobos/ring.png", "rotation": 15, "scale": 1.0, "spin": 45, "focus": 0.9}}
+```
+
+| key | default | meaning |
+| --- | --- | --- |
+| `file` | — | the image, relative to the stage folder (a bundled PNG / JPG; `SafeRelativeFile` rules as for `screens`) |
+| `rotation` | `0` | degrees: the stencil's rotation around the cone's axis |
+| `scale` | `1` | uv scale: 1 = the texture fills the cone's inscribed square, 2 = magnified, 0.5 = repeated area cropped |
+| `spin` | `0` | degrees per second, added to `rotation` with the song / timeline time (a rotating gobo) |
+| `focus` | `1` | `1` = sharp; lower blurs the stencil (a higher mip level) |
+
+The block is omitted from a written file when the light has no gobo, so an older file is unchanged. `stage_check`
+requires the file to exist and to be a `.png` / `.jpg` image. The projection is in the spot's own frame (`+z` = the
+light direction, an up vector picked stably): the pattern lands on world geometry and in the haze, in every render
+path (raster, RT, path tracing, offline GI and the volumetric beams), and is the same in all of them. A missing or
+undecodable file is one `[W]` and the light then shines without a gobo.
+
+The four value fields are keyable through the usual binding / cue machinery: `lights.<name>.gobo.rotation`,
+`lights.<name>.gobo.scale`, `lights.<name>.gobo.spin`, `lights.<name>.gobo.focus` (all float). The inspector shows
+them read-only while a stage binding drives them, exactly like the shadow properties.
+
+Limits: a gobo is a **spot** feature (a point / area light has no cone); the legacy per-pixel march
+(`--volumetric-mode march`) keeps a plain beam (the default froxel grid and the offline march carry gobos), and the
+`world.lights` world-pack API does not read gobos.
+
 ### `gltfLights` (S2a)
 
 A glTF part may carry lights with `KHR_lights_punctual`. They are imported into the model as light descriptions
@@ -434,7 +468,7 @@ order and applied in that order. Target paths:
 
 | path | value type |
 |---|---|
-| `lights.<name>.<field>` | see the light fields: `enabled` (bool), `intensity` / `range` / `coneOuter` / `coneInner` / `shadowSoftness` / `shadowDensity` / `rimStrength` / `swayPhase` (float), `color` / `rimColor` / `shadowColor` (colour), `position` / `aim` / `direction` / `size` (vec3), `vmdLink` (bool) |
+| `lights.<name>.<field>` | see the light fields: `enabled` (bool), `intensity` / `range` / `coneOuter` / `coneInner` / `shadowSoftness` / `shadowDensity` / `rimStrength` / `swayPhase` / `gobo.rotation` / `gobo.scale` / `gobo.spin` / `gobo.focus` (float), `color` / `rimColor` / `shadowColor` (colour), `position` / `aim` / `direction` / `size` (vec3), `vmdLink` (bool) |
 | `materials.<rule match>.<field>` | `baseColor` (colour), `roughness` / `metallic` / `emissiveStrength` / `transmission` / `ior` / `alpha` (float), `emissive` (vec3), `mirror` / `castShadow` / `receiveShadow` (bool), `screen` (string) |
 | `screens.<id>.<field>` | `brightness` (float), `width` / `height` (int), `emitLight` / `enabled` (bool), `source` / `file` / `camera` (string) |
 | `packs.<index>.params.<key>` | float |
@@ -541,7 +575,7 @@ adds the file / model checks:
 ## Tools
 
 ```
-python tools/stagegen/stagegen.py --out captures/stages    # the three procedural test stages
+python tools/stagegen/stagegen.py --out captures/stages    # the procedural test stages
 python tools/stagegen/stagegen.py --out build/bin/stages   # install them next to the exe (<exe>/stages/<id>/)
 build/bin/stage_check captures/stages/cyclorama           # errors -> exit code != 0
 build/bin/stage_check --selftest                          # evaluator / validator unit checks
@@ -549,9 +583,11 @@ build/bin/gltf_pbr_test                                   # glTF PBR records, in
 ```
 
 `stagegen` writes GLB by hand (JSON chunk + BIN chunk, 4-byte padded; named nodes and materials, normals and UVs) with
-numpy only — no Blender, no glTF library. The three stages are `cyclorama` (cove, 3 colour variants, 7 lights with 4
-spots), `mirror_room` (box room, `mirror: true` wall, wood floor PBR) and `led_stage` (raised stage, 3 screen quads,
-truss, 8 swaying spots, fog values).
+numpy only — no Blender, no glTF library. The stages are `cyclorama` (cove, 3 colour variants, 7 lights with 4
+spots), `mirror_room` (box room, `mirror: true` wall, wood floor PBR), `led_stage` (raised stage, 3 screen quads,
+truss, 8 swaying spots, fog values), `pack_test` (one bundled pack of each role) and `gobo_test` (S7b: two spots with a
+ring gobo straight down on the floor — one of them spinning a coloured stripe stencil — and a third with the stripe
+stencil across the back wall, haze on; `gobos/ring.png` / `gobos/stripes.png` are written with the stage).
 
 `tools/testdata/make_ext_test.py` is the one Blender-made test asset (S2a / S2b): it writes `tools/testdata/ext_test.glb`,
 a committed GLB with a transmissive / volume glass sphere, a thick tinted glass block, a thin-walled window pane, a

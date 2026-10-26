@@ -17,6 +17,8 @@
 // light_cluster.hlsli reaches the cluster block through the bindless buffer table (rt_common.hlsli's gBindlessBuf).
 #define gPbrBuf gBindlessBuf
 #include "light_cluster.hlsli"
+#include "gobo.hlsli"   // S7b: spot gobos in the froxel injector
+#define VOL_GOBO 1      // volumetric_common.hlsli applies the spot gobos (the froxel pass has the bindless tables)
 
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
 SamplerState gLinearClamp : register(s1);
@@ -183,8 +185,11 @@ void CSFroxelLight(uint3 id : SV_DispatchThreadID) {
         const bool spot = l.cosOuter > -1.0;
         const float g = l.aniso > -0.99 ? l.aniso : vp.punctualG;
         const float vis = spot ? VolSpotVisibility(l, wp) : 1.0;
+        // S7b: a spot's gobo dims / tints its in-scattering at the froxel (+1 mip: the volume is noisy)
+        const float3 gobo = spot ? GoboFactor(LightListAt(list, k), wp, l.pos, l.dir, l.cosOuter, 1.0)
+                                 : float3(1.0, 1.0, 1.0);
         Ls += l.color * ((spot ? vp.spotBoost : vp.pointBoost) * l.volumetric * atten * vis) *
-              VolPhaseMS(dot(dirW, ld), g);
+              VolPhaseMS(dot(dirW, ld), g) * gobo;
     }
     // the medium tint scales the whole in-scattering, exactly as the march's final L * p.tint does
     gFroxelOut[uint3(tile, tz)] = float4(sigmaS * Ls * vp.tint, sigmaT);
