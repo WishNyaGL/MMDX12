@@ -3600,7 +3600,12 @@ void App::StudioRebuildRows() {
         for (int ch = 0; ch < channelCount; ++ch)
             pushChannel(ch, parent.graphChannels[(size_t)ch].label, parent.graphChannels[(size_t)ch].color);
     };
-    if (d.selectedModel < 0) {
+    // Selecting the stage entity selects its part model: that stage's param rows ("스테이지") join the part's own rows,
+    // so a stage's keys show where the user clicked (they used to appear only with the camera selected).
+    const StudioModel* selStagePart =
+        d.selectedModel >= 0 && d.Selected() && d.Selected()->stageUid != 0 ? d.Selected() : nullptr;
+    if (d.selectedModel < 0 || selStagePart) {
+      if (!selStagePart) {   // the scene rows (camera, effects, worlds) only with the camera selected
         TimelineRow r;
         r.id = MakeRowId(RowKind::Camera, 0, 0);
         // S4: the row name says which camera's keys it shows (the selected one)
@@ -3947,6 +3952,7 @@ void App::StudioRebuildRows() {
             for (auto& c : children) d.rows.push_back(std::move(c));
         }
 
+      }   // !selStagePart
         // S3: stage parameters: a row tree "스테이지" (group word 0, index 2) with one default-collapsed group per stage
         // entity, one group per manifest `groups` entry that has params, then the params (colours per component).
         if (!d.stages.empty()) {
@@ -3967,6 +3973,7 @@ void App::StudioRebuildRows() {
             };
             for (const StudioStage& stage : d.stages) {
                 if (!stage.manifest) continue;
+                if (selStagePart && stage.uid != selStagePart->stageUid) continue;   // only the selected stage
                 const StageManifest& man = *stage.manifest;
                 const std::string entityLabel = man.DisplayName(StageLanguage());
                 const uint32_t entityGroup = 0xC00000u | stage.uid;
@@ -4019,7 +4026,7 @@ void App::StudioRebuildRows() {
                 ent.depth = 1;
                 ent.isGroup = true;
                 ent.keysEditable = false;
-                ent.expanded = d.expanded.count(ent.id) != 0;
+                ent.expanded = d.expanded.count(ent.id) != 0 || selStagePart != nullptr;   // open when the stage is selected
                 ent.selected = d.selectedRows.count(ent.id) != 0;
                 std::vector<uint64_t>& entChildren = d.groupChildren[ent.id];
                 std::set<int> entSummary;
@@ -4073,7 +4080,7 @@ void App::StudioRebuildRows() {
             d.rows.push_back(std::move(group));
             for (auto& c : children) d.rows.push_back(std::move(c));
         }
-        return;
+        if (!selStagePart) return;
     }
     StudioModel* m = d.Selected();
     if (!m) return;
