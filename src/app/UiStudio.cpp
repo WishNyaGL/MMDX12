@@ -186,9 +186,9 @@ bool App::FinishStudioLoad() {
     for (const studio::StudioStage& stage : doc->stages)
         if (stage.manifest) RegisterStagePacks(*stage.manifest);
     doc->camera = std::move(pkg.camera);
-    // S4: the extra cameras + the switch track (a version <= 4 project / a library scene: none)
+    // S4: the extra cameras (a version <= 4 project / a library scene: none). They feed the stage screens; the main
+    // camera alone is the output (the loader already flattened an old project's switch track into it).
     doc->cameras = std::move(pkg.cameras);
-    doc->cameraSwitch = std::move(pkg.cameraSwitch);
     doc->nextCameraUid = 1;
     for (const studio::StudioCamera& c : doc->cameras) doc->nextCameraUid = std::max(doc->nextCameraUid, c.uid + 1);
     doc->selectedCameraUid = 0;
@@ -762,9 +762,7 @@ void App::StudioCamera(CameraParams& camera) const {
     // S4: the active camera at this frame (the switch track; a project without switch keys = the main camera). While
     // possessing, the camera being edited (the selected one): possession writes the selected camera's keys, and showing
     // the switch track's camera instead made an extra camera impossible to possess (the view never moved).
-    const std::shared_ptr<CameraMotion>& selectedEval = d.SelectedCameraEval();
-    const std::shared_ptr<CameraMotion>& eval =
-        d.possessCamera && selectedEval ? selectedEval : d.ActiveCameraEval((int)frame);
+    const std::shared_ptr<CameraMotion>& eval = d.cameraEval;  // the output camera: always the main one
     if (d.useMotionCamera && eval) {
         CameraPose pose = eval->Evaluate(frame);
         if (!StudioCameraPerspective(frame)) {
@@ -1957,7 +1955,6 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
     kind = RowKindOf(row);
     name.clear();
     if (kind == RowKind::GraphLane || kind == RowKind::GraphChannel) return false;  // graph rows carry no track / keys
-    if (kind == RowKind::CameraSwitch) return d.selectedModel < 0;   // S4: the stepped switch track
     if (IsCameraKind(kind)) return d.selectedModel < 0;
     if (kind == RowKind::SceneLight) {
         // a light row is only offered through the camera target (the lights live next to the camera)
@@ -2041,7 +2038,7 @@ void App::StudioPushTrackEdit(const char* name, const std::vector<TrackState>& b
 // Viewport navigation starts from the motion camera's current view, so the free camera begins where it was.
 void App::StudioTakeFreeCamera() {
     StudioDoc& d = *studio_;
-    const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(d.Frame());  // S4: the camera shown now
+    const std::shared_ptr<CameraMotion>& eval = d.cameraEval;  // the viewport's camera view is the main camera
     if (!d.useMotionCamera || !eval) return;
     freeCam_ = FreeFromPose(eval->Evaluate((float)(d.time * kMmdFps)));
     d.useMotionCamera = false;
@@ -2090,6 +2087,19 @@ CameraKf App::StudioViewedCamera(int frame) const {
     return k;
 }
 
+CameraKf App::StudioViewportCameraKey(int frame) const {
+    const StudioDoc& d = *studio_;
+    CameraKf k;
+    if (d.useMotionCamera && !d.camera.camera.empty()) {
+        k = SampleCamera(d.camera.camera, frame);   // looking through the main camera
+    } else {
+        FillLinearCameraInterp(k.interp);
+        PoseFromFree(freeCam_.target, freeCam_.yaw, freeCam_.pitch, freeCam_.distance, freeCam_.fovDeg, k);
+    }
+    k.frame = frame;
+    return k;
+}
+
 void App::StudioInsertKeys(const std::vector<uint64_t>& rows, int frame) {
     OpTimer timer{"StudioInsertKeys"};
     StudioDoc& d = *studio_;
@@ -2113,12 +2123,6 @@ void App::StudioInsertKeys(const std::vector<uint64_t>& rows, int frame) {
         if (kind == RowKind::Camera) {
             // S4: the selected camera's row; the key keeps what the view shows now
             UpsertKey(d.SelectedCameraTrack().camera, StudioViewedCamera(frame));
-        } else if (kind == RowKind::CameraSwitch) {
-            // S4: a switch key keeps the camera that is active at this frame (the value before the key)
-            CameraSwitchKey k;
-            k.frame = frame;
-            k.uid = d.ActiveCameraUidAt(frame);
-            UpsertKey(d.cameraSwitch, k);
         } else if (kind == RowKind::Light) {
             // a new key keeps the current interpolated value (empty track: the sun's light)
             LightKf k = d.camera.light.empty() ? StudioSunLight((float)frame) : SampleLight(d.camera.light, (float)frame);
@@ -2261,9 +2265,7 @@ std::vector<int> App::StudioRowFrames(uint64_t row) const {
         out.reserve(keys.size());
         for (const auto& k : keys) out.push_back(k.frame);
     };
-    if (kind == RowKind::CameraSwitch) {
-        for (const CameraSwitchKey& k : d.cameraSwitch) out.push_back(k.frame);
-    } else if (kind == RowKind::Camera) {
+    if (kind == RowKind::Camera) {
         add(d.SelectedCameraTrack().camera);
     } else if (kind == RowKind::Light) {
         add(d.camera.light);
@@ -2393,12 +2395,7 @@ void App::StudioDeleteSelected(const char* undoName) {
     }
     for (const auto& [track, fs] : frames) {
         const RowKind kind = (RowKind)track.first;
-        if (kind == RowKind::CameraSwitch) {
-            // S4: the switch keys vanish by frame (the track has no name of its own)
-            d.cameraSwitch.erase(std::remove_if(d.cameraSwitch.begin(), d.cameraSwitch.end(),
-                                                [&](const CameraSwitchKey& k) { return fs.count(k.frame) != 0; }),
-                                 d.cameraSwitch.end());
-        } else if (IsCameraKind(kind)) {
+        if (IsCameraKind(kind)) {
             if (kind == RowKind::Light) EraseKeyFrames(d.camera.light, fs);
             else if (kind == RowKind::Shadow) EraseKeyFrames(d.camera.shadow, fs);
             else if (kind == RowKind::Focus) EraseKeyFrames(d.camera.focus, fs);
@@ -2473,9 +2470,7 @@ void App::StudioCopySelected() {
         c.row = k.first;
         c.offset = k.second - base;
         bool found = false;
-        if (kind == RowKind::CameraSwitch) {
-            if (const CameraSwitchKey* p = FindKey(d.cameraSwitch, k.second)) { c.cameraSwitch = *p; found = true; }
-        } else if (IsCameraKind(kind)) {
+        if (IsCameraKind(kind)) {
             if (kind == RowKind::Light) {
                 if (const LightKf* p = FindKey(d.camera.light, k.second)) { c.light = *p; found = true; }
             } else if (kind == RowKind::Shadow) {
@@ -2609,10 +2604,8 @@ void App::StudioPaste(bool curvesOnly, bool mirrored) {
         }
         const int f = at + c.offset;
         if (curvesOnly) {
-            // interpolation only, onto keys that already exist at the target frames (morph / switch keys have none)
-            if (kind == RowKind::CameraSwitch) {
-                continue;
-            } else if (kind == RowKind::Camera) {
+            // interpolation only, onto keys that already exist at the target frames (morph keys have none)
+            if (kind == RowKind::Camera) {
                 CameraKf* k = FindKey(d.SelectedCameraTrack().camera, f);
                 if (!k) continue;
                 std::memcpy(k->interp, c.camera.interp, sizeof(k->interp));
@@ -2625,8 +2618,6 @@ void App::StudioPaste(bool curvesOnly, bool mirrored) {
             } else {
                 continue;  // morphs, lights and shadows have no interpolation
             }
-        } else if (kind == RowKind::CameraSwitch) {
-            CameraSwitchKey k = c.cameraSwitch; k.frame = f; UpsertKey(d.cameraSwitch, k);
         } else if (kind == RowKind::Camera) { CameraKf k = c.camera; k.frame = f; UpsertKey(d.SelectedCameraTrack().camera, k); }
         else if (kind == RowKind::Light) { LightKf k = c.light; k.frame = f; UpsertKey(d.camera.light, k); }
         else if (kind == RowKind::Shadow) { ShadowKf k = c.shadow; k.frame = f; UpsertKey(d.camera.shadow, k); }
@@ -2735,9 +2726,7 @@ void App::StudioShiftFrames(bool remove) {
             const auto apply = [&](auto& keys) {
                 changed |= remove ? DeleteFrameSpan(keys, at, count) : InsertFrameSpan(keys, at, count);
             };
-            if (kind == RowKind::CameraSwitch) {
-                apply(d.cameraSwitch);
-            } else if (kind == RowKind::Camera) {
+            if (kind == RowKind::Camera) {
                 apply(d.SelectedCameraTrack().camera);
             } else if (kind == RowKind::Light) {
                 apply(d.camera.light);
@@ -2866,7 +2855,6 @@ void App::StudioRowStopwatch(uint64_t rowId) {
     std::string name;
     if (!StudioTrackOfRow(rowId, kind, name)) return;
     const int frame = d.Frame();
-    if (kind == RowKind::CameraSwitch) return;   // S4: the switch track is not switched on/off from a stopwatch
 
     if (kind == RowKind::Bone) {
         StudioModel* m = StudioPoseModel();
@@ -3489,8 +3477,7 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
         std::set<KeyId> moved;
         for (const auto& [track, fs] : frames) {
             const RowKind kind = (RowKind)track.first;
-            if (kind == RowKind::CameraSwitch) MoveKeyFrames(d.cameraSwitch, fs, ev.moveDelta);
-            else if (kind == RowKind::Camera) MoveKeyFrames(d.SelectedCameraTrack().camera, fs, ev.moveDelta);
+            if (kind == RowKind::Camera) MoveKeyFrames(d.SelectedCameraTrack().camera, fs, ev.moveDelta);
             else if (kind == RowKind::Light) MoveKeyFrames(d.camera.light, fs, ev.moveDelta);
             else if (kind == RowKind::Shadow) MoveKeyFrames(d.camera.shadow, fs, ev.moveDelta);
             else if (kind == RowKind::Focus) MoveKeyFrames(d.camera.focus, fs, ev.moveDelta);
@@ -3622,37 +3609,27 @@ void App::StudioRebuildRows() {
         if (cameraGraph) pushGraphRows(cameraGraphRows, r);
         d.rows.push_back(std::move(r));
         for (auto& c : cameraGraphRows) d.rows.push_back(std::move(c));
-        // S4: the stepped active-camera switch track, directly under the camera row
-        {
-            TimelineRow sw;
-            sw.id = MakeRowId(RowKind::CameraSwitch, 0, 0);
-            sw.label = Tr("카메라 전환");
-            sw.selected = d.selectedRows.count(sw.id) != 0;
-            keysOf(sw.id, d.cameraSwitch, sw.keys);
-            for (size_t i = 0; i < sw.keys.size() && i < d.cameraSwitch.size(); ++i) {
-                const uint32_t uid = d.cameraSwitch[i].uid;
-                sw.keys[i].label = uid == 0 ? std::string(Tr("메인")) : d.CameraLabel(uid);
-            }
-            d.rows.push_back(std::move(sw));
+        // the light / self-shadow / focus tracks are the main camera's: an extra (stage-screen) camera has its keys only
+        if (d.selectedCameraUid == 0) {
+            TimelineRow l;
+            l.id = MakeRowId(RowKind::Light, 0, 0);
+            l.label = Tr("조명");
+            l.selected = d.selectedRows.count(l.id) != 0;
+            keysOf(l.id, d.camera.light, l.keys);
+            d.rows.push_back(std::move(l));
+            TimelineRow sh;
+            sh.id = MakeRowId(RowKind::Shadow, 0, 0);
+            sh.label = Tr("셀프 섀도");
+            sh.selected = d.selectedRows.count(sh.id) != 0;
+            keysOf(sh.id, d.camera.shadow, sh.keys);
+            d.rows.push_back(std::move(sh));
+            TimelineRow fo;
+            fo.id = MakeRowId(RowKind::Focus, 0, 0);
+            fo.label = Tr("초점");
+            fo.selected = d.selectedRows.count(fo.id) != 0;
+            keysOf(fo.id, d.camera.focus, fo.keys);
+            d.rows.push_back(std::move(fo));
         }
-        TimelineRow l;
-        l.id = MakeRowId(RowKind::Light, 0, 0);
-        l.label = Tr("조명");
-        l.selected = d.selectedRows.count(l.id) != 0;
-        keysOf(l.id, d.camera.light, l.keys);
-        d.rows.push_back(std::move(l));
-        TimelineRow sh;
-        sh.id = MakeRowId(RowKind::Shadow, 0, 0);
-        sh.label = Tr("셀프 섀도");
-        sh.selected = d.selectedRows.count(sh.id) != 0;
-        keysOf(sh.id, d.camera.shadow, sh.keys);
-        d.rows.push_back(std::move(sh));
-        TimelineRow fo;
-        fo.id = MakeRowId(RowKind::Focus, 0, 0);
-        fo.label = Tr("초점");
-        fo.selected = d.selectedRows.count(fo.id) != 0;
-        keysOf(fo.id, d.camera.focus, fo.keys);
-        d.rows.push_back(std::move(fo));
         // the scene lights: one row per keyable light (sun, point, spot); the ambient light has no keys
         for (const SceneLight& light : d.lights) {
             if (light.kind == LightKind::Ambient) continue;
@@ -4277,12 +4254,10 @@ bool App::StudioExportVmdTo(const std::filesystem::path& path) {
     if (!camera && !m) return false;
     VmdMotion vmd;
     if (camera) {
-        // S4: MMD has one camera track. "전환 반영" (the default, with a non-empty switch track) writes it flattened, so
-        // the exported VMD plays the same cuts the studio shows; without it the SELECTED camera's keys are exported
-        // (an extra camera's own track, else the main one). Light / self-shadow stay the main camera's.
+        // S4: the SELECTED camera's keys are exported (an extra camera's own track, else the main one). Light /
+        // self-shadow stay the main camera's.
         MotionData c;
-        if (studioVmdFlatten_ && !d.cameraSwitch.empty()) c = FlattenCameraSwitch(d.camera, d.cameras, d.cameraSwitch);
-        else c.camera = d.SelectedCameraTrack().camera;
+        c.camera = d.SelectedCameraTrack().camera;
         c.light = d.camera.light;
         c.shadow = d.camera.shadow;
         vmd = c.ToVmd();
@@ -5138,9 +5113,12 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
             DrawStudioMmeRow(w);
         } else {
             char counts[96];
-            std::snprintf(counts, sizeof(counts), Tr("카메라 %d · 조명 %d · 섀도 %d · 초점 %d"),
-                          (int)d.SelectedCameraTrack().camera.size(),
-                          (int)d.camera.light.size(), (int)d.camera.shadow.size(), (int)d.camera.focus.size());
+            if (d.selectedCameraUid != 0)
+                std::snprintf(counts, sizeof(counts), Tr("카메라 %d"), (int)d.SelectedCameraTrack().camera.size());
+            else
+                std::snprintf(counts, sizeof(counts), Tr("카메라 %d · 조명 %d · 섀도 %d · 초점 %d"),
+                              (int)d.SelectedCameraTrack().camera.size(),
+                              (int)d.camera.light.size(), (int)d.camera.shadow.size(), (int)d.camera.focus.size());
             line(Tr("키"), counts);
             DrawStudioCameraPanel(w);
         }
@@ -5211,15 +5189,14 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
     const std::string trackName = kind == RowKind::Camera
                                       ? (d.selectedCameraUid == 0 ? std::string(Tr("카메라"))
                                                                   : d.CameraLabel(d.selectedCameraUid))
-                                  : kind == RowKind::CameraSwitch ? std::string(Tr("카메라 전환"))
                                   : kind == RowKind::Light ? std::string(Tr("조명"))
                                   : kind == RowKind::Focus ? std::string(Tr("초점"))
                                                            : std::string(Tr("셀프 섀도"));
-    line(IsCameraKind(kind) || kind == RowKind::CameraSwitch || kind == RowKind::SceneLight
+    line(IsCameraKind(kind) || kind == RowKind::SceneLight
              ? Tr("트랙")
              : (kind == RowKind::Bone ? Tr("본") : Tr("모프")),
          kind == RowKind::SceneLight ? (sceneLight ? sceneLight->name : std::string())
-                                     : IsCameraKind(kind) || kind == RowKind::CameraSwitch ? trackName : name);
+                                     : IsCameraKind(kind) ? trackName : name);
     line(Tr("프레임"), std::to_string(first->second));
     if (IsCameraKind(kind) && !keyAwayFromPlayhead) {
         ImGui::Dummy(ImVec2(w, Dp(4.0f)));
@@ -5231,13 +5208,6 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
     }
     if (IsCameraKind(kind) && keyAwayFromPlayhead && kind != RowKind::Camera) {
         // light / shadow / focus keys have no interpolation controls: only their track and frame show here
-        ImGui::EndChild();
-        return;
-    }
-    if (kind == RowKind::CameraSwitch) {
-        // S4: a switch key is stepped (no curve): its camera is picked from the timeline menu, so only say which one
-        const CameraSwitchKey* sw = FindKey(d.cameraSwitch, first->second);
-        line(Tr("카메라"), sw && sw->uid != 0 ? d.CameraLabel(sw->uid) : std::string(Tr("메인")));
         ImGui::EndChild();
         return;
     }
@@ -6144,34 +6114,6 @@ void App::DrawStudioKeyMenu() {
             StudioHandleTimeline(add);
             close = true;
         }
-        // S4: the camera switch track is edited from anywhere in the key area (a switch is a frame decision, not a
-        // key of one row): the submenu lists the main camera and every extra one
-        if (RowKindOf(studioKeyMenuRow_) != RowKind::Group && !studioKeyMenuRuler_) {
-            if (MenuItem("##km_camswitch", Tr("이 프레임에서 카메라 전환"), icon::VideoCamera, nullptr))
-                ImGui::OpenPopup("##camswitchto");
-            if (ImGui::BeginPopup("##camswitchto")) {
-                char title[48];
-                std::snprintf(title, sizeof(title), Tr("프레임 %d에서"), f);
-                Text(ImGui::GetWindowDrawList(), Font::Semibold, size::Caption,
-                     ImVec2(ImGui::GetCursorScreenPos().x + Dp(10.0f), ImGui::GetCursorScreenPos().y + Dp(4.0f)), P().ink3, title);
-                ImGui::Dummy(ImVec2(1, Dp(22.0f)));
-                const uint32_t activeUid = d.ActiveCameraUidAt(f);
-                if (MenuItem("##camswitchmain", Tr("메인 카메라"), icon::VideoCamera, activeUid == 0 ? "✓" : nullptr)) {
-                    StudioSwitchCameraAt(f, 0);
-                    close = true;
-                }
-                for (const studio::StudioCamera& cam : d.cameras) {
-                    const bool on = activeUid == cam.uid;
-                    if (MenuItem(("##camswitch" + std::to_string(cam.uid)).c_str(), cam.name.c_str(), icon::Camera,
-                                 on ? "✓" : nullptr)) {
-                        StudioSwitchCameraAt(f, cam.uid);
-                        close = true;
-                    }
-                }
-                if (close) ImGui::CloseCurrentPopup();
-                ImGui::EndPopup();
-            }
-        }
         ImGui::BeginDisabled(!keys);
         if (MenuItem("##km_copy", Tr("복사"), icon::Copy, "Ctrl+C")) { StudioCopySelected(); close = true; }
         if (MenuItem("##km_cut", Tr("잘라내기"), icon::Scissors, "Ctrl+X")) {
@@ -6510,7 +6452,7 @@ void App::DrawStudioViewport(float x0, float y0, float x1, float y1) {
     // view label (top left of the viewport) and the pose toolbar next to it, over the bone overlay
     const Palette& p = P();
     const char* label = d.possessCamera ? Tr("카메라 빙의 중")
-                      : d.useMotionCamera && d.ActiveCameraEval(d.Frame()) ? Tr("카메라 모션")
+                      : d.useMotionCamera && d.cameraEval ? Tr("카메라 모션")
                                                                           : Tr("자유 카메라");
     ImVec2 bs;
     Badge(dl, ImVec2(x0 + Dp(12.0f), y0 + Dp(12.0f)), label, d.possessCamera ? p.accent : WithAlpha(p.surface, 0.85f),

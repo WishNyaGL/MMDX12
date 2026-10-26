@@ -600,6 +600,10 @@ private:
     studio::GizmoFrame studioCamFrame_;
     studio::GizmoPart studioCamHot_ = studio::GizmoPart::None;
     void StudioTakeFreeCamera();                    // leave the motion camera at its current view (viewport navigation)
+    // The viewport's view now as a camera key at `frame`: the free view, or the main camera while looking through it
+    // (what "새 카메라" / an extra camera's "현재 뷰로 키 등록" take).
+    studio::CameraKf StudioViewportCameraKey(int frame) const;
+    void StudioKeyExtraCameraFromView();             // the selected extra camera gets the viewport's view as a key
     void StudioFocusSelection();                     // F: frame the picked bone / selected model
     float studioFlyMul_ = 1.0f;                      // RMB + WASD fly speed multiplier (wheel while flying)
     studio::CameraKf StudioViewedCamera(int frame) const;  // the camera as shown now (free view or motion camera) as a key at `frame`
@@ -755,7 +759,6 @@ private:
     void DrawStudioCameraGizmos(float x0, float y0, float x1, float y1);  // frustums of the other cameras
     void StudioAddCameraFromView();                   // new extra camera from the current view (undoable)
     void StudioImportStageCameras();                  // one static-key camera per stage.json camera (undoable)
-    void StudioSwitchCameraAt(int frame, uint32_t uid);  // the active-camera switch track: a key at `frame`
     // A freshly added / opened character with no shader choice: SuggestShaderPack for its library id (never applies).
     void StudioSuggestShader(studio::StudioModel& m);
     DirectX::XMFLOAT4X4 StudioPropRoot(const studio::StudioModel& m) const;  // world matrix of a prop's origin
@@ -1462,7 +1465,6 @@ private:
     int studioRenameModel_ = -1;                   // outliner rename popup target
     int studioRemoveModel_ = -1;                   // outliner remove confirmation target
     int studioRenameCamera_ = -1;                  // S4: outliner camera rename popup target (-1 = none); value = uid + 1
-    bool studioVmdFlatten_ = true;                 // S4: "전환 반영": camera VMD export flattens the switch track in
     std::string studioLoadTitle_;                  // Loading screen title while a project opens (empty: library scene)
     char studioRenameBuf_[128] = {};
     char studioAddFilter_[64] = {};

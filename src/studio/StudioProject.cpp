@@ -47,64 +47,6 @@ bool StudioWorld::operator==(const StudioWorld& o) const {
     return name == o.name && fx == o.fx && place == o.place;
 }
 
-// S4: the main camera's track with the switch track flattened in (MMD has a single camera track). For every switch
-// segment the active camera's keys inside it are copied; where the active camera changes at frame f a key pair at
-// (f-1, f) makes the jump instantaneous: the key at f-1 holds the outgoing camera's pose at f-1 and the key at f is the
-// incoming camera's pose at f (MMD's 1-frame cut: SampleCamera holds the first key across a one-frame gap). A camera
-// without keys of its own contributes the main camera's pose, so a cut never falls through to nothing.
-MotionData FlattenCameraSwitch(const MotionData& main, const std::vector<StudioCamera>& cameras,
-                               const std::vector<CameraSwitchKey>& switches) {
-    MotionData out = main;
-    if (switches.empty()) return out;
-    const auto keysOf = [&](uint32_t uid) -> const std::vector<CameraKf>& {
-        static const std::vector<CameraKf> kNone;
-        if (uid == 0) return main.camera;
-        for (const StudioCamera& c : cameras)
-            if (c.uid == uid) return c.track.camera;
-        return kNone;
-    };
-    const auto poseAt = [&](uint32_t uid, int frame) -> CameraKf {
-        const std::vector<CameraKf>& keys = keysOf(uid);
-        CameraKf k;
-        if (!keys.empty()) k = SampleCamera(keys, frame);
-        else if (!main.camera.empty()) k = SampleCamera(main.camera, frame);
-        k.frame = frame;
-        return k;
-    };
-    std::vector<CameraKf> merged;
-    const auto add = [&](const CameraKf& k) {
-        if (!merged.empty() && merged.back().frame == k.frame) {
-            merged.back() = k;
-            return;
-        }
-        merged.push_back(k);
-    };
-    // segments: [previous cut frame, this cut frame) is the outgoing camera's, the cut frame starts the incoming one
-    int prevCut = -1;
-    uint32_t prevUid = 0;
-    for (size_t i = 0; i < switches.size(); ++i) {
-        const CameraSwitchKey& sw = switches[i];
-        // the outgoing camera's keys in (prevCut, sw.frame)
-        for (const CameraKf& k : keysOf(prevUid))
-            if (k.frame > prevCut && k.frame < sw.frame) add(k);
-        if (sw.frame > 0) {
-            CameraKf hold = poseAt(prevUid, sw.frame - 1);  // the outgoing pose up to the frame before the cut
-            hold.frame = sw.frame - 1;
-            // the outgoing camera's own key at f-1 is better than the sampled pose: it keeps its curve bytes
-            if (const CameraKf* own = FindKey(keysOf(prevUid), sw.frame - 1)) hold = *own;
-            add(hold);
-        }
-        add(poseAt(sw.uid, sw.frame));  // the incoming camera at the cut frame
-        prevCut = sw.frame;
-        prevUid = sw.uid;
-    }
-    // after the last cut the last switched-to camera plays to the end
-    for (const CameraKf& k : keysOf(prevUid))
-        if (k.frame > prevCut) add(k);
-    if (!merged.empty()) out.camera = std::move(merged);
-    return out;
-}
-
 size_t StudioCamera::ApproxBytes() const {
     return sizeof(StudioCamera) + name.size() + track.ApproxBytes();
 }
@@ -684,9 +626,6 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                 cams.push_back(std::move(jc));
             }
             j["cameras"] = std::move(cams);
-            nlohmann::json sw = nlohmann::json::array();
-            for (const CameraSwitchKey& k : data.cameraSwitch) sw.push_back({k.frame, k.uid});
-            j["cameraSwitch"] = std::move(sw);
         }
         // M6b: the project's own MME post stack (effects after the scene, replaces the play-mode stack).
         {
@@ -1078,18 +1017,6 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                     else if (warnings) warnings->push_back("camera missing: " + PathToUtf8(vmdPath));
                 }
                 out.cameras.push_back(std::move(c));
-            }
-        }
-        if (version >= 5 && j.contains("cameraSwitch") && j["cameraSwitch"].is_array()) {
-            for (const nlohmann::json& jk : j["cameraSwitch"]) {
-                if (!jk.is_array() || jk.size() < 2 || !jk[0].is_number() || !jk[1].is_number()) continue;
-                CameraSwitchKey k;
-                k.frame = std::max(0, jk[0].get<int>());
-                k.uid = (uint32_t)std::max(0, jk[1].get<int>());
-                auto it = std::lower_bound(out.cameraSwitch.begin(), out.cameraSwitch.end(), k.frame,
-                                           [](const CameraSwitchKey& a, int f) { return a.frame < f; });
-                if (it != out.cameraSwitch.end() && it->frame == k.frame) it->uid = k.uid;
-                else out.cameraSwitch.insert(it, k);
             }
         }
 

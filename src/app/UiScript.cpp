@@ -208,22 +208,13 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                          st.uid, st.stageId.c_str(),
                          st.variant.empty() ? std::string("<default>").c_str() : st.variant.c_str(),
                          st.base.size(), st.tracks.size(), st.cuesOff.size());
-            // S4: one STUDIOCAM line per camera (uid 0 = the main camera) + the stepped switch track
+            // S4: one STUDIOCAM line per camera (uid 0 = the main camera)
             LOG_INFO("STUDIOCAM uid=%u name=%s keys=%zu visible=%d stageUid=%u%s", 0u, "main",
                      d.camera.camera.size(), 1, 0u, d.selectedCameraUid == 0 ? " selected" : "");
             for (const studio::StudioCamera& cam : d.cameras)
                 LOG_INFO("STUDIOCAM uid=%u name=%s keys=%zu visible=%d stageUid=%u%s", cam.uid, cam.name.c_str(),
                          cam.track.camera.size(), (int)cam.visible, cam.stageUid,
                          d.selectedCameraUid == cam.uid ? " selected" : "");
-            {
-                std::string sw;
-                for (const studio::CameraSwitchKey& k : d.cameraSwitch) {
-                    sw += sw.empty() ? "" : " ";
-                    sw += std::to_string(k.frame) + ":" + std::to_string(k.uid);
-                }
-                LOG_INFO("STUDIOCAMSWITCH count=%zu active=%u keys=[%s ]", d.cameraSwitch.size(),
-                         d.ActiveCameraUidAt(d.Frame()), sw.c_str());
-            }
             // P2.2: the selected model's physics bake state (driven bones + baked key count + the off flag)
             if (m) {
                 size_t bakedKeys = 0;
@@ -1096,9 +1087,6 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
         }
     } else if (cmd == "studiocamselect") {  // studiocamselect <uid>
         if (studio_ && !args.empty()) StudioSelectCamera((uint32_t)std::max(0, std::atoi(args[0].c_str())));
-    } else if (cmd == "studiocamswitch") {  // studiocamswitch <frame> <uid>
-        if (studio_ && args.size() >= 2)
-            StudioSwitchCameraAt(std::atoi(args[0].c_str()), (uint32_t)std::max(0, std::atoi(args[1].c_str())));
     } else if (cmd == "studiocamimport") {
         if (studio_) StudioImportStageCameras();
     } else if (cmd == "studiocamview") {  // studiocamview <0|1>: look through the camera (0 = the free camera)
@@ -1108,8 +1096,6 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
         }
     } else if (cmd == "studiopossess") {  // studiopossess <0|1>: possess the selected camera (viewport edits its keys)
         if (studio_ && !args.empty()) StudioPossess(std::atoi(args[0].c_str()) != 0);
-    } else if (cmd == "studiocamflatten") {  // studiocamflatten <0|1>: camera VMD export flattens the switch track
-        if (!args.empty()) studioVmdFlatten_ = std::atoi(args[0].c_str()) != 0;
     } else if (cmd == "look") {  // look <id>: applies a look pack and saves the settings like a UI change
         if (!args.empty()) ApplyLookById(args[0], true);
     } else if (cmd == "lookexport") {  // lookexport <id> <name...>

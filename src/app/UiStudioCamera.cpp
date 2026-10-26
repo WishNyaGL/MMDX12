@@ -41,7 +41,7 @@ bool PerspectiveAt(const std::vector<CameraKf>& keys, float frame) {
 
 bool App::StudioCameraPerspective(float frame) const {
     const StudioDoc& d = *studio_;
-    return PerspectiveAt(d.CameraKeys(d.ActiveCameraUidAt((int)frame)), frame);
+    return PerspectiveAt(d.camera.camera, frame);   // the output camera: always the main one
 }
 
 void App::StudioOrthoCamera(CameraPose& pose, CameraParams& camera) const {
@@ -93,6 +93,10 @@ LightKf App::StudioCurrentLight() const {
 
 void App::StudioKeyCameraFromView() {
     StudioDoc& d = *studio_;
+    if (d.selectedCameraUid != 0) {   // an extra camera takes the viewport's view (it is never looked through)
+        StudioKeyExtraCameraFromView();
+        return;
+    }
     // StudioInsertKeys keys the free camera when it is the view, else the motion camera's value at the frame
     StudioInsertKeys({RowOf(RowKind::Camera)}, d.Frame());
     if (!d.useMotionCamera) {
@@ -182,12 +186,40 @@ void App::DrawStudioCameraPanel(float w) {
             }
     }
 
+    // --- an extra camera: a stage-screen camera, never the output or the viewport's camera view. It is placed from the
+    // viewport's view or with its eye / target handles, and keyed like the main camera; no light / shadow / focus tracks.
+    if (d.selectedCameraUid != 0) {
+        separator(2.0f);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+        ImGui::TextUnformatted(Tr("무대 스크린에 띄우는 카메라예요. 영상 출력과 뷰포트의 카메라 모션은 메인 카메라만 써요."));
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(w, Dp(6.0f)));
+        if (Button("##camkeyx", Tr("현재 뷰를 키로 등록"), icon::Plus, ButtonKind::Secondary, ImVec2((w - bw) / Dpi() - 6.0f, btn)))
+            StudioKeyExtraCameraFromView();
+        Tooltip(Tr("뷰포트에 보이는 시점을 재생 헤드에 이 카메라의 키로 넣어요"));
+        ImGui::SameLine(0, Dp(6.0f));
+        if (IconButton("##campath", d.showCameraPath ? icon::Eye : icon::EyeSlash,
+                       d.showCameraPath ? Tr("경로·핸들 숨기기 (자유 카메라로 볼 때 표시)") : Tr("경로·핸들 표시 (자유 카메라로 볼 때)"),
+                       d.showCameraPath, btn))
+            d.showCameraPath = !d.showCameraPath;
+        if (!compact) {
+            separator(8.0f);
+            Switch("##autokey", Tr("자동 키"), &d.autoKey, Tr("값을 고치면 재생 헤드에 키가 생겨요"));
+            ImGui::Dummy(ImVec2(w, Dp(6.0f)));
+            DrawStudioCameraKeyFields(w, RowKind::Camera, d.Frame(), true);
+        }
+        separator(10.0f);
+        return;
+    }
+
     // --- view: motion / free camera, key from the view, path overlay
     separator(2.0f);
     {
         const char* modes[] = {Tr("카메라 모션"), Tr("자유 카메라")};
         const char* modeIcons[] = {icon::VideoCamera, icon::Crosshair};
-        const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(d.Frame());  // S4: the camera shown now
+        const std::shared_ptr<CameraMotion>& eval = d.cameraEval;  // the camera view is always the main camera
         int mode = d.useMotionCamera && eval ? 0 : 1;
         ImGui::BeginDisabled(!d.HasCameraKeys());
         if (Segmented("##viewmode", modes, 2, &mode, w / Dpi(), 32.0f, modeIcons)) {
@@ -321,18 +353,6 @@ void App::DrawStudioCameraPanel(float w) {
     // --- depth-of-field focus track
     separator(8.0f);
     DrawStudioFocusSection(w);
-    // --- S4: camera VMD export and the switch track (MMD has one camera track: flatten the cuts into it)
-    separator(8.0f);
-    {
-        Switch("##vmdflatten", Tr("VMD 내보내기에 전환 반영"), &studioVmdFlatten_,
-               Tr("카메라 VMD를 내보낼 때 전환 트랙을 하나의 카메라 트랙으로 펴서 MMD에서도 같은 컷이 나오게 해요"));
-        char note[96];
-        if (d.cameraSwitch.empty()) std::snprintf(note, sizeof(note), "%s", Tr("전환 키 없음 · 메인 카메라만"));
-        else std::snprintf(note, sizeof(note), Tr("전환 키 %d개"), (int)d.cameraSwitch.size());
-        const ImVec2 c = ImGui::GetCursorScreenPos();
-        Text(cdl, Font::Regular, size::Caption, ImVec2(c.x, c.y + Dp(2.0f)), p.ink3, note);
-        ImGui::Dummy(ImVec2(w, Dp(18.0f)));
-    }
     separator(10.0f);
     ImGui::Dummy(ImVec2(w, Dp(2.0f)));
 }
@@ -548,11 +568,12 @@ App::FreeCamera App::FreeFromKey(const CameraKf& k) {
 void App::StudioPossess(bool on) {
     StudioDoc& d = *studio_;
     if (on == d.possessCamera) return;
+    if (on && d.selectedCameraUid != 0) return;   // only the main camera is looked through (and so possessed)
     if (studioKeyEdit_ && studioKeyLive_) StudioEndKeyEdit();
     d.possessCamera = on;
     if (on) {
         d.selectedModel = -1;  // the camera row is the possessed object
-        if (d.SelectedCameraEval()) d.useMotionCamera = true;  // look through the camera that is being edited
+        if (d.cameraEval) d.useMotionCamera = true;  // look through the main camera
         studioCamHandle_ = 0;
     }
 }
@@ -612,7 +633,7 @@ void App::StudioNavEditTick() {
 void App::StudioRenderRect(float x0, float y0, float x1, float y1, float out[4]) const {
     const StudioDoc& d = *studio_;
     out[0] = x0; out[1] = y0; out[2] = x1 - x0; out[3] = y1 - y0;
-    if (d.viewLayout != 0 || !d.frameMask || !d.useMotionCamera || !d.ActiveCameraEval(d.Frame())) return;
+    if (d.viewLayout != 0 || !d.frameMask || !d.useMotionCamera || !d.cameraEval) return;
     const float area[4] = {x0, y0, x1 - x0, y1 - y0};
     FitInArea(area, (float)d.aspectW, (float)d.aspectH, out);
     for (int i = 0; i < 4; ++i) out[i] = std::floor(out[i]);  // whole pixels: the 3D image and the mask agree
@@ -623,7 +644,7 @@ void App::DrawStudioFrameMask(float x0, float y0, float x1, float y1) {
     StudioDoc& d = *studio_;
     float r[4];
     StudioRenderRect(x0, y0, x1, y1, r);
-    const bool locked = d.viewLayout == 0 && d.frameMask && d.useMotionCamera && d.ActiveCameraEval(d.Frame());
+    const bool locked = d.viewLayout == 0 && d.frameMask && d.useMotionCamera && d.cameraEval;
     if (!locked) return;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImU32 bar = IM_COL32(14, 17, 22, 255);
@@ -655,7 +676,7 @@ void App::DrawStudioCameraPath(float x0, float y0, float x1, float y1) {
     using namespace ui;
     StudioDoc& d = *studio_;
     const bool cameraSelected = (d.selectedModel < 0 && d.selectedLightUid == 0);
-    if (!cameraSelected || !d.showCameraPath || (d.useMotionCamera && d.SelectedCameraEval()) || !d.SelectedCameraEval())
+    if (!cameraSelected || !d.showCameraPath || (d.useMotionCamera && d.cameraEval) || !d.SelectedCameraEval())
         return;
     StudioUpdateCameraPath();
     if (studioCamPath_.empty()) return;
@@ -736,7 +757,7 @@ void App::StudioCameraPathWindow(int& lo, int& hi) const {
 
 bool App::StudioPickCameraKey(ImVec2 mouse) {
     StudioDoc& d = *studio_;
-    if (d.selectedModel >= 0 || d.selectedLightUid != 0 || !d.showCameraPath || (d.useMotionCamera && d.SelectedCameraEval()) ||
+    if (d.selectedModel >= 0 || d.selectedLightUid != 0 || !d.showCameraPath || (d.useMotionCamera && d.cameraEval) ||
         !d.SelectedCameraEval())
         return false;
     StudioUpdateCameraPath();

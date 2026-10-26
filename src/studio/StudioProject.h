@@ -30,9 +30,9 @@ namespace mmdx::studio {
 // Version 4: MMDX stage entities ("stages": variant, param base values, keyed params, the params whose manifest cue the
 // project replaced) and a part model's / light's "stageUid". A version 3 file's per-part "stageVariant" becomes one
 // StudioStage per stage (StudioLoader). Older builds reject version 4.
-// Version 5: camera entities ("cameras": uid, name, visible, stageUid, motion) and the active-camera switch track
-// ("cameraSwitch"). The main camera stays the top-level "camera" (its light / self-shadow / focus tracks). Older builds
-// reject version 5; a version <= 4 file has the main camera only.
+// Version 5: camera entities ("cameras": uid, name, visible, stageUid, motion), the stage screens' extra cameras. The
+// main camera stays the top-level "camera" (its light / self-shadow / focus tracks) and is the only output camera.
+// Older builds reject version 5; a version <= 4 file has the main camera only.
 // Version 6: a stage entity's screen overrides ("screens": id -> {source, file, camera, brightness}).
 inline constexpr int kProjectFormatVersion = 6;
 inline constexpr const char* kProjectFormatName = "mmdx12-studio-project";
@@ -110,14 +110,6 @@ struct StudioCamera {
     uint32_t stageUid = 0;            // the MMDX stage whose stage.json "cameras" entry it came from (0 = user camera)
     size_t ApproxBytes() const;
     bool operator==(const StudioCamera& o) const;   // ignores uid
-};
-
-// One key of the active-camera switch track (stepped: the last key at or before the frame wins). An empty switch
-// track always shows the main camera (uid 0).
-struct CameraSwitchKey {
-    int frame = 0;
-    uint32_t uid = 0;                 // 0 = the main camera
-    bool operator==(const CameraSwitchKey& o) const { return frame == o.frame && uid == o.uid; }
 };
 
 struct ProjectModel {    std::string name;                  // outliner label (UTF-8)
@@ -219,20 +211,11 @@ struct ProjectData {
     std::vector<StudioWorld> worlds;
     // Version 4: the project's MMDX stage entities ("stages"). Empty = none.
     std::vector<StudioStage> stages;
-    // Version 5: the extra cameras ("cameras") and the stepped active-camera switch track ("cameraSwitch"). The main
-    // camera stays `camera` above. Empty cameras + empty switch = a version <= 4 project (main camera only).
+    // Version 5: the extra cameras ("cameras", for the stage screens). The main camera stays `camera` above. Empty = a
+    // version <= 4 project (main camera only).
     std::vector<StudioCamera> cameras;
-    std::vector<CameraSwitchKey> cameraSwitch;
     std::filesystem::path recoveryOf;  // autosave (recovery) files only: the project it belongs to (empty: never saved)
 };
-
-// S4: the main camera's track with the switch track flattened into it (MMD has one camera track only): for every
-// switch segment the active camera's keys inside the segment are copied, and where the active camera changes at frame
-// f a key pair at (f-1, f) makes the jump instantaneous (MMD's 1-frame cut convention). Before the first switch key
-// the main camera is active. An empty switch track returns `main` unchanged. A switched-to camera without keys falls
-// back to the main camera's pose. The light / self-shadow / focus tracks are the main camera's.
-MotionData FlattenCameraSwitch(const MotionData& main, const std::vector<StudioCamera>& cameras,
-                               const std::vector<CameraSwitchKey>& switches);
 
 // Writes `file` (JSON) and the motion VMDs next to it. Models without keys and an empty camera write no VMD
 // ("motion": null). VMD names: "<stem> - <SanitizeFileName(name)>.vmd", camera "<stem> - camera.vmd"; duplicates

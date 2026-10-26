@@ -1149,7 +1149,7 @@ bool App::ExecuteMcpAnalysis(const std::string& tool, const nlohmann::json& args
 
         nlohmann::json result = nlohmann::json::array();
         for (int frame : frames) {
-            const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(frame);
+            const std::shared_ptr<CameraMotion>& eval = d.cameraEval;
             if (!hasOverride && !eval) {
                 promise->Reject("no camera keys: pass a camera override");
                 return true;

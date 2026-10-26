@@ -948,7 +948,7 @@ bool App::ExecuteMcpMotion(const std::string& tool, const nlohmann::json& args, 
                 } else if (op.targetKind == "camera") {
                     d.RefreshCameraEvals();   // S4: one evaluator per camera
                     for (int f : frames) {
-                        const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(f);
+                        const std::shared_ptr<CameraMotion>& eval = d.cameraEval;
                         CameraPose pose = eval ? eval->Evaluate((float)f) : CameraPose{};
                         DirectX::XMFLOAT3 eye;
                         CameraMotion::ToView(pose, nullptr, &eye);
@@ -1013,7 +1013,7 @@ bool App::ExecuteMcpMotion(const std::string& tool, const nlohmann::json& args, 
                         } else if (op.targetKind == "camera") {
                             d.RefreshCameraEvals();
                             for (int f : measureFrames) {
-                                const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(f);
+                                const std::shared_ptr<CameraMotion>& eval = d.cameraEval;
                                 CameraPose pose = eval ? eval->Evaluate((float)f) : CameraPose{};
                                 DirectX::XMFLOAT3 eye;
                                 CameraMotion::ToView(pose, nullptr, &eye);

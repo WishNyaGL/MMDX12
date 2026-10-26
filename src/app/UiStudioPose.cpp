@@ -675,8 +675,9 @@ void App::StudioViewportCameraHandles(bool hovered) {
     using namespace DirectX;
     StudioDoc& d = *studio_;
     ImGuiIO& io = ImGui::GetIO();
-    const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval(d.Frame());  // S4: the camera shown now
-    const bool free = !(d.useMotionCamera && eval);
+    // the handles move the SELECTED camera (an extra one too), in the free view (the camera view is the main camera)
+    const std::shared_ptr<CameraMotion>& eval = d.SelectedCameraEval();
+    const bool free = !(d.useMotionCamera && d.cameraEval);
     if (d.selectedModel >= 0 || d.selectedLightUid != 0 || d.possessCamera || !free || !eval ||
         d.SelectedCameraTrack().camera.empty() || d.playing) {
         if (studioViewDrag_ == 7) studioViewDrag_ = 0;

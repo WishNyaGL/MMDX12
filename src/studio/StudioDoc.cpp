@@ -61,7 +61,6 @@ int StudioDoc::EndFrame() const {
     int end = std::max(camera.EndFrame(), (int)std::ceil(audioEndFrame));
     for (const auto& m : models) end = std::max(end, m->motion.EndFrame());
     for (const StudioCamera& c : cameras) end = std::max(end, c.track.EndFrame());
-    for (const CameraSwitchKey& k : cameraSwitch) end = std::max(end, k.frame);
     return std::max(end, 300);
 }
 
@@ -105,46 +104,12 @@ void StudioDoc::RefreshCameraEvals() {
     cameraEvalVersion = cameraVersion;
 }
 
-const std::shared_ptr<CameraMotion>& StudioDoc::ActiveCameraEval(int frame) const {
-    static const std::shared_ptr<CameraMotion> kNone;
-    const uint32_t uid = ActiveCameraUidAt(frame);
-    if (uid != 0 && cameraEvals.size() == cameras.size()) {
-        for (size_t i = 0; i < cameras.size(); ++i)
-            if (cameras[i].uid == uid && cameraEvals[i]) return cameraEvals[i];
-    }
-    if (cameraEval) return cameraEval;
-    // the active camera has no keys of its own: with a switch track, fall back to any camera that has keys (a switch
-    // track is meant to be seen, so camera view never ends up with nothing to look through); without one the view stays
-    // free, exactly as before S4 (the extra cameras are just parked overheads).
-    if (!cameraSwitch.empty() && cameraEvals.size() == cameras.size())
-        for (const std::shared_ptr<CameraMotion>& eval : cameraEvals)
-            if (eval) return eval;
-    return kNone;
-}
-
-bool StudioDoc::HasCameraKeys() const {
-    if (!camera.camera.empty()) return true;
-    for (const StudioCamera& c : cameras)
-        if (!c.track.camera.empty()) return true;
-    return false;
-}
-
 const std::shared_ptr<CameraMotion>& StudioDoc::SelectedCameraEval() const {
     static const std::shared_ptr<CameraMotion> kNone;
     if (selectedCameraUid == 0) return cameraEval;
     for (size_t i = 0; i < cameras.size(); ++i)
         if (cameras[i].uid == selectedCameraUid && cameraEvals.size() == cameras.size()) return cameraEvals[i];
     return kNone;
-}
-
-uint32_t StudioDoc::ActiveCameraUidAt(int frame) const {
-    if (cameraSwitch.empty()) return 0;
-    // stepped: the last switch key at or before the frame (before the first key the main camera is active)
-    auto it = std::upper_bound(cameraSwitch.begin(), cameraSwitch.end(), frame,
-                               [](int f, const CameraSwitchKey& k) { return f < k.frame; });
-    if (it == cameraSwitch.begin()) return 0;
-    const uint32_t uid = std::prev(it)->uid;
-    return FindCamera(uid) ? uid : 0;  // a switch to a removed camera falls back to the main one
 }
 
 std::string StudioDoc::CameraLabel(uint32_t uid) const {
@@ -158,11 +123,6 @@ TrackState CaptureTrack(StudioDoc& doc, int model, RowKind kind, const std::stri
     s.model = model;
     s.kind = kind;
     s.name = name;
-    if (kind == RowKind::CameraSwitch) {  // S4: the stepped active-camera switch track (whole-list)
-        s.existed = true;
-        s.switchKeys = doc.cameraSwitch;
-        return s;
-    }
     if (IsCameraKind(kind)) {
         s.existed = true;
         if (kind == RowKind::Light) s.lights = doc.camera.light;
@@ -264,11 +224,6 @@ TrackState CaptureTrack(StudioDoc& doc, const TrackState& before) {
 }
 
 void RestoreTrack(StudioDoc& doc, const TrackState& s) {
-    if (s.kind == RowKind::CameraSwitch) {
-        doc.cameraSwitch = s.switchKeys;
-        doc.rowsKey = ~0ull;
-        return;
-    }
     if (IsCameraKind(s.kind)) {
         if (s.kind == RowKind::Light) doc.camera.light = s.lights;
         else if (s.kind == RowKind::Shadow) doc.camera.shadow = s.shadows;

@@ -1,7 +1,8 @@
 // S4: camera entities in the studio. The main camera (uid 0) stays StudioDoc::camera; `StudioDoc::cameras` holds the
-// extra ones, each with its own camera keys and VMD. This file owns their outliner rows (select / rename / delete /
-// eye / "새 카메라" / "스테이지 카메라 가져오기"), the stepped active-camera switch track edits, and the small
-// viewport gizmos of the cameras that are not the one being looked through.
+// extra ones, each with its own camera keys and VMD. The main camera alone is the output and the viewport's camera view
+// (MMD compatible: a cut is a 1-frame key pair); the extra cameras feed the stage screens. This file owns their outliner
+// rows (select / rename / delete / eye / possess / "새 카메라" / "스테이지 카메라 가져오기") and the small viewport
+// gizmos of the extra cameras.
 #include "app/App.h"
 
 #include <algorithm>
@@ -22,10 +23,6 @@ namespace mmdx {
 using namespace studio;
 
 namespace {
-// The row the camera rows (and their keys) use: one camera row, one switch row.
-uint64_t CameraRow() { return MakeRowId(RowKind::Camera, 0, 0); }
-uint64_t SwitchRow() { return MakeRowId(RowKind::CameraSwitch, 0, 0); }
-
 // A stage camera's static pose as a camera key: MMD's camera looks at `target` from `position`, its distance is the
 // eye -> target length (negative: MMD's convention for an eye in front of the target along its own axis) and its
 // rotation the yaw / pitch of that direction.
@@ -50,6 +47,15 @@ CameraKf KeyFromStageCamera(const StageCamera& c) {
 // ---------------------------------------------------------------------------
 // Selection / camera list edits
 // ---------------------------------------------------------------------------
+
+void App::StudioKeyExtraCameraFromView() {
+    StudioDoc& d = *studio_;
+    if (d.selectedCameraUid == 0) return;
+    const std::vector<TrackState> before = {CaptureTrack(d, -1, RowKind::Camera, "")};
+    UpsertKey(d.SelectedCameraTrack().camera, StudioViewportCameraKey(d.Frame()));
+    d.TouchCamera(d.selectedCameraUid);
+    StudioPushTrackEdit(Tr("카메라 키"), before);
+}
 
 void App::StudioSelectCamera(uint32_t uid) {
     StudioDoc& d = *studio_;
@@ -81,8 +87,8 @@ void App::StudioAddCameraFromView() {
             break;
         }
     }
-    // the current view becomes a key at the playhead (the free camera's view, or the camera being looked through)
-    c.track.camera = {StudioViewedCamera(d.Frame())};
+    // the viewport's view becomes a key at the playhead (the free view, or the main camera while looking through it)
+    c.track.camera = {StudioViewportCameraKey(d.Frame())};
     d.cameras.push_back(std::move(c));
     const uint32_t uid = d.cameras.back().uid;
     d.history.Push(std::make_unique<CamerasCommand>(d, Tr("카메라 추가"), before, d.cameras));
@@ -132,24 +138,6 @@ void App::StudioImportStageCameras() {
     toast_ = {Tr("스테이지 카메라를 가져왔어요"), std::to_string(added) + Tr("개"), {}, false, timeSeconds_ + 3.0};
 }
 
-void App::StudioSwitchCameraAt(int frame, uint32_t uid) {
-    StudioDoc& d = *studio_;
-    if (uid != 0 && !d.FindCamera(uid)) return;
-    std::vector<CameraSwitchKey> before = d.cameraSwitch;
-    auto after = before;
-    CameraSwitchKey k;
-    k.frame = std::max(0, frame);
-    k.uid = uid;
-    auto it = std::lower_bound(after.begin(), after.end(), k.frame,
-                               [](const CameraSwitchKey& a, int f) { return a.frame < f; });
-    if (it != after.end() && it->frame == k.frame) *it = k;
-    else after.insert(it, k);
-    if (after == before) return;
-    d.history.Push(std::make_unique<CameraSwitchCommand>(d, Tr("카메라 전환"), std::move(before), std::move(after)));
-    ++d.projectVersion;
-    d.rowsKey = ~0ull;
-}
-
 // ---------------------------------------------------------------------------
 // Outliner
 // ---------------------------------------------------------------------------
@@ -184,7 +172,7 @@ void App::DrawStudioCameraOutliner() {
             studioRenameCamera_ = (int)uid;
             std::snprintf(studioRenameBuf_, sizeof(studioRenameBuf_), "%s", cam->name.c_str());
         }
-        if (cam && ImGui::IsItemClicked(ImGuiMouseButton_Right)) ImGui::OpenPopup("##cammenu");
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) ImGui::OpenPopup("##cammenu");   // the main camera too
         const bool rowHot = hovered || ImGui::IsMouseHoveringRect(a, b);
         const ImVec2 ra(a.x + Dp(8.0f), a.y + Dp(2.0f)), rb(b.x - Dp(8.0f), b.y - Dp(2.0f));
         if (selected) cdl->AddRectFilled(ra, rb, p.accentSoft, Dp(8.0f));
@@ -196,54 +184,69 @@ void App::DrawStudioCameraOutliner() {
         char sub[96];
         const size_t keys = d.CameraKeys(uid).size();
         std::string caption = cam ? cam->name : std::string(Tr("메인 카메라"));
-        if (d.cameraSwitch.empty()) {
-            std::snprintf(sub, sizeof(sub), Tr("키 %d개"), (int)keys);
+        // the main camera is the output; the extra ones are the stage screens' (say how many screens show one)
+        if (!cam) {
+            std::snprintf(sub, sizeof(sub), Tr("키 %d개 · 출력 카메라"), (int)keys);
         } else {
-            // the switch track is what the renders use: say whether this camera is the one playing now
-            std::snprintf(sub, sizeof(sub), Tr("키 %d개 · %s"), (int)keys,
-                          d.ActiveCameraUidAt(d.Frame()) == uid ? Tr("현재 화면") : Tr("전환 트랙"));
+            const std::string addr = "uid:" + std::to_string(uid);
+            int screens = 0;
+            for (const studio::StudioStage& st : d.stages)
+                for (const auto& [id, o] : st.screens) screens += o.camera && *o.camera == addr ? 1 : 0;
+            if (screens > 0) std::snprintf(sub, sizeof(sub), Tr("키 %d개 · 스크린 %d곳"), (int)keys, screens);
+            else std::snprintf(sub, sizeof(sub), Tr("키 %d개 · 스크린용"), (int)keys);
         }
         TextEllipsis(cdl, Font::Semibold, size::Small, ImVec2(tx, a.y + Dp(4.0f)), maxX, fg, caption.c_str());
         TextEllipsis(cdl, Font::Regular, size::Caption, ImVec2(tx, a.y + Dp(21.0f)), maxX, p.ink3, sub);
-        if ((rowHot || selected) && cam) {
+        // Right side: the main camera's possess button (the viewport then moves it), an extra camera's eye (the viewport
+        // overlay of its frustum); the menu button shows on hover.
+        ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(40.0f), a.y + Dp(6.0f)));
+        if (!cam) {
+            if (IconButton("##possess", icon::Crosshair,
+                           d.possessCamera ? Tr("카메라 빙의 해제  (Esc)") : Tr("카메라 빙의: 뷰포트 조작이 메인 카메라를 움직여요"),
+                           d.possessCamera, 28.0f)) {
+                StudioSelectCamera(0);
+                StudioPossess(!d.possessCamera);
+            }
+        } else if (IconButton("##vis", cam->visible ? icon::Eye : icon::EyeSlash,
+                              cam->visible ? Tr("뷰포트에서 숨기기") : Tr("뷰포트에 보이기"), false, 28.0f)) {
+            std::vector<studio::StudioCamera> before = d.cameras;
+            if (studio::StudioCamera* c = d.FindCamera(uid)) {
+                c->visible = !c->visible;
+                d.history.Push(std::make_unique<CamerasCommand>(d, Tr("카메라 표시"), before, d.cameras));
+                ++d.projectVersion;
+                d.rowsKey = ~0ull;
+            }
+        }
+        if (rowHot || selected) {
             ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(72.0f), a.y + Dp(6.0f)));
             if (IconButton("##more", icon::DotsThree, Tr("카메라 메뉴"), false, 28.0f)) ImGui::OpenPopup("##cammenu");
         }
-        if (uid == 0) {  // possess the camera (C4D): navigating the viewport then edits this camera
-            ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(40.0f), a.y + Dp(6.0f)));
-            if (IconButton("##possess", icon::Crosshair,
-                           d.possessCamera ? Tr("카메라 빙의 해제  (Esc)") : Tr("카메라 빙의: 뷰포트 조작이 이 카메라를 움직여요"),
-                           d.possessCamera, 28.0f))
-                StudioPossess(!d.possessCamera);
-        } else {
-            ImGui::SetCursorScreenPos(ImVec2(b.x - Dp(40.0f), a.y + Dp(6.0f)));
-            if (IconButton("##vis", cam->visible ? icon::Eye : icon::EyeSlash, cam->visible ? Tr("숨기기") : Tr("보이기"),
-                           false, 28.0f)) {
-                std::vector<studio::StudioCamera> before = d.cameras;
-                studio::StudioCamera* c = d.FindCamera(uid);
-                if (c) {
-                    c->visible = !c->visible;
-                    d.history.Push(std::make_unique<CamerasCommand>(d, Tr("카메라 표시"), before, d.cameras));
-                    ++d.projectVersion;
-                    d.rowsKey = ~0ull;
+        if (ImGui::BeginPopup("##cammenu")) {
+            if (!cam) {
+                if (MenuItem("##campossessm", d.possessCamera ? Tr("카메라 빙의 해제") : Tr("카메라 빙의"), icon::Crosshair)) {
+                    StudioSelectCamera(0);
+                    StudioPossess(!d.possessCamera);
+                    ImGui::CloseCurrentPopup();
                 }
+                if (MenuItem("##camkeym", Tr("현재 시점을 키로 등록"), icon::Plus)) {
+                    StudioSelectCamera(0);
+                    StudioKeyCameraFromView();
+                    ImGui::CloseCurrentPopup();
+                }
+            } else {
+                if (MenuItem("##camkeyx", Tr("현재 뷰를 키로 등록"), icon::Plus)) {
+                    StudioSelectCamera(uid);
+                    StudioKeyExtraCameraFromView();
+                    ImGui::CloseCurrentPopup();
+                }
+                Tooltip(Tr("뷰포트에 보이는 시점을 재생 헤드에 이 카메라의 키로 넣어요"));
+                if (MenuItem("##camename", Tr("이름 바꾸기"), icon::PencilSimple)) {
+                    studioRenameCamera_ = (int)uid;
+                    std::snprintf(studioRenameBuf_, sizeof(studioRenameBuf_), "%s", cam->name.c_str());
+                    ImGui::CloseCurrentPopup();
+                }
+                if (MenuItem("##camremove", Tr("카메라 삭제"), icon::Trash)) removeUid = uid, haveRemove = true;
             }
-        }
-        if (cam && ImGui::BeginPopup("##cammenu")) {
-            if (MenuItem("##camename", Tr("이름 바꾸기"), icon::PencilSimple)) {
-                studioRenameCamera_ = (int)uid;
-                std::snprintf(studioRenameBuf_, sizeof(studioRenameBuf_), "%s", cam->name.c_str());
-                ImGui::CloseCurrentPopup();
-            }
-            if (MenuItem("##camselect", Tr("이 카메라로 보기"), icon::VideoCamera)) {
-                StudioSelectCamera(uid);
-                d.useMotionCamera = d.SelectedCameraEval() != nullptr;
-                ImGui::CloseCurrentPopup();
-            }
-            ui::Gap(4.0f);
-            ImGui::Separator();
-            ui::Gap(4.0f);
-            if (MenuItem("##camremove", Tr("카메라 삭제"), icon::Trash)) removeUid = uid, haveRemove = true;
             ImGui::EndPopup();
         }
         ImGui::SetCursorScreenPos(ImVec2(a.x, b.y));
@@ -259,7 +262,7 @@ void App::DrawStudioCameraOutliner() {
         ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x + Dp(8.0f), ImGui::GetCursorScreenPos().y + Dp(2.0f)));
         if (Button("##camadd", Tr("새 카메라"), icon::Plus, ButtonKind::Ghost, ImVec2(bw / Dpi(), 30.0f)))
             StudioAddCameraFromView();
-        Tooltip(Tr("지금 보고 있는 시점을 키로 가진 카메라를 만들어요"));
+        Tooltip(Tr("무대 스크린에 띄울 카메라를 지금 뷰포트 시점으로 만들어요"));
         ImGui::SameLine(0, Dp(4.0f));
         if (Button("##camimport", Tr("스테이지 카메라"), icon::DownloadSimple, ButtonKind::Ghost, ImVec2(bw / Dpi(), 30.0f)))
             StudioImportStageCameras();
@@ -334,7 +337,7 @@ void App::DrawStudioCameraGizmos(float x0, float y0, float x1, float y1) {
     using namespace ui;
     StudioDoc& d = *studio_;
     if (d.cameras.empty()) return;
-    if (d.useMotionCamera && d.ActiveCameraEval(d.Frame())) return;   // looking through a camera: no overlay clutter
+    if (d.useMotionCamera && d.cameraEval) return;   // looking through the main camera: no overlay clutter
     const float frame = (float)(d.time * kMmdFps);
     const Palette& p = P();
     ImDrawList* dl = ImGui::GetWindowDrawList();
