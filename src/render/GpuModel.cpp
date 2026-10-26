@@ -269,6 +269,8 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         if (!compressed || i < 0 || (size_t)i >= compressed->size()) return nullptr;
         const CompressedImage& c = (*compressed)[(size_t)i];
         if (c.Empty() || c.faces != 1 || !IsMaterialBlockFormat(c.format)) return nullptr;
+        // D3D12 needs level 0 of a block-compressed texture in whole blocks: other sizes keep the RGBA8 path.
+        if ((c.width & 3) != 0 || (c.height & 3) != 0) return nullptr;
         return &c;
     };
     auto hasTexture = [&](int32_t i) {
