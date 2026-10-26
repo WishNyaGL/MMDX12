@@ -2697,6 +2697,7 @@ void App::BuildFrameView(float frame, FrameView& view) {
             stageAnchors.characters.push_back(c);
         }
         BuildSceneLighting(*stageRig, scene_->lightTrack, stageSeconds, stageAnchors, view.light);
+        ApplyHazeGains(view.light, settings_.volumetricLightGain, settings_.volumetricAmbientGain);
         // S9: a stage's environment.fog drives the haze's tint, density and height falloff while the stage is loaded; the
         // user's volumetric switch still decides whether the pass runs at all (the anisotropy is a render setting, set
         // when the scene loads).
@@ -2710,6 +2711,7 @@ void App::BuildFrameView(float frame, FrameView& view) {
     } else {
         // "스테이지 조명" without a stage rig (or a classic stage): the Studio preset, as before.
         BuildLighting(preset == LightingPreset::Stage ? LightingPreset::Studio : preset, playTime_, focus, view.light);
+        ApplyHazeGains(view.light, settings_.volumetricLightGain, settings_.volumetricAmbientGain);
     }
     // --classic: vanilla-MMD shading (plain toon key light): a hard-edged sun shadow, no rim / specular rim light
     if (classicLighting_) {

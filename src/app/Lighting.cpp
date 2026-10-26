@@ -365,5 +365,11 @@ DirectX::XMFLOAT3 ResolveSpotAim(const studio::SceneLight& l, const studio::Ligh
     return target;
 }
 
+
+void ApplyHazeGains(LightParams& light, float lightGain, float ambientGain) {
+    if (lightGain != 1.0f)
+        for (PunctualLight& p : light.punctual) p.volumetric *= std::max(lightGain, 0.0f);
+    if (ambientGain != 1.0f) light.sunVolumetric *= std::max(ambientGain, 0.0f);
+}
 } // namespace mmdx
 

@@ -1588,6 +1588,7 @@ void App::BuildStudioFrameView(FrameView& view) {
 
     LightAnchors anchors = StudioBuildLightAnchors();
     BuildSceneLighting(d.lights, d.camera.light, d.time, anchors, view.light);
+    ApplyHazeGains(view.light, settings_.volumetricLightGain, settings_.volumetricAmbientGain);
     // S7b: a gobo path that came from a stage is relative to that stage folder: resolve it for the renderer, which keys
     // its texture cache by absolute path (a studio light's own pick is already absolute).
     for (PunctualLight& p : view.light.punctual) {

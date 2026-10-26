@@ -41,7 +41,16 @@ void App::DrawScreenEffectControls(float width) {
         stageFogVolumetric_ = false;
         fx = true;
     }
-    if (volumetric) { Gap(6.0f); fx |= SliderRow("##vold", Tr("안개 밀도"), &settings_.volumetricDensity, 0.25f, 4.0f, "%.2f"); Gap(6.0f); }
+    if (volumetric) {
+        Gap(6.0f);
+        fx |= SliderRow("##vold", Tr("안개 밀도"), &settings_.volumetricDensity, 0.25f, 4.0f, "%.2f");
+        Gap(6.0f);
+        // the haze's light shares: shafts read when the spots scatter strongly and the sun / sky barely do
+        fx |= SliderRow("##volgain", Tr("빛줄기 강도"), &settings_.volumetricLightGain, 0.0f, 8.0f, "%.2f");
+        Gap(6.0f);
+        fx |= SliderRow("##volamb", Tr("환경 산란"), &settings_.volumetricAmbientGain, 0.0f, 2.0f, "%.2f");
+        Gap(6.0f);
+    }
     // DLSS Frame Generation (play scene only; the panel is only drawn in play mode).
     {
         const bool fgOk = renderer_.FrameGenAvailable();

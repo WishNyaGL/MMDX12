@@ -51,5 +51,9 @@ void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std
 DirectX::XMFLOAT3 ResolveSpotAim(const studio::SceneLight& light, const studio::LightValues& v,
                                  double songSeconds, const LightAnchors& anchors);
 
+
+// The user's haze light shares (AppSettings::volumetricLightGain / volumetricAmbientGain): every punctual light's
+// in-scattering x lightGain, the sun's (and through it the froxel grid's sky term) x ambientGain. 1 / 1 = no change.
+void ApplyHazeGains(LightParams& light, float lightGain, float ambientGain);
 } // namespace mmdx
 

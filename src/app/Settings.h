@@ -62,6 +62,11 @@ struct AppSettings {
     float dofAperture = 1.0f;        // 0.2 .. 3.0
     bool volumetric = false;
     float volumetricDensity = 1.0f;  // 0.25 .. 4.0
+    // Haze light shares (ini volumetricLightGain= / volumetricAmbientGain=): multiply every spot / point light's
+    // in-scattering ("빛줄기 강도", 0..8) and the sun + sky's ("환경 산란", 0..2). 1 / 1 = the lights' own values. Shafts read
+    // only when the sun / sky do not fill the whole medium: an arena wants a low ambient share and a high light gain.
+    float volumetricLightGain = 1.0f;
+    float volumetricAmbientGain = 1.0f;
     // S9d: the real-time volumetric mode: 0 = froxel grid (default), 1 = the per-pixel march (A/B, fallback) and the
     // multiple-scatter approximation switch (froxel injector).
     int volumetricMode = 0;
