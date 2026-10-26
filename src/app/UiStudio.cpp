@@ -858,6 +858,11 @@ void App::StudioApplyStageTargets() {
                 if (driven.count("direction")) l.v.direction = src->v.direction;
                 if (driven.count("size")) l.v.size = src->v.size;
                 if (driven.count("vmdLink")) l.vmdLink = src->vmdLink;
+                // S7b: the gobo block (the file keeps its relative form; the stage runtime / renderer resolves it)
+                if (driven.count("gobo.rotation")) l.goboRotation = src->goboRotation;
+                if (driven.count("gobo.scale")) l.goboScale = src->goboScale;
+                if (driven.count("gobo.spin")) l.goboSpin = src->goboSpin;
+                if (driven.count("gobo.focus")) l.goboFocus = src->goboFocus;
             }
             for (const StageAssignment& a : eval.targets) {
                 const StageTargetSpec spec = ResolveStageTarget(*stage.manifest, a.target);
@@ -1561,6 +1566,19 @@ void App::BuildStudioFrameView(FrameView& view) {
 
     LightAnchors anchors = StudioBuildLightAnchors();
     BuildSceneLighting(d.lights, d.camera.light, d.time, anchors, view.light);
+    // S7b: a gobo path that came from a stage is relative to that stage folder: resolve it for the renderer, which keys
+    // its texture cache by absolute path (a studio light's own pick is already absolute).
+    for (PunctualLight& p : view.light.punctual) {
+        if (p.gobo.empty()) continue;
+        const std::filesystem::path path = Utf8ToPath(p.gobo);
+        if (path.is_absolute()) continue;
+        for (const StudioStage& s : d.stages) {
+            if (!s.manifest) continue;
+            std::error_code ec;
+            const std::filesystem::path candidate = s.manifest->dir / path;
+            if (std::filesystem::is_regular_file(candidate, ec)) { p.gobo = PathToUtf8(candidate); break; }
+        }
+    }
     // S9: a stage's environment.fog is the project's medium while that stage is in the scene (the stage panel shows the
     // same values; a later stage in the list wins, as its rig would).
     for (const StudioStage& s : d.stages) {

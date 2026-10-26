@@ -11,6 +11,7 @@ Stages:
   cyclorama   curved floor-to-wall cove, 3 colour variants (cove + key / fill light colours), 7 named lights (4 spots)
   mirror_room a box room, one wall material flagged "mirror", a wood floor with PBR values
   led_stage   a raised stage with 3 screen quads (screen ids main / left / right), truss bars, 8 spots, fog
+  gobo_test   S7b: two spot gobos on a floor + a coloured one on a back wall (spinning / keyed), haze on
 """
 
 import argparse
@@ -354,7 +355,7 @@ def build_cyclorama(out_dir):
             {"name": "close", "position": [0.0, 13.0, 40.0], "target": [0.0, 11.0, -40.0], "fov": 55.0},
         ],
         "environment": {
-            "fog": {"density": 0.004, "color": [0.62, 0.65, 0.72], "anisotropy": 0.3, "heightFalloff": 0.02},
+            "fog": {"density": 0.0006, "color": [0.62, 0.65, 0.72], "anisotropy": 0.3, "heightFalloff": 0.02},
             "ambient": {"intensity": 0.18},
         },
         "groups": [
@@ -616,7 +617,7 @@ def build_led_stage(out_dir):
             {"match": "led_right", "screen": "right", "castShadow": False},
         ],
         "lights": [
-            light("sun", "key", intensity=0.35, color=(0.55, 0.60, 0.75), direction=(0.2, -1.0, 0.35)),
+            light("sun", "key", intensity=0.14, color=(0.55, 0.60, 0.75), direction=(0.2, -1.0, 0.35)),
             light("ambient", "ambient", intensity=0.08, color=(1.0, 1.0, 1.0)),
             light("point", "crowd_fill", intensity=0.5, color=(0.85, 0.90, 1.0), position=(0.0, 18.0, 120.0),
                   range_=220.0, shadow="nocast"),
@@ -903,11 +904,136 @@ PackResult PackShade(PackSurface s) {
     return stage_dir
 
 
+def build_gobo_test(out_dir):
+    """S7b fixture: spot gobos projected onto a floor and a back wall.
+
+    Two gobo images are written next to stage.json (`gobos/*.png`): a soft ring stencil for the floor spots and a
+    coloured stripe stencil for the wall spot. glTF geometry is in metres (the importer scales it by 12.5 to MMD
+    units); `lights` / `cameras` are in MMD units, as in every other stage here. One spot spins (`gobo.spin`, keyed
+    through a cue) so the pattern's motion is covered too.
+    """
+    stage_id = "gobo_test"
+    gltf = Gltf(stage_id)
+    floor = gltf.material("floor_stone", base_color=(0.62, 0.62, 0.64, 1.0), roughness=0.55, metallic=0.0)
+    wall = gltf.material("back_wall", base_color=(0.70, 0.69, 0.71, 1.0), roughness=0.75, metallic=0.0)
+    truss = gltf.material("truss_metal", base_color=(0.55, 0.56, 0.58, 1.0), roughness=0.35, metallic=1.0)
+
+    # metres: a 12 x 9 m room with a 5 m back wall (150 x 112 MMD units, the character ~1.6 m = 20 units)
+    w, d, h = 12.0, 9.0, 5.0
+    z_back = -d / 2
+    # corner order picks the normal: +y for the floor (z edge first), +z for the wall (audience side)
+    gltf.add(grid_part("Floor", floor, ((-w / 2, 0.0, -d / 2), (-w / 2, 0.0, d / 2), (w / 2, 0.0, -d / 2)), 6, 5,
+                       uv_scale=(6.0, 5.0)))
+    gltf.add(grid_part("Wall", wall, ((-w / 2, 0.0, z_back), (w / 2, 0.0, z_back), (-w / 2, h, z_back)), 6, 3,
+                       uv_scale=(6.0, 3.0)))
+    for part in box_parts("Truss", truss, (0.0, h + 0.2, z_back + 1.0), (w, 0.2, 0.2)):
+        gltf.add(part)
+
+    stage_dir = os.path.join(out_dir, stage_id)
+    os.makedirs(stage_dir, exist_ok=True)
+    with open(os.path.join(stage_dir, stage_id + ".glb"), "wb") as f:
+        f.write(gltf.build())
+
+    # ---- the gobo images: a soft ring (floor) and coloured stripes (wall) -------------------------------------------
+    def ring(x, y, size=128):
+        """Concentric bands filling the whole stencil: uv radius 1 is the cone's edge (gobo.hlsli GoboUv)."""
+        cx = cy = (size - 1) / 2.0
+        r = math.sqrt((x - cx) ** 2 + (y - cy) ** 2) / (size * 0.5)
+        ringIndex = int(r / 0.2)
+        v = 235 if ringIndex % 2 == 0 else 25
+        if r < 0.09:
+            v = 235   # a solid centre dot
+        return (v, v, v)
+
+    def stripes(x, y, size=128):
+        # vertical bars in the red / blue channels, green darker: a coloured gobo tints the spot
+        on = ((x * 8) // size) % 2 == 0
+        return ((230 if on else 20), (90 if on else 10), (200 if on else 40))
+
+    write_png(os.path.join(stage_dir, "gobos", "ring.png"), 128, 128, ring)
+    write_png(os.path.join(stage_dir, "gobos", "stripes.png"), 128, 128, stripes)
+
+    lights = [
+        light("sun", "key", intensity=0.14, color=(0.55, 0.60, 0.75), direction=(0.2, -1.0, 0.35)),
+        light("ambient", "ambient", intensity=0.04, color=(1.0, 1.0, 1.0)),
+        # floor spots: the ring stencil straight down from the truss, one of them spinning (MMD units)
+        light("spot", "floor_ring_a", intensity=40.0, color=(1.0, 0.96, 0.90), position=(-38.0, 105.0, 30.0),
+              aim=(-38.0, 0.0, 30.0), cone=(0.26, 0.16), range_=320.0),
+        light("spot", "floor_ring_b", intensity=40.0, color=(0.85, 0.92, 1.0), position=(38.0, 105.0, 30.0),
+              aim=(38.0, 0.0, 30.0), cone=(0.26, 0.16), range_=320.0),
+        # wall spot: the coloured stripe stencil across the back wall
+        light("spot", "wall_stripes", intensity=14.0, color=(0.95, 0.95, 1.0), position=(0.0, 62.0, 20.0),
+              aim=(0.0, 42.0, z_back * 12.5), cone=(0.34, 0.20), range_=320.0),
+    ]
+    # The ring is rotation-invariant, so the spinning / coloured one is the striped stencil (its rotation is visible):
+    # floor_ring_a = the still ring, floor_ring_b = the coloured stripes spinning + slightly out of focus, wall_stripes =
+    # the same stencil rotated 90 degrees across the back wall.
+    lights[2]["gobo"] = {"file": "gobos/ring.png", "rotation": 0.0, "scale": 1.0, "spin": 0.0, "focus": 1.0}
+    lights[3]["gobo"] = {"file": "gobos/stripes.png", "rotation": 20.0, "scale": 1.2, "spin": 45.0, "focus": 0.8}
+    lights[4]["gobo"] = {"file": "gobos/stripes.png", "rotation": 90.0, "scale": 1.4, "spin": 0.0, "focus": 1.0}
+
+    manifest = {
+        "format": "mmdx-stage",
+        "formatVersion": 1,
+        "id": stage_id,
+        "version": "1.0.0",
+        "name": {"ko": "고보 테스트 스테이지", "en": "Gobo test stage", "ja": "ゴボテストステージ"},
+        "description": {"ko": "스팟 고보(투영 텍스처) 테스트: 바닥의 링과 회전하는 색 줄무늬, 벽의 돌아간 줄무늬, 안개 켜짐.",
+                        "en": "Spot gobo test: a ring and spinning coloured stripes on the floor, the stripes rotated on the wall."},
+        "authors": [{"name": "MMDX stagegen", "role": "procedural"}],
+        "license": "CC0-1.0",
+        "tags": ["gobo", "spot", "test"],
+        "models": [{"file": stage_id + ".glb", "name": "Room", "role": "floor"}],
+        "materials": [
+            {"match": "floor_stone", "baseColor": [0.62, 0.62, 0.64, 1.0], "roughness": 0.55},
+            {"match": "back_wall", "baseColor": [0.70, 0.69, 0.71, 1.0], "roughness": 0.75},
+            {"match": "truss_metal", "metallic": 1.0, "roughness": 0.35},
+        ],
+        "lights": lights,
+        "sockets": [
+            {"name": "world", "position": [0.0, 40.0, -160.0]},
+            {"name": "stage_center", "position": [0.0, 25.0, 0.0]},
+        ],
+        "cameras": [
+            {"name": "wide", "position": [0.0, 75.0, 210.0], "target": [0.0, 40.0, -30.0], "fov": 42.0},
+            {"name": "floor", "position": [0.0, 55.0, 95.0], "target": [0.0, 5.0, -10.0], "fov": 50.0},
+        ],
+        "environment": {
+            "fog": {"density": 0.0012, "color": [0.55, 0.60, 0.72], "anisotropy": 0.5, "heightFalloff": 0.008},
+            "ambient": {"intensity": 0.03, "skyZenith": [0.03, 0.04, 0.08], "ground": [0.05, 0.05, 0.06]},
+        },
+        "groups": [{"id": "gobos", "label": {"ko": "고보", "en": "Gobos"}}],
+        "params": [
+            {"key": "goboSpin", "type": "float", "label": {"ko": "고보 회전 속도", "en": "Gobo spin"},
+             "group": "gobos", "default": 45.0, "min": -180.0, "max": 180.0},
+            {"key": "goboFocus", "type": "float", "label": {"ko": "고보 초점", "en": "Gobo focus"},
+             "group": "gobos", "default": 1.0, "min": 0.0, "max": 1.0},
+        ],
+        "variants": [
+            {"id": "default", "label": {"ko": "기본", "en": "Default"},
+             "values": {"goboSpin": 45.0, "goboFocus": 1.0}},
+        ],
+        "defaultVariant": "default",
+        "bindings": [
+            {"param": "goboSpin", "target": "lights.floor_ring_b.gobo.spin"},
+            {"param": "goboFocus", "target": "lights.floor_ring_b.gobo.focus"},
+        ],
+        "cues": [
+            {"param": "goboSpin", "keys": [{"frame": 0, "value": 0.0}, {"frame": 300, "value": 90.0},
+                                           {"frame": 600, "value": 0.0}]},
+        ],
+    }
+    with open(os.path.join(stage_dir, "stage.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return stage_dir
+
+
 STAGES = {
     "cyclorama": build_cyclorama,
     "mirror_room": build_mirror_room,
     "led_stage": build_led_stage,
     "pack_test": build_pack_test,
+    "gobo_test": build_gobo_test,
 }
 
 

@@ -69,6 +69,11 @@ bool ApplyStageLightField(studio::SceneLight& l, const std::string& field, const
     if (field == "direction") { l.v.direction = vec; return true; }
     if (field == "size") { l.v.size = {v.x, v.y}; return true; }
     if (field == "vmdLink") { l.vmdLink = v.AsNumber() > 0.5f; return true; }
+    // S7b: the spot gobo's animatable values (the file itself is not bound)
+    if (field == "gobo.rotation") { l.goboRotation = v.AsNumber(); return true; }
+    if (field == "gobo.scale") { l.goboScale = v.AsNumber(); return true; }
+    if (field == "gobo.spin") { l.goboSpin = v.AsNumber(); return true; }
+    if (field == "gobo.focus") { l.goboFocus = std::clamp(v.AsNumber(), 0.0f, 1.0f); return true; }
     return false;
 }
 
@@ -153,6 +158,14 @@ const std::vector<studio::SceneLight>& StageRuntime::Apply(double timeSeconds, u
     } else {
         lights_.clear();
     }
+    // S7b: resolve each gobo file once against the stage folder: the renderer keys its texture cache by path, and a
+    // manifest light's path is relative to the stage (docs/stage_format.md "lights"). An absolute path (a studio light
+    // replayed into a stage rig) is kept as it is.
+    for (studio::SceneLight& l : lights_)
+        if (!l.gobo.empty()) {
+            const std::filesystem::path p = Utf8ToPath(l.gobo);
+            if (!p.is_absolute()) l.gobo = PathToUtf8(manifest_->dir / p);
+        }
     // S9: environment.fogVolumes become FogVolume lights of the rig (static: they are placement, not cues). They are
     // appended after the manifest's lights so a light index binding keeps its meaning.
     for (size_t i = 0; i < manifest_->environment.fogVolumes.size(); ++i)

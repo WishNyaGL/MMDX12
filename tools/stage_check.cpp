@@ -166,6 +166,20 @@ void CheckFiles(const StageManifest& m) {
         if (!fs::is_regular_file(m.dir / mmdx::Utf8ToPath(p.folder) / L"pack.json", ec))
             Problem("packs: " + p.folder + ": no pack.json");
     }
+    // S7b: a light's gobo must be a bundled image (png / jpg; the renderer decodes anything, the format rule keeps a
+    // stage's assets reviewable).
+    for (const auto& l : m.lights) {
+        if (l.gobo.empty()) continue;
+        const fs::path file = m.dir / mmdx::Utf8ToPath(l.gobo);
+        std::error_code ec;
+        if (!fs::is_regular_file(file, ec)) {
+            Problem("lights: " + l.name + ": missing gobo file " + l.gobo);
+            continue;
+        }
+        const std::string ext = mmdx::ToLowerAscii(mmdx::PathToUtf8(file.extension()));
+        if (ext != ".png" && ext != ".jpg" && ext != ".jpeg")
+            Problem("lights: " + l.name + ": gobo file must be a .png / .jpg image (" + l.gobo + ")");
+    }
     // budget: every file under the folder, grouped by extension
     std::map<std::string, std::pair<uint64_t, uint32_t>> byExt;   // ext -> (bytes, count)
     uint64_t total = 0;
@@ -296,6 +310,33 @@ int SelfTest() {
     auto r5 = mmdx::EvaluateStage(m, "nosuchvariant", bad, 0.0);
     check(r5.warnings.size() == 2, "unknown override + unknown variant warn", std::to_string(r5.warnings.size()));
     check(r5.params.at("coveColor").x == 0.5f, "an unknown variant falls back to the defaults");
+
+    // S7b: a gobo target nests one level ("lights.<name>.gobo.<field>"): owner plus field split at the last dot
+    {
+        const std::string goboJson = R"({
+          "format": "mmdx-stage", "formatVersion": 1, "id": "gobotest", "version": "1", "name": "Gobo test",
+          "models": [{"file": "x.glb"}],
+          "lights": [{"kind": "spot", "name": "ring",
+                      "values": {"position": [0, 100, 0], "aim": [0, 0, 0]},
+                      "gobo": {"file": "g/ring.png", "rotation": 10, "scale": 1.5, "spin": 30, "focus": 0.5}}],
+          "params": [{"key": "spin", "type": "float", "default": 45.0, "min": 0.0, "max": 180.0}],
+          "bindings": [{"param": "spin", "target": "lights.ring.gobo.spin"}]
+        })";
+        StageManifest gm;
+        check(mmdx::ParseStageManifest(goboJson, fs::path("gobotest"), gm, error), "gobo manifest parses", error);
+        check(mmdx::ValidateStageManifest(gm).empty(), "gobo manifest validates",
+              mmdx::ValidateStageManifest(gm).empty() ? "" : mmdx::ValidateStageManifest(gm).front());
+        check(gm.lights.size() == 1 && gm.lights[0].gobo == "g/ring.png" && gm.lights[0].goboSpin == 30.0f &&
+                  gm.lights[0].goboFocus == 0.5f,
+              "gobo block parsed");
+        const mmdx::StageTargetSpec gs = mmdx::ResolveStageTarget(gm, "lights.ring.gobo.spin");
+        check(gs.ok && gs.owner == "ring" && gs.field == "gobo.spin" && gs.type == mmdx::StageTargetSpec::ValueType::Float,
+              "gobo target splits owner / field");
+        check(!mmdx::ResolveStageTarget(gm, "lights.ring.gobo.nope").ok, "unknown gobo field rejected");
+        const auto gr = mmdx::EvaluateStage(gm, "", {}, 0.0);
+        const auto* spin = findTarget(gr, "lights.ring.gobo.spin");
+        check(spin && std::abs(spin->value.x - 45.0f) < 1e-4f, "gobo spin binding assignment");
+    }
 
     // enum -> screen source (string target)
     const std::string enumJson = R"({

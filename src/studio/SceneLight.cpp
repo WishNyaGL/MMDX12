@@ -121,6 +121,8 @@ bool SceneLight::operator==(const SceneLight& o) const {
            vmdLink == o.vmdLink && rimStrength == o.rimStrength && Same(rimColor, o.rimColor) &&
            aimMode == o.aimMode && targetUid == o.targetUid && targetPart == o.targetPart && swayPhase == o.swayPhase &&
            volumetricG == o.volumetricG && fogShape == o.fogShape && fogEdge == o.fogEdge &&
+           gobo == o.gobo && goboRotation == o.goboRotation && goboScale == o.goboScale && goboSpin == o.goboSpin &&
+           goboFocus == o.goboFocus &&
            Same(skyZenith, o.skyZenith) && Same(skyHorizon, o.skyHorizon) && Same(groundColor, o.groundColor) &&
            shadow == o.shadow && shadowSoftness == o.shadowSoftness && shadowDensity == o.shadowDensity &&
            Same(shadowColor, o.shadowColor) && falloff == o.falloff && affectDiffuse == o.affectDiffuse &&

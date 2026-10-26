@@ -149,8 +149,23 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     // S10: the mirror pass's clip plane (world space, front side positive: the lit PS discards fragments behind it);
     // (0,0,0,0) = off, which every other view / pass keeps.
     DirectX::XMFLOAT4 clipPlane;
+    // S7b: the frame's spot gobo table (Renderer::FillGoboTable / OfflineRenderer::FillGoboTable), one float4 per
+    // punctual light in a raw buffer reached through the bindless buffer table (shaders/gobo.hlsli): x = SrvHeap index
+    // of the gobo texture (-1 = this light has no gobo), y = rotation radians including spin x time, z = scale,
+    // w = mip bias from the focus (0 = sharp). x = SrvHeap index of the raw ByteAddressBuffer holding that table,
+    // negative = no light of the frame has a gobo: the old image, zero cost.
+    DirectX::XMFLOAT4 goboParams;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
+
+// S7b: one float4 per punctual light in the frame's gobo table (see SceneConstants::goboParams / shaders/gobo.hlsli).
+struct GpuGobo {
+    float srv;        // SrvHeap index of the gobo texture, -1 = no gobo on this light
+    float rotation;   // radians (authored rotation + spin x song seconds)
+    float scale;      // uv scale (1 = the texture fills the cone's inscribed square)
+    float mipBias;    // focus: 0 = sharp, > 0 = a blurred (higher) mip
+};
+static_assert(sizeof(GpuGobo) == 16, "GpuGobo layout");
 
 // Shader-pack alpha key (pack.json class rule "alphaKey", 0..1; 0 = off). PackClass stays in bits 0..7 of
 // MaterialConstants::packClass, the key lives in bits 8..15 as round(key * 255). The HLSL side (mmd.hlsl,

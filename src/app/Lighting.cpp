@@ -230,6 +230,12 @@ void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std
                 p.direction = {0.0f, -1.0f, 0.0f};
             p.spotCosOuter = std::cos(std::clamp(v.coneOuter, 0.02f, 1.5f));
             p.spotCosInner = std::cos(std::clamp(v.coneInner, 0.01f, std::max(v.coneOuter, 0.01f)));
+            // S7b: the gobo (only a spot has a cone to project it through)
+            p.gobo = l.gobo;
+            p.goboRotation = l.goboRotation;
+            p.goboScale = l.goboScale;
+            p.goboSpin = l.goboSpin;
+            p.goboFocus = l.goboFocus;
         } else if (l.kind == LightKind::Area) {
             p.castPointShadow = (l.shadow != studio::ShadowType::NoCast);
             p.areaSize = v.size;

@@ -248,6 +248,15 @@ struct PunctualLight {
     // Henyey-Greenstein anisotropy of this light's in-scattering (-0.9..0.95; -1 = the fog's own).
     float volumetric = 1.0f;
     float volumetricG = -1.0f;
+    // S7b: a spot's gobo (a stencil projected through the cone). `gobo` is the texture file (absolute: the stage
+    // runtime resolves a manifest's relative path before the renderer sees it); empty = no gobo. The value fields are
+    // the authored rotation (degrees), uv scale, spin (degrees per second, added with the song time) and focus
+    // (0..1: 1 = sharp, below = blurred). Only a spot uses them (a point light has no cone to project through).
+    std::string gobo;
+    float goboRotation = 0.0f;
+    float goboScale = 1.0f;
+    float goboSpin = 0.0f;
+    float goboFocus = 1.0f;
 };
 
 // S9: a local participating-medium volume (studio LightKind::FogVolume). Its density adds to the global height fog

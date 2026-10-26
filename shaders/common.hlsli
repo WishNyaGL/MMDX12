@@ -83,6 +83,10 @@ cbuffer SceneCB : register(b0) {
     float4 gMirrorParams;
     // S10: the mirror pass's clip plane (world space, front side positive; 0 = off). Only the mirror pass sets it.
     float4 gClipPlane;
+    // S7b: the frame's spot gobo table (ShaderInterop.h goboParams / shaders/gobo.hlsli): x = SrvHeap index of the raw
+    // ByteAddressBuffer holding one GpuGobo per punctual light (negative = no gobo in the frame: no fetch, the old
+    // image). A light's entry is (gobo texture SrvHeap index or -1, rotation radians, uv scale, focus mip bias).
+    float4 gGoboParams;
 };
 
 static const float PI = 3.14159265;

@@ -102,6 +102,15 @@ nlohmann::json SceneLightToJson(const SceneLight& l) {
         j["fogShape"] = FogShapeName(l.fogShape);
         j["fogEdge"] = l.fogEdge;
     }
+    // S7b: the spot gobo. Absent = none (an older file keeps no gobo). `file` is whatever the light carries: a stage
+    // light's relative to the stage, a studio light's absolute.
+    if (!l.gobo.empty()) {
+        j["gobo"] = {{"file", l.gobo},
+                     {"rotation", l.goboRotation},
+                     {"scale", l.goboScale},
+                     {"spin", l.goboSpin},
+                     {"focus", l.goboFocus}};
+    }
     j["affectDiffuse"] = l.affectDiffuse;
     j["affectSpecular"] = l.affectSpecular;
     j["viewportVisible"] = l.viewportVisible;
@@ -151,6 +160,14 @@ bool SceneLightFromJson(const nlohmann::json& jl, SceneLight& l, std::vector<std
     l.volumetricG = (float)ReadDouble(jl, "volumetricG", l.volumetricG);
     ParseFogShape(ReadString(jl, "fogShape", ""), l.fogShape);
     l.fogEdge = (float)ReadDouble(jl, "fogEdge", l.fogEdge);
+    // S7b: the spot gobo block (absent = no gobo).
+    if (const nlohmann::json* g = ObjectAt(jl, "gobo")) {
+        l.gobo = ReadString(*g, "file", l.gobo);
+        l.goboRotation = (float)ReadDouble(*g, "rotation", l.goboRotation);
+        l.goboScale = (float)ReadDouble(*g, "scale", l.goboScale);
+        l.goboSpin = (float)ReadDouble(*g, "spin", l.goboSpin);
+        l.goboFocus = (float)ReadDouble(*g, "focus", l.goboFocus);
+    }
     l.affectDiffuse = ReadBool(jl, "affectDiffuse", l.affectDiffuse);
     l.affectSpecular = ReadBool(jl, "affectSpecular", l.affectSpecular);
     l.viewportVisible = ReadBool(jl, "viewportVisible", l.viewportVisible);

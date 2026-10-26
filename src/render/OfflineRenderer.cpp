@@ -31,6 +31,8 @@ constexpr uint32_t kLightBytes = Renderer::kMaxPunctualLights * sizeof(GpuLight)
 constexpr uint32_t kFogBytes = Renderer::kMaxFogVolumes * sizeof(GpuFogVolume);
 constexpr uint32_t kMediumBytes = sizeof(GpuMedium);   // S9c: one element, the frame's in-path medium
 constexpr uint32_t kLightCdfBytes = kLightCdfMax * sizeof(float);   // S7a: the image's light pick CDF (one slot)
+// S7b: the image's gobo table (one GpuGobo per punctual light, read through the bindless buffer table)
+constexpr uint32_t kGoboBytes = Renderer::kMaxPunctualLights * sizeof(GpuGobo);
 constexpr uint32_t kEdgeIterations = 64;   // outline layers averaged for DoF / motion blur
 constexpr float kConvolutionBloomGain = 6.0f;        // as the real-time convolution bloom output
 constexpr float kConvolutionBloomIntensity = 0.12f;  // CSFinalize multiplier of the convolved bloom  // outline layers averaged for motion blur / depth of field
@@ -177,6 +179,10 @@ struct OfflineRenderer::Impl {
     uint8_t* mediumMapped = nullptr;
     uint8_t* lightCdfMapped = nullptr;
     uint32_t lightCdfSrv = DescriptorHeap::kInvalid;   // S7a: raw ByteAddressBuffer SRV (bindless buffer table)
+    // S7b: the image's gobo table (one GpuGobo per punctual light, raw SRV in the bindless buffer table)
+    ComPtr<ID3D12Resource> goboBuf;
+    uint8_t* goboMapped = nullptr;
+    uint32_t goboSrv = DescriptorHeap::kInvalid;
     // S8a: the image's emissive-triangle pick table (triangle list / CDF / per-geometry base, raw SRVs)
     ComPtr<ID3D12Resource> emissiveTriBuf, emissiveCdfBuf, emissiveBaseBuf;
     uint8_t* emissiveTriMapped = nullptr;
@@ -1331,6 +1337,21 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
         device->CreateShaderResourceView(m.lightCdfBuf.Get(), &srv, ctx.SrvHeap().Cpu(m.lightCdfSrv));
     }
 
+    // S7b: the image's gobo table (one GpuGobo per punctual light, raw SRV in the bindless buffer table)
+    m.goboBuf = CreateMappedUpload(device, kGoboBytes, &m.goboMapped, L"offline.gobos");
+    if (!m.goboBuf) return false;
+    m.goboSrv = ctx.SrvHeap().Allocate(1);
+    if (m.goboSrv == DescriptorHeap::kInvalid) return false;
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;   // raw ByteAddressBuffer (the shaders' bindless buffer table)
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.NumElements = kGoboBytes / sizeof(uint32_t);
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        device->CreateShaderResourceView(m.goboBuf.Get(), &srv, ctx.SrvHeap().Cpu(m.goboSrv));
+    }
+
     // S8a: the image's emissive-triangle pick table (kEmissiveTriMax entries, read through the bindless buffer table)
     m.emissiveTriBuf = CreateMappedUpload(device, kEmissiveTriBytes, &m.emissiveTriMapped, L"offline.emissivetris");
     m.emissiveCdfBuf = CreateMappedUpload(device, kEmissiveCdfBytes, (uint8_t**)&m.emissiveCdfMapped,
@@ -1411,6 +1432,10 @@ void OfflineRenderer::Shutdown() {
     if (m.lightCdfBuf && m.lightCdfMapped) m.lightCdfBuf->Unmap(0, nullptr);
     if (m.lightCdfSrv != DescriptorHeap::kInvalid) ctx.SrvHeap().Free(m.lightCdfSrv, 1);
     m.lightCdfSrv = DescriptorHeap::kInvalid;
+    // S7b: the gobo table
+    if (m.goboBuf && m.goboMapped) m.goboBuf->Unmap(0, nullptr);
+    if (m.goboSrv != DescriptorHeap::kInvalid) ctx.SrvHeap().Free(m.goboSrv, 1);
+    m.goboSrv = DescriptorHeap::kInvalid;
     // S8a: the emissive-triangle pick table
     if (m.emissiveTriBuf && m.emissiveTriMapped) m.emissiveTriBuf->Unmap(0, nullptr);
     if (m.emissiveCdfBuf && m.emissiveCdfMapped) m.emissiveCdfBuf->Unmap(0, nullptr);
@@ -1427,11 +1452,13 @@ void OfflineRenderer::Shutdown() {
     m.emissiveBaseBuf.Reset();
     m.sceneCbMapped = m.lightMapped = m.fogMapped = m.mediumMapped = nullptr;
     m.lightCdfMapped = nullptr;
+    m.goboMapped = nullptr;
     m.sceneCb.Reset();
     m.lightBuf.Reset();
     m.fogBuf.Reset();
     m.mediumBuf.Reset();
     m.lightCdfBuf.Reset();
+    m.goboBuf.Reset();
     m.counterReadback.Reset();
     m.timestampReadback.Reset();
     m.timestampHeap.Reset();
@@ -1458,7 +1485,7 @@ void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors
                             const SceneConstants& sc, const GpuLight* lights, uint32_t lightCount,
                             const float* lightCdf, uint32_t lightCdfCount, const GpuFogVolume* fogVolumes,
                             uint32_t fogVolumeCount, const OfflineJobDesc& job, uint64_t frame,
-                            const EmissiveTable& emissive, MmeRuntime* mme, MmeSkin* mmeSkin) {
+                            const EmissiveTable& emissive, MmeRuntime* mme, MmeSkin* mmeSkin, const GpuGobo* gobos) {
     if (!impl_) return;
     Impl& m = *impl_;
 
@@ -1508,6 +1535,13 @@ void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors
     memset(m.lightCdfMapped, 0, kLightCdfBytes);
     if (lightCdf && lightCdfCount)
         memcpy(m.lightCdfMapped, lightCdf, (size_t)std::min(lightCdfCount, kLightCdfMax) * sizeof(float));
+    // S7b: the image's gobo table (zeroed = no light has a gobo: SrvHeap index -1, rotation 0, scale 1, no mip bias)
+    for (uint32_t i = 0; i < Renderer::kMaxPunctualLights; ++i) {
+        GpuGobo g{-1.0f, 0.0f, 1.0f, 0.0f};
+        memcpy(m.goboMapped + (size_t)i * sizeof(GpuGobo), &g, sizeof(g));
+    }
+    if (gobos)
+        memcpy(m.goboMapped, gobos, (size_t)Renderer::kMaxPunctualLights * sizeof(GpuGobo));
     // S8a: the image's emissive-triangle pick table (zeroed past the count; the base table reads 0xFFFFFFFF where no
     // geometry emits, so a stale range can never be sampled)
     memset(m.emissiveTriMapped, 0, kEmissiveTriBytes);
@@ -1619,6 +1653,9 @@ void OfflineRenderer::Cancel() { progress_ = {}; }
 uint32_t OfflineRenderer::LightCdfSrv() const {
     return impl_ ? impl_->lightCdfSrv : DescriptorHeap::kInvalid;
 }
+
+// S7b: the raw gobo table buffer SRV the GI shaders index through the bindless buffer table.
+uint32_t OfflineRenderer::GoboSrv() const { return impl_ ? impl_->goboSrv : DescriptorHeap::kInvalid; }
 
 // S8a: the emissive-triangle pick table SRVs the GI shaders index through the bindless buffer table.
 OfflineRenderer::EmissiveSrvs OfflineRenderer::EmissiveSrv() const {

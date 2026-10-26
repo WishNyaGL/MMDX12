@@ -97,6 +97,17 @@ struct SceneLight {
     FogShape fogShape = FogShape::Box;
     float fogEdge = 0.35f;
 
+    // S7b: a spot's gobo (a stencil projected through the cone, docs/stage_format.md "lights"). `gobo` is the texture
+    // file: a stage light's path is relative to the stage folder (the stage runtime resolves it to an absolute path in
+    // the rig it hands the renderer); a studio light's is absolute (what the file picker gives). Empty = no gobo.
+    // These are base values like the shadow properties: a stage binding (`lights.<name>.gobo.rotation` ...) drives them
+    // and the inspector shows them read-only while a stage owns the field.
+    std::string gobo;
+    float goboRotation = 0.0f;        // degrees, in the cone's own frame
+    float goboScale = 1.0f;           // uv scale (1 = the texture fills the cone's inscribed square)
+    float goboSpin = 0.0f;            // degrees per second (added to the rotation with the song time)
+    float goboFocus = 1.0f;           // 0..1: 1 = sharp, below = blurred (a higher mip)
+
     // Ambient: the environment. The hemisphere strength is v.intensity.
     DirectX::XMFLOAT3 skyZenith{0.32f, 0.55f, 0.85f};
     DirectX::XMFLOAT3 skyHorizon{0.78f, 0.86f, 0.92f};

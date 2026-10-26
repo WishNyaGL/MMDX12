@@ -18,6 +18,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "studio/SceneLight.h"
+#include "studio/FileDialog.h"
 #include "studio/StudioDoc.h"
 
 namespace mmdx {
@@ -790,6 +791,60 @@ void App::DrawStudioLightInspector(float w) {
                 innerDeg = std::clamp(innerDeg, 0.5f, curOut);
                 v.coneInner = DirectX::XMConvertToRadians(innerDeg);
             }, "coneInner");
+
+        // S7b: the gobo (a stencil projected through the cone). The base values are bound fields of a stage light, so
+        // they are read-only while a stage owns them, exactly like the shadow properties.
+        ImGui::Dummy(ImVec2(w, Dp(6.0f)));
+        SectionLabel(Tr("고보"));
+        {
+            const std::string shown = light->gobo.empty() ? std::string(Tr("(없음)"))
+                                                          : PathToUtf8(std::filesystem::path(light->gobo).filename());
+            if (Button("##gobofile", shown.c_str(), icon::FolderOpen, ButtonKind::Secondary, ImVec2(w / Dpi(), 30.0f))) {
+                const std::vector<studio::FileFilter> filters = {{L"이미지", L"*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.gif"}};
+                const std::filesystem::path picked = studio::OpenFileDialog(GetActiveWindow(), filters);
+                if (!picked.empty()) {
+                    std::vector<SceneLight> before = d.lights;
+                    std::vector<SceneLight> after = before;
+                    for (SceneLight& l : after) {
+                        if (l.uid == light->uid) { l.gobo = PathToUtf8(picked); break; }
+                    }
+                    d.history.Push(std::make_unique<LightsCommand>(d, Tr("조명 편집"), before, after));
+                    ++d.projectVersion;
+                }
+            }
+            if (!light->gobo.empty()) {
+                if (Button("##goboclear", Tr("고보 지우기"), nullptr, ButtonKind::Ghost, ImVec2(w / Dpi(), 26.0f))) {
+                    std::vector<SceneLight> before = d.lights;
+                    std::vector<SceneLight> after = before;
+                    for (SceneLight& l : after) {
+                        if (l.uid == light->uid) { l.gobo.clear(); break; }
+                    }
+                    d.history.Push(std::make_unique<LightsCommand>(d, Tr("조명 편집"), before, after));
+                    ++d.projectVersion;
+                }
+            }
+        }
+        if (!light->gobo.empty()) {
+            float rot = light->goboRotation;
+            basePropEdit(Tr("회전"),
+                [&] { return ImGui::DragFloat("##goborot", &rot, 1.0f, -360.0f, 360.0f, "%.0f°"); },
+                [&](SceneLight& l) { l.goboRotation = rot; }, "gobo.rotation");
+
+            float scale = light->goboScale;
+            basePropEdit(Tr("크기"),
+                [&] { return ImGui::DragFloat("##goboscale", &scale, 0.01f, 0.05f, 20.0f, "%.2f"); },
+                [&](SceneLight& l) { l.goboScale = std::max(0.05f, scale); }, "gobo.scale");
+
+            float spin = light->goboSpin;
+            basePropEdit(Tr("회전 속도"),
+                [&] { return ImGui::DragFloat("##gobospin", &spin, 1.0f, -360.0f, 360.0f, "%.0f°/s"); },
+                [&](SceneLight& l) { l.goboSpin = spin; }, "gobo.spin");
+
+            float focus = light->goboFocus;
+            basePropEdit(Tr("초점"),
+                [&] { return ImGui::SliderFloat("##gobofocus", &focus, 0.0f, 1.0f, "%.2f"); },
+                [&](SceneLight& l) { l.goboFocus = std::clamp(focus, 0.0f, 1.0f); }, "gobo.focus");
+        }
 
     } else if (light->kind == LightKind::Area) {
         float pos[3] = {cur.position.x, cur.position.y, cur.position.z};

@@ -607,6 +607,12 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                     else if (f == "diffuse" || f == "affectdiffuse") light->affectDiffuse = (args[2] == "1" || args[2] == "true" || args[2] == "on");
                     else if (f == "specular" || f == "affectspecular") light->affectSpecular = (args[2] == "1" || args[2] == "true" || args[2] == "on");
                     else if (f == "visible" || f == "viewportvisible") light->viewportVisible = (args[2] == "1" || args[2] == "true" || args[2] == "on");
+                    // S7b: the spot gobo (file + its four values)
+                    else if (f == "gobo") light->gobo = args[2];
+                    else if (f == "goborotation") light->goboRotation = num(2);
+                    else if (f == "goboscale") light->goboScale = std::max(0.01f, num(2));
+                    else if (f == "gobospin") light->goboSpin = num(2);
+                    else if (f == "gobofocus") light->goboFocus = std::clamp(num(2), 0.0f, 1.0f);
 
                     studioLightChanged_ = true;
                     studio_->rowsKey = ~0ull;

@@ -54,6 +54,16 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     const uint32_t cdfCount = FillLightCdf(view.light, lightCdf.data(), (uint32_t)lightCdf.size());
     // negative when the offline renderer has no CDF buffer (the shaders then keep the uniform pick)
     sc.lightCdfParams = {(float)(int32_t)offline_->LightCdfSrv(), (float)cdfCount, 0.0f, 0.0f};
+    // S7b: the image's spot gobos (the offline renderer uploads its own table through the bindless buffer table)
+    std::vector<GpuGobo> gobos(kMaxPunctualLights);
+    const bool goboAny = FillGoboTable(*ctx_, view.light, gobos.data(), view.sceneTime);
+    sc.goboParams = {goboAny ? (float)(int32_t)offline_->GoboSrv() : -1.0f, 0.0f, 0.0f, 0.0f};
+    // S7b: a camera screen feed rendered inside this image draws with the raster slot's constants (RenderScreenFeed
+    // copies the frame slot's light / gobo table), so that slot holds the same table
+    goboActive_ = goboAny;
+    if (goboAny)
+        memcpy(goboBufMapped_ + (size_t)ctx_->FrameSlot() * kMaxPunctualLights * sizeof(GpuGobo), gobos.data(),
+               kMaxPunctualLights * sizeof(GpuGobo));
     // S7c: the offline renderer's shaders are the path tracer / GI (light CDF sampling); no light clusters
     sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};
     // S9: the frame's local fog volumes (GpuFogVolume, zeroed past the count)
@@ -88,7 +98,8 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     OfflineJobDesc jobWithMme = job;
     if (jobWithMme.mmeEffects.empty()) jobWithMme.mmeEffects = settings_.mmeEffects;
     offline_->Begin(cmd, transient_, &builtin_, *rt_, view, sc, lights.data(), count, lightCdf.data(), cdfCount,
-                    fogVolumes, fogCount, jobWithMme, ctx_->FrameNumber(), emissiveUpload, mme_.get(), mmeSkin_.get());
+                    fogVolumes, fogCount, jobWithMme, ctx_->FrameNumber(), emissiveUpload, mme_.get(), mmeSkin_.get(),
+                    goboAny ? gobos.data() : nullptr);
     float area[4];
     ViewportArea(settings_, (float)ctx_->Width(), (float)ctx_->Height(), area);
     if (offlinePresent_) offline_->Present(cmd, transient_, presentRect_, area);
