@@ -261,6 +261,14 @@ public:
     DirectX::XMFLOAT3 BoundsMin() const { return boundsMin_; }
     DirectX::XMFLOAT3 BoundsMax() const { return boundsMax_; }
 
+    // S8a: rest-pose area of every triangle (parallel to the index list / 3), and the material's emission estimate:
+    // the luminance the shaders' emission terms (ScreenEmission / AutoLumEmission / PBR emissive) add at an average
+    // texel (0 = the material does not emit). The path tracers' emissive-triangle CDF weighs a triangle by
+    // area x estimate; the exact radiance is evaluated in the shader at the sampled point, so the estimate is only a
+    // sampling heuristic.
+    const std::vector<float>& TriAreas() const { return triAreas_; }
+    float EmitEstimate(size_t material) const;
+
     // Static buffers. vb: GpuVertex[], state VERTEX_AND_CONSTANT_BUFFER | NON_PIXEL_SHADER_RESOURCE.
     // ib: uint32[], state INDEX_BUFFER | NON_PIXEL_SHADER_RESOURCE | PIXEL_SHADER_RESOURCE (also read
     // by ray queries through a raw SRV).
@@ -388,6 +396,9 @@ private:
     std::vector<DXGI_FORMAT> materialOrigTexFormat_;   // S11: format the diffuse texture resource was created with
     std::vector<char> materialOrigHasTex_;   // the material's MatFlag_HasTexture before a texture was bound over it
     std::vector<float> materialOrigReflect_;
+    // S8a: per-triangle rest-pose area (parallel to the index list / 3) and per-material emission estimate (0 = not
+    // an emitter; see EmitEstimate).
+    std::vector<float> triAreas_;
     ComPtr<ID3D12Resource> packParamsExtCb_;
     uint8_t* packParamsExtMapped_ = nullptr;
     std::vector<DirectX::XMFLOAT4> packParamsExtSlots_;

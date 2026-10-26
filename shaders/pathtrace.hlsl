@@ -5,6 +5,7 @@
 #include "light_pick.hlsli"   // S7a: the punctual-light CDF pick
 #define PBR_SAMPLE_LEVEL0     // compute: no screen-space gradients
 #include "pt_pbr.hlsli"
+#include "emissive_nee.hlsli"   // S8a: emissive-triangle NEE + MIS (needs the PBR record decode)
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
 SamplerState gPoint : register(s0);
 SamplerState gLinear : register(s1);
@@ -182,6 +183,11 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
         float3 throughput = 1.0;
         float3 dir = rd, origin = ro;
         bool primarySky = false;
+        // S8a: MIS across bounces -- the pdf of the direction the previous vertex's BSDF sampled (0 / invalid at the
+        // camera and after a delta event: those emitters keep weight 1) and where it sampled it.
+        float prevPdfBsdf = 0.0;
+        float3 prevBsdfPos = 0;
+        bool prevBsdfValid = false;
 #ifdef MMDX_PT_PACK
         bool diffuseChain = false;
 #endif
@@ -219,6 +225,11 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
             float flat = 0.0;     // MAT_FLAT (faces): even fill instead of traced indirect
             PtPbrSurface pbr;     // decoded PBR record (used when isPbrHit)
             bool isPbrHit = false;
+            // S8a: the hit geometry / triangle (MIS looks the triangle's light pdf up), the hit's emission terms, and
+            // whether the emission arrived through a BSDF-sampled direction (depth > 0, no delta bounce).
+            uint hitGeom = 0xFFFFFFFFu, hitPrim = 0xFFFFFFFFu;
+            float3 hitTexLin = 0.0;
+            float3 emission = 0.0;   // the hit's own emission, weighted by MIS below
 #ifdef PT_PACK_HAS_LIGHTING
             float flatIndirect = 0.0;   // pack's flat indirect requesting (falls back to flat)
 #endif
@@ -230,10 +241,13 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 uint packClass = 7u;
                 uint tag = 0u;
                 RtSurface sf = FetchSurface(g, hit.prim, hit.bary);
+                hitGeom = hit.instanceId + hit.geometryIndex;   // index into the RtGeometry table
+                hitPrim = hit.prim;
                 backFace = dot(sf.faceNormal, dir) > 0.0;   // S2b: inside a transmissive body
                 if (backFace) sf.faceNormal = -sf.faceNormal;
                 if (dot(sf.normal, sf.faceNormal) < 0) sf.normal = -sf.normal;
                 float4 tex = SampleBaseTexture(g, sf.uv, bounce == 0 ? 0.0 : 2.0);
+                hitTexLin = SrgbToLinear(saturate(tex.rgb));
                 albedo = SrgbToLinear(saturate(MaterialAlbedo(g, tex.rgb)));
                 float r = g.reflectivity;
                 if (g.flags & MAT_STAGE)
@@ -245,7 +259,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 // S5: a stage screen surface shows its texture as emission, black behind it (no diffuse / specular / AO).
                 const bool screenMat = (g.flags & MAT_SCREEN) != 0;
                 if (screenMat) {
-                    radiance += throughput * ScreenEmission(g.flags, SrgbToLinear(saturate(tex.rgb)), g.reflectivity);
+                    emission += EmissionAt(g, hitTexLin, 0.0, false);
                     albedo = 0.0;
                     refl = 0.0;
                 }
@@ -266,12 +280,12 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 if (g.flags & MAT_STAGE) {
                     if (!screenMat) {
                         radiance += throughput * SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
-                        radiance += throughput * AutoLumEmission(g.flags, g.diffuse, g.specularPower, SrgbToLinear(saturate(tex.rgb)));
+                        emission += EmissionAt(g, hitTexLin, 0.0, false);
                     }
                     // S2a: a stage material's PBR emissive (KHR_materials_emissive_strength, HDR) is visible to a
                     // camera hit here too, like offline GI's CameraDirect; a stage's PBR sun term stays out (the
                     // stage path below is ambient-only).
-                    if (isPbrHit) radiance += throughput * pbr.emissive;
+                    if (isPbrHit) emission += EmissionAt(g, hitTexLin, pbr.emissive, true);
                 } else {
 #ifdef MMDX_PT_PACK
                     bool isPtPackHit = (g.flags & RTG_PT_PACK) != 0;
@@ -369,7 +383,8 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                                 sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd, 1e5,
                                                                               0xFFu)));
                             }
-                            radiance += throughput * (PbrSunDirect(pbr, g, tex, sf.uv, -dir, sh, flat) + pbr.emissive);
+                            radiance += throughput * PbrSunDirect(pbr, g, tex, sf.uv, -dir, sh, flat);
+                            emission += EmissionAt(g, hitTexLin, pbr.emissive, true);
                             if (flat > 0.5) {
                                 // raster flat fill: no sky/ground gradient and no occlusion modelling the face
                                 float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
@@ -390,7 +405,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                             }
                             radiance += throughput * ToonSun(g, tex, sf.uv, n, -dir, sh);
                             // AutoLuminous (そぼろ): marked (non-PBR, non-pack) materials emit their colour.
-                            radiance += throughput * AutoLumEmission(g.flags, g.diffuse, g.specularPower, SrgbToLinear(saturate(tex.rgb)));
+                            emission += EmissionAt(g, hitTexLin, 0.0, false);
 #ifdef PT_PACK_HAS_LIGHTING
                             if (flatIndirect > 0.5) {
 #else
@@ -414,6 +429,18 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 refl = 0.42 * (1.0 - smoothstep(120.0, 600.0, r));
                 rough = 0.12;
                 receive = true;
+            }
+
+            // S8a: the hit's own emission (a frame without emitters adds exactly 0: the value is unchanged).
+            if (any(emission > 0.0)) {
+                // MIS against the light sampling: the NEE estimate for this triangle was added at the previous vertex,
+                // so an emission that arrived through a BSDF-sampled direction at depth >= 1 takes the BSDF weight;
+                // camera hits (depth 0) and delta events (the transmissive branch below) keep weight 1.
+                if (EmissiveOn() && prevBsdfValid && hitMesh && EmissiveBase(hitGeom) != 0xFFFFFFFFu) {
+                    const float pdfLight = EmissiveHitPdf(hitGeom, hitPrim, prevBsdfPos);
+                    if (pdfLight > 0.0) emission *= MisWeightBsdf(prevPdfBsdf, pdfLight);
+                }
+                radiance += throughput * emission;
             }
 
             // S2b mesh dielectric: a transmissive PBR hit continues with the transmission event (probability =
@@ -564,6 +591,42 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 }
             }
 
+            // S8a: emissive-triangle NEE (one sample per shading point, IN ADDITION to the punctual NEE above): LED
+            // screens / AutoLuminous / PBR emissive light the surface directly instead of only where a path happens to
+            // hit them. MIS: the weight of this estimate against the BSDF path that could have found the same triangle.
+            if (EmissiveOn() && !(isPbrHit && PtPbrIsTransmissive(pbr))) {
+                EmissiveSample es;
+                if (EmissiveSamplePoint(Rand(rng), float2(Rand(rng), Rand(rng)), pos, es)) {
+                    const float3 wi = (es.pos - pos) / es.dist;
+                    const float cosS = dot(n, wi);
+                    // one-sided: only the winding side emits (the hit path culls the back face)
+                    if (cosS > 0.0 && dot(faceN, wi) > 0.0 && dot(es.nLight, -wi) > 0.0) {
+                        const float3 Le = EmissiveSampleRadiance(es.tri, es.uv, bounce == 0 ? 0.0 : 2.0);
+                        if (any(Le > 0.0)) {
+                            // the same tinted-visibility model the sun uses (transmissive stages, shadow colour)
+                            const float rawVis =
+                                Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), wi,
+                                                                        max(es.dist - 0.05, 0.0), 0xFFu)));
+                            const float occ = (1.0 - rawVis) * gSunShadowParams.z;
+                            const float3 visFactor = (1.0 - occ) + gSunShadowColor.rgb * occ;
+                            const float pdfBsdf = PathBsdfPdf(isPbrHit, pbr, rough, pSpec, n, -dir, wi);
+                            const float wMis = MisWeightLight(es.pdf, pdfBsdf);
+                            const float diff = toon ? lerp(smoothstep(-0.05, 0.25, cosS), saturate(cosS * 0.3 + 0.7), flat)
+                                                    : cosS;
+                            float3 f = (1.0 - pSpec) * (isPbrHit ? pbr.diffuse : albedo) / PI * diff;
+                            if (isPbrHit) {
+                                f += pSpec * PtPbrEvalSpecular(pbr, -dir, wi);
+                            } else if (pSpec > 0.0 && dot(reflect(dir, n), wi) >= cos(rough * 0.5)) {
+                                const float cosHalfAngle = cos(rough * 0.5);
+                                const float omega = max(2.0 * PI * (1.0 - cosHalfAngle), 1e-6);
+                                f += pSpec / omega;
+                            }
+                            radiance += throughput * wMis * f * Le * visFactor / es.pdf;
+                        }
+                    }
+                }
+            }
+
 #ifdef PT_PACK_HAS_LIGHTING
             if (bounce == bounces || flatIndirect > 0.5) break;
 #else
@@ -595,6 +658,10 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
 #endif
             }
             if (dot(nextDir, faceN) <= 0.0) break;
+            // S8a: the pdf of this continuation, for the MIS of an emitter the next ray happens to hit.
+            prevPdfBsdf = PathBsdfPdf(isPbrHit, pbr, rough, pSpec, n, -dir, nextDir);
+            prevBsdfPos = pos;
+            prevBsdfValid = prevPdfBsdf > 0.0;
             dir = nextDir;
             origin = OffsetRayOrigin(pos, faceN);
 

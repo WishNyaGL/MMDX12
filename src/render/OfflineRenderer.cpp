@@ -177,6 +177,14 @@ struct OfflineRenderer::Impl {
     uint8_t* mediumMapped = nullptr;
     uint8_t* lightCdfMapped = nullptr;
     uint32_t lightCdfSrv = DescriptorHeap::kInvalid;   // S7a: raw ByteAddressBuffer SRV (bindless buffer table)
+    // S8a: the image's emissive-triangle pick table (triangle list / CDF / per-geometry base, raw SRVs)
+    ComPtr<ID3D12Resource> emissiveTriBuf, emissiveCdfBuf, emissiveBaseBuf;
+    uint8_t* emissiveTriMapped = nullptr;
+    float* emissiveCdfMapped = nullptr;
+    uint32_t* emissiveBaseMapped = nullptr;
+    uint32_t emissiveTriSrv = DescriptorHeap::kInvalid;
+    uint32_t emissiveCdfSrv = DescriptorHeap::kInvalid;
+    uint32_t emissiveBaseSrv = DescriptorHeap::kInvalid;
     // readbacks, one entry per frame slot
     ComPtr<ID3D12Resource> counterReadback;       // kFramesInFlight * 512 bytes
     ComPtr<ID3D12QueryHeap> timestampHeap;        // 2 * kFramesInFlight
@@ -1323,6 +1331,33 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
         device->CreateShaderResourceView(m.lightCdfBuf.Get(), &srv, ctx.SrvHeap().Cpu(m.lightCdfSrv));
     }
 
+    // S8a: the image's emissive-triangle pick table (kEmissiveTriMax entries, read through the bindless buffer table)
+    m.emissiveTriBuf = CreateMappedUpload(device, kEmissiveTriBytes, &m.emissiveTriMapped, L"offline.emissivetris");
+    m.emissiveCdfBuf = CreateMappedUpload(device, kEmissiveCdfBytes, (uint8_t**)&m.emissiveCdfMapped,
+                                          L"offline.emissivecdf");
+    m.emissiveBaseBuf = CreateMappedUpload(device, kEmissiveBaseBytes, (uint8_t**)&m.emissiveBaseMapped,
+                                           L"offline.emissivebase");
+    if (!m.emissiveTriBuf || !m.emissiveCdfBuf || !m.emissiveBaseBuf) return false;
+    m.emissiveTriSrv = ctx.SrvHeap().Allocate(1);
+    m.emissiveCdfSrv = ctx.SrvHeap().Allocate(1);
+    m.emissiveBaseSrv = ctx.SrvHeap().Allocate(1);
+    if (m.emissiveTriSrv == DescriptorHeap::kInvalid || m.emissiveCdfSrv == DescriptorHeap::kInvalid ||
+        m.emissiveBaseSrv == DescriptorHeap::kInvalid)
+        return false;
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;   // raw ByteAddressBuffer (the shaders' bindless buffer table)
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        srv.Buffer.NumElements = kEmissiveTriMax * (sizeof(GpuEmissiveTri) / 4);
+        device->CreateShaderResourceView(m.emissiveTriBuf.Get(), &srv, ctx.SrvHeap().Cpu(m.emissiveTriSrv));
+        srv.Buffer.NumElements = kEmissiveTriMax;
+        device->CreateShaderResourceView(m.emissiveCdfBuf.Get(), &srv, ctx.SrvHeap().Cpu(m.emissiveCdfSrv));
+        srv.Buffer.NumElements = kEmissiveBaseMax;
+        device->CreateShaderResourceView(m.emissiveBaseBuf.Get(), &srv, ctx.SrvHeap().Cpu(m.emissiveBaseSrv));
+    }
+
     // Readbacks, one entry per frame slot.
     D3D12_HEAP_PROPERTIES readback{D3D12_HEAP_TYPE_READBACK};
     CD3DX12_RESOURCE_DESC crDesc = CD3DX12_RESOURCE_DESC::Buffer((uint64_t)kSlots * 512);
@@ -1376,6 +1411,20 @@ void OfflineRenderer::Shutdown() {
     if (m.lightCdfBuf && m.lightCdfMapped) m.lightCdfBuf->Unmap(0, nullptr);
     if (m.lightCdfSrv != DescriptorHeap::kInvalid) ctx.SrvHeap().Free(m.lightCdfSrv, 1);
     m.lightCdfSrv = DescriptorHeap::kInvalid;
+    // S8a: the emissive-triangle pick table
+    if (m.emissiveTriBuf && m.emissiveTriMapped) m.emissiveTriBuf->Unmap(0, nullptr);
+    if (m.emissiveCdfBuf && m.emissiveCdfMapped) m.emissiveCdfBuf->Unmap(0, nullptr);
+    if (m.emissiveBaseBuf && m.emissiveBaseMapped) m.emissiveBaseBuf->Unmap(0, nullptr);
+    for (uint32_t* srv : {&m.emissiveTriSrv, &m.emissiveCdfSrv, &m.emissiveBaseSrv}) {
+        if (*srv != DescriptorHeap::kInvalid) ctx.SrvHeap().Free(*srv, 1);
+        *srv = DescriptorHeap::kInvalid;
+    }
+    m.emissiveTriMapped = nullptr;
+    m.emissiveCdfMapped = nullptr;
+    m.emissiveBaseMapped = nullptr;
+    m.emissiveTriBuf.Reset();
+    m.emissiveCdfBuf.Reset();
+    m.emissiveBaseBuf.Reset();
     m.sceneCbMapped = m.lightMapped = m.fogMapped = m.mediumMapped = nullptr;
     m.lightCdfMapped = nullptr;
     m.sceneCb.Reset();
@@ -1408,8 +1457,8 @@ void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors
                             const BuiltinTextures* builtin, RtScene& rt, const FrameView& view,
                             const SceneConstants& sc, const GpuLight* lights, uint32_t lightCount,
                             const float* lightCdf, uint32_t lightCdfCount, const GpuFogVolume* fogVolumes,
-                            uint32_t fogVolumeCount, const OfflineJobDesc& job, uint64_t frame, MmeRuntime* mme,
-                            MmeSkin* mmeSkin) {
+                            uint32_t fogVolumeCount, const OfflineJobDesc& job, uint64_t frame,
+                            const EmissiveTable& emissive, MmeRuntime* mme, MmeSkin* mmeSkin) {
     if (!impl_) return;
     Impl& m = *impl_;
 
@@ -1459,6 +1508,19 @@ void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors
     memset(m.lightCdfMapped, 0, kLightCdfBytes);
     if (lightCdf && lightCdfCount)
         memcpy(m.lightCdfMapped, lightCdf, (size_t)std::min(lightCdfCount, kLightCdfMax) * sizeof(float));
+    // S8a: the image's emissive-triangle pick table (zeroed past the count; the base table reads 0xFFFFFFFF where no
+    // geometry emits, so a stale range can never be sampled)
+    memset(m.emissiveTriMapped, 0, kEmissiveTriBytes);
+    memset(m.emissiveCdfMapped, 0, kEmissiveCdfBytes);
+    memset(m.emissiveBaseMapped, 0xFF, kEmissiveBaseBytes);
+    if (emissive.triCount > 0 && emissive.tris && emissive.cdf) {
+        const uint32_t count = std::min(emissive.triCount, kEmissiveTriMax);
+        memcpy(m.emissiveTriMapped, emissive.tris, (size_t)count * sizeof(GpuEmissiveTri));
+        memcpy(m.emissiveCdfMapped, emissive.cdf, (size_t)count * sizeof(float));
+        if (emissive.base && emissive.baseCount)
+            memcpy(m.emissiveBaseMapped, emissive.base,
+                   (size_t)std::min(emissive.baseCount, kEmissiveBaseMax) * sizeof(uint32_t));
+    }
     // S9: the local fog volumes (zeroed past the count; an empty list leaves every entry zero = no medium)
     memset(m.fogMapped, 0, kFogBytes);
     if (fogVolumes && fogVolumeCount)
@@ -1556,6 +1618,16 @@ void OfflineRenderer::Cancel() { progress_ = {}; }
 // S7a: the raw CDF buffer SRV the GI shaders index through the bindless buffer table.
 uint32_t OfflineRenderer::LightCdfSrv() const {
     return impl_ ? impl_->lightCdfSrv : DescriptorHeap::kInvalid;
+}
+
+// S8a: the emissive-triangle pick table SRVs the GI shaders index through the bindless buffer table.
+OfflineRenderer::EmissiveSrvs OfflineRenderer::EmissiveSrv() const {
+    EmissiveSrvs s;
+    if (!impl_) return s;
+    s.tris = impl_->emissiveTriSrv;
+    s.cdf = impl_->emissiveCdfSrv;
+    s.base = impl_->emissiveBaseSrv;
+    return s;
 }
 
 bool OfflineRenderer::ReadImage(ImageRGBA8& out, bool preserveAlpha) {

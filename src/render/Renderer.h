@@ -206,6 +206,22 @@ private:
     // table. Zero weights fall back to a uniform CDF.
     static uint32_t FillLightCdf(const LightParams& light, float* out, uint32_t capacity);
 
+    // S8a: the frame's emissive-triangle pick table from the last RtScene build (`geometries`, in buffer order = the
+    // geometry id). Fills the slot's entry list, its normalised inclusive CDF (float per entry) and the per-geometry
+    // base table (first entry of a geometry, or kEmissiveTriNone). Returns the entry count (0 = no emitters). Capped at
+    // kEmissiveTriMax entries: the largest-weight geometries are kept (one [W] the first time). Pure CPU.
+    struct EmissiveTable {
+        std::vector<GpuEmissiveTri> tris;
+        std::vector<float> cdf;
+        std::vector<uint32_t> base;
+    };
+    static uint32_t BuildEmissiveTable(const std::vector<RtScene::GeometryRef>& geometries, EmissiveTable& out,
+                                       bool& warned);
+    // S8a: builds the emissive table for the last RtScene build into `cbSlot`'s buffers (only when its key changed) and
+    // sets emissiveParams_ (x = -1 when the frame has no emitters). Called after RtScene::Build in RecordScene and
+    // BeginOffline.
+    void UpdateEmissiveTable(uint32_t cbSlot);
+
     // S9: the same for the local fog volumes (<= kMaxFogVolumes); returns the count written.
     static uint32_t FillGpuFogVolumes(const LightParams& light, GpuFogVolume* out);
 
@@ -282,6 +298,26 @@ private:
     ComPtr<ID3D12Resource> lightClusterBuf_;
     uint32_t lightClusterSrv_[64] = {};   // >= kTotalCbSlots (Renderer.cpp)
     uint32_t lightClusterSrvCount_ = 0;   // entries of lightClusterSrv_ that are allocated
+    // S8a: the frame's emissive-triangle pick table (the path tracers' next-event estimation over LED screens /
+    // AutoLuminous / PBR emissive materials). One entry per emitting triangle of an RtScene geometry, the CDF on the
+    // CPU (Renderer::BuildEmissiveTable) and a per-geometry base table, all bound through the bindless buffer table
+    // (SceneConstants::emissiveParams). Three raw SRVs per slot, like the light CDF.
+    ComPtr<ID3D12Resource> emissiveTriBuf_, emissiveCdfBuf_, emissiveBaseBuf_;
+    uint8_t* emissiveTriMapped_ = nullptr;
+    float* emissiveCdfMapped_ = nullptr;
+    uint32_t* emissiveBaseMapped_ = nullptr;
+    uint32_t emissiveTriSrv_[64] = {};
+    uint32_t emissiveCdfSrv_[64] = {};
+    uint32_t emissiveBaseSrv_[64] = {};
+    uint32_t emissiveSrvCount_ = 0;
+    // The pick table is rebuilt only when its key (geometry table + per-material emission estimates) changes; each
+    // buffer slot keeps its own copy, so a slot is (re)uploaded when it does not hold the current key yet.
+    uint64_t emissiveKey_ = 0;                                     // key of emissiveTable_ (0 = nothing built yet)
+    EmissiveTable emissiveTable_;                                  // the table of emissiveKey_, kept for slot uploads
+    uint64_t emissiveSlotKey_[64] = {};                            // >= kTotalCbSlots, 0 = the slot holds no table
+    uint32_t emissiveCount_ = 0;                                   // entries of the current table (0 = no emitters)
+    bool emissiveWarned_ = false;
+    DirectX::XMFLOAT4 emissiveParams_ = {-1.0f, -1.0f, 0.0f, -1.0f};   // this frame's SceneConstants::emissiveParams
     // S7c: the LIGHTS line's cluster fields of the last log (the packed grid, 0 = no clusters): one line per change.
     uint32_t loggedClusterGrid_ = UINT32_MAX;
     std::vector<int> prevSpotPick_;
