@@ -15,6 +15,24 @@ inline constexpr uint32_t kSpotShadowSlices = 16;
 // S7a: a light CDF lives in a raw ByteAddressBuffer SRV (bindless buffer table): one float per light, the normalised
 // inclusive running sum of the pick weight (Renderer::FillLightCdf). At most one per Renderer::kMaxPunctualLights.
 inline constexpr uint32_t kLightCdfMax = 256;
+// S7c: clustered light culling (Forward+ with depth slices). The view is cut into a fixed froxel grid: screen tiles x
+// exponential (log) view-depth slices. Each cluster stores one header uint (the light count, or 0xFFFF = "too many:
+// the shaders loop over every light") followed by up to kClusterMaxLights light indices in ASCENDING light order, so a
+// fragment's per-light sum is accumulated in the same order as the full loop. Buffer word offsets (raw uint buffer):
+// cluster c starts at c * (1 + kClusterMaxLights). Cluster order: (slice * kClusterTilesY + ty) * kClusterTilesX + tx,
+// with tx = 0 at the left edge, ty = 0 at the TOP edge.
+inline constexpr uint32_t kClusterTilesX = 16;
+inline constexpr uint32_t kClusterTilesY = 9;
+inline constexpr uint32_t kClusterSlices = 24;
+inline constexpr uint32_t kClusterMaxLights = 64;
+inline constexpr uint32_t kClusterCount = kClusterTilesX * kClusterTilesY * kClusterSlices;
+inline constexpr uint32_t kClusterDwords = kClusterCount * (1 + kClusterMaxLights);   // 224640, x4 = 256-aligned
+inline constexpr uint32_t kClusterBytes = kClusterDwords * sizeof(uint32_t);          // 898560
+// S7c: above this many punctual lights the raster / RT scene shaders read their fragment's cluster list instead of
+// looping over every light (Renderer::RecordScene sets SceneConstants::lightClusterParams.x, else -1).
+inline constexpr uint32_t kClusterMinLights = 16;
+// S7c: the farthest slice ends at min(camera far, this): beyond ~1000 units the exponential slices get too coarse.
+inline constexpr float kClusterFarZ = 1000.0f;
 // Raster point shadows: every shadowed point light gets 6 slices (no light cap). Faces stay at
 // kPointShadowMapSize while the map fits the memory of kPointShadowFullResLights lights (twice that
 // at shadow quality 4096); more lights halve the face size, down to kPointShadowMinSize.
@@ -86,6 +104,13 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     // buffer table. x = SrvHeap index of the raw ByteAddressBuffer holding the float CDF (negative = none, use the
     // uniform pick), y = light count, zw = unused.
     DirectX::XMFLOAT4 lightCdfParams;
+    // S7c: the frame's clustered light lists (PassLightCull, Renderer::lightClusterBuf_), read by the raster / RT scene
+    // pixel shaders through the same bindless buffer table. x = SrvHeap index of the raw ByteAddressBuffer holding this
+    // frame slot's cluster block (negative = none: the shaders keep the full per-light loop), y = the grid packed as
+    // (tilesX & 0xFF) | (tilesY & 0xFF) << 8 | (slices & 0xFF) << 16 (0 = no clusters), z = log-slice scale,
+    // w = log-slice bias: a fragment at view depth z belongs to slice clamp(floor(log(max(z, nearZ)) * scale + bias),
+    // 0, slices - 1); slice k starts at view depth exp((k - bias) / scale). Layout / order: see kCluster* above.
+    DirectX::XMFLOAT4 lightClusterParams;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 
@@ -106,6 +131,25 @@ inline uint32_t PackClassEncode(uint32_t cls, float alphaKey) {
 // The key a material's final class carries (`key[cls]`), or 0 for the off class / a null pack.
 inline float PackAlphaKeyForClass(const float alphaKey[6], uint32_t cls) {
     return cls < 6u ? alphaKey[cls] : 0.0f;
+}
+
+// S7c: the froxel grid packed into SceneConstants::lightClusterParams.y (0 = no clusters). Mirrors the decode in
+// shaders/light_cluster.hlsli.
+inline float ClusterGridPacked() {
+    return (float)((kClusterTilesX & 0xFFu) | ((kClusterTilesY & 0xFFu) << 8) | ((kClusterSlices & 0xFFu) << 16));
+}
+// S7c: the exponential view-depth slice mapping (SceneConstants::lightClusterParams.zw): a view depth z belongs to
+// slice clamp(floor(log(max(z, nearZ)) * scale + bias), 0, slices - 1), and slice k starts at exp((k - bias) / scale).
+// False (scale = bias = 0) when the camera cannot be sliced (degenerate near / far): the caller then keeps -1.
+inline bool ClusterSliceParams(float nearZ, float farZ, float& scale, float& bias) {
+    const float z0 = std::max(nearZ, 0.01f);
+    const float z1 = std::min(farZ, kClusterFarZ);
+    scale = 0.0f;
+    bias = 0.0f;
+    if (!(z1 > z0 * 1.001f)) return false;
+    scale = (float)kClusterSlices / std::log(z1 / z0);
+    bias = -std::log(z0) * scale;
+    return true;
 }
 
 enum MaterialShaderFlags : uint32_t {

@@ -3,6 +3,8 @@
 //                 with volumetrics on (the volumetric march samples it); spot shadow maps of the
 //                 characters for the first 8 spot lights (SpotShadowsWanted: raster/RT scene
 //                 shading and volumetrics)
+//   LightCull     S7c: clustered light lists (16 x 9 x 24 froxels over the main camera), a no-op            raster/RT
+//                 at <= kClusterMinLights lights or offscreen (runs right before ScenePass)
 //   ScenePass     sky, studio floor, MMD materials + edges -> MSAA colour/normal/velocity/depth
 //                 (RayTraced: ray-query sun shadows instead of the shadow map; Raster honours
 //                 ViewShading: Unlit = flat, Wireframe = D3D12_FILL_MODE_WIREFRAME)  not PathTraced
@@ -68,6 +70,21 @@ private:
                    const DirectX::XMMATRIX* overrideMatrix = nullptr);
     ComPtr<ID3D12RootSignature> rootSig_;
     ComPtr<ID3D12PipelineState> psoOpaque_, psoAlpha_;
+};
+
+// S7c: clustered light cull (shaders/light_cull.hlsl): one thread group per froxel of the main camera's 16 x 9 x 24
+// grid writes the cluster's light list into the frame slot's raw buffer (Renderer::lightClusterBuf_, bound through the
+// bindless buffer table). Runs right before ScenePass, from the camera frustum only (no depth pre-pass); the scene
+// shaders read the lists through shaders/light_cluster.hlsli. Only dispatched when the frame has more than
+// kClusterMinLights lights (PassContext::lightCluster); otherwise nothing runs and the shaders keep the full loop.
+class LightCullPass final : public IRenderPass {
+public:
+    const char* Name() const override { return "LightCull"; }
+    bool CreatePipelines(Dx12Context& ctx, const std::filesystem::path& shaderDir, uint32_t msaa) override;
+    void Execute(PassContext& pc) override;
+
+private:
+    ComputePipeline cull_;   // light_cull.hlsl CSLightCull
 };
 
 class ScenePass final : public IRenderPass {

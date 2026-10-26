@@ -144,6 +144,11 @@ struct PassContext {
     // S7a: the frame's spot shadow choice (per punctual light: shadow slice or -1), set by the renderer; the shadow
     // pass draws exactly these slices. Null = the first kSpotShadowSlices casting spots (old behaviour).
     const std::vector<int>* spotSlices = nullptr;
+    // S7c: the frame's light-cluster block (Renderer::lightClusterBuf_) and the slot PassLightCull writes. Null when
+    // clustering is off this frame (<= kClusterMinLights lights, offscreen, the path tracer) and the scene shaders then
+    // see SceneConstants::lightClusterParams.x < 0 and loop over every light.
+    ID3D12Resource* lightCluster = nullptr;
+    uint32_t lightClusterSlot = 0;   // the block of Renderer::lightClusterBuf_ (kClusterBytes each)
 };
 
 class IRenderPass {

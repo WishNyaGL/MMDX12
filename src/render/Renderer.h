@@ -277,7 +277,13 @@ private:
     float* lightCdfMapped_ = nullptr;
     uint32_t lightCdfSrv_[64] = {};   // >= kTotalCbSlots (Renderer.cpp)
     uint32_t lightCdfSrvCount_ = 0;   // entries of lightCdfSrv_ that are allocated
-    // S7a: the spot shadow slice choice of the last frame (per punctual light: slice or -1), for the pick hysteresis.
+    // S7c: this frame's light clusters (PassLightCull): one raw uint block of kClusterBytes per slot, bound through the
+    // bindless buffer table (SceneConstants::lightClusterParams.x = the slot's heap index) and written as a RAW UAV.
+    ComPtr<ID3D12Resource> lightClusterBuf_;
+    uint32_t lightClusterSrv_[64] = {};   // >= kTotalCbSlots (Renderer.cpp)
+    uint32_t lightClusterSrvCount_ = 0;   // entries of lightClusterSrv_ that are allocated
+    // S7c: the LIGHTS line's cluster fields of the last log (the packed grid, 0 = no clusters): one line per change.
+    uint32_t loggedClusterGrid_ = UINT32_MAX;
     std::vector<int> prevSpotPick_;
     // S7a: this frame's spot shadow slices (per punctual light), filled by FillSceneConstants and read by
     // FillGpuLights / ShadowPass (PassContext::spotSlices).

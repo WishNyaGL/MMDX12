@@ -65,6 +65,11 @@ cbuffer SceneCB : register(b0) {
     // S7a: the punctual-light CDF (Renderer::FillLightCdf): x = SrvHeap index of the raw ByteAddressBuffer of floats
     // (negative = none, use the uniform pick), y = light count.
     float4 gLightCdf;
+    // S7c: the clustered light lists (Renderer::lightClusterBuf_): x = SrvHeap index of the raw ByteAddressBuffer
+    // (negative = no clusters: loop over every light), y = the froxel grid packed as (tilesX & 0xFF) |
+    // (tilesY & 0xFF) << 8 | (slices & 0xFF) << 16 (0 = none), z = log-slice scale, w = log-slice bias
+    // (shaders/light_cluster.hlsli). Layout: ShaderInterop.h kCluster*.
+    float4 gLightCluster;
 };
 
 static const float PI = 3.14159265;

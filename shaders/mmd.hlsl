@@ -9,6 +9,7 @@
 #include "rt_common.hlsli"
 #endif
 #include "pbr_common.hlsli"   // includes dielectric.hlsli (S2b FresnelDielectric)
+#include "light_cluster.hlsli"   // S7c: the fragment's froxel light list (after pbr_common: gPbrBuf)
 
 cbuffer MaterialCB : register(b1) {
     float4 gDiffuse; float3 gSpecular; float gSpecularPower; float3 gAmbient; float gEdgeSize;
@@ -239,8 +240,10 @@ float PointShadowRt(Light l, float3 wp, float3 n, float dist, uint lightIndex) {
 
 float3 PunctualDiffuse(float3 wp, float3 n, float toonSoft, float flat) {
     float3 sum = 0;
-    uint count = (uint)gNumLights;
-    for (uint i = 0; i < count; ++i) {
+    // S7c: the fragment's froxel light list (all lights when clustering is off)
+    const LightList list = LightListFor(mul(float4(wp, 1.0), gView).xyz);
+    for (uint k = 0; k < list.count; ++k) {
+        const uint i = LightListAt(list, k);
         Light l = gLights[i];
         if (l.affectDiffuse <= 0.0) continue;
         float3 d = l.pos - wp;
@@ -272,8 +275,10 @@ float3 PunctualDiffuse(float3 wp, float3 n, float toonSoft, float flat) {
 
 float3 PunctualSpecular(float3 wp, float3 n, float3 V, float power) {
     float3 sum = 0;
-    uint count = (uint)gNumLights;
-    for (uint i = 0; i < count; ++i) {
+    // S7c: the fragment's froxel light list (all lights when clustering is off)
+    const LightList list = LightListFor(mul(float4(wp, 1.0), gView).xyz);
+    for (uint k = 0; k < list.count; ++k) {
+        const uint i = LightListAt(list, k);
         Light l = gLights[i];
         if (l.affectSpecular <= 0.0) continue;
         float3 d = l.pos - wp;
@@ -309,8 +314,10 @@ float3 Hemisphere(float3 n) {
 // GGX lobe instead of Blinn. Added + scaled by the caller (SunIntensity lives in the light colour there).
 float3 PunctualSpecularGGX(float3 wp, float3 n, float3 V, float rough, float3 f0) {
     float3 sum = 0;
-    uint count = (uint)gNumLights;
-    for (uint i = 0; i < count; ++i) {
+    // S7c: the fragment's froxel light list (all lights when clustering is off)
+    const LightList list = LightListFor(mul(float4(wp, 1.0), gView).xyz);
+    for (uint k = 0; k < list.count; ++k) {
+        const uint i = LightListAt(list, k);
         Light l = gLights[i];
         if (l.affectSpecular <= 0.0) continue;
         float3 d = l.pos - wp;

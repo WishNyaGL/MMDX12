@@ -183,6 +183,8 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     // renders. Both skip entirely when no effect needs them (byte-identical frame).
     passes_.push_back(std::make_unique<MmeShadowPass>());
     passes_.push_back(std::make_unique<MmeOffscreenPass>());
+    // S7c: the clustered light cull (a no-op unless the frame has more than kClusterMinLights lights)
+    passes_.push_back(std::make_unique<LightCullPass>());
     auto* scenePass = new ScenePass();
     scenePass_ = scenePass;   // S5: the stage screen camera feeds draw through it (owned by passes_)
     passes_.push_back(std::unique_ptr<ScenePass>(scenePass));
@@ -272,6 +274,39 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
         lightCdfSrv_[slot] = idx;
     }
     lightCdfSrvCount_ = kTotalCbSlots;
+
+    // S7c: the per-slot light-cluster blocks (PassLightCull writes them as a RAW UAV, the scene shaders read them as a
+    // raw ByteAddressBuffer through the bindless buffer table). A DEFAULT-heap buffer: the UAV is not allowed on an
+    // upload heap, and it is written / read on the GPU only.
+    {
+        CD3DX12_HEAP_PROPERTIES heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+        CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(
+            (UINT64)kClusterBytes * kTotalCbSlots, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (!CheckHr(ctx.Device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                           D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr,
+                                                           IID_PPV_ARGS(&lightClusterBuf_)),
+                      "CreateCommittedResource(light clusters)"))
+            return false;
+        if (kTotalCbSlots > (uint32_t)std::size(lightClusterSrv_)) {
+            LOG_ERROR("light cluster SRV table too small for %u slots", kTotalCbSlots);
+            return false;
+        }
+        for (uint32_t slot = 0; slot < kTotalCbSlots; ++slot) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Format = DXGI_FORMAT_R32_TYPELESS;   // raw ByteAddressBuffer (the shaders' bindless buffer table)
+            srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.Buffer.NumElements = kClusterDwords;
+            srv.Buffer.FirstElement = (UINT)((uint64_t)slot * kClusterDwords);
+            srv.Buffer.StructureByteStride = 0;
+            srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            const uint32_t idx = ctx.SrvHeap().Allocate(1);
+            if (idx == DescriptorHeap::kInvalid) return false;
+            ctx.Device()->CreateShaderResourceView(lightClusterBuf_.Get(), &srv, ctx.SrvHeap().Cpu(idx));
+            lightClusterSrv_[slot] = idx;
+        }
+        lightClusterSrvCount_ = kTotalCbSlots;
+    }
 
     backdropSrv_ = ctx.SrvHeap().Allocate(1);
 
@@ -408,6 +443,7 @@ bool Renderer::RenderScreenFeed(ID3D12GraphicsCommandList* cmd, const FrameView&
     sc.invViewportSize = {1.0f / (float)w, 1.0f / (float)h};
     sc.edgeScale = (float)h / 1080.0f;
     sc.shading = 0.0f;   // always lit
+    sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};   // S7c: the feed's camera is not the frame's cluster grid
     memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
 
     // The feed reads the frame's lights + shadow maps: its own slot in the light buffer is a copy of the frame's.
@@ -708,6 +744,9 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
     // (RecordScene turns the lighting-adjacent effects off for these frames).
     if (shading != 0u) sc.fog = 0.0f;
     sc.packInputs = view.packInputs;
+    // S7c: no light clusters by default (FillSceneConstants is also the base for the camera feeds and the extra views,
+    // whose cameras differ from the frame's cluster grid); RecordScene turns them on for the main view.
+    sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};
 }
 
 uint32_t Renderer::FillGpuLights(const LightParams& light, GpuLight* out, const std::vector<int>* spotSlices,
@@ -866,6 +905,17 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     // S7a: the frame's light CDF (the PT / GI pick) lives in a raw SRV buffer of this slot
     const uint32_t cdfCount = FillLightCdf(view.light, lightCdfMapped_ + (size_t)cbSlot * kLightCdfMax, kLightCdfMax);
     sc.lightCdfParams = {(float)lightCdfSrv_[cbSlot], (float)cdfCount, 0.0f, 0.0f};
+    // S7c: clustered light culling for the main camera view: only above kClusterMinLights lights (a frame with fewer
+    // keeps the full per-light loop, byte for byte), never offscreen (RenderToImage), and only with the compute path
+    // (PassLightCull's pipeline; the shadow map of the frame is not needed: the cull is frustum-only).
+    const uint32_t lightCount = (uint32_t)std::min<size_t>(view.light.punctual.size(), kMaxPunctualLights);
+    float clusterScale = 0.0f, clusterBias = 0.0f;
+    const bool clusterSlices = ClusterSliceParams(sc.nearZ, sc.farZ, clusterScale, clusterBias);
+    const bool clusters = lightCount > kClusterMinLights && !offscreen && clusterSlices &&
+                          EffectivePath() != RenderPath::PathTraced && lightClusterBuf_ &&
+                          cbSlot < lightClusterSrvCount_;
+    sc.lightClusterParams = {(float)(clusters ? (int32_t)lightClusterSrv_[cbSlot] : -1), clusters ? ClusterGridPacked() : 0.0f,
+                             clusterScale, clusterBias};
     memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
     // S7a: 256 lights x 112 B does not belong on the stack
     static thread_local std::vector<GpuLight> lights(kMaxPunctualLights);
@@ -880,12 +930,17 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
         uint32_t spotCount = 0;
         for (int s : spotSlices_) spotCount += s >= 0 ? 1u : 0u;
         const uint32_t pointCount = PointShadowCount(view.light, kMaxPunctualLights);
-        const uint32_t lightCount = (uint32_t)std::min<size_t>(view.light.punctual.size(), kMaxPunctualLights);
-        if (lightCount != loggedLights_[0] || spotCount != loggedLights_[1] || pointCount != loggedLights_[2]) {
+        const uint32_t clusterGrid = (uint32_t)sc.lightClusterParams.y;
+        if (lightCount != loggedLights_[0] || spotCount != loggedLights_[1] || pointCount != loggedLights_[2] ||
+            clusterGrid != loggedClusterGrid_) {
             loggedLights_[0] = lightCount;
             loggedLights_[1] = spotCount;
             loggedLights_[2] = pointCount;
-            LOG_INFO("LIGHTS count=%u spots=%u points=%u", lightCount, spotCount, pointCount);
+            loggedClusterGrid_ = clusterGrid;
+            // S7c: clusters = the scene shaders read a froxel list this frame; maxPerCluster is not read back from the
+            // GPU (no GPU->CPU stall per scene), so the field stays a '?'
+            LOG_INFO("LIGHTS count=%u spots=%u points=%u clusters=%u maxPerCluster=?", lightCount, spotCount,
+                     pointCount, clusters ? 1u : 0u);
         }
     }
     // S9: the frame's local fog volumes (zeroed beyond the count, so a stale slot never lingers)
@@ -991,6 +1046,9 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     pc.mmeSkin = mmeSkin_.get();
     pc.sceneConstantsCpu = &sc;
     pc.spotSlices = &spotSlices_;
+    // S7c: the light-cluster block PassLightCull fills for this frame (null when clustering is off)
+    pc.lightCluster = clusters ? lightClusterBuf_.Get() : nullptr;
+    pc.lightClusterSlot = cbSlot;
     // DLSS Ray Reconstruction needs the noisy ray-traced signals and their guides; it replaces the PT
     // temporal / a-trous denoiser, the RT AO / reflection filtering and the upscaler for the frame.
     pc.dlssRr = frameSettings.dlssRayReconstruction &&
@@ -1061,6 +1119,7 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
             esc.viewportSize = {pxW, pxH};
             esc.invViewportSize = {1.0f / pxW, 1.0f / pxH};
             esc.edgeScale = pxH / 1080.0f;
+            esc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};   // S7c: an extra view has its own camera
             const size_t slot = (size_t)kCbSlots + (size_t)cbSlot * kMaxExtraViews + e;
             memcpy(sceneCbMapped_ + slot * kSceneCbSize, &esc, sizeof(esc));
             pc.extraSceneConstants[e] = sceneCb_->GetGPUVirtualAddress() + (uint64_t)slot * kSceneCbSize;
@@ -1760,12 +1819,20 @@ void Renderer::Shutdown() {
     }
     std::fill(std::begin(lightCdfSrv_), std::end(lightCdfSrv_), DescriptorHeap::kInvalid);
     lightCdfSrvCount_ = 0;
+    // S7c: the light-cluster blocks (the SRVs and the DEFAULT-heap buffer)
+    if (lightClusterBuf_ && ctx_) {
+        for (uint32_t i = 0; i < lightClusterSrvCount_; ++i)
+            if (lightClusterSrv_[i] != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(lightClusterSrv_[i], 1);
+    }
+    std::fill(std::begin(lightClusterSrv_), std::end(lightClusterSrv_), DescriptorHeap::kInvalid);
+    lightClusterSrvCount_ = 0;
     sceneCbMapped_ = lightBufMapped_ = fogBufMapped_ = nullptr;
     lightCdfMapped_ = nullptr;
     sceneCb_.Reset();
     lightBuf_.Reset();
     fogBuf_.Reset();
     lightCdfBuf_.Reset();
+    lightClusterBuf_.Reset();
     offList_.Reset();
     offAlloc_.Reset();
     if (readbackFence_) {

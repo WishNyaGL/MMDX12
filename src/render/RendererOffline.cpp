@@ -54,6 +54,8 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     const uint32_t cdfCount = FillLightCdf(view.light, lightCdf.data(), (uint32_t)lightCdf.size());
     // negative when the offline renderer has no CDF buffer (the shaders then keep the uniform pick)
     sc.lightCdfParams = {(float)(int32_t)offline_->LightCdfSrv(), (float)cdfCount, 0.0f, 0.0f};
+    // S7c: the offline renderer's shaders are the path tracer / GI (light CDF sampling); no light clusters
+    sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};
     // S9: the frame's local fog volumes (GpuFogVolume, zeroed past the count)
     GpuFogVolume fogVolumes[kMaxFogVolumes] = {};
     const uint32_t fogCount = FillGpuFogVolumes(view.light, fogVolumes);

@@ -92,7 +92,9 @@ uint PackPunctualCount() {
 #endif
 
 // The scene's punctual lights on a world surface (diffuse only): the scene's PunctualDiffuse, with the
-// shared spot / point shadow-map visibility (hard or soft, like the scene).
+// shared spot / point shadow-map visibility (hard or soft, like the scene). S7c: this keeps the full per-light loop
+// (world surfaces are a small part of a frame, and S9d moves their lighting into the froxel pass); the scene shaders
+// alone read the fragment's cluster list.
 float3 WorldPunctualDiffuse(float3 wp, float3 n) {
     float3 sum = 0;
     uint count = WorldPunctualCount();

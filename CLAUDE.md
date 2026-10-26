@@ -275,7 +275,20 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     bound through the bindless buffer table (`SceneConstants::lightCdfParams` = heap index + count); `shaders/light_pick.hlsli`
     (`LightCdfPick`) samples it. Offline GI keeps its exact all-lights estimator up to 4 lights and takes 4 CDF samples
     per shading point above that (`PunctualLighting`, the glints, skin translucency). The volumetric march considers at
-    most `kVolMaxLights` = 64 lights. Clustered culling (Forward+) is S7c.
+    most `kVolMaxLights` = 64 lights. Clustered culling (Forward+, S7c): above `kClusterMinLights` = 16 lights the raster /
+    RT scene pixel shaders no longer loop over every light: `PassLightCull` (`PassLightCull.cpp`, `shaders/light_cull.hlsl`)
+    runs right before `ScenePass`, one thread group per froxel of a fixed 16 x 9 x 24 grid over the main camera (screen
+    tiles x exponential view-depth slices between nearZ and min(farZ, 1000), `ClusterSliceParams`), and tests every
+    light's range sphere (spots also reject the box outside their cone) against the froxel's view-space AABB; the
+    survivors land in the frame slot's raw `Renderer::lightClusterBuf_` block, ascending, up to `kClusterMaxLights` = 64
+    per cluster (a fuller cluster stores 0xFFFF and its fragments loop over every light). The scene shaders read their
+    fragment's list through `shaders/light_cluster.hlsli` (`LightListFor` from the world position; a fragment past the
+    grid's farthest slice, depth > min(farZ, 1000), is outside the culled range and keeps the full loop) via the same
+    bindless buffer table as the CDF (`SceneConstants::lightClusterParams` = heap index + packed grid + log-slice scale /
+    bias).
+    The order is preserved, so the image is bit-identical to the full loop; `world.hlsl`'s world-surface lights keep the
+    full loop, and camera feeds / quad extra views / ortho / `RenderToImage` / offline set the index to -1 (their camera
+    is not the grid's). No root-signature change; nothing runs at <= 16 lights (`LIGHTS ... clusters=0`).
     Volumetric haze (S9, `shaders/volumetric_common.hlsli` shared by `volumetric.hlsl` and `offline_volumetric.hlsl`):
     every light scales its own in-scattering by `LightValues::volumetric` (`GpuLight::_pad` / `VolLight::volumetric`) and
     uses `SceneLight::volumetricG` as its Henyey-Greenstein `g` (`_pad2` / `VolLight::aniso`; absent = the fog's own).
