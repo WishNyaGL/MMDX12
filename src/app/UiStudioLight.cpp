@@ -190,15 +190,13 @@ void App::StudioApplyLightPreset(int presetIndex) {
 // are ordinary scene lights tagged with the stage they came from (SceneLight::stageUid) and the manifest light name their
 // bindings address (stageLightName), so the per-frame stage targets can drive them. S2a: when the manifest says
 // "gltfLights", the parts' KHR_lights_punctual lights are appended first, named after their glTF nodes.
-void App::StudioApplyStageLightRig(uint32_t stageUid) {
-    if (!studio_) return;
-    StudioDoc& d = *studio_;
+bool App::StudioStageRigLights(StudioDoc& d, uint32_t stageUid, std::vector<SceneLight>& after) {
+    after.clear();
     StudioStage* stage = d.FindStage(stageUid);
-    if (!stage || !stage->manifest) return;
+    if (!stage || !stage->manifest) return false;
     const std::shared_ptr<const StageManifest> manifest = stage->manifest;
-    if (manifest->lights.empty() && manifest->environment.fogVolumes.empty() && !manifest->gltfLights) return;
-    std::vector<SceneLight> before = d.lights;
-    std::vector<SceneLight> after = manifest->lights;
+    if (manifest->lights.empty() && manifest->environment.fogVolumes.empty() && !manifest->gltfLights) return false;
+    after = manifest->lights;
     if (manifest->gltfLights) {
         std::vector<std::string> taken;
         for (const SceneLight& l : after) taken.push_back(l.name);
@@ -213,7 +211,7 @@ void App::StudioApplyStageLightRig(uint32_t stageUid) {
     // S9: the stage's local fog volumes become FogVolume lights of the rig (placement only, never cue driven).
     for (size_t i = 0; i < manifest->environment.fogVolumes.size(); ++i)
         after.push_back(StageFogVolumeLight(manifest->environment.fogVolumes[i], i));
-    if (after.empty()) return;
+    if (after.empty()) return false;
     for (SceneLight& l : after) {
         l.uid = d.nextLightUid++;   // the stage's order is its identity; uids are per project
         if (l.name.empty()) l.name = LightKindName(l.kind);
@@ -221,6 +219,16 @@ void App::StudioApplyStageLightRig(uint32_t stageUid) {
         l.stageUid = stageUid;
         l.stageLightName = l.name;
     }
+    return true;
+}
+
+void App::StudioApplyStageLightRig(uint32_t stageUid) {
+    if (!studio_) return;
+    StudioDoc& d = *studio_;
+    std::vector<SceneLight> before = d.lights;
+    std::vector<SceneLight> after;
+    if (!StudioStageRigLights(d, stageUid, after)) return;
+    const std::shared_ptr<const StageManifest> manifest = d.FindStage(stageUid)->manifest;
     d.history.Push(std::make_unique<LightsCommand>(d, Tr("스테이지 조명"), before, after));
     d.selectedLightUid = 0;
     ++d.projectVersion;

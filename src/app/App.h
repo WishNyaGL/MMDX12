@@ -635,6 +635,9 @@ private:
     // S3: the rig lights are tagged with the stage (SceneLight::stageUid / stageLightName) and the stage's light targets
     // are replayed onto them every frame.
     void StudioApplyStageLightRig(uint32_t stageUid);
+    // The rig lights of `stageUid` in `d` (tagged, with fresh uids from d.nextLightUid); false when the stage has none.
+    // Shared by StudioApplyStageLightRig (undoable add) and a new project opened with a stage (no undo step).
+    bool StudioStageRigLights(studio::StudioDoc& d, uint32_t stageUid, std::vector<studio::SceneLight>& out);
     // S1b: the studio's per-frame MMDX stage targets (material values + light values on the stage's own rig lights).
     void StudioApplyStageTargets();
     // S5: BuildStudioFrameView's stage screens (image / video / camera feed sources), the project's overrides applied.

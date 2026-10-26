@@ -184,7 +184,32 @@ uint64_t FnvLight(uint64_t h, const LightParams& l) {
     h = FnvBytes(h, &l.sunShadowColor, sizeof(l.sunShadowColor));
     const uint64_t count = (uint64_t)l.punctual.size();
     h = FnvBytes(h, &count, sizeof(count));
-    for (const PunctualLight& p : l.punctual) h = FnvBytes(h, &p, sizeof(p));
+    // Field by field: PunctualLight holds a std::string (the S7b gobo path), so its raw bytes carry a heap pointer that
+    // differs every frame (the light list is rebuilt per frame) and padding; hashing them restarted the studio GI preview
+    // on every frame of any scene with a punctual light (stuck at "prepass 2/6").
+    for (const PunctualLight& p : l.punctual) {
+        h = FnvBytes(h, &p.position, sizeof(p.position));
+        h = FnvFloat(h, p.range);
+        h = FnvBytes(h, &p.color, sizeof(p.color));
+        h = FnvFloat(h, p.intensity);
+        h = FnvBytes(h, &p.direction, sizeof(p.direction));
+        h = FnvFloat(h, p.spotCosOuter);
+        h = FnvFloat(h, p.spotCosInner);
+        h = FnvInt(h, (int64_t)p.shadow);
+        h = FnvFloat(h, p.shadowSoftness);
+        h = FnvFloat(h, p.shadowDensity);
+        h = FnvBytes(h, &p.shadowColor, sizeof(p.shadowColor));
+        h = FnvInt(h, (int64_t)p.falloff);
+        h = FnvInt(h, (p.affectDiffuse ? 1 : 0) | (p.affectSpecular ? 2 : 0) | (p.castPointShadow ? 4 : 0));
+        h = FnvBytes(h, &p.areaSize, sizeof(p.areaSize));
+        h = FnvFloat(h, p.volumetric);
+        h = FnvFloat(h, p.volumetricG);
+        h = FnvString(h, p.gobo);
+        h = FnvFloat(h, p.goboRotation);
+        h = FnvFloat(h, p.goboScale);
+        h = FnvFloat(h, p.goboSpin);
+        h = FnvFloat(h, p.goboFocus);
+    }
     return h;
 }
 uint64_t FnvEffects(uint64_t h, const std::vector<EffectStackEntry>& stack) {

@@ -286,6 +286,19 @@ bool App::FinishStudioLoad() {
     } else {
         doc->useMotionCamera = doc->HasCameraKeys() && !options_.freeCamera;
         doc->lights = PresetLights(0, DirectX::XMFLOAT3{0.0f, 10.0f, 0.0f}, doc->nextLightUid);  // the Studio preset
+        // A library scene with an MMDX stage starts with the stage's light rig, exactly as adding the stage inside the
+        // studio does (StudioApplyStageLightRig), but as the new project's starting state (no undo step). Before this
+        // the rig only came with "add stage", so a stage chosen in the lobby had no spots (no beams in the haze).
+        for (const studio::StudioStage& stage : doc->stages) {
+            std::vector<SceneLight> rig;
+            if (!StudioStageRigLights(*doc, stage.uid, rig)) continue;
+            doc->lights = std::move(rig);
+            if (stage.manifest && stage.manifest->environment.fog.present && !settings_.volumetric) {
+                settings_.volumetric = true;   // as StudioApplyStageLightRig: a fog stage turns the haze on
+                ApplyRenderSettings();
+            }
+            break;   // one rig per project (the first stage that has one), as an added stage replaces the lights
+        }
         // the character (the last model of a library scene); the camera in an empty project
         doc->selectedModel = -1;
         for (int i = (int)doc->models.size() - 1; i >= 0; --i)
@@ -1194,19 +1207,28 @@ void App::DrawStudioStageScreens(float w, uint32_t stageUid) {
             for (const StageCamera& sc : man.cameras) names.push_back(sc.name);
             for (const studio::StudioCamera& sc : d.cameras) names.push_back("uid:" + std::to_string(sc.uid));
             std::string label = camera.empty() ? Tr("(카메라 없음)") : camera;
+            if (camera.rfind("uid:", 0) == 0)   // a studio camera: its name, not the "uid:<n>" address
+                for (const studio::StudioCamera& sc : d.cameras)
+                    if ("uid:" + std::to_string(sc.uid) == camera) label = sc.name + "  · " + Tr("스튜디오");
             const ImVec2 cpos = ImGui::GetCursorScreenPos();
             TextEllipsis(cdl, Font::Regular, size::Small, ImVec2(cpos.x, cpos.y + Dp(4.0f)), cpos.x + rowW * 0.4f, p.ink2,
                          Tr("카메라"));
             ImGui::SetCursorScreenPos(ImVec2(cpos.x + rowW * 0.4f, cpos.y));
             ImGui::SetNextItemWidth(rowW - rowW * 0.4f);
             if (ImGui::BeginCombo("##stagescreencam", label.c_str())) {
-                for (const std::string& n : names) {
+                for (size_t ni = 0; ni < names.size(); ++ni) {
+                    const std::string& n = names[ni];
                     std::string shown2 = n;
                     if (n.rfind("uid:", 0) == 0) {
+                        // a studio camera (often imported from this very stage camera, so the names repeat): marked,
+                        // and every row gets its own ID (two equal labels were an ImGui ID conflict)
                         for (const studio::StudioCamera& sc : d.cameras)
-                            if ("uid:" + std::to_string(sc.uid) == n) shown2 = sc.name;
+                            if ("uid:" + std::to_string(sc.uid) == n) shown2 = sc.name + "  · " + Tr("스튜디오");
                     }
-                    if (ImGui::Selectable(shown2.c_str(), n == camera)) {
+                    ImGui::PushID((int)ni);
+                    const bool picked = ImGui::Selectable(shown2.c_str(), n == camera);
+                    ImGui::PopID();
+                    if (picked) {
                         studio::StageScreenOverride next = ov;
                         next.camera = n;
                         StudioSetScreenOverride(stageUid, id, next, Tr("스크린 카메라"));
