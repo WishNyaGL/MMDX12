@@ -1225,6 +1225,7 @@ private:
     AudioPlayer audio_;
     std::vector<float> audioPeaks_;   // timeline waveform envelope (0..1), cached from the loaded audio
     double audioPeaksDur_ = 0.0;      // audio duration the cache was built for (rebuild when it changes)
+    std::string audioPeaksPath_;      // audio path the cache was built for (rebuild on track replacement)
 
     // library
     LibraryScanResult library_;

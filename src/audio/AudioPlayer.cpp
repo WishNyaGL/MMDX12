@@ -92,9 +92,13 @@ bool AudioPlayer::BuildPeaks(int bands, std::vector<float>& out) const {
     size_t fi = 0;
     int band = 0;
     float bandMax = 0.0f;
+    bool ok = true;
     for (;;) {
         ma_uint64 got = 0;
-        if (ma_decoder_read_pcm_frames(&decoder, buf.data(), (ma_uint64)buf.size(), &got) != MA_SUCCESS) break;
+        if (ma_decoder_read_pcm_frames(&decoder, buf.data(), (ma_uint64)buf.size(), &got) != MA_SUCCESS) {
+            ok = false;  // a decode error is not a normal end of file
+            break;
+        }
         if (got == 0) break;
         for (ma_uint64 i = 0; i < got; ++i) {
             const float v = std::fabs(buf[(size_t)i]);
@@ -107,6 +111,12 @@ bool AudioPlayer::BuildPeaks(int bands, std::vector<float>& out) const {
             }
         }
         if (got < buf.size()) break;
+    }
+    if (!ok) {
+        // never hand back a partially decoded waveform as if it were complete
+        out.clear();
+        ma_decoder_uninit(&decoder);
+        return false;
     }
     if (band < bands && fi > 0) out[(size_t)band] = bandMax;
     // normalise to the global peak

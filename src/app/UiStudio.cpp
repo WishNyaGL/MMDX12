@@ -3653,19 +3653,23 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
     }
     d.followFrame = d.Frame();
 
-    // Lazy audio-waveform cache: rebuild only when the loaded audio (duration) changes.
+    // Lazy audio-waveform cache: rebuild when the loaded track (path) or its duration changes, so replacing a file
+    // with another of the same length also refreshes the waveform.
     {
         const double dur = d.hasAudio ? audio_.DurationSeconds() : 0.0;
-        if (dur <= 0.0) { audioPeaks_.clear(); audioPeaksDur_ = 0.0; }
-        else if (audioPeaks_.empty() || std::fabs(audioPeaksDur_ - dur) > 0.01) {
+        const std::string curPath = d.hasAudio ? PathToUtf8(d.audioPath) : std::string();
+        if (dur <= 0.0 || curPath.empty()) { audioPeaks_.clear(); audioPeaksDur_ = 0.0; audioPeaksPath_.clear(); }
+        else if (audioPeaks_.empty() || audioPeaksPath_ != curPath || std::fabs(audioPeaksDur_ - dur) > 0.01) {
             audioPeaks_.clear();
-            if (audio_.BuildPeaks(1280, audioPeaks_)) audioPeaksDur_ = dur;
+            if (audio_.BuildPeaks(1280, audioPeaks_)) { audioPeaksDur_ = dur; audioPeaksPath_ = curPath; }
+            else { audioPeaksDur_ = 0.0; audioPeaksPath_.clear(); }
         }
     }
     if (d.hasAudio && !audioPeaks_.empty()) {
         d.view.waveformPeaks = audioPeaks_.data();
         d.view.waveformBands = (int)audioPeaks_.size();
         d.view.waveformDurationSeconds = (float)audio_.DurationSeconds();
+        d.view.waveformOffsetSeconds = (float)d.audioOffset;
         d.view.waveformFps = (float)kMmdFps;
         d.view.waveformAlpha = d.showWaveform ? d.waveformAlpha : 0.0f;
     } else {

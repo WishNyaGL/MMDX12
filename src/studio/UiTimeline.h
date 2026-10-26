@@ -47,6 +47,7 @@ struct TimelineView {
     const float* waveformPeaks = nullptr;   // normalised envelope [0,1]
     int waveformBands = 0;                  // length of waveformPeaks
     float waveformDurationSeconds = 0.0f;   // total audio duration
+    float waveformOffsetSeconds = 0.0f;     // audio offset on the timeline (seconds, may be negative)
     float waveformFps = 30.0f;              // timeline frames per second
     float waveformAlpha = 0.0f;             // 0 = hidden
 };
