@@ -4,6 +4,7 @@
 // motion sync.
 #include <filesystem>
 #include <memory>
+#include <vector>
 
 namespace mmdx {
 
@@ -36,6 +37,10 @@ public:
     float Volume() const;
     void SetMuted(bool muted);
     bool Muted() const;
+
+    // Decodes the current/loaded file into `bands` envelope samples (0..1, normalised to the global peak) for the
+    // timeline waveform. Returns false when nothing is loaded or decoding fails. Out is resized to `bands`.
+    bool BuildPeaks(int bands, std::vector<float>& out) const;
 
 private:
     struct Impl;

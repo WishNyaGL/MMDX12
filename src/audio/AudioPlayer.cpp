@@ -5,6 +5,8 @@
 #include "core/Log.h"
 #include "core/TextUtil.h"
 
+#include <cmath>
+
 namespace mmdx {
 
 struct AudioPlayer::Impl {
@@ -12,6 +14,7 @@ struct AudioPlayer::Impl {
     bool engineOk = false;
     ma_sound sound{};
     bool soundOk = false;
+    std::filesystem::path path;
     float volume = 0.8f;
     bool muted = false;
     // After the sound reached its end, miniaudio's at-end flag makes the node stop and ignore seek
@@ -47,6 +50,7 @@ bool AudioPlayer::Load(const std::filesystem::path& path) {
         return false;
     }
     impl_->soundOk = true;
+    impl_->path = path;
     return true;
 }
 
@@ -67,6 +71,50 @@ void AudioPlayer::Unload() {
     if (impl_->soundOk) ma_sound_uninit(&impl_->sound);
     impl_->soundOk = false;
     impl_->restartPending = false;
+    impl_->path.clear();
+}
+
+bool AudioPlayer::BuildPeaks(int bands, std::vector<float>& out) const {
+    out.clear();
+    if (impl_->path.empty() || bands <= 0) return false;
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 1, 0);  // mono f32, native rate
+    ma_decoder decoder;
+    if (ma_decoder_init_file_w(impl_->path.c_str(), &cfg, &decoder) != MA_SUCCESS) return false;
+    const double dur = DurationSeconds();
+    if (dur <= 0.0) {
+        ma_decoder_uninit(&decoder);
+        return false;
+    }
+    const float sr = decoder.outputSampleRate > 0 ? (float)decoder.outputSampleRate : 44100.0f;
+    const double framesPerBand = dur * sr / bands;
+    out.assign((size_t)bands, 0.0f);
+    std::vector<float> buf(8192);
+    size_t fi = 0;
+    int band = 0;
+    float bandMax = 0.0f;
+    for (;;) {
+        ma_uint64 got = 0;
+        if (ma_decoder_read_pcm_frames(&decoder, buf.data(), (ma_uint64)buf.size(), &got) != MA_SUCCESS) break;
+        if (got == 0) break;
+        for (ma_uint64 i = 0; i < got; ++i) {
+            const float v = std::fabs(buf[(size_t)i]);
+            if (v > bandMax) bandMax = v;
+            ++fi;
+            if ((double)fi >= (double)(band + 1) * framesPerBand) {
+                if (band < bands) out[(size_t)band] = bandMax;
+                bandMax = 0.0f;
+                ++band;
+            }
+        }
+        if (got < buf.size()) break;
+    }
+    if (band < bands && fi > 0) out[(size_t)band] = bandMax;
+    // normalise to the global peak
+    float gmax = 0.0f;
+    for (float v : out) if (v > gmax) gmax = v;
+    if (gmax > 1e-6f) for (float& v : out) v /= gmax;
+    ma_decoder_uninit(&decoder);
+    return true;
 }
 
 bool AudioPlayer::IsLoaded() const { return impl_->soundOk; }

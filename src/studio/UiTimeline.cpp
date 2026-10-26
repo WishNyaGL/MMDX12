@@ -441,6 +441,25 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     dl->AddRectFilled(bb.Min, ImVec2(bb.Max.x, contentY), p.surface);
     dl->AddLine(ImVec2(bb.Min.x, contentY), ImVec2(bb.Max.x, contentY), p.lineStrong);
 
+    // Audio waveform behind the frame/second ticks (theme soft cold-green, alpha = visibility).
+    if (view.waveformAlpha > 0.0f && view.waveformPeaks && view.waveformBands > 0 &&
+        view.waveformDurationSeconds > 0.0f) {
+        const float rulerH = std::max(1.0f, contentY - bb.Min.y);
+        const float yMid = (bb.Min.y + contentY) * 0.5f;
+        const float halfH = rulerH * 0.42f;
+        const ImU32 wcol = IM_COL32(120, 220, 150, (int)(200.0f * std::clamp(view.waveformAlpha, 0.0f, 1.0f)));
+        dl->PushClipRect(ImVec2(keyAreaX, bb.Min.y), ImVec2(bb.Max.x, contentY), true);
+        const float wfps = view.waveformFps > 0.0f ? view.waveformFps : 30.0f;
+        for (int i = 0; i < view.waveformBands; ++i) {
+            const float f = view.waveformDurationSeconds * wfps * (float)i / (float)view.waveformBands;
+            const float x = originX + (f - view.scrollFrame) * view.pxPerFrame * Dpi();
+            if (x < keyAreaX || x > bb.Max.x) continue;
+            const float amp = std::clamp(view.waveformPeaks[i], 0.0f, 1.0f) * halfH;
+            dl->AddLine(ImVec2(x, yMid - amp), ImVec2(x, yMid + amp), wcol, 1.0f);
+        }
+        dl->PopClipRect();
+    }
+
     if (view.rangeStart >= 0 && view.rangeEnd >= view.rangeStart) {
         float xa = originX + (view.rangeStart - view.scrollFrame) * view.pxPerFrame * Dpi() - 0.5f * view.pxPerFrame * Dpi();
         float xb = originX + (view.rangeEnd - view.scrollFrame) * view.pxPerFrame * Dpi() + 0.5f * view.pxPerFrame * Dpi();

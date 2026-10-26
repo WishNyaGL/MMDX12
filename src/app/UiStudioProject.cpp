@@ -1237,6 +1237,13 @@ void App::DrawStudioModelMenu(int index) {
             if (ImGui::IsItemDeactivatedAfterEdit()) ++d.projectVersion;
             PopFont();
             Tooltip(Tr("음원이 타임라인의 이 시간에 시작해요 (양수: 늦게, 음수: 앞부분을 건너뜀)"));
+            Gap(10.0f);
+            ImGui::Checkbox(Tr("타임라인에 waveform 표시"), &d.showWaveform);
+            if (d.showWaveform) {
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::SliderFloat("##wavealpha", &d.waveformAlpha, 0.0f, 1.0f, Tr("투명도 %.2f"));
+                d.waveformAlpha = std::clamp(d.waveformAlpha, 0.0f, 1.0f);
+            }
             Gap(8.0f);
             if (MenuItemChip("##audioreplace", Tr("음원 바꾸기…"), icon::FolderOpen)) {
                 ImGui::CloseCurrentPopup();

@@ -3652,6 +3652,28 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
             d.view.scrollFrame = std::max(0.0f, f - visible * (d.playing ? 0.08f : 0.4f));
     }
     d.followFrame = d.Frame();
+
+    // Lazy audio-waveform cache: rebuild only when the loaded audio (duration) changes.
+    {
+        const double dur = d.hasAudio ? audio_.DurationSeconds() : 0.0;
+        if (dur <= 0.0) { audioPeaks_.clear(); audioPeaksDur_ = 0.0; }
+        else if (audioPeaks_.empty() || std::fabs(audioPeaksDur_ - dur) > 0.01) {
+            audioPeaks_.clear();
+            if (audio_.BuildPeaks(1280, audioPeaks_)) audioPeaksDur_ = dur;
+        }
+    }
+    if (d.hasAudio && !audioPeaks_.empty()) {
+        d.view.waveformPeaks = audioPeaks_.data();
+        d.view.waveformBands = (int)audioPeaks_.size();
+        d.view.waveformDurationSeconds = (float)audio_.DurationSeconds();
+        d.view.waveformFps = (float)kMmdFps;
+        d.view.waveformAlpha = d.showWaveform ? d.waveformAlpha : 0.0f;
+    } else {
+        d.view.waveformPeaks = nullptr;
+        d.view.waveformBands = 0;
+        d.view.waveformAlpha = 0.0f;
+    }
+
     TimelineEvents ev;
     Timeline("##tl", ImVec2(0, 0), d.rows, d.Frame(), d.EndFrame(), d.view, ev);
     ImGui::EndChild();

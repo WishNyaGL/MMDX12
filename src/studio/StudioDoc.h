@@ -146,6 +146,8 @@ struct StudioDoc {
     bool hasAudio = false;
     float audioEndFrame = 0;          // timeline frame where the audio ends (includes audioOffset)
     double audioOffset = 0;           // seconds: the audio starts at this timeline time (may be negative)
+    bool showWaveform = true;         // draw the audio waveform in the timeline ruler
+    float waveformAlpha = 0.5f;       // waveform visibility 0..1
     // Background AVI (背景AVI): an absolute video path (empty = none) whose current frame feeds screen.bmp materials
     // and, with bgVideoAsBackground, is also drawn as the screen background. bgVideoOffset is seconds: the video
     // starts at this timeline time (may be negative, like audioOffset).

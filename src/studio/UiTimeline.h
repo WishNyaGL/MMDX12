@@ -42,6 +42,13 @@ struct TimelineView {
     float boxAnchorFrame = 0.0f;         // box select anchor as a frame (content coordinates: stays put while the view auto-scrolls)
     float boxAnchorY = 0.0f;             // box select anchor as content px below the rows area's top (content coordinates)
     uint64_t scrollToRow = 0;            // caller writes a row id: the widget scrolls it into view on the next call, then resets it to 0 (0 = no request; unknown id is just reset)
+
+    // Optional audio waveform drawn in the ruler background (behind the frame/second ticks).
+    const float* waveformPeaks = nullptr;   // normalised envelope [0,1]
+    int waveformBands = 0;                  // length of waveformPeaks
+    float waveformDurationSeconds = 0.0f;   // total audio duration
+    float waveformFps = 30.0f;              // timeline frames per second
+    float waveformAlpha = 0.0f;             // 0 = hidden
 };
 
 struct TimelineKeyRef { uint64_t row; int frame; };

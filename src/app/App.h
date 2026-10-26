@@ -1223,6 +1223,8 @@ private:
     Dx12Context ctx_;
     Renderer renderer_;
     AudioPlayer audio_;
+    std::vector<float> audioPeaks_;   // timeline waveform envelope (0..1), cached from the loaded audio
+    double audioPeaksDur_ = 0.0;      // audio duration the cache was built for (rebuild when it changes)
 
     // library
     LibraryScanResult library_;
