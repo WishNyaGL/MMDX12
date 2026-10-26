@@ -767,8 +767,59 @@ ComPtr<ID3D12Resource> UploadBatch::CreateTextureChannel8(const ImageRGBA8& imag
     return res;
 }
 
-// ---- S11: block-compressed / cube uploads -----------------------------------------------------
+// S9b-3: one mip of raw texels (the sky map's RGBA16F equirect). Same staging / footprint flow as CreateTextureTyped.
+ComPtr<ID3D12Resource> UploadBatch::CreateTextureRaw(const void* pixels, uint32_t width, uint32_t height,
+                                                    uint32_t bytesPerPixel, DXGI_FORMAT format,
+                                                    const wchar_t* debugName) {
+    if (!ctx_.Device() || !list_ || !pixels || width == 0 || height == 0 || bytesPerPixel == 0) return {};
+    CD3DX12_RESOURCE_DESC desc =
+        CD3DX12_RESOURCE_DESC::Tex2D(format, width, height, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_NONE);
+    D3D12_HEAP_PROPERTIES def{D3D12_HEAP_TYPE_DEFAULT};
+    ComPtr<ID3D12Resource> res;
+    if (!CheckHr(ctx_.Device()->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &desc,
+                                                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                        IID_PPV_ARGS(&res)),
+                 "CreateCommittedResource(texture)"))
+        return {};
+    if (debugName) res->SetName(debugName);
 
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT rowCount = 0;
+    UINT64 rowSize = 0, total = 0;
+    ctx_.Device()->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, &rowCount, &rowSize, &total);
+
+    D3D12_HEAP_PROPERTIES upload{D3D12_HEAP_TYPE_UPLOAD};
+    D3D12_RESOURCE_DESC stagingDesc = CD3DX12_RESOURCE_DESC::Buffer(total);
+    ComPtr<ID3D12Resource> staging;
+    if (!CheckHr(ctx_.Device()->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &stagingDesc,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                        IID_PPV_ARGS(&staging)),
+                 "CreateCommittedResource(texture staging)"))
+        return {};
+    void* mapped = nullptr;
+    if (FAILED(staging->Map(0, nullptr, &mapped))) {
+        LOG_ERROR("failed to map texture upload staging buffer");
+        return {};
+    }
+    uint8_t* base = (uint8_t*)mapped;
+    const size_t srcPitch = (size_t)width * bytesPerPixel;
+    for (UINT y = 0; y < rowCount; ++y)
+        memcpy(base + footprint.Offset + (size_t)y * footprint.Footprint.RowPitch,
+               (const uint8_t*)pixels + (size_t)y * srcPitch, srcPitch);
+    staging->Unmap(0, nullptr);
+
+    CD3DX12_TEXTURE_COPY_LOCATION dst(res.Get(), 0);
+    CD3DX12_TEXTURE_COPY_LOCATION src(staging.Get(), footprint);
+    list_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    staging_.push_back(std::move(staging));   // kept alive until Submit; moved only after the copy reads it
+
+    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    list_->ResourceBarrier(1, &barrier);
+    return res;
+}
+
+// ---- S11: block-compressed / cube uploads -----------------------------------------------------
 ComPtr<ID3D12Resource> UploadBatch::CreateTextureCompressed(const CompressedImage& image, DXGI_FORMAT format,
                                                           const wchar_t* debugName) {
     if (!ctx_.Device() || !list_ || image.Empty() || format == DXGI_FORMAT_UNKNOWN) return {};

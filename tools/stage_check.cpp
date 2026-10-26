@@ -180,6 +180,20 @@ void CheckFiles(const StageManifest& m) {
         if (ext != ".png" && ext != ".jpg" && ext != ".jpeg")
             Problem("lights: " + l.name + ": gobo file must be a .png / .jpg image (" + l.gobo + ")");
     }
+    // S9b-3: a sky light's image must be a bundled panorama (an HDRI, an 8-bit image or a DDS cubemap). The encoding is
+    // validated by the manifest.
+    for (const auto& l : m.lights) {
+        if (l.skyMap.empty()) continue;
+        const fs::path file = m.dir / mmdx::Utf8ToPath(l.skyMap);
+        std::error_code ec;
+        if (!fs::is_regular_file(file, ec)) {
+            Problem("lights: " + l.name + ": missing sky map file " + l.skyMap);
+            continue;
+        }
+        const std::string ext = mmdx::ToLowerAscii(mmdx::PathToUtf8(file.extension()));
+        if (ext != ".hdr" && ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".dds")
+            Problem("lights: " + l.name + ": sky map file must be a .hdr / .png / .jpg / .dds image (" + l.skyMap + ")");
+    }
     // budget: every file under the folder, grouped by extension
     std::map<std::string, std::pair<uint64_t, uint32_t>> byExt;   // ext -> (bytes, count)
     uint64_t total = 0;
@@ -369,6 +383,41 @@ int SelfTest() {
         mmdx::StageManifest twoSkies = sm;
         twoSkies.lights.push_back(sm.lights[0]);
         check(!mmdx::ValidateStageManifest(twoSkies).empty(), "two sky lights rejected");
+    }
+
+    // S9b-3: a sky light's image (base keys beside the light, its two values in "values") and its nested targets
+    {
+        const std::string skyMapJson = R"({
+          "format": "mmdx-stage", "formatVersion": 1, "id": "skymaptest", "version": "1", "name": "Sky map test",
+          "models": [{"file": "x.glb"}],
+          "lights": [{"kind": "sky", "name": "sky", "skyMap": "sky/test_sky.hdr", "skyMapEncoding": "rgbt",
+                      "skyMapMirror": true,
+                      "values": {"skySunIntensity": 0.0, "skyMapRotationDeg": 15.0, "skyMapIntensity": 2.0}}],
+          "params": [{"key": "rot", "type": "float", "default": 30.0, "min": -180.0, "max": 180.0}],
+          "bindings": [{"param": "rot", "target": "lights.sky.sky.mapRotation"}]
+        })";
+        StageManifest mm;
+        check(mmdx::ParseStageManifest(skyMapJson, fs::path("skymaptest"), mm, error), "sky map manifest parses", error);
+        check(mmdx::ValidateStageManifest(mm).empty(), "sky map manifest validates",
+              mmdx::ValidateStageManifest(mm).empty() ? "" : mmdx::ValidateStageManifest(mm).front());
+        check(mm.lights.size() == 1 && mm.lights[0].skyMap == "sky/test_sky.hdr" &&
+                  mm.lights[0].skyMapEncoding == "rgbt" && mm.lights[0].skyMapMirror &&
+                  mm.lights[0].v.skyMapIntensity == 2.0f && mm.lights[0].v.skyMapRotationDeg == 15.0f,
+              "sky map keys parsed");
+        const mmdx::StageTargetSpec ms = mmdx::ResolveStageTarget(mm, "lights.sky.sky.mapRotation");
+        check(ms.ok && ms.owner == "sky" && ms.field == "sky.mapRotation" &&
+                  ms.type == mmdx::StageTargetSpec::ValueType::Float,
+              "sky map target splits owner / field");
+        check(!mmdx::ResolveStageTarget(mm, "lights.sky.sky.mapNope").ok, "unknown sky map field rejected");
+        mmdx::StageManifest badEnc = mm;
+        badEnc.lights[0].skyMapEncoding = "hdri";
+        check(!mmdx::ValidateStageManifest(badEnc).empty(), "an unknown sky map encoding rejected");
+        mmdx::StageManifest badMap = mm;
+        badMap.lights[0].skyMap = "../escape.hdr";
+        check(!mmdx::ValidateStageManifest(badMap).empty(), "a sky map path outside the stage rejected");
+        mmdx::StageManifest badMapInt = mm;
+        badMapInt.lights[0].v.skyMapIntensity = -1.0f;
+        check(!mmdx::ValidateStageManifest(badMapInt).empty(), "a negative sky map intensity rejected");
     }
 
     // enum -> screen source (string target)

@@ -308,6 +308,15 @@ struct LightParams {
     // model also writes (the hemisphere fill, the floor and the haze stay coherent with it).
     bool physicalSky = false;
     PhysicalSkyState sky;
+    // S9b-3: the Sky light's image (render/SkyMap.h): `skyMap` is the file (absolute: the stage runtime / the studio
+    // resolve a relative one before the renderer sees it), empty = no image and the procedural sky above draws.
+    // skyMapEncoding: 0 auto, 1 linear, 2 sRGB, 3 Ray-MMD RGBT; skyMapRotationRad rotates the panorama around +y,
+    // skyMapIntensity scales its radiance (and the ambient colours derived from it).
+    std::string skyMap;
+    int skyMapEncoding = 0;
+    bool skyMapMirror = false;
+    float skyMapRotationRad = 0.0f;
+    float skyMapIntensity = 1.0f;
 
     // Sun shadow properties
     LightShadowType sunShadow = LightShadowType::Hard;

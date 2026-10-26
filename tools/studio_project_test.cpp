@@ -111,6 +111,10 @@ static std::string DiffLight(const SceneLight& a, const SceneLight& b) {
     if (a.goboScale != b.goboScale) return "goboScale";
     if (a.goboSpin != b.goboSpin) return "goboSpin";
     if (a.goboFocus != b.goboFocus) return "goboFocus";
+    // S9b-3: the sky light's image
+    if (a.skyMap != b.skyMap) return "skyMap";
+    if (a.skyMapEncoding != b.skyMapEncoding) return "skyMapEncoding";
+    if (a.skyMapMirror != b.skyMapMirror) return "skyMapMirror";
     // S9b-1: the Physical Sky light's values
     if (a.v.skyTimeOfDay != b.v.skyTimeOfDay) return "v.skyTimeOfDay";
     if (a.v.skyNorthDeg != b.v.skyNorthDeg) return "v.skyNorthDeg";
@@ -120,6 +124,8 @@ static std::string DiffLight(const SceneLight& a, const SceneLight& b) {
     if (a.v.skyIntensity != b.v.skyIntensity) return "v.skyIntensity";
     if (a.v.skySunIntensity != b.v.skySunIntensity) return "v.skySunIntensity";
     if (a.v.skyMaxElevationDeg != b.v.skyMaxElevationDeg) return "v.skyMaxElevationDeg";
+    if (a.v.skyMapRotationDeg != b.v.skyMapRotationDeg) return "v.skyMapRotationDeg";
+    if (a.v.skyMapIntensity != b.v.skyMapIntensity) return "v.skyMapIntensity";
     return "";
 }
 
@@ -1209,6 +1215,12 @@ static void TestSkyLightProject() {
     sky.v.skyIntensity = 1.4f;
     sky.v.skySunIntensity = 0.85f;
     sky.v.skyMaxElevationDeg = 52.0f;
+    // S9b-3: the sky's image (its rotation / scale are keyable values, its file / encoding / mirror base values)
+    sky.skyMap = "sky/test_sky.hdr";
+    sky.skyMapEncoding = "rgbt";
+    sky.skyMapMirror = true;
+    sky.v.skyMapRotationDeg = -72.5f;
+    sky.v.skyMapIntensity = 1.75f;
     LightKey k0, k1;
     k0.frame = 0;
     k0.v = sky.v;
@@ -1228,6 +1240,9 @@ static void TestSkyLightProject() {
         Check(l["kind"] == "sky" && l["values"]["skyTimeOfDay"] == 6.75f && l["values"]["skyGround"].size() == 3 &&
                   l["values"]["skySunIntensity"] == 0.85f,
               "sky light: kind and values are written");
+        Check(l["skyMap"] == "sky/test_sky.hdr" && l["skyMapEncoding"] == "rgbt" && l["skyMapMirror"] == true &&
+                  l["values"]["skyMapRotationDeg"] == -72.5f && l["values"]["skyMapIntensity"] == 1.75f,
+              "sky light: the image and its values are written");
         Check(l["keys"].size() == 2 && l["keys"][1]["values"]["skyTimeOfDay"] == 18.25f,
               "sky light: key values carry the time of day");
     }
@@ -1260,6 +1275,9 @@ static void TestSkyLightProject() {
                       got.v.skyHaze == 0.2f && got.v.skyGround.x == 0.35f && got.v.skyIntensity == 1.0f &&
                       got.v.skySunIntensity == 1.0f && got.v.skyMaxElevationDeg == 60.0f,
                   "sky defaults: noon, north 0, turbidity 3, haze 0.2, grey ground, intensity 1, elevation 60");
+            Check(got.skyMap.empty() && got.skyMapEncoding == "auto" && !got.skyMapMirror &&
+                      got.v.skyMapRotationDeg == 0.0f && got.v.skyMapIntensity == 1.0f,
+                  "sky image defaults: no map, auto encoding, no mirror, rotation 0, intensity 1");
         }
         ProjectData plain;
         SceneLight def;
@@ -1273,8 +1291,11 @@ static void TestSkyLightProject() {
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
         const nlohmann::json& vals = j["editor"]["lights"][0]["values"];
-        Check(!vals.contains("skyTimeOfDay") && !vals.contains("skyTurbidity") && !vals.contains("skyIntensity"),
+        Check(!vals.contains("skyTimeOfDay") && !vals.contains("skyTurbidity") && !vals.contains("skyIntensity") &&
+                  !vals.contains("skyMapIntensity"),
               "a default sky light writes no sky value keys (an older file's bytes are kept)");
+        Check(!j["editor"]["lights"][0].contains("skyMap"),
+              "a sky light with no image writes no skyMap key");
     }
 }
 

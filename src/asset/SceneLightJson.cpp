@@ -68,6 +68,9 @@ nlohmann::json LightValuesJson(const LightValues& v) {
     if (v.skyIntensity != 1.0f) j["skyIntensity"] = v.skyIntensity;
     if (v.skySunIntensity != 1.0f) j["skySunIntensity"] = v.skySunIntensity;
     if (v.skyMaxElevationDeg != 60.0f) j["skyMaxElevationDeg"] = v.skyMaxElevationDeg;
+    // S9b-3: the image sky's rotation / radiance scale (unused / the defaults while the light has no image).
+    if (v.skyMapRotationDeg != 0.0f) j["skyMapRotationDeg"] = v.skyMapRotationDeg;
+    if (v.skyMapIntensity != 1.0f) j["skyMapIntensity"] = v.skyMapIntensity;
     return j;
 }
 
@@ -91,6 +94,8 @@ void ReadLightValues(const nlohmann::json& j, LightValues& v) {
     v.skyIntensity = (float)ReadDouble(j, "skyIntensity", v.skyIntensity);
     v.skySunIntensity = (float)ReadDouble(j, "skySunIntensity", v.skySunIntensity);
     v.skyMaxElevationDeg = (float)ReadDouble(j, "skyMaxElevationDeg", v.skyMaxElevationDeg);
+    v.skyMapRotationDeg = (float)ReadDouble(j, "skyMapRotationDeg", v.skyMapRotationDeg);
+    v.skyMapIntensity = (float)ReadDouble(j, "skyMapIntensity", v.skyMapIntensity);
 }
 
 } // namespace
@@ -128,6 +133,13 @@ nlohmann::json SceneLightToJson(const SceneLight& l) {
                      {"scale", l.goboScale},
                      {"spin", l.goboSpin},
                      {"focus", l.goboFocus}};
+    }
+    // S9b-3: the sky light's image (absent = none, so an older file is unchanged). `skyMap` is whatever the light
+    // carries: a stage light's relative to the stage, a studio light's absolute.
+    if (!l.skyMap.empty()) {
+        j["skyMap"] = l.skyMap;
+        j["skyMapEncoding"] = l.skyMapEncoding;
+        j["skyMapMirror"] = l.skyMapMirror;
     }
     j["affectDiffuse"] = l.affectDiffuse;
     j["affectSpecular"] = l.affectSpecular;
@@ -186,6 +198,10 @@ bool SceneLightFromJson(const nlohmann::json& jl, SceneLight& l, std::vector<std
         l.goboSpin = (float)ReadDouble(*g, "spin", l.goboSpin);
         l.goboFocus = (float)ReadDouble(*g, "focus", l.goboFocus);
     }
+    // S9b-3: the sky light's image (absent = none; the encoding keeps its default for an older / shorter file).
+    l.skyMap = ReadString(jl, "skyMap", l.skyMap);
+    l.skyMapEncoding = ReadString(jl, "skyMapEncoding", l.skyMapEncoding);
+    l.skyMapMirror = ReadBool(jl, "skyMapMirror", l.skyMapMirror);
     l.affectDiffuse = ReadBool(jl, "affectDiffuse", l.affectDiffuse);
     l.affectSpecular = ReadBool(jl, "affectSpecular", l.affectSpecular);
     l.viewportVisible = ReadBool(jl, "viewportVisible", l.viewportVisible);

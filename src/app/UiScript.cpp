@@ -613,6 +613,10 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                     else if (f == "goboscale") light->goboScale = std::max(0.01f, num(2));
                     else if (f == "gobospin") light->goboSpin = num(2);
                     else if (f == "gobofocus") light->goboFocus = std::clamp(num(2), 0.0f, 1.0f);
+                    // S9b-3: the sky light's image (the file + its two values; encoding / mirror stay base values)
+                    else if (f == "skymap") light->skyMap = args[2];
+                    else if (f == "skymaprot") light->v.skyMapRotationDeg = num(2);
+                    else if (f == "skymapint") light->v.skyMapIntensity = std::max(0.0f, num(2));
 
                     studioLightChanged_ = true;
                     studio_->rowsKey = ~0ull;

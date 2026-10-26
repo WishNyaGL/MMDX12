@@ -973,6 +973,41 @@ static void TestSkyLight() {
     Check(!withoutSky.physicalSky && withoutSky.sky.params.x == 0.0f && withoutSky.sky.perezY.z == 0.0f,
           "no sky light leaves the physical sky off");
 
+    // S9b-3: the sky light's IMAGE reaches the renderer (path, encoding id, mirror, rotation radians, scale) and an
+    // image-less sky leaves all of it at "no image".
+    Check(noon.skyMap.empty() && !noon.skyMapMirror && noon.skyMapIntensity == 1.0f,
+          "a sky light without an image carries no sky map");
+    SceneLight mapped = sky;
+    mapped.skyMap = "sky/test_sky.hdr";
+    mapped.skyMapEncoding = "rgbt";
+    mapped.skyMapMirror = true;
+    mapped.v.skyMapRotationDeg = 42.0f;
+    mapped.v.skyMapIntensity = 2.5f;
+    LightParams withMap;
+    BuildSceneLighting({mapped}, {}, 0.0, anchors, withMap);
+    Check(withMap.physicalSky && withMap.skyMap == "sky/test_sky.hdr" && withMap.skyMapEncoding == 3 &&
+              withMap.skyMapMirror && withMap.skyMapIntensity == 2.5f &&
+              std::abs(withMap.skyMapRotationRad - DirectX::XMConvertToRadians(42.0f)) < 1e-5f,
+          "the sky map fields reach the renderer's light");
+    // the map's rotation / intensity are keyable with the rest of the sky values
+    SceneLight mapKeyed = mapped;
+    LightValues dim = mapped.v;
+    dim.skyMapIntensity = 0.5f;
+    mapKeyed.keys = {{0, mapped.v}, {60, dim}};
+    LightParams midMap;
+    BuildSceneLighting({mapKeyed}, {}, 30.0 / (double)kMmdFps, anchors, midMap);
+    Check(std::abs(midMap.skyMapIntensity - 1.5f) < 1e-4f, "the sky map's intensity interpolates between keys");
+
+    // encoding names: the file-facing strings map onto the shader ids
+    SkyMapEncoding enc = SkyMapEncoding::Rgbt;
+    Check(std::string(SkyMapEncodingName(SkyMapEncoding::Auto)) == "auto" &&
+              std::string(SkyMapEncodingName(SkyMapEncoding::Linear)) == "linear" &&
+              std::string(SkyMapEncodingName(SkyMapEncoding::Srgb)) == "srgb" &&
+              std::string(SkyMapEncodingName(SkyMapEncoding::Rgbt)) == "rgbt" &&
+              ParseSkyMapEncoding("srgb", enc) && enc == SkyMapEncoding::Srgb && !ParseSkyMapEncoding("hdr", enc),
+          "sky map encoding names and parse");
+
+
     LightKind kind = LightKind::Point;
     Check(std::string(LightKindName(LightKind::Sky)) == "sky" && ParseLightKind("sky", kind) && kind == LightKind::Sky,
           "sky kind name and parse");

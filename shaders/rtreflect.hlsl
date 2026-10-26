@@ -4,6 +4,10 @@
 #include "rt_common.hlsli"   // includes common.hlsli
 #define PBR_SAMPLE_LEVEL0   // compute: no screen-space gradients
 #include "pbr_common.hlsli"
+// S9b-3: the Sky light's image (SkyColor's gSkyParams.x > 1.5 branch); the RT bindless texture table
+#define SKY_MAP_TEX(i) gBindlessTex[NonUniformResourceIndex((uint)(i))]
+#define SKY_MAP_SAMPLER gRtWrap
+#include "sky_map.hlsli"
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
 SamplerState gPoint : register(s0);
 SamplerState gLinear : register(s1);

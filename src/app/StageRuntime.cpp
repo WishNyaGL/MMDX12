@@ -82,6 +82,9 @@ bool ApplyStageLightField(studio::SceneLight& l, const std::string& field, const
     if (field == "sky.ground") { l.v.skyGround = vec; return true; }
     if (field == "sky.intensity") { l.v.skyIntensity = std::max(0.0f, v.AsNumber()); return true; }
     if (field == "sky.sunIntensity") { l.v.skySunIntensity = std::max(0.0f, v.AsNumber()); return true; }
+    // S9b-3: the sky image's values (the file / encoding / mirror are not bound, as the gobo's)
+    if (field == "sky.mapRotation") { l.v.skyMapRotationDeg = v.AsNumber(); return true; }
+    if (field == "sky.mapIntensity") { l.v.skyMapIntensity = std::max(0.0f, v.AsNumber()); return true; }
     return false;
 }
 
@@ -173,6 +176,12 @@ const std::vector<studio::SceneLight>& StageRuntime::Apply(double timeSeconds, u
         if (!l.gobo.empty()) {
             const std::filesystem::path p = Utf8ToPath(l.gobo);
             if (!p.is_absolute()) l.gobo = PathToUtf8(manifest_->dir / p);
+        }
+    // S9b-3: the sky light's image is resolved the same way (stage-relative for a manifest light).
+    for (studio::SceneLight& l : lights_)
+        if (!l.skyMap.empty()) {
+            const std::filesystem::path p = Utf8ToPath(l.skyMap);
+            if (!p.is_absolute()) l.skyMap = PathToUtf8(manifest_->dir / p);
         }
     // S9: environment.fogVolumes become FogVolume lights of the rig (static: they are placement, not cues). They are
     // appended after the manifest's lights so a light index binding keeps its meaning.

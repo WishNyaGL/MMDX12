@@ -13,6 +13,7 @@
 #include "render/MmeSkin.h"
 #include "render/ScreenVideo.h"
 #include "render/SkyEnv.h"
+#include "render/SkyMap.h"
 #include "render/StageScreens.h"
 #include <atomic>
 #include <filesystem>
@@ -357,6 +358,19 @@ private:
     // S7b: the gobo paths that produced the texture cache (a path that disappears from the frame frees its texture).
     std::vector<std::wstring> goboUsed_;
     bool goboActive_ = false;   // this frame's scene has a gobo (RecordScene fills the table of its slot)
+    // S9b-3: the Sky light's image cache (one entry per file + encoding: the RGBA16F equirect texture, its SRV and the
+    // row averages FillSceneConstants writes over the ambient colours). Decoded once; a failed file is remembered so a
+    // broken path logs one [W] instead of retrying every frame.
+    struct SkyMapGpu {
+        ComPtr<ID3D12Resource> res;
+        uint32_t srv = DescriptorHeap::kInvalid;
+        uint32_t width = 0, height = 0;
+        DirectX::XMFLOAT3 avg[3] = {};   // zenith, horizon, ground (linear, before the intensity)
+        bool failed = false;
+    };
+    std::unordered_map<std::string, SkyMapGpu> skyMaps_;
+    // The frame's sky map (decode + upload on first use; null when the light has no image or it failed).
+    const SkyMapGpu* EnsureSkyMap(const LightParams& light);
     // S8b: the frame's screen-light table (kMaxScreenLights GpuScreenLight entries, a raw SRV per constant-buffer slot
     // through the bindless table, exactly like the gobo table). The lights' colour follows the screen's content: the
     // scene shaders read the screen texture the material shows (the table's axisA.w = its SrvHeap index), so there is

@@ -1221,6 +1221,142 @@ def build_sky_test(out_dir):
     return stage_dir
 
 
+def write_sky_map_hdr(path, width=1024, height=512):
+    """S9b-3: a Radiance RGBE .hdr equirect test panorama (flat scanlines, 4 bytes per texel).
+
+    The content matches the shader's mapping (shaders/sky_map.hlsli): u = atan2(x, z) / 2PI + 0.5 (u = 0.5 faces +Z),
+    v = acos(y) / PI (v = 0 is the zenith). Above the horizon the sky lerps from a hazy horizon to a deep zenith blue;
+    below it is a dull ground. Three 10 deg tall / 20 deg wide colour markers just above the horizon (red at +Z, green
+    at +X, blue at -X) make the panorama's orientation readable, and a small bright sun sits at u = 0.625, 35 deg up.
+    """
+    import math
+
+    horizon = (0.70, 0.75, 0.80)
+    zenith = (0.15, 0.30, 0.70)
+    ground = (0.20, 0.18, 0.15)
+    markers = [(0.50, (4.0, 0.2, 0.2)), (0.75, (0.2, 4.0, 0.2)), (0.25, (0.2, 0.2, 4.0))]
+    sun_u, sun_elev = 0.625, 35.0
+    rows = []
+    for y in range(height):
+        v = (y + 0.5) / height
+        dir_y = math.cos(math.pi * v)          # dir.y = cos(theta), theta = PI v
+        elev = math.degrees(math.asin(max(-1.0, min(1.0, dir_y))))
+        row = bytearray()
+        for x in range(width):
+            u = (x + 0.5) / width
+            if dir_y >= 0.0:
+                t = dir_y ** 0.5
+                r = horizon[0] + (zenith[0] - horizon[0]) * t
+                g = horizon[1] + (zenith[1] - horizon[1]) * t
+                b = horizon[2] + (zenith[2] - horizon[2]) * t
+                for mu, colour in markers:
+                    # the u distance folded around the panorama's seam
+                    du = abs((u - mu + 0.5) % 1.0 - 0.5)
+                    if du <= (20.0 / 360.0) * 0.5 and 0.0 <= elev <= 10.0:
+                        r, g, b = colour
+                du = abs((u - sun_u + 0.5) % 1.0 - 0.5)
+                if math.hypot(du * 360.0 * math.cos(math.radians(elev)), elev - sun_elev) <= 2.0:
+                    r, g, b = (300.0, 280.0, 250.0)
+            else:
+                r, g, b = ground
+            m = max(r, g, b)
+            if m < 1e-32:
+                row += bytes((0, 0, 0, 0))
+                continue
+            mant, e = math.frexp(m)
+            s = mant * 256.0 / m
+            row += bytes((min(255, int(r * s)), min(255, int(g * s)), min(255, int(b * s)), e + 128))
+        rows.append(bytes(row))
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n")
+        f.write(f"-Y {height} +X {width}\n".encode("ascii"))
+        for row in rows:
+            f.write(row)
+
+
+def build_sky_map_test(out_dir):
+    """S9b-3 fixture: the sky_test floor + pillars under one Sky light whose IMAGE is sky/test_sky.hdr, no fog and no
+    sun (skySunIntensity 0: the panorama is the only sky and its markers show the mapping).
+
+    Geometry is in metres (the importer scales by 12.5 to MMD units); `lights` / `cameras` are in MMD units like every
+    other stage.
+    """
+    stage_id = "sky_map_test"
+    gltf = Gltf(stage_id)
+    floor = gltf.material("floor_open", base_color=(0.58, 0.58, 0.60, 1.0), roughness=0.62, metallic=0.0)
+    pillar = gltf.material("pillar_stone", base_color=(0.72, 0.71, 0.68, 1.0), roughness=0.55, metallic=0.0)
+
+    w, d = 26.0, 26.0
+    gltf.add(grid_part("Floor", floor, ((-w / 2, 0.0, -d / 2), (-w / 2, 0.0, d / 2), (w / 2, 0.0, -d / 2)),
+                       10, 10, uv_scale=(10.0, 10.0)))
+    for i, (px, pz) in enumerate(((-9.0, -9.0), (9.0, -9.0), (-9.0, 9.0), (9.0, 9.0))):
+        for part in box_parts(f"Pillar_{i}", pillar, (px, 2.5, pz), (0.45, 2.5, 0.45)):
+            gltf.add(part)
+
+    stage_dir = os.path.join(out_dir, stage_id)
+    os.makedirs(stage_dir, exist_ok=True)
+    with open(os.path.join(stage_dir, stage_id + ".glb"), "wb") as f:
+        f.write(gltf.build())
+    write_sky_map_hdr(os.path.join(stage_dir, "sky", "test_sky.hdr"))
+
+    manifest = {
+        "format": "mmdx-stage",
+        "formatVersion": 1,
+        "id": stage_id,
+        "version": "1.0.0",
+        "name": {"ko": "하늘 이미지 테스트", "en": "Image sky test", "ja": "イメージスカイテスト"},
+        "description": {"ko": "S9b-3: 하늘 조명 하나가 HDRI 파노라마를 배경과 환경광으로 쓴다 (표식: +Z 빨강, +X 초록, -X 파랑).",
+                        "en": "S9b-3: one Sky light uses an HDRI panorama as the background and the environment light "
+                              "(markers: +Z red, +X green, -X blue)."},
+        "authors": [{"name": "MMDX stagegen", "role": "procedural"}],
+        "license": "CC0-1.0",
+        "tags": ["sky", "light", "hdri", "test"],
+        "models": [{"file": stage_id + ".glb", "name": "Room", "role": "floor"}],
+        "materials": [
+            {"match": "floor_open", "baseColor": [0.58, 0.58, 0.60, 1.0], "roughness": 0.62},
+            {"match": "pillar_stone", "baseColor": [0.72, 0.71, 0.68, 1.0], "roughness": 0.55},
+        ],
+        "lights": [
+            # one Sky light with an image: the panorama is the background and (through the sky environment) the ambient
+            # light. Its own sun is turned off, so the image's markers are the only bright thing in the sky.
+            {"kind": "sky", "name": "sky", "enabled": True,
+             "skyMap": "sky/test_sky.hdr", "skyMapEncoding": "auto", "skyMapMirror": False,
+             "values": {"skyTimeOfDay": 12.0, "skyTurbidity": 3.2, "skyHaze": 0.35, "skyNorthDeg": 35.0,
+                        "skyGround": [0.34, 0.33, 0.31], "skyIntensity": 1.0, "skySunIntensity": 0.0,
+                        "skyMaxElevationDeg": 60.0, "skyMapIntensity": 1.0}},
+            {"kind": "ambient", "name": "ambient", "enabled": True, "values": {"intensity": 0.18}},
+        ],
+        "sockets": [
+            {"name": "world", "position": [0.0, 30.0, -160.0]},
+            {"name": "stage_center", "position": [0.0, 15.0, 0.0]},
+        ],
+        "cameras": [
+            {"name": "wide", "position": [0.0, 26.0, 180.0], "target": [0.0, 52.0, -70.0], "fov": 50.0},
+        ],
+        "environment": {
+            # no fog: the image's own colours must read on the floor and the pillars
+            "fog": {"density": 0.0, "color": [0.6, 0.65, 0.75], "anisotropy": 0.5, "heightFalloff": 0.008},
+        },
+        "groups": [{"id": "sky", "label": {"ko": "하늘", "en": "Sky"}}],
+        "params": [
+            {"key": "rotation", "type": "float", "label": {"ko": "회전", "en": "Rotation"},
+             "group": "sky", "default": 0.0, "min": -180.0, "max": 180.0},
+        ],
+        "variants": [{"id": "default", "label": {"ko": "기본", "en": "Default"}, "values": {"rotation": 0.0}}],
+        "defaultVariant": "default",
+        "bindings": [{"param": "rotation", "target": "lights.sky.sky.mapRotation"}],
+        # a slow turn of the panorama over the first 30 s: the QA capture at 5 s reads it turned by a third
+        "cues": [
+            {"param": "rotation", "keys": [{"frame": 0, "value": 0.0}, {"frame": 900, "value": 120.0}]},
+        ],
+    }
+    with open(os.path.join(stage_dir, "stage.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return stage_dir
+
+
 STAGES = {
     "cyclorama": build_cyclorama,
     "mirror_room": build_mirror_room,
@@ -1229,6 +1365,7 @@ STAGES = {
     "gobo_test": build_gobo_test,
     "screen_light_test": build_screen_light_test,
     "sky_test": build_sky_test,
+    "sky_map_test": build_sky_map_test,
 }
 
 

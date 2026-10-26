@@ -184,6 +184,13 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     // Physical Sky, the build failed, or the offline background override: the ambient stays the two-colour hemisphere
     // and the path tracers add no sky light sample), y = W, z = H, w = unused.
     DirectX::XMFLOAT4 skyEnvParams;
+    // S9b-3: the Sky light's IMAGE (render/SkyMap.h, shaders/sky_map.hlsli). skyParams.x = 2 with a loaded image (1 =
+    // the procedural S9b-1 sky, 0 = the hand-set gradient). skyMapParams: x = SrvHeap index of the RGBA16F equirect
+    // texture (-1 = none: SkyMapRadiance returns 0), y = the rotation around +y in radians (the panorama's u offset),
+    // z = the radiance scale (skyMapIntensity), w = mirror (1 = flipped left / right). skyMapSize: x / y = the
+    // texture's width / height in texels (the v clamp keeps sampling off the edge rows), zw = 0.
+    DirectX::XMFLOAT4 skyMapParams;
+    DirectX::XMFLOAT4 skyMapSize;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 

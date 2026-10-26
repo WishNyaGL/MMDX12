@@ -18,6 +18,14 @@
 #include "common.hlsli"
 
 RWByteAddressBuffer gSkyEnv : register(u0);
+// S9b-3: the sky light's image, sampled by SkyColor's image branch. The ComputePipeline's unbounded t0 space2 range is
+// the bindless texture table (its root signature binds heap slot 0, which is what a descriptor-table range covers
+// here); s2 is its static linear wrap sampler.
+Texture2D gSkyTex[] : register(t0, space2);
+SamplerState gSkyMapWrap : register(s2);
+#define SKY_MAP_TEX(i) gSkyTex[NonUniformResourceIndex((uint)(i))]
+#define SKY_MAP_SAMPLER gSkyMapWrap
+#include "sky_map.hlsli"
 
 #define SKY_ENV_W 128u
 #define SKY_ENV_H 64u

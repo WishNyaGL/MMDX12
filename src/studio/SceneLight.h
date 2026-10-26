@@ -47,6 +47,11 @@ bool ParseFalloffType(const std::string& s, FalloffType& out);
 // "box" / "sphere".
 const char* FogShapeName(FogShape s);
 bool ParseFogShape(const std::string& s, FogShape& out);
+// S9b-3: the Sky light's image encoding (SceneLight::skyMapEncoding): "auto" / "linear" / "srgb" / "rgbt" (the Ray-MMD
+// RGBT range-1024 dome). Parse returns false for anything else (out untouched).
+enum class SkyMapEncoding : uint8_t { Auto = 0, Linear = 1, Srgb = 2, Rgbt = 3 };
+const char* SkyMapEncodingName(SkyMapEncoding e);
+bool ParseSkyMapEncoding(const std::string& s, SkyMapEncoding& out);
 
 // The keyable values. The base values of a light and every key hold all of them; the ones a kind does not use stay at
 // their defaults.
@@ -74,6 +79,10 @@ struct LightValues {
     float skyIntensity = 1.0f;
     float skySunIntensity = 1.0f;
     float skyMaxElevationDeg = 60.0f;
+    // S9b-3: the Sky light's IMAGE (SceneLight::skyMap): the equirect's rotation around +y (degrees) and its radiance
+    // scale. With no image both are unused and the procedural sky above draws exactly as before.
+    float skyMapRotationDeg = 0.0f;
+    float skyMapIntensity = 1.0f;
     bool operator==(const LightValues& o) const;     // exact, every field
 };
 
@@ -122,6 +131,15 @@ struct SceneLight {
     float goboScale = 1.0f;           // uv scale (1 = the texture fills the cone's inscribed square)
     float goboSpin = 0.0f;            // degrees per second (added to the rotation with the song time)
     float goboFocus = 1.0f;           // 0..1: 1 = sharp, below = blurred (a higher mip)
+
+    // S9b-3: the Sky light's image (an equirect HDRI / LDR image / Ray-MMD RGBT dome / DDS cubemap). `skyMap` is the
+    // file: a stage light's path is relative to the stage folder (the stage runtime resolves it, as for the gobo); a
+    // studio light's is absolute. Empty = no image: the S9b-1 procedural sky draws, byte for byte as before.
+    // skyMapEncoding is "auto" | "linear" | "srgb" | "rgbt" ("auto" sniffs the file: 8-bit images are sRGB, RGBA DDS
+    // with alpha is RGBT, HDR is linear). skyMapMirror flips the panorama left / right.
+    std::string skyMap;
+    std::string skyMapEncoding = "auto";
+    bool skyMapMirror = false;
 
     // Ambient: the environment. The hemisphere strength is v.intensity.
     DirectX::XMFLOAT3 skyZenith{0.32f, 0.55f, 0.85f};

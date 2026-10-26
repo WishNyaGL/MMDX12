@@ -110,13 +110,32 @@ bool ParseFogShape(const std::string& s, FogShape& out) {
     return false;
 }
 
+const char* SkyMapEncodingName(SkyMapEncoding e) {
+    switch (e) {
+    case SkyMapEncoding::Linear: return "linear";
+    case SkyMapEncoding::Srgb: return "srgb";
+    case SkyMapEncoding::Rgbt: return "rgbt";
+    case SkyMapEncoding::Auto: break;
+    }
+    return "auto";
+}
+
+bool ParseSkyMapEncoding(const std::string& s, SkyMapEncoding& out) {
+    if (s == "auto") { out = SkyMapEncoding::Auto; return true; }
+    if (s == "linear") { out = SkyMapEncoding::Linear; return true; }
+    if (s == "srgb") { out = SkyMapEncoding::Srgb; return true; }
+    if (s == "rgbt") { out = SkyMapEncoding::Rgbt; return true; }
+    return false;
+}
+
 bool LightValues::operator==(const LightValues& o) const {
     return Same(position, o.position) && Same(aim, o.aim) && Same(direction, o.direction) && Same(color, o.color) &&
            intensity == o.intensity && range == o.range && coneOuter == o.coneOuter && coneInner == o.coneInner &&
            size.x == o.size.x && size.y == o.size.y && Same(extent, o.extent) && volumetric == o.volumetric &&
            skyTimeOfDay == o.skyTimeOfDay && skyNorthDeg == o.skyNorthDeg && skyTurbidity == o.skyTurbidity &&
            skyHaze == o.skyHaze && Same(skyGround, o.skyGround) && skyIntensity == o.skyIntensity &&
-           skySunIntensity == o.skySunIntensity && skyMaxElevationDeg == o.skyMaxElevationDeg;
+           skySunIntensity == o.skySunIntensity && skyMaxElevationDeg == o.skyMaxElevationDeg &&
+           skyMapRotationDeg == o.skyMapRotationDeg && skyMapIntensity == o.skyMapIntensity;
 }
 
 bool LightKey::operator==(const LightKey& o) const { return frame == o.frame && v == o.v; }
@@ -127,7 +146,8 @@ bool SceneLight::operator==(const SceneLight& o) const {
            aimMode == o.aimMode && targetUid == o.targetUid && targetPart == o.targetPart && swayPhase == o.swayPhase &&
            volumetricG == o.volumetricG && fogShape == o.fogShape && fogEdge == o.fogEdge &&
            gobo == o.gobo && goboRotation == o.goboRotation && goboScale == o.goboScale && goboSpin == o.goboSpin &&
-           goboFocus == o.goboFocus &&
+           goboFocus == o.goboFocus && skyMap == o.skyMap && skyMapEncoding == o.skyMapEncoding &&
+           skyMapMirror == o.skyMapMirror &&
            Same(skyZenith, o.skyZenith) && Same(skyHorizon, o.skyHorizon) && Same(groundColor, o.groundColor) &&
            shadow == o.shadow && shadowSoftness == o.shadowSoftness && shadowDensity == o.shadowDensity &&
            Same(shadowColor, o.shadowColor) && falloff == o.falloff && affectDiffuse == o.affectDiffuse &&
@@ -166,6 +186,8 @@ LightValues SampleLightValues(const SceneLight& light, int frame) {
     out.skyIntensity = Lerp(a.v.skyIntensity, b.v.skyIntensity, t);
     out.skySunIntensity = Lerp(a.v.skySunIntensity, b.v.skySunIntensity, t);
     out.skyMaxElevationDeg = Lerp(a.v.skyMaxElevationDeg, b.v.skyMaxElevationDeg, t);
+    out.skyMapRotationDeg = Lerp(a.v.skyMapRotationDeg, b.v.skyMapRotationDeg, t);
+    out.skyMapIntensity = Lerp(a.v.skyMapIntensity, b.v.skyMapIntensity, t);
     return out;
 }
 

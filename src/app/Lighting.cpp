@@ -218,6 +218,15 @@ void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std
         out.skyZenith = out.sky.skyZenith;
         out.skyHorizon = out.sky.skyHorizon;
         out.groundColor = out.sky.groundColor;
+        // S9b-3: the sky's IMAGE (the renderer decodes it; FillSceneConstants writes the map's averages over these
+        // ambient colours once the texture is up, so the hemisphere fill and the haze follow the image).
+        out.skyMap = sky->skyMap;
+        studio::SkyMapEncoding enc = studio::SkyMapEncoding::Auto;
+        studio::ParseSkyMapEncoding(sky->skyMapEncoding, enc);
+        out.skyMapEncoding = (int)enc;
+        out.skyMapMirror = sky->skyMapMirror;
+        out.skyMapRotationRad = DirectX::XMConvertToRadians(v.skyMapRotationDeg);
+        out.skyMapIntensity = std::max(0.0f, v.skyMapIntensity);
         if (!sun) out.direction = out.sky.sunDirToScene;
         // The sun colour: LightParams::color is gamma space (the shaders SrgbToLinear it), so the model's linear colour
         // is encoded here. With no Sun light the sky light also owns the sun's magnitude: it stays under 0.6 (the
@@ -240,9 +249,12 @@ void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std
             if (!sun) out.sunIntensity = 1.0f;
         }
         if (!sun) {
-            // the sky's own sun casts like a default sun light
+            // the sky's own sun casts like a default sun light; a dark sun (night, skySunIntensity 0 with an image
+            // sky whose own sun lights the scene) casts nothing (a hard shadow with no light was a ghost shadow)
             out.rimStrength = 0.0f;
-            out.sunShadow = LightShadowType::Hard;
+            const DirectX::XMFLOAT3& sc = out.sky.sunColor;
+            out.sunShadow = std::max(sc.x, std::max(sc.y, sc.z)) > 1e-5f ? LightShadowType::Hard
+                                                                        : LightShadowType::NoCast;
             out.sunShadowSoftness = 0.5f;
             out.sunShadowDensity = 1.0f;
             out.sunShadowColor = {0.0f, 0.0f, 0.0f};

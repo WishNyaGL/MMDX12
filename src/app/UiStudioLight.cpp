@@ -947,6 +947,76 @@ void App::DrawStudioLightInspector(float w) {
             [&] { return ImGui::SliderFloat("##skymaxelev", &maxElev, 1.0f, 89.0f, "%.0f°"); },
             [&](LightValues& v) { v.skyMaxElevationDeg = std::clamp(maxElev, 1.0f, 89.0f); }, "sky.maxElevationDeg");
 
+        // S9b-3: the sky's IMAGE (an equirect HDRI / LDR image / Ray-MMD RGBT dome / DDS cubemap): it becomes the
+        // background and, through the sky environment buffer, the ambient light. The file / encoding / mirror are base
+        // values (read-only while a stage owns the field); rotation and radiance scale are keyable.
+        ImGui::Dummy(ImVec2(w, Dp(6.0f)));
+        SectionLabel(Tr("하늘 이미지"));
+        {
+            const std::string shown = light->skyMap.empty()
+                                          ? std::string(Tr("(없음)"))
+                                          : PathToUtf8(std::filesystem::path(light->skyMap).filename());
+            if (Button("##skymapfile", shown.c_str(), icon::FolderOpen, ButtonKind::Secondary, ImVec2(w / Dpi(), 30.0f))) {
+                const std::vector<studio::FileFilter> filters = {
+                    {L"하늘 이미지", L"*.hdr;*.png;*.jpg;*.jpeg;*.dds"},
+                    {L"HDR", L"*.hdr"}, {L"이미지", L"*.png;*.jpg;*.jpeg"}, {L"DDS", L"*.dds"}};
+                const std::filesystem::path picked = studio::OpenFileDialog(GetActiveWindow(), filters);
+                if (!picked.empty()) {
+                    std::vector<SceneLight> before = d.lights;
+                    std::vector<SceneLight> after = before;
+                    for (SceneLight& l : after) {
+                        if (l.uid == light->uid) { l.skyMap = PathToUtf8(picked); break; }
+                    }
+                    d.history.Push(std::make_unique<LightsCommand>(d, Tr("조명 편집"), before, after));
+                    ++d.projectVersion;
+                }
+            }
+            if (!light->skyMap.empty()) {
+                if (Button("##skymapclear", Tr("하늘 이미지 지우기"), nullptr, ButtonKind::Ghost, ImVec2(w / Dpi(), 26.0f))) {
+                    std::vector<SceneLight> before = d.lights;
+                    std::vector<SceneLight> after = before;
+                    for (SceneLight& l : after) {
+                        if (l.uid == light->uid) { l.skyMap.clear(); break; }
+                    }
+                    d.history.Push(std::make_unique<LightsCommand>(d, Tr("조명 편집"), before, after));
+                    ++d.projectVersion;
+                }
+            }
+        }
+        if (!light->skyMap.empty()) {
+            float rot = cur.skyMapRotationDeg;
+            keyedEdit(Tr("회전"),
+                [&] { return ImGui::SliderFloat("##skymaprot", &rot, -180.0f, 180.0f, "%.0f°"); },
+                [&](LightValues& v) { v.skyMapRotationDeg = rot; }, "sky.mapRotation");
+
+            float mapInt = cur.skyMapIntensity;
+            keyedEdit(Tr("세기"),
+                [&] { return ImGui::SliderFloat("##skymapint", &mapInt, 0.0f, 8.0f, "%.2f"); },
+                [&](LightValues& v) { v.skyMapIntensity = std::max(0.0f, mapInt); }, "sky.mapIntensity");
+
+            bool mirror = light->skyMapMirror;
+            if (Switch("##skymapmirror", Tr("좌우 반전"), &mirror, Tr("파노라마를 좌우로 뒤집습니다"))) {
+                std::vector<SceneLight> before = d.lights;
+                std::vector<SceneLight> after = before;
+                for (SceneLight& l : after) {
+                    if (l.uid == light->uid) { l.skyMapMirror = mirror; break; }
+                }
+                d.history.Push(std::make_unique<LightsCommand>(d, Tr("조명 편집"), before, after));
+                ++d.projectVersion;
+            }
+
+            const char* encodings[] = {Tr("자동"), Tr("선형"), Tr("sRGB"), Tr("RGBT")};
+            int enc = 0;
+            studio::SkyMapEncoding parsed = studio::SkyMapEncoding::Auto;
+            if (studio::ParseSkyMapEncoding(light->skyMapEncoding, parsed)) enc = (int)parsed;
+            basePropEdit(Tr("인코딩"),
+                [&] {
+                    bool changed = Segmented("##skymapenc", encodings, 4, &enc, (w - Dp(72.0f)) / Dpi(), 30.0f);
+                    return changed;
+                },
+                [&](SceneLight& l) { l.skyMapEncoding = studio::SkyMapEncodingName((studio::SkyMapEncoding)enc); });
+        }
+
         ImGui::Dummy(ImVec2(w, Dp(4.0f)));
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));

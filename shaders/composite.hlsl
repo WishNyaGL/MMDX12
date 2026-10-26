@@ -11,6 +11,15 @@ Texture2D<float4> gNormalTex : register(t2);
 Texture2D<float> gAoTex : register(t3);
 Texture2D<float4> gSsrTex : register(t4);
 
+// S9b-3: composite has no bindless texture table, and its only SkyColor caller is the distance haze, which wants a
+// colour rather than the panorama: rebuild it from the CPU averages FillSceneConstants wrote (the image's zenith /
+// horizon / ground means), the same shape as the hand-set gradient. The panorama itself is drawn by the scene passes.
+float3 SkyMapRadiance(float3 dir) {
+    const float y = dir.y;
+    return y >= 0.0 ? lerp(gSkyHorizon, gSkyZenith, pow(saturate(y), 0.55))
+                    : lerp(gSkyHorizon, gGroundColor, saturate(-y * 6.0));
+}
+
 float UpsampleAo(float2 uv, float z) {
     float2 halfTexel = gP0.zw;
     float2 base = (floor(uv / halfTexel - 0.5) + 0.5) * halfTexel;

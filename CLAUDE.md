@@ -423,6 +423,19 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
       last vertex), and a BSDF-sampled ray that escapes is weighted by `MisWeightBsdf(prevPdfBsdf, SkyEnvPdf(dir))`.
       Offline GI mirrors each side in `SkyLighting` (the `EmissiveLighting` copy), in the prepass gather paths and at
       the camera path's escape; its first gather segment is left out, as the emissive table hits are there.
+    Image skies (S9b-3): a Sky light's `skyMap` (stage-relative or absolute; `skyMapEncoding` auto / linear / srgb /
+    rgbt, `skyMapMirror`, keyable `skyMapRotationDeg` / `skyMapIntensity`, targets `lights.<name>.sky.mapRotation` /
+    `.mapIntensity`) replaces the Preetham model. `render/SkyMap.{h,cpp}` decodes it on the CPU into a linear RGBA16F
+    equirect (.hdr via `stbi_loadf`, PNG / JPG sRGB, RGBA8 DDS: Ray-MMD RGBT when any alpha != 255 (`DecodeRGBT`, range
+    1024), a DDS cube map converted with the D3D face table, max width 4096; EXR and BC6H / BC7 are not supported: one
+    `[W]`, the procedural sky stays), uploaded once per path (`Renderer::EnsureSkyMap`, `UploadBatch::CreateTextureRaw`,
+    one `SKYMAP` log line). `skyParams.x = 2` + `skyMapParams` / `skyMapSize`; `common.hlsli` only declares
+    `float3 SkyMapRadiance(float3)` and each SkyColor user defines it after its bindless table through
+    `shaders/sky_map.hlsli` (mmd / pathtrace / offline_gi / rtreflect / sky_env; composite.hlsl, which has no bindless
+    table, uses the gradient of the map's CPU averages). Mapping: u = atan2(x, z) / 2pi + 0.5 + rotation, v = acos(y) / pi
+    (Ray-MMD's IBL_QUALITY > 1 convention; mirror flips u). S9b-2 then lights from the image (SH ambient, PT / GI NEE). The
+    sky light's own sun stays (time of day); with `skySunIntensity` 0 it casts no shadow, and raster / RT then get the
+    image's light as ambient only (no directional shadow from the image's sun; PT / GI find it through the NEE).
     The offline background override (`gBgOverride.w > 0.5`) disables the build, since that escaped radiance is not sky.
     AutoLuminous (そぼろ convention, native): `GpuModel::Create` flags a non-PBR material with black specular and
     specular power >= 100 as `MatFlag_AutoLuminous` (cleared for pack-shaded materials); `AutoLumEmission`

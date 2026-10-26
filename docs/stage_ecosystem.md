@@ -65,12 +65,20 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S9d | Real-time froxel volumetric fog (after S7): a camera-aligned 3D grid (froxels, the S7 cluster layout) injects medium density (height fog + fog volumes) and lighting from every light via the S7 cluster lists (shadow maps / ray-query shadows), temporal reprojection over frames, front-to-back integration; an approximate multiple-scattering term; replaces the per-pixel ray march in raster / RT / PT, same medium parameters as S9 / S9c (done 2026-10-26) | |
 | S9b-1 | Physical Sky light (C4D-like): `LightKind::Sky`, procedural sky (sun position / time of day, turbidity, horizon haze, ground) as the background, the fog colour and the sun colour, every render path | done 2026-10-27 |
 | S9b-2 | Sky lighting: the sky as a light (SH irradiance for the raster / RT ambient, importance-sampled with MIS in PT / GI) | done 2026-10-27 |
-| S9b-3 | Image skies: HDRI (.hdr / .exr equirect) and MME / Ray-MMD sky domes (DDS cubemap) as the sky light's map, rotation + intensity | |
+| S9b-3 | Image skies: HDRI (.hdr / .exr equirect) and MME / Ray-MMD sky domes (DDS cubemap) as the sky light's map, rotation + intensity | done 2026-10-27 (.hdr / png / jpg / RGBA8 dds incl. Ray-MMD RGBT and cube maps; no EXR / BC6H) |
 | S9b-4 | Clouds: procedural cloud layer on the physical sky (coverage, height, wind; keyable), lit by the sun | |
 | S10 | Planar mirrors in raster (RT / PT / GI reflect natively) | done 2026-10-26 |
 | S11 | Compressed textures: DDS BCn (+ glTF `MSFT_texture_dds`), VRAM budget report | done 2026-10-26 |
 | S12 | Gallery screen + stage store (index, resumable download, install, update, revoke) | done 2026-10-26 |
 | S13 | Website stage gallery (MMDX12_Web): index + pages; deploy only after the owner says so | built 2026-10-26 (MMDX12_Web: build-stages.mjs, /<lang>/stages/ pages, creator doc); not deployed, zips not uploaded (STAGE_CDN_BASE unset) |
+| U1 | (issue #5) Settings window: camera controls (invert horizontal / vertical, sensitivity) + English bone / morph names toggle (timeline, bone / morph lists) | |
+| U2 | (issue #5) Studio timeline audio waveform (the project audio under the frame ruler, zoom-aware) | |
+| U3 | (issue #5) Lobby model selection: list view next to the card grid; hide (exists: right-click) made discoverable + undoable (a hidden-models filter) | |
+| U4 | (issue #5) Pose editing: `Ctrl` fine drag, click cycles through overlapping bones, MMD-style on-screen bone controllers (bottom-left of the viewport) | |
+| U5 | (issue #5) UI scaling: LUT and other buttons off-screen on 3:2 / 2K displays; check 3:2, 16:10, 2K, 4K at 100-200 % | |
+| U6 | (issue #5) Wind physics: keyable wind (direction, strength, gusts) on the Bullet bodies, play + studio | |
+| U7 | (issue #5) Beamman MME effects: add to the compatibility list, fix what breaks | |
+| U8 | (issue #5) Rigify-like control rig: auto-generated (editable) FK / IK controls saved as a project JSON sidecar, never touching the model file | |
 
 ## 3. Runtime model (shared by all milestones)
 

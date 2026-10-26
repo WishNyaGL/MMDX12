@@ -267,6 +267,16 @@ The values are **keyable** (they live in `values`, so a key's `values` carry the
 `.sunIntensity` (float). `stage_check` rejects out-of-range values, and a second sky light. A written file omits the
 values that are at their defaults, so a file without a sky light keeps its bytes.
 
+**Image skies (S9b-3).** A sky light may show an image instead of the model:
+`"skyMap": "sky/helipad.hdr"` (relative to the stage folder), `"skyMapEncoding": "auto"` (`linear` | `srgb` | `rgbt`),
+`"skyMapMirror": false`, and the keyable values `skyMapRotationDeg` (0) / `skyMapIntensity` (1) (targets
+`lights.<name>.sky.mapRotation` / `.mapIntensity`). Supported: Radiance `.hdr`, `.png` / `.jpg` (sRGB), and uncompressed
+RGBA8 `.dds` (an equirect panorama, or a cube map, which is converted); a Ray-MMD sky dome texture (RGBT-encoded, alpha
+not all 255) decodes automatically. EXR and BC6H / BC7 `.dds` are not supported (a warning, the model sky stays). The
+image is equirectangular: its centre column looks along +Z, u grows to the right. The image becomes the background and,
+through the sky lighting, the ambient light everywhere and a real light in the path tracers. The light's own sun still
+shines (set `skySunIntensity` to 0 when the image has its own sun; raster / RT then have no sharp sun shadow).
+
 ### `gltfLights` (S2a)
 
 A glTF part may carry lights with `KHR_lights_punctual`. They are imported into the model as light descriptions

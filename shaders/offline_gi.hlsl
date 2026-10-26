@@ -47,6 +47,10 @@
 #include "pt_pbr.hlsli"
 #include "emissive_nee.hlsli"   // S8a: emissive-triangle NEE + MIS (needs the PBR record decode)
 #include "sky_env.hlsli"        // S9b-2: the sky as an importance-sampled light
+// S9b-3: the Sky light's image (SkyColor's gSkyParams.x > 1.5 branch); the RT bindless texture table
+#define SKY_MAP_TEX(i) gBindlessTex[NonUniformResourceIndex((uint)(i))]
+#define SKY_MAP_SAMPLER gRtWrap
+#include "sky_map.hlsli"
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
 SamplerState gPoint : register(s0);
 SamplerState gLinear : register(s1);

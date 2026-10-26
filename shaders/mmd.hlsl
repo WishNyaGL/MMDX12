@@ -13,6 +13,10 @@
 #include "gobo.hlsli"            // S7b: spot gobos (the light loops below)
 #include "screen_light.hlsli"    // S8b: stage screens as rectangular area lights (raster / RT)
 #include "sky_env.hlsli"         // S9b-2: the Physical Sky's SH irradiance (the ambient fill below)
+// S9b-3: the Sky light's image (SkyColor's gSkyParams.x > 1.5 branch); the raster / RT bindless texture table
+#define SKY_MAP_TEX(i) gPbrTex[NonUniformResourceIndex((uint)(i))]
+#define SKY_MAP_SAMPLER gPbrWrap
+#include "sky_map.hlsli"
 
 cbuffer MaterialCB : register(b1) {
     float4 gDiffuse; float3 gSpecular; float gSpecularPower; float3 gAmbient; float gEdgeSize;

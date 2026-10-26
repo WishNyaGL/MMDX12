@@ -107,6 +107,12 @@ cbuffer SceneCB : register(b0) {
     // the raw ByteAddressBuffer holding the sky's luminance CDF and SH irradiance (negative = none: the ambient stays
     // the hemisphere fill and the path tracers skip every sky light sample), y = W, z = H, w unused.
     float4 gSkyEnvParams;
+    // S9b-3: the Sky light's IMAGE (ShaderInterop.h skyMapParams / shaders/sky_map.hlsli): x = SrvHeap index of the
+    // RGBA16F equirect texture (-1 = none), y = the rotation around +y in radians, z = the radiance scale,
+    // w = mirror (1 = flipped left / right). gSkyMapSize: x / y = the texture's width / height in texels, zw = 0.
+    // gSkyParams.x = 2 while an image is loaded (1 = the procedural S9b-1 sky, 0 = the hand-set gradient).
+    float4 gSkyMapParams;
+    float4 gSkyMapSize;
 };
 
 static const float PI = 3.14159265;
@@ -149,6 +155,11 @@ float2 ViewToUv(float3 v) {
 // S9b-1: the Physical Sky light's radiance (needs the SceneCB fields above; read by SkyColor only).
 #include "physical_sky.hlsli"
 
+// S9b-3: the Sky light's image (shaders/sky_map.hlsli). Declared here and defined by each shader that calls SkyColor
+// (after its bindless declarations): the six callers each supply their own texture table / sampler. composite.hlsl,
+// which has no bindless table, defines the CPU-averages gradient instead (only the fog colour uses it there).
+float3 SkyMapRadiance(float3 dir);
+
 // Linear sky radiance for a world direction (also the fog colour source).
 float3 SkyColor(float3 dir) {
     float y = dir.y;
@@ -157,9 +168,13 @@ float3 SkyColor(float3 dir) {
     float3 below = lerp(gSkyHorizon, gGroundColor, saturate(-y * 6.0));
     float3 c = y >= 0.0 ? sky : below;
     float3 glowTint = gSkyHorizon;
-    // S9b-1: a Physical Sky light replaces the hand-set gradient (its ground colour is written to gGroundColor by the
-    // CPU, so the below-horizon blend stays the same) and draws the sun's glow in the sun's own colour.
-    if (gSkyParams.x > 0.5) {
+    // S9b-3: an image sky replaces the model entirely (no procedural glow: the image has its own sun).
+    if (gSkyParams.x > 1.5) {
+        c = SkyMapRadiance(dir);
+        glowTint = 0.0;
+    } else if (gSkyParams.x > 0.5) {
+        // S9b-1: a Physical Sky light replaces the hand-set gradient (its ground colour is written to gGroundColor by the
+        // CPU, so the below-horizon blend stays the same) and draws the sun's glow in the sun's own colour.
         c = PhysicalSkyRadiance(dir);
         glowTint = SrgbToLinear(saturate(gLightColor));
     }

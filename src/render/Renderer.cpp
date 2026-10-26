@@ -1290,6 +1290,23 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
     sc.skyZenithOverF = lp.physicalSky ? lp.sky.zenithOverF : DirectX::XMFLOAT4{0, 0, 0, 0};
     sc.skySunToward = lp.physicalSky ? lp.sky.sunToward : DirectX::XMFLOAT4{0, 1, 0, 0};
     sc.skyNight = lp.physicalSky ? lp.sky.night : DirectX::XMFLOAT4{0, 0, 0, 0};
+    // S9b-3: the Sky light's image. A loaded map switches SkyColor to gSkyParams.x = 2 (the S9b-1 model stays behind it:
+    // the sun direction / colour still follow the time of day) and its row averages replace the ambient colours, so the
+    // hemisphere fallback and the haze follow the image. No image / a failed decode keeps the frame exactly the S9b-1 one.
+    sc.skyMapParams = {-1.0f, 0.0f, 0.0f, 0.0f};
+    sc.skyMapSize = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (lp.physicalSky && !lp.skyMap.empty()) {
+        if (const SkyMapGpu* map = EnsureSkyMap(lp)) {
+            sc.skyParams.x = 2.0f;
+            sc.skyMapParams = {(float)(int32_t)map->srv, lp.skyMapRotationRad, lp.skyMapIntensity,
+                               lp.skyMapMirror ? 1.0f : 0.0f};
+            sc.skyMapSize = {(float)map->width, (float)map->height, 0.0f, 0.0f};
+            const float k = lp.skyMapIntensity;
+            sc.skyZenith = {map->avg[0].x * k, map->avg[0].y * k, map->avg[0].z * k};
+            sc.skyHorizon = {map->avg[1].x * k, map->avg[1].y * k, map->avg[1].z * k};
+            sc.groundColor = {map->avg[2].x * k, map->avg[2].y * k, map->avg[2].z * k};
+        }
+    }
     // S9b-2: no sky environment until RecordScene (or the offline image) builds one for this frame
     sc.skyEnvParams = {(float)(int32_t)DescriptorHeap::kInvalid, (float)kSkyEnvW, (float)kSkyEnvH, 0.0f};
     sc.floorGloss = (settings_.ssr || EffectivePath() == RenderPath::PathTraced) ? settings_.floorGloss : 0.0f;
@@ -1550,6 +1567,54 @@ bool Renderer::FillGoboTable(Dx12Context& ctx, const LightParams& light, GpuGobo
     }
     return any;
 }
+
+// S9b-3: the Sky light's image (render/SkyMap.h). One decode + upload per (path, encoding), kept for the renderer's
+// lifetime: a sky map is a single texture, so unlike the gobos there is no per-frame used list to free. A failed file is
+// remembered (failed = true): one [W] per broken file, then the procedural sky draws as if no image were set.
+const Renderer::SkyMapGpu* Renderer::EnsureSkyMap(const LightParams& light) {
+    if (light.skyMap.empty()) return nullptr;
+    const std::string key = light.skyMap + "|" + std::to_string(light.skyMapEncoding);
+    auto it = skyMaps_.find(key);
+    if (it == skyMaps_.end()) {
+        SkyMapGpu map;
+        std::vector<uint16_t> halves;
+        std::string error;
+        if (!LoadSkyMap(Utf8ToPath(light.skyMap), light.skyMapEncoding, halves, map.width, map.height, map.avg,
+                        &error)) {
+            LOG_WARN("sky map %s: %s (the sky draws procedurally)", light.skyMap.c_str(),
+                     error.empty() ? "cannot decode the image" : error.c_str());
+            map.failed = true;
+        } else {
+            UploadBatch batch(*ctx_);
+            map.res = batch.CreateTextureRaw(halves.data(), map.width, map.height, 8, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                             L"skyMap");
+            batch.Submit();
+            if (!map.res) {
+                LOG_WARN("sky map %s: texture upload failed (the sky draws procedurally)", light.skyMap.c_str());
+                map.failed = true;
+            } else {
+                map.srv = ctx_->SrvHeap().Allocate(1);
+                if (map.srv == DescriptorHeap::kInvalid) {
+                    LOG_WARN("sky map %s: no free descriptor (the sky draws procedurally)", light.skyMap.c_str());
+                    map.res.Reset();
+                    map.failed = true;
+                } else {
+                    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+                    srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    srv.Texture2D.MipLevels = 1;
+                    ctx_->Device()->CreateShaderResourceView(map.res.Get(), &srv, ctx_->SrvHeap().Cpu(map.srv));
+                    LOG_INFO("SKYMAP %s %ux%u enc=%d", light.skyMap.c_str(), map.width, map.height,
+                             light.skyMapEncoding);
+                }
+            }
+        }
+        it = skyMaps_.emplace(key, std::move(map)).first;
+    }
+    if (it->second.failed || it->second.srv == DescriptorHeap::kInvalid) return nullptr;
+    return &it->second;
+} 
 
 // S8a: the emissive-triangle pick table of the last RtScene build. Per geometry (index = geometry id) the material's
 // rest-pose triangles are appended with weight = rest-pose area x EmitEstimate, and the running sum is normalised into an
@@ -2730,6 +2795,12 @@ void Renderer::Shutdown() {
     goboBuf_.Reset();
     gobos_.clear();
     goboTable_.clear();
+    // S9b-3: the sky map textures and their SRVs
+    if (ctx_) {
+        for (auto& [key, m] : skyMaps_)
+            if (m.srv != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(m.srv, 1);
+    }
+    skyMaps_.clear();
     // S8b: the screen-light table's SRVs and its upload buffer
     if (screenLightBuf_ && screenLightBufMapped_) screenLightBuf_->Unmap(0, nullptr);
     if (ctx_) {

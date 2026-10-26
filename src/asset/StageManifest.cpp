@@ -347,6 +347,9 @@ StageTargetSpec::ValueType LightFieldType(const std::string& field) {
         {"sky.turbidity", StageTargetSpec::ValueType::Float}, {"sky.haze", StageTargetSpec::ValueType::Float},
         {"sky.intensity", StageTargetSpec::ValueType::Float}, {"sky.sunIntensity", StageTargetSpec::ValueType::Float},
         {"sky.ground", StageTargetSpec::ValueType::Color},
+        // S9b-3: the sky light's image: rotation degrees and radiance scale (the file / encoding / mirror are base
+        // values, like the gobo's file)
+        {"sky.mapRotation", StageTargetSpec::ValueType::Float}, {"sky.mapIntensity", StageTargetSpec::ValueType::Float},
     };
     for (const auto& f : kFields)
         if (field == f.name) return f.type;
@@ -1398,6 +1401,15 @@ std::vector<std::string> ValidateStageManifest(const StageManifest& manifest) {
             if (l.v.skySunIntensity < 0.0f) err("lights: " + l.name + ": sky.sunIntensity must be >= 0");
             if (l.v.skyMaxElevationDeg <= 0.0f || l.v.skyMaxElevationDeg >= 90.0f)
                 err("lights: " + l.name + ": sky.maxElevationDeg must be 0..90");
+            // S9b-3: the sky's image (the tool also checks the file itself: existence, an image extension).
+            if (!l.skyMap.empty()) {
+                std::string why;
+                if (!SafeRelativeFile(l.skyMap, why)) err("lights: " + l.name + ": skyMap: " + l.skyMap + ": " + why);
+            }
+            studio::SkyMapEncoding enc;
+            if (!studio::ParseSkyMapEncoding(l.skyMapEncoding, enc))
+                err("lights: " + l.name + ": skyMapEncoding must be auto / linear / srgb / rgbt");
+            if (l.v.skyMapIntensity < 0.0f) err("lights: " + l.name + ": sky.mapIntensity must be >= 0");
         }
     }
     {

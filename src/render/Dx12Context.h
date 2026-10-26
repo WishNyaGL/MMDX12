@@ -189,6 +189,12 @@ public:
     // same format.
     ComPtr<ID3D12Resource> CreateTextureCompressed(const CompressedImage& image, DXGI_FORMAT format,
                                                    const wchar_t* debugName = nullptr);
+    // S9b-3: a DEFAULT-heap one-mip texture from raw texels (width * height * bytesPerPixel, tightly packed rows).
+    // The row pitch / footprint come from GetCopyableFootprints like CreateTextureTyped; final state
+    // PIXEL_SHADER_RESOURCE. Used by the sky map's RGBA16F equirect.
+    ComPtr<ID3D12Resource> CreateTextureRaw(const void* pixels, uint32_t width, uint32_t height,
+                                            uint32_t bytesPerPixel, DXGI_FORMAT format,
+                                            const wchar_t* debugName = nullptr);
     // S11: a TextureCube from six RGBA8 faces (one mip each; no mips are generated) or from a compressed cube
     // (every face and mip). Final state PIXEL_SHADER_RESOURCE; the caller's SRV must be TEXTURECUBE with the same
     // format.
