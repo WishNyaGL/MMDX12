@@ -6,6 +6,8 @@
 
 namespace mmdx {
 
+struct CompressedImage;
+
 // Tightly packed RGBA8 image with a full mip chain (level 0 first).
 struct ImageRGBA8 {
     struct Level { uint32_t width = 0, height = 0; std::vector<uint8_t> pixels; };  // pixels.size() == w*h*4
@@ -24,6 +26,17 @@ bool LoadImageRGBA8(const std::filesystem::path& path, ImageRGBA8& out, std::str
 // Same decode from an in-memory file image (textures embedded in glTF/GLB/VRM/FBX). WIC covers
 // formats stb lacks (e.g. WebP when the system codec is installed).
 bool LoadImageRGBA8FromMemory(const uint8_t* bytes, size_t size, ImageRGBA8& out, std::string* error = nullptr);
+
+// S11: loads `path` for a material texture. `image` receives the RGBA8 decode (level 0 + the built mip chain, exactly
+// like LoadImageRGBA8: the CPU copies the material code needs) and `compressed` the blocks of a block-compressed DDS
+// file (BC1..BC7) when the file is one, so the GPU can take it compressed; `compressed` stays empty for every other
+// file. The file is read once. BC4/BC5/BC6H/BC7 have no RGBA8 decoder: for such a file `image` stays empty, `compressed`
+// carries the blocks and the call reports success (the GPU takes the compressed form). Failing with a message means
+// neither form is usable.
+bool LoadImageWithCompressed(const std::filesystem::path& path, ImageRGBA8& image, CompressedImage& compressed,
+                             std::string* error = nullptr);
+bool LoadImageWithCompressedFromMemory(const uint8_t* bytes, size_t size, ImageRGBA8& image,
+                                       CompressedImage& compressed, std::string* error = nullptr);
 
 // Writes level 0 of an RGBA8 buffer as PNG (stb_image_write).
 bool SavePngRGBA8(const std::filesystem::path& path, uint32_t width, uint32_t height,

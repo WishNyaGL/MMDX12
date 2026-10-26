@@ -3,6 +3,7 @@
 // history and the editor state (selection, timeline view). Owned by App while screen_ == Studio.
 // Motions are keyed by bone/morph name (StudioMotion.h) and re-bound to the model after every edit.
 #include "anim/Motion.h"
+#include "asset/DdsLoader.h"
 #include "asset/ImageLoader.h"
 #include "asset/MaterialChoice.h"
 #include "asset/PbrMaterial.h"
@@ -701,6 +702,8 @@ private:
 struct StudioPackageModel {
     std::shared_ptr<PmxModel> pmx;
     std::vector<ImageRGBA8> textures;
+    // S11: parallel to `textures`; the DDS blocks the GPU upload prefers (see LoadedModelCpu::compressedTextures).
+    std::vector<CompressedImage> compressedTextures;
     std::string name, libraryId;
     ModelKind kind = ModelKind::Character;
     std::filesystem::path fx;                 // M5c: kind Effect only: the effect file (mesh = `pmx`, may be null)

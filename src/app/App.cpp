@@ -2047,7 +2047,8 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
     s->characterDisplayName = !pkg.characterDisplayName.empty() ? pkg.characterDisplayName : (s->character ? s->character->Model().name : "");
     if (selStage_ >= 0 && (size_t)selStage_ < library_.stages.size()) s->stageId = library_.stages[(size_t)selStage_].id;
     s->characterGpu = renderer_.CreateModel(batch, *pkg.character.pmx, pkg.character.textures,
-                                            ModelRole::Character, &pkg.character.pbr);
+                                            ModelRole::Character, &pkg.character.pbr,
+                                            &pkg.character.compressedTextures);
     if (!s->characterGpu) return false;
     if (cliLookActive_ && cliLook_.setsSurface && !s->characterId.empty()) {
         cliLookCharacterId_ = s->characterId;
@@ -2063,7 +2064,8 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         SceneRuntime::Performer perf;
         perf.instance = std::make_unique<ModelInstance>(pkg.extraCharacters[i].pmx);
         perf.gpu = renderer_.CreateModel(batch, *pkg.extraCharacters[i].pmx, pkg.extraCharacters[i].textures,
-                                         ModelRole::Character, &pkg.extraCharacters[i].pbr);
+                                         ModelRole::Character, &pkg.extraCharacters[i].pbr,
+                                         &pkg.extraCharacters[i].compressedTextures);
         if (!perf.gpu) return false;
         perf.gpu->SetDefaultPackTextureFolder(pkg.extraCharacters[i].defaultPackTextureFolder);
         perf.gpu->SetMaterialBlendHints(pkg.extraCharacters[i].materialBlend, pkg.extraCharacters[i].materialBlendDefault);
@@ -2077,7 +2079,8 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         LoadedModelCpu& part = pkg.stageParts[i];
         auto inst = std::make_unique<ModelInstance>(part.pmx);
         inst->UpdatePose();
-        auto gpu = renderer_.CreateModel(batch, *part.pmx, part.textures, ModelRole::Stage, &part.pbr);
+        auto gpu = renderer_.CreateModel(batch, *part.pmx, part.textures, ModelRole::Stage, &part.pbr,
+                                         &part.compressedTextures);
         if (!gpu) {
             LOG_WARN("stage part GPU upload failed: %s", part.pmx->name.c_str());
             continue;
@@ -2161,9 +2164,11 @@ bool App::BuildSceneRuntime(ScenePackage& pkg) {
         }
         cpu.pmx = spm.pmx;
         cpu.textures = std::move(spm.textures);
+        cpu.compressedTextures = std::move(spm.compressedTextures);
         obj.inst = std::make_unique<ModelInstance>(cpu.pmx);
         obj.inst->SetRootTransform(DirectX::XMFLOAT4X4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
-        obj.mesh = renderer_.CreateModel(batch, *cpu.pmx, cpu.textures, ModelRole::Stage);
+        obj.mesh = renderer_.CreateModel(batch, *cpu.pmx, cpu.textures, ModelRole::Stage, nullptr,
+                                         &cpu.compressedTextures);
         obj.fileName = PathToUtf8(meshFile.filename());
         for (char& c : obj.fileName) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
         obj.displayName = cpu.pmx->name;
@@ -2282,12 +2287,14 @@ void App::PollMmeControllers() {
         }
         cpu.pmx = spm.pmx;
         cpu.textures = std::move(spm.textures);
+        cpu.compressedTextures = std::move(spm.compressedTextures);
         c.inst = std::make_unique<ModelInstance>(cpu.pmx);
         c.inst->SetRootTransform(DirectX::XMFLOAT4X4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
         c.inst->UpdatePose();
         {
             UploadBatch batch(ctx_);
-            c.gpu = renderer_.CreateModel(batch, *cpu.pmx, cpu.textures, ModelRole::Stage);
+            c.gpu = renderer_.CreateModel(batch, *cpu.pmx, cpu.textures, ModelRole::Stage, nullptr,
+                                          &cpu.compressedTextures);
             batch.Submit();
         }
         if (!c.gpu) {

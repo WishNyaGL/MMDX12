@@ -203,6 +203,18 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
 ## Architecture (src/)
 - `core`: logging, text encodings (Shift-JIS/UTF-16/UTF-8).
 - `asset`: PMX/VMD parsers, image loading (stb with a WIC fallback, also from memory), `AssetLibrary`, `ModelImport`.
+  - DDS (M5a / S11): `DdsLoader` decodes level 0 of any 2D DDS to RGBA8 (`LoadDdsLevel0`, the fallback path) and, for
+    BC1/BC2/BC3/BC4/BC5/BC6H/BC7 (DX10 formats and the DXT1/DXT3/DXT5/ATI1/ATI2/BC4U/BC5U FourCCs),
+    `LoadDdsCompressed` keeps the file's blocks and all its mips in a `CompressedImage` instead. `IsDdsCube` /
+    `LoadDdsCube` handle `DDSCAPS2_CUBEMAP` files (six faces, +X -X +Y -Y +Z -Z) both as RGBA8 faces and compressed;
+    `Dx12Context::UploadBatch::CreateTextureCompressed` / `CreateTextureCube` upload them as they are (no CPU decode,
+    SRV format = the BC format; the model path uploads UNORM because the shaders apply `SrgbToLinear` themselves).
+    `LoadImageWithCompressed` returns both forms from one file read: the model texture paths take the blocks and keep
+    the RGBA8 copy only for the CPU checks (alpha test / toon ramp / thumbnails). BC7 and BC4/5/6H have no RGBA8
+    decoder, so such a file's RGBA8 copy is empty and the GPU uses the blocks alone. glTF `MSFT_texture_dds` swaps a
+    texture's image for the DDS one. Every model logs one `TEXTURES` line (count / RGBA8 / BCn / all-RGBA8 / saved);
+    `tools/asset_probe --full` prints the same totals for the library and `tools/dds_test` checks the formats, mips,
+    cube round trip and scans `library/`.
   - Unit songs: same-length dances in one song folder are the song's `SongAsset::parts` (byte-identical renamed copies
     merge, labels from the file names; `danceVmd` stays the primary part), ordered left to right on stage and with
     `centerPart` = the part closest to the group's middle in most samples (from `VmdProbe::stageX`, the sampled

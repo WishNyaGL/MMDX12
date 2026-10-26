@@ -713,7 +713,7 @@ void App::StudioPollJobs() {
                     sm->inst = std::make_unique<ModelInstance>(pm.pmx);
                     sm->gpu = renderer_.CreateModel(batch, *pm.pmx, pm.textures,
                                                     (pm.kind == ModelKind::Stage) ? ModelRole::Stage : ModelRole::Character,
-                                                    &pm.pbr);
+                                                    &pm.pbr, &pm.compressedTextures);
                     if (!sm->gpu) {
                         LOG_WARN("studio: GPU upload failed: %s", pm.name.c_str());
                         continue;
@@ -861,7 +861,7 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
     UploadBatch batch(ctx_);
     std::unique_ptr<GpuModel> gpu =
         renderer_.CreateModel(batch, *pm.pmx, pm.textures, m.IsStage() ? ModelRole::Stage : ModelRole::Character,
-                              &pm.pbr);
+                              &pm.pbr, &pm.compressedTextures);
     batch.Submit();
     if (!gpu) {
         LOG_WARN("studio: GPU upload failed: %s", pm.name.c_str());

@@ -59,6 +59,7 @@ bool LoadModel(const std::filesystem::path& path, ModelRole role, const std::str
     DecodeModelTextures(cpu, progress, f0, f1, label.c_str(), choice);
     out.pmx = cpu.pmx;
     out.textures = std::move(cpu.textures);
+    out.compressedTextures = std::move(cpu.compressedTextures);
     out.pbr = std::move(cpu.pbr);
     out.material = choice;   // the choice the PBR data was built with (the inspector / project show it)
     out.name = label;

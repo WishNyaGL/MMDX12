@@ -32,6 +32,33 @@ cgltf_result ReadFileUtf8(const cgltf_memory_options*, const cgltf_file_options*
 
 void ReleaseFile(const cgltf_memory_options*, const cgltf_file_options*, void* data) { std::free(data); }
 
+// S11: MSFT_texture_dds (Blender's "Microsoft DDS" export) replaces a texture's image with a DDS one: the extension
+// on the texture names the index of another image ("source"), which carries the .dds path / bytes. cgltf exposes it
+// as raw JSON in cgltf_texture::extensions.
+const cgltf_image* TextureDdsImage(const cgltf_data* data, const cgltf_texture* tex) {
+    if (!tex || !tex->extensions) return nullptr;
+    for (cgltf_size e = 0; e < tex->extensions_count; ++e) {
+        const cgltf_extension& ext = tex->extensions[e];
+        if (!ext.name || !ext.data) continue;
+        if (std::strcmp(ext.name, "MSFT_texture_dds") != 0) continue;
+        nlohmann::json j = nlohmann::json::parse(ext.data, nullptr, false);
+        if (j.is_discarded() || !j.is_object()) return nullptr;
+        auto it = j.find("source");
+        if (it == j.end() || !it->is_number_integer()) return nullptr;
+        const int64_t index = it->get<int64_t>();
+        if (index < 0 || (cgltf_size)index >= data->images_count) return nullptr;
+        return &data->images[index];
+    }
+    return nullptr;
+}
+
+// The image a texture samples: its DDS replacement when MSFT_texture_dds names one, else the plain / WebP image.
+const cgltf_image* TextureImage(const cgltf_data* data, const cgltf_texture* tex) {
+    if (!tex) return nullptr;
+    if (const cgltf_image* dds = TextureDdsImage(data, tex)) return dds;
+    return tex->image ? tex->image : (tex->has_webp ? tex->webp_image : nullptr);
+}
+
 XMFLOAT4X4 ToRowMatrix(const float m[16]) {
     // glTF stores column-major matrices for column vectors; read in order, that is exactly the
     // row-major matrix for row vectors (the transpose).
@@ -312,7 +339,7 @@ bool ImportGltf(const std::filesystem::path& path, ImpScene& scene, std::string*
             tex = m.pbr_specular_glossiness.diffuse_texture.texture;
             out.baseColorUv = UvTransformOf(m.pbr_specular_glossiness.diffuse_texture);
         }
-        if (tex) out.texture = ImportImage(data, tex->image ? tex->image : (tex->has_webp ? tex->webp_image : nullptr), dir, scene, imageCache);
+        if (tex) out.texture = ImportImage(data, TextureImage(data, tex), dir, scene, imageCache);
         out.emissive = {m.emissive_factor[0], m.emissive_factor[1], m.emissive_factor[2]};
         if (m.has_emissive_strength) out.emissiveStrength = m.emissive_strength.emissive_strength;
         out.doubleSided = m.double_sided;
@@ -329,7 +356,7 @@ bool ImportGltf(const std::filesystem::path& path, ImpScene& scene, std::string*
                 scene.warnings.push_back("ignored a PBR map on UV" + std::to_string((int)v.texcoord) + " of " + out.name);
                 return -1;
             }
-            return ImportImage(data, t->image ? t->image : (t->has_webp ? t->webp_image : nullptr), dir, scene, imageCache);
+            return ImportImage(data, TextureImage(data, t), dir, scene, imageCache);
         };
         // VRM / MToon / KHR_materials_unlit are NPR on purpose: never give them glossy PBR data.
         if (isVrm || m.unlit) out.npr = true;

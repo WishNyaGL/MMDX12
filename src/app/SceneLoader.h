@@ -3,6 +3,7 @@
 // binds motions. GPU upload happens afterwards on the main thread (App).
 #include "anim/Motion.h"
 #include "asset/AssetLibrary.h"
+#include "asset/DdsLoader.h"
 #include "asset/ImageLoader.h"
 #include "asset/MaterialChoice.h"
 #include "asset/PbrMaterial.h"
@@ -21,6 +22,10 @@ namespace mmdx {
 struct LoadedModelCpu {
     std::shared_ptr<PmxModel> pmx;
     std::vector<ImageRGBA8> textures;  // parallel to pmx->textures; empty = missing/failed
+    // S11: parallel to `textures`; a non-empty entry is the same file's DDS blocks (BC1..BC7), which the GPU upload
+    // takes as they are instead of the RGBA8 copy. `textures` still holds the decode (alpha test / toon ramp checks
+    // and thumbnails read it).
+    std::vector<CompressedImage> compressedTextures;
     // The model's default shader-pack texture folder (found through its own MME files by asset/MmeHints): the
     // directory of the face texture the pack needs. Empty when none was found. Filled on the loader worker thread.
     std::filesystem::path defaultPackTextureFolder;

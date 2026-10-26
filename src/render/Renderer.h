@@ -29,6 +29,7 @@ class ScenePass;
 
 struct PmxModel;
 struct ImageRGBA8;
+struct CompressedImage;
 struct PbrModelData;
 
 struct RenderInitProgress {
@@ -54,7 +55,8 @@ public:
     std::unique_ptr<GpuModel> CreateModel(UploadBatch& batch, const PmxModel& pmx,
                                           const std::vector<ImageRGBA8>& textures,
                                           ModelRole role = ModelRole::Character,
-                                          const PbrModelData* pbr = nullptr);
+                                          const PbrModelData* pbr = nullptr,
+                                          const std::vector<CompressedImage>* compressed = nullptr);
 
     // M6b: hot-reload failure / success messages (the UI shows a toast). Set once at startup.
     void SetMmeMessage(std::function<void(const std::string&, bool /*error*/)> cb) {

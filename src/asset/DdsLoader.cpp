@@ -8,7 +8,9 @@
 //   * a DX10 header: R8G8B8A8/B8G8R8A8 (+ _SRGB), R16G16B16A16_FLOAT/UNORM, R32G32B32A32_FLOAT, R32_FLOAT,
 //     R16_FLOAT, R8_UNORM, A8_UNORM, R10G10B10A2_UNORM, BC1/2/3 (+ _SRGB); other DXGI formats fail with a message.
 // Float / 16-bit formats are converted (clamped, rounded) to RGBA8: the ImageRGBA8 struct is 8-bit only (noted in
-// the spec as the allowed fallback). Cube maps and volumes are rejected (the caller falls back to white).
+// the spec as the allowed fallback). Cube maps and volumes are rejected by the RGBA8 path (the caller falls back to
+// white). S11 adds a second, lossless path: LoadDdsCompressed / LoadDdsCube keep BC1..BC7 blocks and every file mip
+// (2D and cube), so the GPU never inflates them; see DdsLoader.h.
 #include "asset/DdsLoader.h"
 
 #include <algorithm>
@@ -34,6 +36,11 @@ constexpr uint32_t kFourCC114 = 114;           // D3DFMT_R32F
 constexpr uint32_t kCaps2Cubemap = 0x200;
 constexpr uint32_t kCaps2Volume = 0x200000;
 constexpr uint32_t kDdpfFourCC = 0x4;
+// S11: legacy block-compressed FourCCs that keep their blocks.
+constexpr uint32_t kFourCCAti1 = 0x31495441;   // "ATI1" (BC4U)
+constexpr uint32_t kFourCCAti2 = 0x32495441;   // "ATI2" (BC5U)
+constexpr uint32_t kFourCCBc4u = 0x55344342;   // "BC4U"
+constexpr uint32_t kFourCCBc5u = 0x55354342;   // "BC5U"
 
 uint32_t Rd32(const uint8_t* p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 
@@ -317,6 +324,178 @@ bool DecodeDx10Format(uint32_t fmt, const uint8_t* data, size_t size, uint32_t w
     return false;
 }
 
+// ---- S11: block-compressed formats ----------------------------------------------------------------------------
+
+constexpr uint32_t kDxgiBc4Unorm = 80;
+constexpr uint32_t kDxgiBc5Unorm = 83;
+constexpr uint32_t kDxgiBc6HUnorm = 95;
+constexpr uint32_t kDxgiBc7Unorm = 98;
+constexpr uint32_t kDxgiBc7UnormSrgb = 99;
+
+// The UNORM DXGI_FORMAT of a block-compressed DXGI format (UNKNOWN for anything else). The sRGB variants map onto
+// their UNORM base: the upload decides whether the SRV samples as sRGB. The SNORM formats (BC4_SNORM 81, BC5_SNORM 84,
+// BC6H_SF16 96) are not kept: they have no unsigned block layout to sample as colours.
+DXGI_FORMAT BcBaseFormat(uint32_t dxgi) {
+    switch (dxgi) {
+        case kDxgiBc1Unorm: case kDxgiBc1UnormSrgb: return DXGI_FORMAT_BC1_UNORM;
+        case kDxgiBc2Unorm: case kDxgiBc2UnormSrgb: return DXGI_FORMAT_BC2_UNORM;
+        case kDxgiBc3Unorm: case kDxgiBc3UnormSrgb: return DXGI_FORMAT_BC3_UNORM;
+        case kDxgiBc4Unorm: return DXGI_FORMAT_BC4_UNORM;
+        case kDxgiBc5Unorm: return DXGI_FORMAT_BC5_UNORM;
+        case kDxgiBc6HUnorm: return DXGI_FORMAT_BC6H_UF16;
+        case kDxgiBc7Unorm: case kDxgiBc7UnormSrgb: return DXGI_FORMAT_BC7_UNORM;
+        default: return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+// Bytes of one 4x4 block of `format`.
+uint32_t BcBlockBytes(DXGI_FORMAT format) {
+    switch (format) {
+        case DXGI_FORMAT_BC1_UNORM:
+        case DXGI_FORMAT_BC4_UNORM: return 8;
+        case DXGI_FORMAT_BC2_UNORM:
+        case DXGI_FORMAT_BC3_UNORM:
+        case DXGI_FORMAT_BC5_UNORM:
+        case DXGI_FORMAT_BC6H_UF16:
+        case DXGI_FORMAT_BC7_UNORM: return 16;
+        default: return 0;
+    }
+}
+
+// Bytes of one mip of a w x h block-compressed surface (block-rounded rows: w / h that are not multiples of 4 are
+// legal).
+size_t BcMipBytes(DXGI_FORMAT format, uint32_t w, uint32_t h) {
+    return (size_t)std::max(1u, (w + 3) / 4) * std::max(1u, (h + 3) / 4) * BcBlockBytes(format);
+}
+
+// One parsed DDS header, shared by the RGBA8 / compressed / cube entry points.
+struct DdsHeader {
+    uint32_t w = 0, h = 0;
+    uint32_t mipCount = 1;
+    uint32_t caps2 = 0;
+    uint32_t pfFlags = 0;
+    uint32_t fourCC = 0;
+    uint32_t bitCount = 0;
+    size_t dataOff = 128;
+    uint32_t dxgi = 0;      // valid when fourCC == "DX10"
+    bool dx10 = false;
+};
+
+bool ParseDdsHeader(const uint8_t* bytes, size_t size, DdsHeader& out, std::string* error) {
+    if (!IsDdsImage(bytes, size)) {
+        if (error) *error = "dds: bad magic";
+        return false;
+    }
+    const uint32_t headerSize = Rd32(bytes + 4);
+    if (headerSize != kHeaderSize) {
+        if (error) *error = "dds: bad header size";
+        return false;
+    }
+    out.h = Rd32(bytes + 12);
+    out.w = Rd32(bytes + 16);
+    out.mipCount = Rd32(bytes + 28);
+    out.caps2 = Rd32(bytes + 112);
+    if (out.w == 0 || out.h == 0 || out.w > 16384 || out.h > 16384) {
+        if (error) *error = "dds: bad dimensions";
+        return false;
+    }
+    if (out.mipCount == 0) out.mipCount = 1;
+    const uint8_t* pf = bytes + 76;
+    out.pfFlags = Rd32(pf + 4);
+    out.fourCC = Rd32(pf + 8);
+    out.bitCount = Rd32(pf + 12);
+    if (out.fourCC == kFourCCDx10) {
+        if (size < 148) {
+            if (error) *error = "dds: truncated DX10 header";
+            return false;
+        }
+        out.dx10 = true;
+        out.dxgi = Rd32(bytes + 128);
+        out.dataOff = 148;
+    }
+    return true;
+}
+
+// The block-compressed format of a header (UNKNOWN when it is not one we keep compressed).
+DXGI_FORMAT CompressedFormatOf(const DdsHeader& h) {
+    if (h.dx10) return BcBaseFormat(h.dxgi);
+    if (!(h.pfFlags & kDdpfFourCC)) return DXGI_FORMAT_UNKNOWN;
+    switch (h.fourCC) {
+        case kFourCCDxt1: return DXGI_FORMAT_BC1_UNORM;
+        case kFourCCDxt3: return DXGI_FORMAT_BC2_UNORM;
+        case kFourCCDxt5: return DXGI_FORMAT_BC3_UNORM;
+        case kFourCCAti1: case kFourCCBc4u: return DXGI_FORMAT_BC4_UNORM;
+        case kFourCCAti2: case kFourCCBc5u: return DXGI_FORMAT_BC5_UNORM;
+        default: return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+// Collects the blocks of every mip (and of every face when `faces` > 1) of a block-compressed file. The file layout
+// is face-major: all mips of face 0, then face 1, ... A file whose chain stops early keeps the mips it has (the
+// sampler clamps); a file that cannot hold level 0 of the first face, or that drops a later face, fails.
+bool CopyCompressedBlocks(const uint8_t* bytes, size_t size, const DdsHeader& h, DXGI_FORMAT format, uint32_t faces,
+                          CompressedImage& out, std::string* error) {
+    out = CompressedImage{};
+    out.format = format;
+    out.width = h.w;
+    out.height = h.h;
+    out.faces = faces;
+    std::vector<uint32_t> mipW, mipH;
+    mipW.push_back(h.w);
+    mipH.push_back(h.h);
+    while ((mipW.back() > 1 || mipH.back() > 1) && mipW.size() < 32) {
+        mipW.push_back(std::max(1u, mipW.back() / 2));
+        mipH.push_back(std::max(1u, mipH.back() / 2));
+    }
+    const uint32_t chain = (uint32_t)std::min<size_t>(mipW.size(), std::max(1u, h.mipCount));
+    // Face 0 decides the mip count: a chain that stops early keeps what it has, one that cannot hold level 0 fails.
+    uint32_t mips = chain;
+    size_t faceBytes = 0;
+    for (uint32_t m = 0; m < chain; ++m) {
+        const size_t mipBytes = BcMipBytes(format, mipW[m], mipH[m]);
+        if (h.dataOff + faceBytes + mipBytes > size) {
+            mips = m;
+            break;
+        }
+        faceBytes += mipBytes;
+    }
+    if (mips == 0) {
+        if (error) *error = "dds: truncated compressed data";
+        return false;
+    }
+    // Every face must hold the same mips (the faces are stored back to back).
+    if (h.dataOff + faceBytes * faces > size) {
+        if (error) *error = "dds: truncated compressed cube face data";
+        return false;
+    }
+    out.mipCount = mips;
+    out.mipOffsets.reserve((size_t)mips * faces);
+    for (uint32_t f = 0; f < faces; ++f) {
+        size_t off = 0;
+        for (uint32_t m = 0; m < mips; ++m) {
+            out.mipOffsets.push_back((size_t)f * faceBytes + off);
+            off += BcMipBytes(format, mipW[m], mipH[m]);
+        }
+    }
+    out.data.assign(bytes + h.dataOff, bytes + h.dataOff + faceBytes * faces);
+    // hasAlpha: only the block formats we already decode. A plain BC4/BC5/BC6H/BC7 has none we can test cheaply, so
+    // it stays false (the alpha-test / alpha-key detection uses the RGBA8 decode of level 0 instead).
+    if (format == DXGI_FORMAT_BC1_UNORM || format == DXGI_FORMAT_BC2_UNORM || format == DXGI_FORMAT_BC3_UNORM) {
+        std::vector<uint8_t> rgba;
+        const uint32_t fourCC = format == DXGI_FORMAT_BC1_UNORM   ? kFourCCDxt1
+                                : format == DXGI_FORMAT_BC2_UNORM ? kFourCCDxt3
+                                                                  : kFourCCDxt5;
+        if (DecodeDxt(fourCC, bytes + h.dataOff, size - h.dataOff, h.w, h.h, rgba, nullptr)) {
+            for (size_t i = 3; i < rgba.size(); i += 4)
+                if (rgba[i] < 255) {
+                    out.hasAlpha = true;
+                    break;
+                }
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 bool IsDdsImage(const uint8_t* bytes, size_t size) {
@@ -478,6 +657,88 @@ bool LoadDdsLevel0(const uint8_t* bytes, size_t size, ImageRGBA8& out, std::stri
     out.mips.push_back(std::move(level0));
     out.hasAlpha = hasAlpha;
     return true;
+}
+
+bool IsDdsCube(const uint8_t* bytes, size_t size) {
+    if (!IsDdsImage(bytes, size)) return false;
+    return (Rd32(bytes + 112) & kCaps2Cubemap) != 0;
+}
+
+bool LoadDdsCompressed(const uint8_t* bytes, size_t size, CompressedImage& out, std::string* error) {
+    DdsHeader h;
+    if (!ParseDdsHeader(bytes, size, h, error)) return false;
+    if (h.caps2 & kCaps2Cubemap) {
+        if (error) *error = "dds: cube map (use LoadDdsCube)";
+        return false;
+    }
+    if (h.caps2 & kCaps2Volume) {
+        if (error) *error = "dds: volume texture unsupported";
+        return false;
+    }
+    const DXGI_FORMAT format = CompressedFormatOf(h);
+    if (format == DXGI_FORMAT_UNKNOWN) {
+        if (error) *error = "dds: not a supported block-compressed format";
+        return false;
+    }
+    return CopyCompressedBlocks(bytes, size, h, format, 1, out, error);
+}
+
+bool LoadDdsCube(const uint8_t* bytes, size_t size, std::array<ImageRGBA8, 6>& faces, std::string* error) {
+    faces = {};
+    DdsHeader h;
+    if (!ParseDdsHeader(bytes, size, h, error)) return false;
+    if (!(h.caps2 & kCaps2Cubemap)) {
+        if (error) *error = "dds: not a cube map";
+        return false;
+    }
+    if (h.caps2 & kCaps2Volume) {
+        if (error) *error = "dds: volume texture unsupported";
+        return false;
+    }
+    // The six faces have equal size and are stored one after another (+X -X +Y -Y +Z -Z); a face's own mips follow
+    // its level 0. Splitting the payload in six and decoding each half as its own 2D image therefore reads exactly
+    // one face, whatever the pixel format.
+    const size_t payload = size - h.dataOff;
+    if (payload < 6 || payload % 6 != 0) {
+        if (error) *error = "dds: truncated cube map";
+        return false;
+    }
+    const size_t faceBytes = payload / 6;
+    std::vector<uint8_t> header(bytes, bytes + h.dataOff);
+    // Clear the cube bit in the copied header so LoadDdsLevel0 accepts the slice.
+    const uint32_t caps2 = Rd32(header.data() + 112) & ~kCaps2Cubemap & ~kCaps2Volume;
+    header[112] = (uint8_t)(caps2 & 0xFF);
+    header[113] = (uint8_t)((caps2 >> 8) & 0xFF);
+    header[114] = (uint8_t)((caps2 >> 16) & 0xFF);
+    header[115] = (uint8_t)((caps2 >> 24) & 0xFF);
+    std::vector<uint8_t> slice = header;
+    for (uint32_t f = 0; f < 6; ++f) {
+        slice.resize(header.size());
+        const uint8_t* fs = bytes + h.dataOff + faceBytes * f;
+        slice.insert(slice.end(), fs, fs + faceBytes);
+        std::string faceError;
+        if (!LoadDdsLevel0(slice.data(), slice.size(), faces[f], &faceError)) {
+            if (error) *error = "dds: cube face " + std::to_string(f) + ": " + faceError;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool LoadDdsCube(const uint8_t* bytes, size_t size, CompressedImage& cube, std::string* error) {
+    cube = CompressedImage{};
+    DdsHeader h;
+    if (!ParseDdsHeader(bytes, size, h, error)) return false;
+    if (!(h.caps2 & kCaps2Cubemap)) {
+        if (error) *error = "dds: not a cube map";
+        return false;
+    }
+    const DXGI_FORMAT format = CompressedFormatOf(h);
+    if (format == DXGI_FORMAT_UNKNOWN) {
+        if (error) *error = "dds: not a supported block-compressed cube format";
+        return false;
+    }
+    return CopyCompressedBlocks(bytes, size, h, format, 6, cube, error);
 }
 
 } // namespace mmdx

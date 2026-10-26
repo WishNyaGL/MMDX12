@@ -1,4 +1,5 @@
 #include "asset/AssetLibrary.h"
+#include "asset/DdsLoader.h"
 #include "asset/ImageLoader.h"
 #include "asset/MmeHints.h"
 #include "asset/ModelImport.h"
@@ -109,6 +110,8 @@ int wmain(int argc, wchar_t** argv) {
 
     if (full) {
         printf("\n--- full load ---\n");
+        // S11: library-wide texture totals, printed again at the end.
+        uint64_t totalRgba8 = 0, totalBc = 0, totalAllRgba8 = 0;
         std::vector<std::pair<std::filesystem::path, mmdx::ModelRole>> pmxPaths;
         for (const auto& c : scan.characters) pmxPaths.push_back({c.modelPath, mmdx::ModelRole::Character});
         for (const auto& s : scan.stages) {
@@ -145,20 +148,58 @@ int wmain(int argc, wchar_t** argv) {
             }
             int texOk = 0;
             std::vector<std::string> missing;
+            // S11: the same VRAM totals the TEXTURES log line prints per model (RGBA8 = textures uploaded
+            // uncompressed, BCn = the DDS blocks actually kept, all_rgba8 = everything as RGBA8 + mips).
+            uint64_t rgba8Bytes = 0, bcBytes = 0, allRgba8Bytes = 0;
             for (const auto& [idx, raw] : referenced) {
                 (void)raw;
                 mmdx::ImageRGBA8 image;
+                mmdx::CompressedImage compressed;
                 std::string texError;
                 const bool embedded = (size_t)idx < model.embeddedTextures.size() && !model.embeddedTextures[idx].empty();
                 const std::filesystem::path texPath = embedded ? std::filesystem::path{} : model.ResolveTexturePath(idx);
-                if (embedded ? mmdx::LoadImageRGBA8FromMemory(model.embeddedTextures[idx].data(), model.embeddedTextures[idx].size(), image, &texError)
-                             : (!texPath.empty() && mmdx::LoadImageRGBA8(texPath, image, &texError))) {
+                if (embedded ? mmdx::LoadImageWithCompressedFromMemory(model.embeddedTextures[idx].data(), model.embeddedTextures[idx].size(), image, compressed, &texError)
+                             : (!texPath.empty() && mmdx::LoadImageWithCompressed(texPath, image, compressed, &texError))) {
                     ++texOk;
+                    if (!compressed.Empty()) {
+                        bcBytes += compressed.data.size();
+                        uint64_t rgba8 = 0;
+                        if (!image.Empty()) {
+                            for (const mmdx::ImageRGBA8::Level& l : image.mips) rgba8 += l.pixels.size();
+                        } else {
+                            // No CPU decode (BC4/5/6H/7): the RGBA8 form would be level 0 + its halving chain.
+                            uint32_t w = compressed.width, h = compressed.height;
+                            while (w > 0 && h > 0) {
+                                rgba8 += (uint64_t)w * h * 4;
+                                if (w == 1 && h == 1) break;
+                                w = std::max(1u, w / 2);
+                                h = std::max(1u, h / 2);
+                            }
+                        }
+                        allRgba8Bytes += rgba8;
+                    } else if (!image.Empty()) {
+                        uint64_t rgba8 = 0;
+                        for (const mmdx::ImageRGBA8::Level& l : image.mips) rgba8 += l.pixels.size();
+                        rgba8Bytes += rgba8;
+                        allRgba8Bytes += rgba8;
+                    }
                 } else {
                     missing.push_back(raw);
                 }
             }
             printf("  textures: %d/%d ok\n", texOk, static_cast<int>(referenced.size()));
+            {
+                const uint64_t uploaded = rgba8Bytes + bcBytes;
+                printf("  vram: rgba8=%.2f MB bcn=%.2f MB all_rgba8=%.2f MB saved=%.1f%%\n",
+                       (double)rgba8Bytes / (1024.0 * 1024.0), (double)bcBytes / (1024.0 * 1024.0),
+                       (double)allRgba8Bytes / (1024.0 * 1024.0),
+                       allRgba8Bytes && allRgba8Bytes > uploaded
+                           ? 100.0 * (double)(allRgba8Bytes - uploaded) / (double)allRgba8Bytes
+                           : 0.0);
+                totalRgba8 += rgba8Bytes;
+                totalBc += bcBytes;
+                totalAllRgba8 += allRgba8Bytes;
+            }
             for (const auto& raw : missing) {
                 printf("  missing: %s\n", raw.c_str());
             }
@@ -183,6 +224,16 @@ int wmain(int argc, wchar_t** argv) {
                    static_cast<int>(motion.morphKeys.size()),
                    static_cast<int>(motion.cameraKeys.size()),
                    static_cast<int>(motion.ikKeys.size()), motion.maxFrame);
+        }
+        {
+            const uint64_t uploaded = totalRgba8 + totalBc;
+            printf("\n--- texture totals ---\n");
+            printf("rgba8=%.2f MB bcn=%.2f MB all_rgba8=%.2f MB saved=%.1f%%\n",
+                   (double)totalRgba8 / (1024.0 * 1024.0), (double)totalBc / (1024.0 * 1024.0),
+                   (double)totalAllRgba8 / (1024.0 * 1024.0),
+                   totalAllRgba8 && totalAllRgba8 > uploaded
+                       ? 100.0 * (double)(totalAllRgba8 - uploaded) / (double)totalAllRgba8
+                       : 0.0);
         }
     }
 

@@ -230,6 +230,40 @@ bool LoadImageRGBA8FromMemory(const uint8_t* bytes, size_t size, ImageRGBA8& out
     }
 }
 
+bool LoadImageWithCompressedFromMemory(const uint8_t* bytes, size_t size, ImageRGBA8& image,
+                                      CompressedImage& compressed, std::string* error) {
+    image = ImageRGBA8{};
+    compressed = CompressedImage{};
+    // The compressed form is only kept for a plain 2D block-compressed DDS; a cube map keeps the RGBA8 path (nothing
+    // binds a cube as a material texture) and every other format decodes to RGBA8 as before.
+    bool ok = LoadImageRGBA8FromMemory(bytes, size, image, error);
+    CompressedImage candidate;
+    std::string compressedError;
+    if (LoadDdsCompressed(bytes, size, candidate, &compressedError)) compressed = std::move(candidate);
+    // BC7 / BC4 / BC5 have no RGBA8 decoder here, so for such a file the CPU copy is genuinely absent: the blocks
+    // are the only form. The load still succeeds (the GPU takes them); callers that need pixels fall back as if the
+    // decode had failed.
+    if (!ok && !compressed.Empty()) {
+        if (error) error->clear();
+        return true;
+    }
+    // LoadDdsLevel0's message is only meaningful when nothing usable came out of the file.
+    return ok;
+}
+
+bool LoadImageWithCompressed(const std::filesystem::path& path, ImageRGBA8& image, CompressedImage& compressed,
+                             std::string* error) {
+    image = ImageRGBA8{};
+    compressed = CompressedImage{};
+    std::vector<uint8_t> fileData;
+    std::string readError;
+    if (!ReadWholeFile(path, fileData, &readError)) {
+        if (error) *error = readError;
+        return false;
+    }
+    return LoadImageWithCompressedFromMemory(fileData.data(), fileData.size(), image, compressed, error);
+}
+
 bool EncodePngRGBA8(uint32_t width, uint32_t height, const uint8_t* rgba,
                     uint32_t rowPitchBytes, std::vector<uint8_t>& outPng) {
     try {

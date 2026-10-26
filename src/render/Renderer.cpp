@@ -275,10 +275,11 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
 
 std::unique_ptr<GpuModel> Renderer::CreateModel(UploadBatch& batch, const PmxModel& pmx,
                                                 const std::vector<ImageRGBA8>& textures, ModelRole role,
-                                                const PbrModelData* pbr) {
+                                                const PbrModelData* pbr,
+                                                const std::vector<CompressedImage>* compressed) {
     auto model = std::make_unique<GpuModel>();
     static const PbrModelData kEmptyPbr;
-    if (!model->Create(*ctx_, batch, pmx, textures, builtin_, role, pbr ? *pbr : kEmptyPbr)) return nullptr;
+    if (!model->Create(*ctx_, batch, pmx, textures, builtin_, role, pbr ? *pbr : kEmptyPbr, compressed)) return nullptr;
     model->SetHasPbrRecords(pbr && pbr->materialsWithRecord > 0);
     return model;
 }
