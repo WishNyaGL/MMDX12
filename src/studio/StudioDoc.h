@@ -13,6 +13,7 @@
 #include "studio/StudioMotion.h"
 #include "studio/StudioPose.h"
 #include "studio/StudioProject.h"
+#include "studio/RigDefinition.h"
 #include "studio/UiTimeline.h"
 #include <chrono>
 #include <cmath>
@@ -61,6 +62,8 @@ struct StudioModel {
     uint64_t motionVersion = 1;    // bumped by every edit of `motion`
     uint64_t boundVersion = 0;     // motionVersion `bound` was built from
     std::shared_ptr<BoundMotion> bound;
+    std::shared_ptr<RigDefinition> rig;   // generated rig (null = none); stored separately from the model/animation
+    RigDiagnostics rigDiag;
     PoseLayer pose;                // unregistered viewport edits (override the motion at pose.frame)
     // stages: what the static BLAS was last built from (StudioUpdateModel rebuilds it when this changes)
     uint64_t stageMotionApplied = 0;

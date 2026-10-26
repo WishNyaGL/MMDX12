@@ -661,6 +661,7 @@ private:
     void DrawStudioViewportAxisControls(float x0, float y0, float x1, float y1);  // bottom-corner move/rotate XYZ for the active bone
     void DrawStudioWindOverlay(const float rr[4]);  // viewport wind-direction arrow (camera-aligned)
     void DrawStudioBoneTab(float w);
+    void DrawStudioRigTab(float w);
     void DrawStudioMorphTab(float w);
     bool StudioScriptGizmoPoint(int part, ImVec2& out) const;  // ui-script: a screen point on a gizmo part
 

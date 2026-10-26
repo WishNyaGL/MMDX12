@@ -21,3 +21,4 @@ __pycache__/
 /external/onnxruntime/bin/
 /external/mocap/
 progress-nya.md
+/external/ref/
