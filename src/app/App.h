@@ -590,6 +590,10 @@ private:
     // Overlapping-bone cycling: last click spot + the bone chosen there (see StudioViewportPose).
     ImVec2 studioCyclePos_{-1e9f, -1e9f};
     int studioCycleBone_ = -1;
+    // Fixed-axis bone rotation panel: base rotation + accumulated angle captured at the gesture start.
+    DirectX::XMFLOAT4 studioFixedAxisBaseR_{0, 0, 0, 1};
+    float studioFixedAxisDelta_ = 0.0f;
+    bool studioFixedAxisActive_ = false;
     // Last focused studio panel (updated while panels draw): 0 viewport / camera, 1 timeline, 2 other. Ctrl+A picks
     // bones when the viewport is focused and keys when the timeline is focused.
     int studioFocusPanel_ = 2;

@@ -862,21 +862,46 @@ void App::DrawStudioViewportAxisControls(float x0, float y0, float x1, float y1)
 
         if (rotatable) {
             if (fixedAxis) {
-                // Fixed-axis: a single angle control spans the row.
+                // Fixed-axis: a single full-width angle control. The angle is an accumulated offset from the pose
+                // captured at the gesture start, so dragging never re-applies to an already-changed rotation each frame.
                 XMVECTOR axW = XMLoadFloat3(&b.fixedAxis);
                 if (XMVectorGetX(XMVector3LengthSq(axW)) < 1e-12f) axW = XMVectorSet(1, 0, 0, 0);
                 axW = XMVector3Normalize(XMVector3Rotate(XMVector3Normalize(axW), XMLoadFloat4(&parentRotF)));
                 XMFLOAT3 axWf; XMStoreFloat3(&axWf, axW);
-                float ang = 0.0f;
-                const auto r = drawRow(Tr("회전"), &ang, rotateMode, 0.5f, "%.1f°", "a", 0);
-                if (r.first) {
-                    const XMVECTOR q = XMQuaternionRotationAxis(XMVector3Normalize(XMLoadFloat3(&axWf)), XMConvertToRadians(ang));
+                const ImVec2 row0 = ImGui::GetCursorScreenPos();
+                Text(dl, Font::Regular, size::Caption, ImVec2(row0.x, row0.y + labelH * 0.5f), p.ink3, Tr("회전"));
+                const float yf = row0.y + labelH;
+                const float bx0 = row0.x + rowLabelW + cGap;
+                const float bx1 = row0.x + innerW - pad;
+                const ImU32 axisCol = rotateMode ? kAxisCol[0] : IM_COL32(90, 98, 106, 180);
+                Text(dl, Font::Semibold, size::Caption, ImVec2(bx0, row0.y), axisCol, "A");
+                ImGui::BeginDisabled(!rotateMode);
+                ImGui::SetCursorScreenPos(ImVec2(bx0, yf));
+                ImGui::SetNextItemWidth(std::max(bx1 - bx0, Dp(40.0f)));
+                const bool started = ImGui::IsItemActivated();
+                if (started && !studioFixedAxisActive_) {
+                    studioFixedAxisBaseR_ = cur.r;
+                    studioFixedAxisDelta_ = 0.0f;
+                    studioFixedAxisActive_ = true;
+                    studioPoseBefore_ = m->pose;
+                    studioPoseFieldEdit_ = true;
+                }
+                const bool ch = ImGui::DragFloat("##vpfixeda", &studioFixedAxisDelta_, 0.5f, 0.0f, 0.0f, "%.1f°");
+                const bool ended = ImGui::IsItemDeactivated();
+                ImGui::EndDisabled();
+                if (ch) {
+                    const XMVECTOR q = XMQuaternionRotationAxis(XMVector3Normalize(XMLoadFloat3(&axWf)),
+                                                               XMConvertToRadians(studioFixedAxisDelta_));
                     const XMVECTOR parentQ = XMLoadFloat4(&parentRotF);
                     const XMVECTOR dq = XMQuaternionMultiply(XMQuaternionMultiply(parentQ, q), XMQuaternionInverse(parentQ));
-                    XMStoreFloat4(&v.r, XMQuaternionNormalize(XMQuaternionMultiply(XMLoadFloat4(&cur.r), dq)));
+                    XMStoreFloat4(&v.r, XMQuaternionNormalize(XMQuaternionMultiply(XMLoadFloat4(&studioFixedAxisBaseR_), dq)));
                     anyChanged = true;
                 }
-                anyEnded |= r.second;
+                if (ended) {
+                    studioFixedAxisActive_ = false;
+                    studioPoseFieldEdit_ = false;
+                    StudioSetPose(Tr("본 값 편집"), studioPoseBefore_);
+                }
             } else {
                 const XMFLOAT3 e0 = EulerDeg(cur.r);
                 float r[3] = {e0.x, e0.y, e0.z};

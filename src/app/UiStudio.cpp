@@ -637,7 +637,8 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
             inst.SetRootTransform(root);
         }
         inst.EnablePhysics(d.physics && !m.physicsOff);
-        if (d.physics && !m.physicsOff && (d.windStrength > 0.0f || d.windGust > 0.0f))
+        // Always sync wind (including zero values) so turning it off explicitly clears the physics-world state.
+        if (d.physics && !m.physicsOff)
             inst.SetWind(d.windDir, d.windStrength, d.windGust, d.windGustFreq, d.windJitter);
         // Interactive playback caps Bullet substeps (drops simulated time on a slow frame); offline renders keep full.
         inst.SetPhysicsMaxSubsteps(offline_.mode == OfflineMode::None ? 4 : 10);
@@ -3524,15 +3525,15 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
     ImGui::SetNextWindowSize(ImVec2(Dp(300.0f), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(14.0f), Dp(12.0f)));
     if (ImGui::BeginPopup("##studiophysics")) {
-        bool physChanged = false;
-        physChanged |= ImGui::Checkbox(Tr("물리 항상 계산"), &d.physicsAlways);
+        ImGui::Checkbox(Tr("물리 항상 계산"), &d.physicsAlways);
         ui::Tooltip(Tr("재생 중이 아니어도 같은 프레임에 멈춰 있을 때 물리를 계속 계산해 (머리카락/치마가 계속 흔들림)"));
-        physChanged |= ImGui::Checkbox(Tr("물리 꺼도 본 표시"), &d.showPhysicsBones);
+        ImGui::Checkbox(Tr("물리 꺼도 본 표시"), &d.showPhysicsBones);
         ui::Tooltip(Tr("물리를 꺼도 물리 뼈(머리카락/치마)를 뷰포트에 표시해 직접 키를 넣을 수 있게"));
         ImGui::SeparatorText(Tr("바람"));
         ImGui::Checkbox(Tr("뷰포트에 바람 벡터 표시"), &d.showWindVector);
+        bool windEditEnded = false;  // physics re-seeds only when a drag finishes, not every slider tick
         {
-            const bool hasWind = (d.windStrength > 0.0f || d.windGust > 0.0f);
+            const bool hasWind = (d.windStrength > 0.0f || d.windGust > 0.0f || d.windJitter > 0.0f);
             // Direction visualizer (top-down: +X right, +Z up) with two compact X/Z sliders to its right.
             const float sz = Dp(64.0f);
             const ImVec2 c0 = ImGui::GetCursorScreenPos();
@@ -3563,9 +3564,11 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
             {
                 const float rem = ImGui::GetContentRegionAvail().x;
                 ImGui::SetNextItemWidth(rem);
-                physChanged |= ImGui::SliderFloat("##windx", &d.windDir.x, -1.0f, 1.0f, "X %.2f");
+                ImGui::SliderFloat("##windx", &d.windDir.x, -1.0f, 1.0f, "X %.2f");
+                windEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
                 ImGui::SetNextItemWidth(rem);
-                physChanged |= ImGui::SliderFloat("##windz", &d.windDir.z, -1.0f, 1.0f, "Z %.2f");
+                ImGui::SliderFloat("##windz", &d.windDir.z, -1.0f, 1.0f, "Z %.2f");
+                windEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
             }
             ImGui::EndGroup();
             ImGui::EndDisabled();
@@ -3574,14 +3577,16 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
             const auto wSlider = [&](const char* label, float* v, float lo, float hi) {
                 ImGui::Text("%s", Tr(label));
                 ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-                physChanged |= ImGui::SliderFloat((std::string("##w") + label).c_str(), v, lo, hi, "%.2f");
+                ImGui::SliderFloat((std::string("##w") + label).c_str(), v, lo, hi, "%.2f");
+                windEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
             };
             wSlider(Tr("바람 세기"), &d.windStrength, 0.0f, 1.0f);
             wSlider(Tr("돌풍 폭"), &d.windGust, 0.0f, 1.0f);
             wSlider(Tr("돌풍 주파수"), &d.windGustFreq, 0.1f, 20.0f);
             wSlider(Tr("바람 무작위성"), &d.windJitter, 0.0f, 1.0f);
         }
-        if (physChanged) d.physicsFrame = -1.0f;  // re-seed bodies so wind applies cleanly
+        // Re-seed bodies only when a wind drag ends (not per tick) so sliding doesn't freeze or thrash physics.
+        if (windEditEnded) d.physicsFrame = -1.0f;
         ImGui::EndPopup();
     }
     ImGui::PopStyleVar();
@@ -3917,7 +3922,7 @@ void App::DrawStudioWindOverlay(const float rr[4]) {
     StudioDoc& d = *studio_;
     (void)rr;
     if (!d.showWindVector) return;
-    if (!(d.windStrength > 0.0f || d.windGust > 0.0f)) return;
+    if (!(d.windStrength > 0.0f || d.windGust > 0.0f || d.windJitter > 0.0f)) return;
     float nx = d.windDir.x, nz = d.windDir.z;
     const float len = std::sqrt(nx * nx + nz * nz);
     if (len < 1e-5f) return;
