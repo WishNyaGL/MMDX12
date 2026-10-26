@@ -119,6 +119,7 @@ void StageRuntime::Init(std::shared_ptr<const StageManifest> manifest, std::stri
     appliedFrame_ = ~0ull;
     lights_.clear();
     screens_.clear();
+    packs_.clear();
 }
 
 const std::vector<studio::SceneLight>& StageRuntime::Apply(double timeSeconds, uint64_t frame) {
@@ -158,6 +159,12 @@ const std::vector<studio::SceneLight>& StageRuntime::Apply(double timeSeconds, u
     // frame % 3 and skips it when that entry already holds this version, so the GPU is still touched only on changes,
     // and every ring entry catches up (gating here on a changed hash left the other entries stale / in flight).
     ApplyMaterials(ResolvedStageMaterialRules(*manifest_, eval), frame);
+    // S6: the bundled packs of this frame (their `packs.<index>.params.<key>` targets applied), then the surface packs
+    // on the parts that were assigned one at load.
+    if (!manifest_->packs.empty()) {
+        packs_ = ResolveStagePacks(*manifest_, eval);
+        for (const StageRuntimePart& part : parts_) ApplyStageSurfacePack(packs_, part);
+    }
     // S5: the screens (their sources / brightness / enabled targets). Cheap: a few strings per frame.
     screens_ = ResolveStageScreens(*manifest_, eval);
     return lights_;
@@ -324,25 +331,14 @@ StageSurfacePack ResolveStageSurfacePack(const StageManifest& manifest, const Gp
     return out;
 }
 
-void ApplyStageSurfacePacks(const std::vector<StagePackState>& packs, const std::vector<StageRuntimePart>& parts,
-                            const std::function<StageSurfacePack(int part)>& surfaceOf) {
-    if (parts.empty()) return;
-    const ShaderPack* chosen = nullptr;
-    const StagePackState* state = nullptr;
+void ApplyStageSurfacePack(const std::vector<StagePackState>& packs, const StageRuntimePart& part) {
+    if (!part.gpu || part.surfacePack.id.empty() || packs.empty()) return;
     for (const StagePackState& p : packs) {
-        if (p.role != StagePackRole::Surface) continue;
+        if (p.id != part.surfacePack.id) continue;
         const ShaderPack* pack = ShaderPacks().Find(p.id);
-        if (!pack || pack->type != PackType::Surface || !pack->Selectable()) continue;
-        chosen = pack;
-        state = &p;
-        break;
-    }
-    if (!chosen) return;   // no (usable) surface pack: every part keeps the default shading
-    for (const StageRuntimePart& part : parts) {
-        if (!part.gpu) continue;
-        const StageSurfacePack sp = surfaceOf(part.part);
-        if (sp.id != chosen->id) continue;
-        part.gpu->SetShaderPack(chosen, state->params, {}, sp.materials, state->params);
+        if (!pack || pack->type != PackType::Surface || !pack->Selectable()) return;
+        part.gpu->SetShaderPack(pack, p.params, {}, part.surfacePack.materials, p.params);
+        return;
     }
 }
 

@@ -130,6 +130,14 @@ inline constexpr uint32_t kPackClassOff = 0xFFu;
 inline constexpr int kMaterialPackOff = -1;
 using MaterialClassOverrides = std::map<std::string, int>;
 
+// S6 (docs/stage_format.md `packs`): the bundled surface pack one stage part's materials are shaded with, plus the
+// per-material class overrides that keep the pack off every material its `materials` globs do not claim. Resolved once
+// per part (App::StageRuntime ResolveStageSurfacePack); `id` empty = the part keeps the default shading.
+struct StageSurfacePack {
+    std::string id;                     // pack registry id, empty = no surface pack
+    MaterialClassOverrides materials;   // GpuModel::SetShaderPack's per-material map
+};
+
 // A model's shader pack choice: pack id (empty = the default shading), the parameter values the user changed
 // (key -> value; the rest use the pack's defaults) and an optional per-character texture folder (UTF-8, empty =
 // the pack-level folder). Saved per character (settings) and per studio model (project).

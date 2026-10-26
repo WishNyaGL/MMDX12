@@ -86,6 +86,10 @@ public:
     // S5: the stage's screens at the last Apply (screens.<id>.<field> targets applied). Empty when it has none.
     const std::vector<StageScreenState>& Screens() const { return screens_; }
 
+    // S6: the bundled packs at the last Apply (`packs[].params` + the packs.<index>.params.<key> targets). Empty when
+    // the stage bundles none.
+    const std::vector<StagePackState>& Packs() const { return packs_; }
+
 private:
     void ApplyMaterials(const std::vector<StageMaterialRule>& rules, uint64_t frame);
 
@@ -95,6 +99,7 @@ private:
     std::vector<studio::SceneLight> lights_;
     std::vector<studio::SceneLight> gltfLights_;   // S2a KHR_lights_punctual of the parts (manifest.gltfLights)
     std::vector<StageScreenState> screens_;        // S5: the screens at the last Apply
+    std::vector<StagePackState> packs_;            // S6: the bundled packs at the last Apply
     uint64_t appliedFrame_ = ~0ull;   // the frame `lights_` / the material targets were last applied for
 };
 
@@ -138,18 +143,13 @@ void RegisterStagePacks(const StageManifest& manifest);
 
 // S6 surface packs: the pack a stage part's materials are shaded with at load (the FIRST `packs[]` entry of role
 // "surface" whose `materials` globs match one of the part's materials), plus the per-material class overrides the pack
-// needs: the materials the pack claims are left out (the pack's own class rules, ShaderPack::ClassifyStage), every other
-// material of the part is `kMaterialPackOff` (the default shading). `pack` empty = the part keeps its own shading.
-struct StageSurfacePack {
-    std::string id;                        // registry id, empty = no surface pack
-    MaterialClassOverrides materials;      // GpuModel::SetShaderPack's per-material map
-};
+// needs (StageSurfacePack): the materials the pack claims are left out (the pack's own class rules,
+// ShaderPack::ClassifyStage), every other material of the part is `kMaterialPackOff` (the default shading).
 StageSurfacePack ResolveStageSurfacePack(const StageManifest& manifest, const GpuModel& part);
-// Applies every surface pack of a stage at this frame (the pack's parameters follow `packs.<index>.params.<key>`) to the
-// stage's parts. Called once per frame by play mode and the studio: GpuModel::SetShaderPack is a no-op when nothing
-// changed. Zero packs = zero work.
-void ApplyStageSurfacePacks(const std::vector<StagePackState>& packs, const std::vector<StageRuntimePart>& parts,
-                            const std::function<StageSurfacePack(int part)>& surfaceOf);
+// Applies the surface pack of one part at this frame: the pack of `surface.index` in `packs` (its parameters follow
+// `packs.<index>.params.<key>`). GpuModel::SetShaderPack is a no-op when nothing changed, so call it every frame. No
+// packs / no pack for the part = nothing to do.
+void ApplyStageSurfacePack(const std::vector<StagePackState>& packs, const StageRuntimePart& part);
 
 // S6 world packs: one WorldInstance per `packs[]` entry of role "world", placed at its socket (the socket's node bone's
 // world matrix, times the socket's explicit offset; resolved after the parts are posed) and evaluated at `time`.

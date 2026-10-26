@@ -140,6 +140,8 @@ bool App::FinishStudioLoad() {
             }
             sm->gpu->SetDefaultPackTextureFolder(m.defaultPackTextureFolder);
             sm->gpu->SetMaterialBlendHints(m.materialBlend, m.materialBlendDefault);
+            // S6: the part's bundled surface pack (resolved once; the parameters follow the timeline every frame)
+            if (m.stageManifest) sm->stageSurfacePack = ResolveStageSurfacePack(*m.stageManifest, *sm->gpu);
             if (m.kind == ModelKind::Prop) sm->gpu->SetProp(true);   // the world's ground map includes the props
             if (!pkg.fromProject) StudioSuggestShader(*sm);   // added character with no shader choice: maybe suggest a pack
             sm->inst->UpdatePose();
@@ -179,6 +181,10 @@ bool App::FinishStudioLoad() {
         legacyVariants[(uint32_t)doc->models[(size_t)remap[i]]->uid] = m.stageVariant;
     }
     StudioConsolidateStages(*doc, legacyVariants);
+    // S6: the stages' bundled packs join the registry ("stage:<id>/<folder>"); a broken one is one [W]. A project's
+    // entities may hold their manifest without a model part, so every entity is asked.
+    for (const studio::StudioStage& stage : doc->stages)
+        if (stage.manifest) RegisterStagePacks(*stage.manifest);
     doc->camera = std::move(pkg.camera);
     // S4: the extra cameras + the switch track (a version <= 4 project / a library scene: none)
     doc->cameras = std::move(pkg.cameras);
@@ -810,6 +816,19 @@ void App::StudioApplyStageTargets() {
                 const StudioModel& m = *mp;
                 if (m.stageUid != stage.uid || !m.gpu) continue;
                 ApplyStageMaterialList(*m.gpu, m.stagePart, m.stageBinding, rules, frame);
+            }
+        }
+        // S6: the stage's bundled surface packs (their `packs.<index>.params.<key>` targets at this frame)
+        if (!stage.manifest->packs.empty()) {
+            const std::vector<StagePackState> packs = ResolveStagePacks(*stage.manifest, eval);
+            for (const auto& mp : d.models) {
+                const StudioModel& m = *mp;
+                if (m.stageUid != stage.uid || !m.gpu) continue;
+                StageRuntimePart part;
+                part.part = m.stagePart;
+                part.gpu = m.gpu.get();
+                part.surfacePack = m.stageSurfacePack;
+                ApplyStageSurfacePack(packs, part);
             }
         }
         // lights: reset the fields a binding drives to the manifest's value, then replay the frame's assignments
@@ -1596,6 +1615,27 @@ void App::BuildStudioFrameView(FrameView& view) {
         inst.exact = !d.playing;
         inst.colliders = studioColliders_;
         view.worlds.push_back(std::move(inst));
+    }
+    // S6: each stage's bundled world packs, after the project's own worlds and at their sockets (the socket's node bone
+    // world matrix x its explicit offset; the parts were posed by UpdateStudioScene). Not editable outliner entities.
+    for (const studio::StudioStage& stage : d.stages) {
+        if (!stage.manifest || stage.manifest->packs.empty()) continue;
+        const studio::StudioStageOverrides ov = studio::StageOverridesAt(stage, worldFrame);
+        const StageEvalResult eval = EvaluateStage(*stage.manifest, stage.variant, ov.values, d.time, ov.skipCues);
+        const std::vector<StagePackState> packs = ResolveStagePacks(*stage.manifest, eval);
+        const auto resolveNode = [&](const std::string& node, DirectX::XMFLOAT4X4& out) {
+            for (const auto& mp : d.models) {
+                const studio::StudioModel& m = *mp;
+                if (m.stageUid != stage.uid || !m.pmx || !m.inst) continue;
+                const int bone = m.pmx->FindBone(node);
+                if (bone < 0) continue;
+                out = m.inst->BoneWorld(bone);
+                return true;
+            }
+            return false;
+        };
+        AppendStageWorldPacks(*stage.manifest, packs, d.time, !d.playing, studioColliders_, kStageWorldUidBase,
+                              resolveNode, view.worlds);
     }
 }
 

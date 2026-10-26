@@ -720,6 +720,8 @@ void App::StudioPollJobs() {
                     }
                     sm->gpu->SetDefaultPackTextureFolder(pm.defaultPackTextureFolder);
                     sm->gpu->SetMaterialBlendHints(pm.materialBlend, pm.materialBlendDefault);
+                    // S6: the part's bundled surface pack (resolved once; the parameters follow the timeline every frame)
+                    if (pm.stageManifest) sm->stageSurfacePack = ResolveStageSurfacePack(*pm.stageManifest, *sm->gpu);
                     StudioSuggestShader(*sm);   // character with no shader choice: maybe suggest a pack
                     sm->inst->UpdatePose();
                 }
@@ -751,6 +753,10 @@ void App::StudioPollJobs() {
                         const uint32_t su = d.models[(size_t)at]->stageUid;
                         if (su) { newStage = su; break; }
                     }
+                    // S6: the added stage's bundled packs join the registry before the next frame uses them
+                    if (newStage)
+                        if (const studio::StudioStage* st = d.FindStage(newStage); st && st->manifest)
+                            RegisterStagePacks(*st->manifest);
                     if (newStage) StudioApplyStageLightRig(newStage);
                 }
                 LOG_INFO("studio: added %s (%d models)", job.label.c_str(), (int)d.models.size());

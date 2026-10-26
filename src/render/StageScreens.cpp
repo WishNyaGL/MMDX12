@@ -471,7 +471,7 @@ void StageScreens::Render(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, cons
         if (!pack || pack->type != PackType::Screen || !pack->Selectable()) continue;   // one [W] at registration
         auto it = impl.programs.find(s.pack);
         if (it == impl.programs.end()) {
-            Impl::ProgramPipe pipe;
+            ProgramPipe pipe;
             if (!CreateProgramPipe(ctx, shaderDir_, *pack, pipe)) pipe.failed = true;
             it = impl.programs.emplace(s.pack, std::move(pipe)).first;
         }

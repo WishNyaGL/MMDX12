@@ -64,6 +64,7 @@ struct StudioModel {
     int stagePart = -1;            // index in manifest->models (-1 = not an MMDX stage part)
     uint32_t stageUid = 0;         // the StudioDoc::stages entity this part belongs to (0 = none)
     StageMaterialBinding stageBinding;   // rule -> material map (resolved when the part enters the document)
+    StageSurfacePack stageSurfacePack;   // S6: the bundled surface pack of the part (resolved with stageBinding)
     std::shared_ptr<const PmxModel> pmx;
     std::unique_ptr<ModelInstance> inst;
     std::unique_ptr<GpuModel> gpu;
