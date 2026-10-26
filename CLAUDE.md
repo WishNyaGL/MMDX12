@@ -211,6 +211,10 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   it never left the lobby (bad `--character/--song`, multi-part song without `--formation`, or a cold library scan in a
   fresh build dir: the first run of a build dir rescans the library, ~25 s). Grep `[E]`/`[W]` after every capture;
   unknown arguments are only a `[W] unknown command line argument` line, never an error.
+- **Never delete `<build>/bin/cache/library_result.json`** to force a rescan (a worker did, 2026-10-27, and every
+  capture was then refused). A scan cancelled by the app quitting is never saved, so a short `--frames` run cannot
+  rebuild it: run `python tools/run_capture.py --timeout 300 -- --screen select --frames 30000` once, which also
+  picks up new `<exe>/stages` folders.
 - **Name matching** = case-insensitive substring of the library id (the relative path, e.g.
   `model/Sekai Model Pack v4/LeoNeed/Ichika/01_9001.pmx`) or the display name; the FIRST match wins, so use a
   distinctive fragment (`01_9001`, `LeoNeed/Ichika`). `--stage none` = no stage. Songs with >= 2 dance parts open the

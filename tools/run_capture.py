@@ -220,8 +220,11 @@ def check_preflight(app_args, library, allow_library=False, allow_gui=False):
     needs_names = bool(info["character"] or info["song"] or
                        (info["stage"] and info["stage"].strip().lower() != "none"))
     if library is None and needs_names:
-        issues.append("no library cache: run the app once in this build dir so it writes "
-                      + LIBRARY_CACHE + " (the cache validates --character/--song/--stage names)")
+        issues.append("no library cache: run `python tools/run_capture.py --timeout 300 -- --screen select --frames 30000` "
+                      "once in this build dir so it writes " + LIBRARY_CACHE + " (the cache validates "
+                      "--character/--song/--stage names). A short run (--frames < ~20000) quits before the scan is "
+                      "saved: a scan cancelled by the quit is never written. Never delete this file to force a "
+                      "rescan; a long --screen select run picks up new stages by itself")
         return issues
     if library is None:
         return issues   # a screen-only capture: nothing to validate against the cache

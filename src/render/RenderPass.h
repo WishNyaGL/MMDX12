@@ -50,7 +50,10 @@ struct Texture {
 // window; Begin(slot) rewinds it (the slot's previous GPU work is complete by then).
 class TransientDescriptors {
 public:
-    static constexpr uint32_t kPerSlot = 512;
+    // One frame's transient tables (8 descriptors each). 512 overflowed (2026-10-27): a path-traced MMDX stage frame
+    // with haze + DoF + bloom measured 440 steady and 512+ on its first frame (the bloom chain's first build),
+    // so Present lost its table ("window exhausted"). 768 x the slots costs ~1k more of the 16k shader-visible heap.
+    static constexpr uint32_t kPerSlot = 768;
     bool Create(Dx12Context& ctx, uint32_t slots);
     void Release(Dx12Context& ctx);
     void Begin(uint32_t slot);
