@@ -642,7 +642,8 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   `packs.<index>.params.<key>` targets into `ScreenView::params`). `params` of a manifest entry are the initial values;
   `packs.<index>.params.<key>` binding targets override them per frame for all three roles. Zero cost without entries:
   no registry entries, no PSOs, no render targets, identical frames. Fixture: `tools/stagegen/stagegen.py --only
-  pack_test` (one pack of each role; `tools/stage_check` + `pack_check --compile` pass on it).
+  pack_test` (one pack of each role; the surface pack's `surface.hlsl` and `pt_surface.hlsl` draw the same tint in
+  raster / RT and PT / offline GI; `tools/stage_check` + `pack_check --compile` pass on it).
 - MME (docs/mme/mme_design.md; compatibility list docs/mme/compat_list.md): own .fx parser / preprocessor / IR in
   `asset/Mme*`, FXC SM5 wrappers `render/MmeCompiler` (object mode = host MRT), `render/MmeRuntime` (instances per
   (file, objectMode), targets, samplers, constant ring), `MmeScriptVM`, `MmeSemantics` (CONTROLOBJECT: missing object =

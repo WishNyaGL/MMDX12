@@ -500,13 +500,16 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
             }
         }
 
-        DirectX::XMFLOAT3 headRight = {1.0f, 0.0f, 0.0f};
-        DirectX::XMFLOAT3 headUp = {0.0f, 1.0f, 0.0f};
-        DirectX::XMFLOAT3 headForward = {0.0f, 0.0f, -1.0f};
+        // A stage part has no head bone (S6b): its pack record carries a zero head frame, headScale included, and
+        // headValid = 0 (docs/shader_pt_api.md). A character keeps the identity frame until its head bone is found.
+        const bool stagePart = m->Role() == ModelRole::Stage;
+        DirectX::XMFLOAT3 headRight = {stagePart ? 0.0f : 1.0f, 0.0f, 0.0f};
+        DirectX::XMFLOAT3 headUp = {0.0f, stagePart ? 0.0f : 1.0f, 0.0f};
+        DirectX::XMFLOAT3 headForward = {0.0f, 0.0f, stagePart ? 0.0f : -1.0f};
         uint32_t headValid = 0;
-        DirectX::XMFLOAT4 headPosScale = {0.0f, 0.0f, 0.0f, 1.0f};   // world head bone position, headScale
+        DirectX::XMFLOAT4 headPosScale = {0.0f, 0.0f, 0.0f, stagePart ? 0.0f : 1.0f};   // head world position, headScale
 
-        if (isPtPack) {
+        if (isPtPack && !stagePart) {
             const auto& matConsts = m->MaterialConstantsCpu();
             if (!matConsts.empty() && matConsts[0].packHead.w > 0.5f) {
                 uint32_t headBone = matConsts[0].packHeadBone;

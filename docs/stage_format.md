@@ -385,8 +385,9 @@ the studio). The mapped pack classes are the pack.json `classes` values; a pack 
 stage materials as `body`.
 
 `tools/stagegen/stagegen.py --only pack_test` writes the fixture (`captures/stages/pack_test`): a `program` screen
-drawing animated bars from the time and a param, a surface pack tinting `cove_wall`, and the built-in `snow` pack copied
-as the world pack at the `world` socket. `tools/stage_check` passes on it.
+drawing animated bars from the time and a param, a surface pack tinting `cove_wall` (`surface.hlsl` for raster / RT and
+the matching `pt_surface.hlsl` for PT / offline GI), and the built-in `snow` pack copied as the world pack at the
+`world` socket. `tools/stage_check` passes on it.
 
 ## `params`, `groups`, `variants`
 

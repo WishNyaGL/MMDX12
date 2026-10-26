@@ -305,7 +305,8 @@ bool TraceScene(float3 o, float3 d, float tMin, inout uint rng, float lod, out S
         // S6b: a material a live pack record shades (a character's pack, or a stage part's bundled surface pack) takes
         // the pack's shading, not the engine's ambient-only stage term; the render loop's pack path composes the direct
         // term. A kPackClassOff material keeps the default shading.
-        packShaded = (g.flags & RTG_PT_PACK) != 0 && LoadPtPackRecord(g.packSrv).materialClass != PACK_CLASS_OFF;
+        packShaded = !(g.flags & MAT_SCREEN) && (g.flags & RTG_PT_PACK) != 0 &&
+                     LoadPtPackRecord(g.packSrv).materialClass != PACK_CLASS_OFF;
         // a PT pack wins over the record (raster rule): keep the plain surface the pack expects
         if (canPbr && packShaded) canPbr = false;
 #endif
@@ -1708,7 +1709,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
         ptPackLgt.sunShadow = 1.0;
         ptPackLgt.lit = -1.0;
 #endif
-        bool isPtPackHit = (s.g.flags & RTG_PT_PACK) != 0;
+        bool isPtPackHit = (s.g.flags & RTG_PT_PACK) != 0 && (s.g.flags & MAT_SCREEN) == 0;   // screens emit their texture
         float ptSunVis = 0.0;
         if (isPtPackHit) {
             RtPtPackRecord rec = LoadPtPackRecord(s.g.packSrv);
@@ -1853,7 +1854,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
                 float3 sunDirect = PtPackComposeSunDirect(ptPackOut, s.n, ptSunVis, s.flat);
 #endif
                 if (gNumLights >= 1.0)
-                    sunDirect += (1.0 - pSpec) * s.albedo / PI * PunctualIrradiance(s, s.character, rng);
+                    sunDirect += (1.0 - pSpec) * s.albedo / PI * PunctualIrradiance(s, toonSurf, rng);
                 radiance += T * (hitEmission + sunDirect);
                 if (EmissiveOn()) radiance += T * EmissiveLighting(s, V, pSpec, toonSurf, emisMode, rng);
             } else
@@ -1889,7 +1890,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
                     break;
                 }
                 float3 indAlbedo = isPbrHit ? s.pb.diffuse : s.albedo;
-                float indScale = (isPbrHit ? s.pb.ao : 1.0) * (s.character ? kToonIndirect : 1.0);
+                float indScale = (isPbrHit ? s.pb.ao : 1.0) * (toonSurf ? kToonIndirect : 1.0);
                 radiance += T * (1.0 - pSpec) * indAlbedo * indScale * Eic / PI;
                 if (Rand(rng) >= pSpec) break;
                 float3 sd;
@@ -1933,14 +1934,14 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
                     T *= w / pSpec;
                 } else {
                     nd = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), s.n);
-                    T *= s.pb.diffuse * s.pb.ao * ((s.character && !diffuseChain) ? kToonIndirect : 1.0) / (1.0 - pSpec);
+                    T *= s.pb.diffuse * s.pb.ao * ((toonSurf && !diffuseChain) ? kToonIndirect : 1.0) / (1.0 - pSpec);
                     diffuseChain = true;
                 }
             } else if (Rand(rng) < pSpec) {
                 nd = SampleCone(float2(Rand(rng), Rand(rng)), reflect(d, s.n), cos(s.rough * 0.5));
             } else {
                 nd = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), s.n);
-                T *= s.albedo * ((s.character && !diffuseChain) ? kToonIndirect : 1.0);
+                T *= s.albedo * ((toonSurf && !diffuseChain) ? kToonIndirect : 1.0);
                 diffuseChain = true;
             }
             if (dot(nd, s.faceN) <= 0.0) break;

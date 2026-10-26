@@ -829,8 +829,9 @@ PtPackOut PackEvaluate(PtPackIn i) {
     float3 tinted = lerp(i.baseColor, P_TINT * dot(i.baseColor, float3(0.299, 0.587, 0.114)) * 2.0,
                          saturate(P_AMOUNT));
     o.albedo = tinted;                     // the GI diffuse bounces carry the tint
-    o.shadowTint = lerp(float3(1.0, 1.0, 1.0), tinted / max(dot(tinted, float3(0.299, 0.587, 0.114)), 1e-4),
-                        saturate(P_AMOUNT));   // the shaded side keeps the tint's hue
+    // the shaded side keeps the tint's hue (a unit-luminance copy, so the multiplier never brightens the terminator)
+    float3 tintHue = P_TINT / max(max(P_TINT.r, max(P_TINT.g, P_TINT.b)), 1e-4);
+    o.shadowTint = lerp(float3(0.7, 0.7, 0.75), tintHue, saturate(P_AMOUNT));
     o.shadowBias = 0.0;
     o.terminator = float2(0.0, 0.0);       // engine default softness
     o.specular = float3(0.0, 0.0, 0.0);

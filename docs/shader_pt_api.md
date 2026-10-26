@@ -1,7 +1,7 @@
 # PT/GI shader pack hook (phase 1: offline GI stills, phase 2: real-time path tracer)
 
 A surface shader pack can optionally provide `pt_surface.hlsl` next to `surface.hlsl` for the offline GI path tracer (`CSRender`) and the real-time path tracer (`CSPathTrace`, `PathTracePass`, `--render pt`).
-When present, characters using the pack will evaluate `PackEvaluate` during offline GI still rendering and real-time path tracing instead of the default `ToonSun` shading.
+When present, every material the pack shades evaluates `PackEvaluate` during offline GI still rendering and real-time path tracing instead of the default shading: a character using the pack, and (S6b) a stage part whose bundled `surface` pack has one (`docs/stage_format.md`, role `surface`). A stage material the pack leaves off (`kPackClassOff`) keeps the default path.
 If `pt_surface.hlsl` is omitted, the pack uses the path tracer's default shading. Real-time raster and RT are unaffected.
 
 ## File placement
