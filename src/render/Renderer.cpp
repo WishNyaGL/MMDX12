@@ -1034,9 +1034,6 @@ uint32_t Renderer::BuildEmissiveTable(const std::vector<RtScene::GeometryRef>& g
     return (uint32_t)totalEntries;
 }
 
-// S8a: uploads the emissive pick table of the geometry table the last RtScene::Build produced. The table only changes
-// when the geometry list or a material's emission estimate changes (`key`), so a static stage does not rebuild it every
-// frame; a bound screen texture or a runtime PBR override changes the key and the next frame picks it up.
 // S8a: uploads the emissive pick table of the geometry table the last RtScene::Build produced into `cbSlot`'s buffers.
 // The table itself is rebuilt only when its key changes (geometry list + per-material emission estimates), so a static
 // stage does not rebuild it every frame; a bound screen texture or a runtime PBR override changes the key and the next

@@ -299,6 +299,24 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     The order is preserved, so the image is bit-identical to the full loop; `world.hlsl`'s world-surface lights keep the
     full loop, and camera feeds / quad extra views / ortho / `RenderToImage` / offline set the index to -1 (their camera
     is not the grid's). No root-signature change; nothing runs at <= 16 lights (`LIGHTS ... clusters=0`).
+    Emissive-triangle NEE (S8a, `shaders/emissive_nee.hlsli`): every RtScene geometry whose material emits (S5 screen,
+    AutoLuminous, a PBR record's emissive; `GpuModel::EmitEstimate` x the rest-pose `TriAreas`) puts its triangles into a
+    pick table (`Renderer::BuildEmissiveTable`, at most `kEmissiveTriMax` = 262144 entries, heaviest materials kept;
+    rebuilt only when the geometry list or an estimate changes, one `EMISSIVE tris= emitterGeometries=` line): a
+    `GpuEmissiveTri` list, a normalised CDF and a per-geometry base table, raw SRVs per constant-buffer slot in the
+    bindless buffer table (`SceneConstants::emissiveParams`, x = -1 = no emitters: no NEE, no MIS, the old image); offline GI
+    uploads its own copy per image (`OfflineRenderer::EmissiveSrv`). PT (`CSPathTrace`) and offline GI (camera / bounce
+    vertices and the cache's gather paths) add ONE emitter sample per shading point on top of the punctual NEE, weighted
+    against the BSDF continuation with the power heuristic; the emission a BSDF-sampled ray finds takes the matching
+    weight (`EmissionAt` is the one emission function of both sides). Both halves must estimate the same integral: the
+    light sample's BSDF is what the continuation realises (a record's full diffuse x AO and VNDF GGX lobe
+    `PbrSpecCosine`, the plain surface's (1 - pSpec) diffuse and pSpec cone), its visibility is `EmissiveVisible`
+    (TraceClosest with the path's stochastic alpha: non-casting geometry and glass block, as they block the path, which
+    crosses glass as a delta event whose emitter hits keep weight 1), and cut-out emitter texels carry their coverage.
+    Camera hits, delta events, medium scattering events and back faces keep weight 1; the last vertex takes the light
+    sample whole. In offline GI the camera vertex that reads the irradiance cache light-samples the emitters with the
+    diffuse lobe unweighted (`EmissiveLighting` mode 1) and the gather paths leave out the table emitter they hit first.
+    Measured on arena_live (2026-10-26): NEE on vs off agree within 0.2 % at 2048-4096 spp in every crop.
     Volumetric haze (S9, `shaders/volumetric_common.hlsli` shared by `volumetric.hlsl` and `offline_volumetric.hlsl`):
     every light scales its own in-scattering by `LightValues::volumetric` (`GpuLight::_pad` / `VolLight::volumetric`) and
     uses `SceneLight::volumetricG` as its Henyey-Greenstein `g` (`_pad2` / `VolLight::aniso`; absent = the fog's own).

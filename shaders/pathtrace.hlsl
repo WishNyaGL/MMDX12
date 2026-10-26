@@ -436,8 +436,9 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 // MIS against the light sampling: the NEE estimate for this triangle was added at the previous vertex,
                 // so an emission that arrived through a BSDF-sampled direction at depth >= 1 takes the BSDF weight;
                 // camera hits (depth 0) and delta events (the transmissive branch below) keep weight 1.
-                if (EmissiveOn() && prevBsdfValid && hitMesh && EmissiveBase(hitGeom) != 0xFFFFFFFFu) {
-                    const float pdfLight = EmissiveHitPdf(hitGeom, hitPrim, prevBsdfPos);
+                // A back-face hit of a double-sided emitter keeps weight 1: the NEE only samples the front side.
+                if (EmissiveOn() && prevBsdfValid && hitMesh && !backFace && EmissiveBase(hitGeom) != 0xFFFFFFFFu) {
+                    const float pdfLight = EmissiveHitPdf(hitGeom, hitPrim, pos, prevBsdfPos);
                     if (pdfLight > 0.0) emission *= MisWeightBsdf(prevPdfBsdf, pdfLight);
                 }
                 radiance += throughput * emission;
@@ -469,6 +470,7 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     primId = hitId;
                 }
                 if (bounce == bounces) break;
+                prevBsdfValid = false;   // S8a: a delta event: an emitter found through it keeps weight 1
                 dir = tx.dir;
                 origin = OffsetRayOrigin(pos, tx.refracted ? -faceN : faceN);
                 if (bounce >= 2) {
@@ -603,23 +605,29 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     if (cosS > 0.0 && dot(faceN, wi) > 0.0 && dot(es.nLight, -wi) > 0.0) {
                         const float3 Le = EmissiveSampleRadiance(es.tri, es.uv, bounce == 0 ? 0.0 : 2.0);
                         if (any(Le > 0.0)) {
-                            // the same tinted-visibility model the sun uses (transmissive stages, shadow colour)
-                            const float rawVis =
-                                Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), wi,
-                                                                        max(es.dist - 0.05, 0.0), 0xFFu)));
-                            const float occ = (1.0 - rawVis) * gSunShadowParams.z;
-                            const float3 visFactor = (1.0 - occ) + gSunShadowColor.rgb * occ;
+                            // visibility as the path itself would find the emitter (see EmissiveVisible)
+                            const float visFactor = EmissiveVisible(OffsetRayOrigin(pos, faceN), wi, es.dist,
+                                                                    max(Rand(rng), 0.004));
+                            // the last vertex (and a flat face, which ends its path here) has no BSDF continuation
+                            // that could find this emitter: the light sample carries all of it
+#ifdef PT_PACK_HAS_LIGHTING
+                            const bool lastVertex = bounce == bounces || flatIndirect > 0.5;
+#else
+                            const bool lastVertex = bounce == bounces || flat > 0.5;
+#endif
                             const float pdfBsdf = PathBsdfPdf(isPbrHit, pbr, rough, pSpec, n, -dir, wi);
-                            const float wMis = MisWeightLight(es.pdf, pdfBsdf);
-                            const float diff = toon ? lerp(smoothstep(-0.05, 0.25, cosS), saturate(cosS * 0.3 + 0.7), flat)
-                                                    : cosS;
-                            float3 f = (1.0 - pSpec) * (isPbrHit ? pbr.diffuse : albedo) / PI * diff;
+                            const float wMis = lastVertex ? 1.0 : MisWeightLight(es.pdf, pdfBsdf);
+                            // the BSDF the continuation below realises (MIS: both halves estimate one integral): a
+                            // record's diffuse is the full lobe x AO and its VNDF sample the full GGX lobe; the plain
+                            // surface's diffuse carries (1 - pSpec), its cone pSpec / omega
+                            float3 f;
                             if (isPbrHit) {
-                                f += pSpec * PtPbrEvalSpecular(pbr, -dir, wi);
-                            } else if (pSpec > 0.0 && dot(reflect(dir, n), wi) >= cos(rough * 0.5)) {
-                                const float cosHalfAngle = cos(rough * 0.5);
-                                const float omega = max(2.0 * PI * (1.0 - cosHalfAngle), 1e-6);
-                                f += pSpec / omega;
+                                f = pbr.diffuse * pbr.ao / PI * cosS;
+                                if (pSpec > 0.0) f += PbrSpecCosine(pbr, -dir, wi);
+                            } else {
+                                f = (1.0 - pSpec) * albedo / PI * cosS;
+                                if (pSpec > 0.0 && dot(reflect(dir, n), wi) >= cos(rough * 0.5))
+                                    f += pSpec / ConeLobeOmega(rough);
                             }
                             radiance += throughput * wMis * f * Le * visFactor / es.pdf;
                         }

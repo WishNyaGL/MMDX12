@@ -323,6 +323,10 @@ bool TraceScene(float3 o, float3 d, float tMin, inout uint rng, float lod, out S
             s.refl = saturate(Luminance(s.pb.f0) * (1.0 - s.pb.rough));
             s.rough = s.pb.rough;
             s.pbr = true;
+            // S8a: the record's emissive is a pick-table emitter as well (EmissiveSampleRadiance), so it travels with
+            // the MIS-weighted table emission (the gather paths now see it too)
+            s.tableEmission += s.pb.emissive;
+            s.emission += s.pb.emissive;
         }
     } else {
         t = tMax;
@@ -733,11 +737,15 @@ void PunctualOne(Surf s, PtLight l, float3 V, bool toon, float pSpec, float3 R, 
 // S8a: emissive-triangle next-event estimation at a shading point (one sample, IN ADDITION to the sun / punctual NEE):
 // the LED screens / AutoLuminous / PBR emitters of the frame light the surface directly. MIS against the BSDF path
 // that could have found the same triangle. Returns the radiance the surface would receive along the sampled direction.
-float3 EmissiveLighting(Surf s, float3 V, float pSpec, bool toonDiffuse, inout uint rng) {
+// mode 0: the path continues with the full BSDF (diffuse + specular): MIS against PathBsdfPdf.
+// mode 1: the vertex reads its diffuse indirect from the irradiance cache, whose gather paths skip the table emitters
+//         they hit first: the diffuse lobe has no BSDF side (weight 1), the traced specular lobe MIS against PathSpecPdf.
+// mode 2: the path ends here (max depth): no BSDF side at all, weight 1.
+float3 EmissiveLighting(Surf s, float3 V, float pSpec, bool toonDiffuse, int mode, inout uint rng) {
     if (!EmissiveOn()) return 0.0;
-    // A face (MAT_FLAT) gathers its fill around the view direction instead of the cosine hemisphere, so the MIS of this
-    // vertex has no matching pdf: it keeps the emission it finds by tracing, as before.
-    if (s.character && s.flat) return 0.0;
+    // A face (MAT_FLAT) gathers its fill around the view direction instead of the cosine hemisphere, so in mode 0 the
+    // MIS of this vertex has no matching pdf: it keeps the emission it finds by tracing, as before.
+    if (mode == 0 && s.character && s.flat) return 0.0;
     EmissiveSample es;
     if (!EmissiveSamplePoint(Rand(rng), float2(Rand(rng), Rand(rng)), s.pos, es)) return 0.0;
     const float3 wi = (es.pos - s.pos) / es.dist;
@@ -745,28 +753,34 @@ float3 EmissiveLighting(Surf s, float3 V, float pSpec, bool toonDiffuse, inout u
     if (cosS <= 0.0 || dot(s.faceN, wi) <= 0.0 || dot(es.nLight, -wi) <= 0.0) return 0.0;   // one-sided emitter
     const float3 Le = EmissiveSampleRadiance(es.tri, es.uv, 0.0);
     if (!any(Le > 0.0)) return 0.0;
-    // the same visibility model as the sun / punctual NEE: tinted mesh transmission through the glass box, the medium
+    // visibility as the path itself would find the emitter (EmissiveVisible), times the medium's transmittance
     const float3 po = OffsetRayOrigin(s.pos, s.faceN);
-    const float tMax = max(es.dist - 0.05, 0.0);
-    const float3 meshTrans = TraceShadowRayTinted(po, wi, tMax, 0xFFu);
-    const float v = Luminance(saturate(meshTrans));
-    const float3 vis = ShadowTransmission(v, gSunShadowParams.z, gSunShadowColor.rgb) * MediumShadowT(po, wi, tMax, rng);
-    const float pdfBsdf = PathBsdfPdf(s.pbr, s.pb, s.rough, pSpec, s.n, V, wi);
-    const float wMis = MisWeightLight(es.pdf, pdfBsdf);
-    // the same continuation weight the BSDF-sampled side carries (a character's toon fill is kToonIndirect)
-    const float3 diffuseWeight = (toonDiffuse && !s.pbr) ? float3(s.albedo * kToonIndirect) : s.albedo;
-    const float diff = s.character && !s.pbr
-                           ? lerp(smoothstep(-0.05, 0.25, cosS), saturate(cosS * 0.3 + 0.7), s.flat ? 1.0 : 0.0)
-                           : cosS;
-    float3 f = (1.0 - pSpec) * (s.pbr ? s.pb.diffuse : diffuseWeight) / PI * diff;
-    if (s.pbr) {
-        if (pSpec > 0.0) f += pSpec * PtPbrEvalSpecular(s.pb, V, wi);
+    const float vis = EmissiveVisible(po, wi, es.dist, max(Rand(rng), 0.004)) *
+                      MediumShadowT(po, wi, max(es.dist - 0.05, 0.0), rng);
+    // The BSDF the path's own continuation (or the cache read) applies, so both halves of the MIS estimate one integral:
+    //   diffuse: cosine-sampled, weight albedo (x AO for a record, x kToonIndirect for a character's first diffuse
+    //   bounce); a record's continuation divides by its probability (the full lobe), the plain one does not ((1 - pSpec)),
+    //   and the cache read scales it by (1 - pSpec) for both (a flat face's cache fill is the full lobe);
+    //   specular: a record's VNDF sample is the full GGX lobe (PbrSpecCosine), the plain cone is pSpec / omega.
+    const float3 baseDiffuse = (s.pbr ? s.pb.diffuse * s.pb.ao : s.albedo) * (toonDiffuse ? kToonIndirect : 1.0);
+    const bool flatFill = mode == 1 && s.character && s.flat;
+    const float diffuseShare = flatFill ? 1.0 : ((s.pbr && mode != 1) ? 1.0 : 1.0 - pSpec);
+    const float3 fd = diffuseShare * baseDiffuse / PI * cosS;
+    float3 fs = 0.0;
+    if (flatFill) {
+        // the face's cache fill ends the path: no specular lobe is traced there
+    } else if (s.pbr) {
+        if (pSpec > 0.0) fs = PbrSpecCosine(s.pb, V, wi);
     } else if (pSpec > 0.0) {
         const float cosHalfAngle = cos(s.rough * 0.5);
         if (dot(reflect(-V, s.n), wi) >= cosHalfAngle)
-            f += pSpec / max(2.0 * PI * (1.0 - cosHalfAngle), 1e-6);
+            fs = pSpec / max(2.0 * PI * (1.0 - cosHalfAngle), 1e-6);
     }
-    return wMis * f * Le * vis / es.pdf;
+    float3 f;
+    if (mode == 2) f = fd + fs;
+    else if (mode == 1) f = fd + MisWeightLight(es.pdf, PathSpecPdf(s.pbr, s.pb, s.rough, pSpec, s.n, V, wi)) * fs;
+    else f = MisWeightLight(es.pdf, PathBsdfPdf(s.pbr, s.pb, s.rough, pSpec, s.n, V, wi)) * (fd + fs);
+    return f * Le * vis / es.pdf;
 }
 
 // Punctual light direct lighting: diffuse irradiance plus specular NEE for the specular lobe around
@@ -1174,7 +1188,7 @@ float3 CameraDirect(Surf s, float3 V, float pSpec, inout uint rng) {
         // PBR record: MMD sun structure with GGX, like the raster / PT. No texture-hue skin heuristic here
         // (SkinWeight thresholds the mip-filtered base texture: blocky translucency patches on mapped skin); the
         // record's SKIN model carries its own SSS term.
-        c += PbrSunDirect(s, V, SunVisibility(s, rng)) + s.pb.emissive;
+        c += PbrSunDirect(s, V, SunVisibility(s, rng));   // (the record's emissive is in s.emission)
     } else if (s.character) {
         float skin = SkinWeight(s);
         if (skin > 0.01) {
@@ -1194,8 +1208,6 @@ float3 CameraDirect(Surf s, float3 V, float pSpec, inout uint rng) {
         PunctualLighting(s, V, s.character || s.pbr, pSpec, rng, diffE, specR);
         c += (1.0 - pSpec) * (s.pbr ? s.pb.diffuse : s.albedo) / PI * diffE + specR;
     }
-    // S8a: the emissive triangles' direct light (screens / AutoLuminous / PBR emitters), one MIS-weighted sample
-    if (EmissiveOn()) c += EmissiveLighting(s, V, pSpec, s.character && !s.pbr, rng);
     return c;
 }
 
@@ -1236,6 +1248,13 @@ float3 GatherPath(float3 o, float3 d, float tMin, inout uint rng) {
     int ch = -1;
     uint glassEvents = 0u;
     uint medEvents = 0;   // S9c: medium events of the whole gather path (MediumMaxEvents, then transmittance)
+    // S8a: emissive MIS. The first segment leaves the cache sample along the cosine lobe; the camera vertex that reads
+    // the cache light-samples the table emitters itself (EmissiveLighting mode 1), so a table emitter hit first here is
+    // left out. Later hits take the BSDF weight against the NEE of the previous gather vertex.
+    bool firstSeg = true;
+    bool prevValid = false;
+    float prevPdf = 0.0;
+    float3 prevPos = 0;
     [loop] for (uint depth = 0; depth < kGatherDepth; ++depth) {
         Surf y;
         float t;
@@ -1251,6 +1270,8 @@ float3 GatherPath(float3 o, float3 d, float tMin, inout uint rng) {
                     ended = true;
                     break;
                 }
+                firstSeg = false;   // S8a: a bent ray: its emitter hits keep weight 1
+                prevValid = false;
                 hit = TraceScene(o, d, 0.0, rng, 1.0, y, t);
             }
         }
@@ -1269,9 +1290,19 @@ float3 GatherPath(float3 o, float3 d, float tMin, inout uint rng) {
             d = GlassScatter(d, y.n, y.inside, ch, T, rng, refr);
             o = OffsetRayOrigin(y.pos, refr ? -y.faceN : y.faceN);
             if (++glassEvents < 8u) --depth;
+            firstSeg = false;
+            prevValid = false;
             continue;
         }
-        L += T * (y.emission + (y.pbr ? y.pb.diffuse : y.albedo) / PI * DirectIrradiance(y, rng));
+        float3 yEmission = y.emission;
+        if (EmissiveOn() && (firstSeg || prevValid) && !y.backFace && any(y.tableEmission > 0.0) &&
+            EmissiveBase(y.geomId) != 0xFFFFFFFFu) {
+            const float pdfLight = EmissiveHitPdf(y.geomId, y.prim, y.pos, firstSeg ? o : prevPos);
+            if (pdfLight > 0.0)
+                yEmission -= y.tableEmission * (firstSeg ? 1.0 : 1.0 - MisWeightBsdf(prevPdf, pdfLight));
+        }
+        firstSeg = false;
+        L += T * (yEmission + (y.pbr ? y.pb.diffuse : y.albedo) / PI * DirectIrradiance(y, rng));
         // S8a: the emissive triangles' direct light (screens / AutoLuminous / PBR emitters), cosine BSDF MIS
         if (EmissiveOn()) {
             EmissiveSample es;
@@ -1282,12 +1313,11 @@ float3 GatherPath(float3 o, float3 d, float tMin, inout uint rng) {
                     const float3 Le = EmissiveSampleRadiance(es.tri, es.uv, 1.0);
                     if (any(Le > 0.0)) {
                         const float3 po = OffsetRayOrigin(y.pos, y.faceN);
-                        const float3 meshTrans = TraceShadowRayTinted(po, wi, max(es.dist - 0.05, 0.0), 0xFFu);
-                        const float v = Luminance(saturate(meshTrans));
-                        const float3 vis = ShadowTransmission(v, gSunShadowParams.z, gSunShadowColor.rgb) *
-                                           MediumShadowT(po, wi, max(es.dist - 0.05, 0.0), rng);
-                        const float pdfBsdf = cosS / PI;
-                        L += T * MisWeightLight(es.pdf, pdfBsdf) * (y.pbr ? y.pb.diffuse : y.albedo) / PI * cosS * Le * vis / es.pdf;
+                        const float vis = EmissiveVisible(po, wi, es.dist, max(Rand(rng), 0.004)) *
+                                          MediumShadowT(po, wi, max(es.dist - 0.05, 0.0), rng);
+                        // the last gather vertex has no continuation: the light sample carries everything
+                        const float w = depth + 1u >= kGatherDepth ? 1.0 : MisWeightLight(es.pdf, cosS / PI);
+                        L += T * w * (y.pbr ? y.pb.diffuse : y.albedo) / PI * cosS * Le * vis / es.pdf;
                     }
                 }
             }
@@ -1295,6 +1325,9 @@ float3 GatherPath(float3 o, float3 d, float tMin, inout uint rng) {
         float3 nd = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), y.n);
         if (dot(nd, y.faceN) <= 0.0) break;
         T *= (y.pbr ? y.pb.diffuse : y.albedo);
+        prevPdf = saturate(dot(y.n, nd)) / PI;
+        prevPos = y.pos;
+        prevValid = prevPdf > 0.0;
         o = OffsetRayOrigin(y.pos, y.faceN);
         d = nd;
         if (depth >= 1u) {
@@ -1622,6 +1655,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
                     ended = true;
                     break;
                 }
+                prevBsdfValid = false;   // S8a: no emissive NEE at medium events: what the bent ray hits keeps weight 1
                 if (specChain && !primLocked) {   // the first interaction of a camera ray is in the medium: the guides
                     primHit = true;
                     primLocked = true;
@@ -1653,6 +1687,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
             d = GlassScatter(d, s.n, s.inside, ch, T, rng, refr);
             o = OffsetRayOrigin(s.pos, refr ? -s.faceN : s.faceN);
             tMinNext = 0.0;
+            prevBsdfValid = false;   // S8a: a delta event
             continue;
         }
         const bool viaGlass = specChain && depth > 0u;
@@ -1757,6 +1792,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
             d = tx.dir;
             o = OffsetRayOrigin(s.pos, tx.refracted ? -s.faceN : s.faceN);
             tMinNext = 0.0;
+            prevBsdfValid = false;   // S8a: a delta event
             continue;
         }
         float3 V = -d;
@@ -1767,11 +1803,18 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
         // punctual lights), so the radiance arriving through a BSDF-sampled direction takes the BSDF weight; camera hits
         // (depth 0) and delta events (the transmissive branch above) keep weight 1.
         float3 tableEmission = s.tableEmission;
-        if (EmissiveOn() && prevBsdfValid && any(tableEmission > 0.0) && EmissiveBase(s.geomId) != 0xFFFFFFFFu) {
-            const float pdfLight = EmissiveHitPdf(s.geomId, s.prim, prevBsdfPos);
+        // A back-face hit keeps weight 1 (the NEE samples front faces only).
+        if (EmissiveOn() && prevBsdfValid && !s.backFace && any(tableEmission > 0.0) &&
+            EmissiveBase(s.geomId) != 0xFFFFFFFFu) {
+            const float pdfLight = EmissiveHitPdf(s.geomId, s.prim, s.pos, prevBsdfPos);
             if (pdfLight > 0.0) tableEmission *= MisWeightBsdf(prevPdfBsdf, pdfLight);
         }
-        const float3 hitEmission = s.emission - s.tableEmission + tableEmission;
+        s.emission = s.emission - s.tableEmission + tableEmission;
+        const float3 hitEmission = s.emission;
+        // S8a: the irradiance cache decides how this vertex's emissive NEE is weighted (EmissiveLighting modes)
+        float3 Eic = 0;
+        const bool icHit = depth != maxDepth && (depth == 0u || viaGlass) && gP2.w > 0.5 && IcLookup(s, Eic);
+        const int emisMode = depth == maxDepth ? 2 : (icHit ? 1 : 0);
         if (!diffuseChain) {
 #ifdef MMDX_PT_PACK
             if (isPtPackHit) {
@@ -1783,13 +1826,13 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
                 if (gNumLights >= 1.0)
                     sunDirect += (1.0 - pSpec) * s.albedo / PI * PunctualIrradiance(s, s.character, rng);
                 radiance += T * (hitEmission + sunDirect);
+                if (EmissiveOn()) radiance += T * EmissiveLighting(s, V, pSpec, s.character, emisMode, rng);
             } else
 #endif
             {
-                if (isPbrHit)
-                    radiance += T * (CameraDirect(s, V, pSpec, rng) + s.pb.emissive);
-                else
-                    radiance += T * CameraDirect(s, V, pSpec, rng);
+                radiance += T * CameraDirect(s, V, pSpec, rng);
+                // S8a: the emissive triangles' direct light (screens / AutoLuminous / PBR emitters), one sample
+                if (EmissiveOn()) radiance += T * EmissiveLighting(s, V, pSpec, s.character, emisMode, rng);
             }
         } else {
             float3 sunE = 0;
@@ -1799,16 +1842,15 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
             float3 diffE = 0, specR = 0;
             if (gNumLights >= 1.0)
                 PunctualLighting(s, V, false, pSpec, rng, diffE, specR);
-            radiance += T * (hitEmission + (isPbrHit ? s.pb.emissive : 0.0) + (1.0 - pSpec) * (isPbrHit ? s.pb.diffuse : s.albedo) / PI * (sunE + diffE) + specR);
+            radiance += T * (hitEmission + (1.0 - pSpec) * (isPbrHit ? s.pb.diffuse : s.albedo) / PI * (sunE + diffE) + specR);
             // S8a: the emissive triangles' direct light at the bounce vertex too (the same additive scheme as PT)
-            if (EmissiveOn()) radiance += T * EmissiveLighting(s, V, pSpec, s.character && !diffuseChain, rng);
+            if (EmissiveOn()) radiance += T * EmissiveLighting(s, V, pSpec, false, emisMode, rng);
         }
         if (depth == maxDepth) break;
 
         // indirect diffuse from the irradiance cache (the prepass); specular lobe still traced
-        if ((depth == 0u || viaGlass) && gP2.w > 0.5) {
-            float3 Eic;
-            if (IcLookup(s, Eic)) {
+        if (icHit) {
+            {
                 float flatIndirect = s.flat;
 #ifdef PT_PACK_HAS_LIGHTING
                 if (isPtPackHit) flatIndirect = ptPackLgt.flatIndirect;
@@ -1830,8 +1872,8 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
                     sd = SampleCone(float2(Rand(rng), Rand(rng)), reflect(d, s.n), cos(s.rough * 0.5));
                 }
                 if (dot(sd, s.faceN) <= 0.0) break;
-                // S8a: the pdf of this continuation, for the MIS of an emitter the next ray happens to hit.
-                prevPdfBsdf = PathBsdfPdf(isPbrHit, s.pb, s.rough, pSpec, s.n, V, sd);
+                // S8a: the pdf of this continuation (the specular lobe only: the diffuse one came from the cache)
+                prevPdfBsdf = PathSpecPdf(isPbrHit, s.pb, s.rough, pSpec, s.n, V, sd);
                 prevBsdfPos = s.pos;
                 prevBsdfValid = prevPdfBsdf > 0.0;
                 o = OffsetRayOrigin(s.pos, s.faceN);
