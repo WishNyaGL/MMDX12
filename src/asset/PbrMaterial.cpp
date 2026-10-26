@@ -487,7 +487,13 @@ void BuildImportedPbrModelData(const PmxModel& pmx, PbrModelData& out) {
             nrm.scale = ip.normalScale;
         }
 
-        // Occlusion: R channel, strength lerp(1, map) baked at decode (PbrSlot::aoStrength).
+        // Occlusion: R channel, strength lerp(1, map) baked at decode (PbrSlot::aoStrength). Without a map the slot's
+        // constant is the AO, so it must be 1 (unoccluded): a zero there blacked out the raster diffuse + hemisphere.
+        {
+            PbrSlot& occ = m.slots[(int)PbrSlotId::Occlusion];
+            occ.value[0] = occ.value[1] = occ.value[2] = 1.0f;
+            occ.hasValue = true;
+        }
         if (ip.occlusionTex >= 0 && ip.occlusionStrength > 0.0f) {
             PbrSlot& occ = m.slots[(int)PbrSlotId::Occlusion];
             occ.from = 1;
