@@ -126,6 +126,7 @@ const DefaultKey kDefaultKeys[] = {
     {"toolAutoIk",    ImGuiKey_K},
     {"toggleBones",   ImGuiKey_C},
     {"registerPose",  ImGuiKey_I},
+    {"togglePlay",    ImGuiKey_Space},
 };
 
 int FindDefaultKey(const char* action) {

@@ -1388,6 +1388,7 @@ const Entry kEnglish[] = {
     {"뷰포트에 바람 벡터 표시", "Show wind vector in viewport"},
     {"타임라인에 waveform 표시", "Show waveform on the timeline"},
     {"투명도 %.2f", "Opacity %.2f"},
+    {"재생/일시정지 (Space)", "Play / pause (Space)"},
     {"0..1. 1을 넘으면 물리 뼈를 심하게 흔들 수 있어요", "0..1. Above 1 the physics bones can be shaken violently."},
     {"열 %d", "Cols %d"},
 };
