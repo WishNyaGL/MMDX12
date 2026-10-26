@@ -624,8 +624,11 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   `ApplyStageSurfacePack` calls `GpuModel::SetShaderPack` with the entry's current params (a stage part takes surface
   packs only, `GpuModel::SetShaderPack` drops other types for `ModelRole::Stage`; `ShaderPack::ClassifyStage` = the
   pack's own class rules, else its FIRST rule's class, else Body, so unclaimed stage materials never fall back to a
-  bare Body class). Raster and RT draw that pack; PT / offline GI keep their character-only `pt_surface.hlsl` hook
-  (`render/PtPackVariants.*`), so a stage part's PT / GI shading stays the engine's even with a surface pack.
+  bare Body class). Raster, RT, PT and offline GI draw that pack: a part's record reaches
+  `render/PtPackVariants.*` and `RayTracing.cpp` (`TakesPtPack` = a model with a pack id that has
+  `pt_surface.hlsl`; characters and stage parts alike), so `PackEvaluate` shades a stage material exactly like a
+  character's, and the pack owns the surface (the engine's ambient-only stage term is skipped; its head frame is zeros
+  because a part has no head bone).
   `world` = `AppendStageWorldPacks` appends one `WorldInstance` per entry after the user's
   `worldStack` (play) / the project's world entities (studio) at its socket (the socket node bone's world matrix x the
   explicit offset, resolved after the parts are posed; uid = `kStageWorldUidBase` + the entry index, so nothing is an

@@ -264,10 +264,18 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     refl = 0.0;
                 }
                 bool canPbr = !screenMat && (g.pbrIndex != 0xFFFFFFFFu);
+                // S6b: a pack record shades this hit (a character's pack, or a stage part's surface pack); a material
+                // the pack leaves off (PACK_CLASS_OFF) keeps the default shading. Declared in every build: the
+                // default-shading guard below reads it whether or not a PT pack is compiled in.
+                bool isPtPackHit = false;
+                RtPtPackRecord ptPackRec = (RtPtPackRecord)0;
 #ifdef MMDX_PT_PACK
+                if (!screenMat && (g.flags & RTG_PT_PACK) != 0) {
+                    ptPackRec = LoadPtPackRecord(g.packSrv);
+                    isPtPackHit = ptPackRec.materialClass != PACK_CLASS_OFF;
+                }
                 // a PT pack wins over the record (raster rule): keep the plain surface the pack expects
-                if (canPbr && (g.flags & RTG_PT_PACK) && LoadPtPackRecord(g.packSrv).materialClass != PACK_CLASS_OFF)
-                    canPbr = false;
+                if (canPbr && isPtPackHit) canPbr = false;
 #endif
                 if (canPbr) {   // PBR record: mapped normal, albedo, GGX, AO, emissive, reflectivity
                     pbr = PtPbrDecode(hit.prim, g, sf, sf.normal, g.diffuse.rgb);
@@ -278,7 +286,9 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     isPbrHit = true;
                 }
                 if (g.flags & MAT_STAGE) {
-                    if (!screenMat) {
+                    // S6b: a surface pack that shades this stage material owns its surface like a character's, so the
+                    // engine's ambient-only stage term stays out (the pack composes its own direct term below).
+                    if (!screenMat && !isPtPackHit) {
                         radiance += throughput * SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
                         emission += EmissionAt(g, hitTexLin, 0.0, false);
                     }
@@ -286,135 +296,131 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     // camera hit here too, like offline GI's CameraDirect; a stage's PBR sun term stays out (the
                     // stage path below is ambient-only).
                     if (isPbrHit) emission += EmissionAt(g, hitTexLin, pbr.emissive, true);
-                } else {
+                }
 #ifdef MMDX_PT_PACK
-                    bool isPtPackHit = (g.flags & RTG_PT_PACK) != 0;
-                    if (isPtPackHit) {
-                        RtPtPackRecord rec = LoadPtPackRecord(g.packSrv);
-                        if (rec.materialClass != PACK_CLASS_OFF) {
-                            packClass = rec.materialClass & 0x7u;
-                            isPbrHit = false;   // the pack wins the PBR record (raster rule)
-                            PtPackBindRecord(rec);
-                            PtPackBindGeometry(g);
-                            PtPackIn packIn;
-                            packIn.pos = pos;
-                            packIn.normal = n;
-                            packIn.V = -dir;
-                            packIn.uv = sf.uv;
-                            packIn.uv1 = sf.uv1;
-                            packIn.uv2 = sf.uv2;
-                            packIn.L = -gLightDir;
-                            float sh = 1.0;
-                            if (!diffuseChain) {
-                                if (receive && gShadowParams.w < 0.5) {
-                                    float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, SunShadowConeCos(kSunCosMax));
-                                    sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd,
-                                                                                  1e5, 0xFFu)));
-                                }
-                                packIn.sunVis = sh;
-                            } else {
-                                packIn.sunVis = 0.0;
-                            }
-                            packIn.baseColor = SrgbToLinear(saturate(tex.rgb * g.diffuse.rgb));
-                            packIn.materialClass = rec.materialClass;
-                            [unroll] for (int p = 0; p < 16; ++p)
-                                packIn.params[p] = rec.params[p >> 2][p & 3];
-                            packIn.headRight = rec.headRight.xyz;
-                            packIn.headPos = rec.headPos.xyz;
-                            packIn.headScale = rec.headPos.w;
-                            packIn.headUp = rec.headUp.xyz;
-                            packIn.headForward = rec.headForward.xyz;
-                            packIn.headValid = (rec.headValid != 0);
-
-                            PtPackOut ptPackOut = PackEvaluate(packIn);
-                            albedo = ptPackOut.albedo;
-#if defined(PACK_CAP_SURFACE_OUTPUT) && PACK_CAP_SURFACE_OUTPUT
-                            tag = ptPackOut.tag & 0xFu;
-                            n = normalize(ptPackOut.normal);
-                            radiance += throughput * ptPackOut.emission;
-#endif
-                            // the pack decides: MAT_FLAT (a material without toon) would drop its terminator
-                            flat = ptPackOut.flatFace ? 1.0 : 0.0;
-#ifdef PT_PACK_HAS_LIGHTING
-                            PtPackLighting ptLgt = PackEvaluateLighting(packIn, ptPackOut);
-                            flatIndirect = (ptLgt.flatIndirect > 0.5) ? 1.0 : flat;   // keep the MAT_FLAT bounce stop for flat packs
-
-                            if (!diffuseChain) {
-                                toon = true;
-                                radiance += throughput * PtPackComposeSunDirect(ptPackOut, ptLgt, n, sh, flat);
-                                if (ptLgt.flatIndirect > 0.5) {
-                                    // raster flat fill: no sky/ground gradient and no occlusion modelling the face
-                                    float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
-                                    radiance += throughput * albedo * fill;
-                                }
-                            } else {
-                                toon = false;
-                            }
-#else
-                            if (!diffuseChain) {
-                                toon = true;
-                                radiance += throughput * PtPackComposeSunDirect(ptPackOut, n, sh, flat > 0.5);
-                                if (flat > 0.5) {
-                                    // raster flat fill: no sky/ground gradient and no occlusion modelling the face
-                                    float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
-                                    radiance += throughput * albedo * fill;
-                                }
-                            } else {
-                                toon = false;
-                            }
-#endif
-                        } else {
-                            isPtPackHit = false;
+                // a pack record shades this hit: the same PackEvaluate a character's material runs (a stage part
+                // has no head bone, so its record carries a zero head frame; docs/shader_pt_api.md)
+                if (isPtPackHit) {
+                    RtPtPackRecord rec = ptPackRec;
+                    packClass = rec.materialClass & 0x7u;
+                    isPbrHit = false;   // the pack wins the PBR record (raster rule)
+                    PtPackBindRecord(rec);
+                    PtPackBindGeometry(g);
+                    PtPackIn packIn;
+                    packIn.pos = pos;
+                    packIn.normal = n;
+                    packIn.V = -dir;
+                    packIn.uv = sf.uv;
+                    packIn.uv1 = sf.uv1;
+                    packIn.uv2 = sf.uv2;
+                    packIn.L = -gLightDir;
+                    float sh = 1.0;
+                    if (!diffuseChain) {
+                        if (receive && gShadowParams.w < 0.5) {
+                            float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, SunShadowConeCos(kSunCosMax));
+                            sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd,
+                                                                          1e5, 0xFFu)));
                         }
+                        packIn.sunVis = sh;
+                    } else {
+                        packIn.sunVis = 0.0;
                     }
-                    if (!isPtPackHit)
+                    packIn.baseColor = SrgbToLinear(saturate(tex.rgb * g.diffuse.rgb));
+                    packIn.materialClass = rec.materialClass;
+                    [unroll] for (int p = 0; p < 16; ++p)
+                        packIn.params[p] = rec.params[p >> 2][p & 3];
+                    packIn.headRight = rec.headRight.xyz;
+                    packIn.headPos = rec.headPos.xyz;
+                    packIn.headScale = rec.headPos.w;
+                    packIn.headUp = rec.headUp.xyz;
+                    packIn.headForward = rec.headForward.xyz;
+                    packIn.headValid = (rec.headValid != 0);
+
+                    PtPackOut ptPackOut = PackEvaluate(packIn);
+                    albedo = ptPackOut.albedo;
+#if defined(PACK_CAP_SURFACE_OUTPUT) && PACK_CAP_SURFACE_OUTPUT
+                    tag = ptPackOut.tag & 0xFu;
+                    n = normalize(ptPackOut.normal);
+                    radiance += throughput * ptPackOut.emission;
 #endif
-                    {
-                        if (isPbrHit) {
-                            // ---- PBR record: mirror MmdShadePbr's sun structure; GGX for punctual NEE ----
-                            toon = true;
-                            flat = (g.flags & MAT_FLAT) ? 1.0 : 0.0;
+                    // the pack decides: MAT_FLAT (a material without toon) would drop its terminator
+                    flat = ptPackOut.flatFace ? 1.0 : 0.0;
 #ifdef PT_PACK_HAS_LIGHTING
-                            flatIndirect = flat;
-#endif
-                            float sh = 1.0;
-                            if (receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5) {
-                                float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, SunShadowConeCos(kSunCosMax));
-                                sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd, 1e5,
-                                                                              0xFFu)));
-                            }
-                            radiance += throughput * PbrSunDirect(pbr, g, tex, sf.uv, -dir, sh, flat);
-                            emission += EmissionAt(g, hitTexLin, pbr.emissive, true);
-                            if (flat > 0.5) {
-                                // raster flat fill: no sky/ground gradient and no occlusion modelling the face
-                                float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
-                                radiance += throughput * albedo * fill;
-                            }
-                        } else {
-                            toon = true;
-                            flat = (g.flags & MAT_FLAT) ? 1.0 : 0.0;
-#ifdef PT_PACK_HAS_LIGHTING
-                            flatIndirect = flat;
-#endif
-                            float sh = 1.0;
-                            if (receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5) {
-                                float cosMax = SunShadowConeCos(kSunCosMax);
-                                float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, cosMax);
-                                sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd, 1e5,
-                                                                              0xFFu)));
-                            }
-                            radiance += throughput * ToonSun(g, tex, sf.uv, n, -dir, sh);
-                            // AutoLuminous (そぼろ): marked (non-PBR, non-pack) materials emit their colour.
-                            emission += EmissionAt(g, hitTexLin, 0.0, false);
-#ifdef PT_PACK_HAS_LIGHTING
-                            if (flatIndirect > 0.5) {
+                    PtPackLighting ptLgt = PackEvaluateLighting(packIn, ptPackOut);
+                    flatIndirect = (ptLgt.flatIndirect > 0.5) ? 1.0 : flat;   // keep the MAT_FLAT bounce stop for flat packs
+
+                    if (!diffuseChain) {
+                        toon = true;
+                        radiance += throughput * PtPackComposeSunDirect(ptPackOut, ptLgt, n, sh, flat);
+                        if (ptLgt.flatIndirect > 0.5) {
+                            // raster flat fill: no sky/ground gradient and no occlusion modelling the face
+                            float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
+                            radiance += throughput * albedo * fill;
+                        }
+                    } else {
+                        toon = false;
+                    }
 #else
-                            if (flat > 0.5) {
+                    if (!diffuseChain) {
+                        toon = true;
+                        radiance += throughput * PtPackComposeSunDirect(ptPackOut, n, sh, flat > 0.5);
+                        if (flat > 0.5) {
+                            // raster flat fill: no sky/ground gradient and no occlusion modelling the face
+                            float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
+                            radiance += throughput * albedo * fill;
+                        }
+                    } else {
+                        toon = false;
+                    }
 #endif
-                                // raster flat fill: no sky/ground gradient and no occlusion modelling the face
-                                float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
-                                radiance += throughput * albedo * fill;
-                            }
+                }
+#endif
+                // the default shading (toon / PBR sun): characters, and stage materials the pack leaves off
+                if (!(g.flags & MAT_STAGE) && !isPtPackHit) {
+                    if (isPbrHit) {
+                        // ---- PBR record: mirror MmdShadePbr's sun structure; GGX for punctual NEE ----
+                        toon = true;
+                        flat = (g.flags & MAT_FLAT) ? 1.0 : 0.0;
+#ifdef PT_PACK_HAS_LIGHTING
+                        flatIndirect = flat;
+#endif
+                        float sh = 1.0;
+                        if (receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5) {
+                            float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, SunShadowConeCos(kSunCosMax));
+                            sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd, 1e5,
+                                                                          0xFFu)));
+                        }
+                        radiance += throughput * PbrSunDirect(pbr, g, tex, sf.uv, -dir, sh, flat);
+                        emission += EmissionAt(g, hitTexLin, pbr.emissive, true);
+                        if (flat > 0.5) {
+                            // raster flat fill: no sky/ground gradient and no occlusion modelling the face
+                            float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
+                            radiance += throughput * albedo * fill;
+                        }
+                    } else {
+                        toon = true;
+                        flat = (g.flags & MAT_FLAT) ? 1.0 : 0.0;
+#ifdef PT_PACK_HAS_LIGHTING
+                        flatIndirect = flat;
+#endif
+                        float sh = 1.0;
+                        if (receive && gShadowParams.w < 0.5 && gSunShadowParams.x > 0.5) {
+                            float cosMax = SunShadowConeCos(kSunCosMax);
+                            float3 sd = SampleCone(float2(Rand(rng), Rand(rng)), -gLightDir, cosMax);
+                            sh = Luminance(saturate(TraceShadowRayTinted(OffsetRayOrigin(pos, faceN), sd, 1e5,
+                                                                          0xFFu)));
+                        }
+                        radiance += throughput * ToonSun(g, tex, sf.uv, n, -dir, sh);
+                        // AutoLuminous (そぼろ): marked (non-PBR, non-pack) materials emit their colour.
+                        emission += EmissionAt(g, hitTexLin, 0.0, false);
+#ifdef PT_PACK_HAS_LIGHTING
+                        if (flatIndirect > 0.5) {
+#else
+                        if (flat > 0.5) {
+#endif
+                            // raster flat fill: no sky/ground gradient and no occlusion modelling the face
+                            float3 fill = lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity * gHemiStrength;
+                            radiance += throughput * albedo * fill;
                         }
                     }
                 }

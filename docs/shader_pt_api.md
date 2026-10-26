@@ -32,7 +32,7 @@ PtPackOut PackEvaluate(PtPackIn i);
 - `float3 baseColor`: linear base colour (`SrgbToLinear(texture * diffuse)`)
 - `uint materialClass`: pack material class (`PACK_BODY`, `PACK_SKIN`, `PACK_FACE`, `PACK_EYE`, `PACK_HAIR`, `PACK_WEAPON`)
 - `float params[16]`: 16 pack sliders
-- Head frame: `float3 headPos` (world position of the head bone), `float headScale` (world units per model unit), `float3 headRight`, `float3 headUp`, `float3 headForward`, `bool headValid`
+- Head frame: `float3 headPos` (world position of the head bone), `float headScale` (world units per model unit), `float3 headRight`, `float3 headUp`, `float3 headForward`, `bool headValid`. A stage part's material has no head bone: `headPos` / `headScale` / `headRight` / `headUp` / `headForward` are 0 and `headValid` is false there, so a pack must fall back to its non-face path when `headValid` is false
 
 ### `PtPackOut`
 

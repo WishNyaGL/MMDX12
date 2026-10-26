@@ -36,7 +36,9 @@ ComputePipeline* PtPackVariants::Resolve(Dx12Context& ctx,
     const ShaderPack* chosenPack = nullptr;
     bool warnedMultiple = false;
     for (GpuModel* model : models) {
-        if (!model || model->Role() != ModelRole::Character || model->ShaderPackId().empty()) continue;
+        // S6b: a stage part's bundled surface pack takes the same variant as a character's pack (the record and the
+        // material classes come from RtScene; see TakesPtPack there).
+        if (!model || model->ShaderPackId().empty()) continue;
         if (!model->PackActive()) continue;   // every material switched off
         const ShaderPack* pack = reg.Find(model->ShaderPackId());
         if (!pack || !pack->hasPtSurface) continue;

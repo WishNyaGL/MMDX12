@@ -299,7 +299,19 @@ bool TraceScene(float3 o, float3 d, float tMin, inout uint rng, float lod, out S
         if (!s.character) r = saturate(r + gFloorGloss * smoothstep(0.82, 0.97, sf.normal.y));
         s.refl = r;
         s.rough = clamp(sqrt(2.0 / (g.specularPower + 2.0)), 0.03, 0.6);
-        s.emission = s.character ? 0.0 : SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
+        bool canPbr = !(g.flags & MAT_SCREEN) && (g.pbrIndex != 0xFFFFFFFFu);
+        bool packShaded = false;
+#ifdef MMDX_PT_PACK
+        // S6b: a material a live pack record shades (a character's pack, or a stage part's bundled surface pack) takes
+        // the pack's shading, not the engine's ambient-only stage term; the render loop's pack path composes the direct
+        // term. A kPackClassOff material keeps the default shading.
+        packShaded = (g.flags & RTG_PT_PACK) != 0 && LoadPtPackRecord(g.packSrv).materialClass != PACK_CLASS_OFF;
+        // a PT pack wins over the record (raster rule): keep the plain surface the pack expects
+        if (canPbr && packShaded) canPbr = false;
+#endif
+        s.emission = (s.character || packShaded)
+                         ? 0.0
+                         : SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
         // AutoLuminous (そぼろ) / S5 screens: the emission terms the emissive-triangle pick table samples as well (see
         // emissive_nee.hlsli). Kept apart from the ambient term: only this part takes the emissive MIS weight.
         s.tableEmission = EmissionAt(g, SrgbToLinear(saturate(tex.rgb)), 0.0, false);
@@ -310,12 +322,6 @@ bool TraceScene(float3 o, float3 d, float tMin, inout uint rng, float lod, out S
             s.albedo = 0.0;
             s.refl = 0.0;
         }
-        bool canPbr = !(g.flags & MAT_SCREEN) && (g.pbrIndex != 0xFFFFFFFFu);
-#ifdef MMDX_PT_PACK
-        // a PT pack wins over the record (raster rule): keep the plain surface the pack expects
-        if (canPbr && (g.flags & RTG_PT_PACK) && LoadPtPackRecord(g.packSrv).materialClass != PACK_CLASS_OFF)
-            canPbr = false;
-#endif
         if (canPbr) {   // PBR record: mapped normal, albedo, GGX, AO, emissive
             s.pb = PtPbrDecode(hit.prim, g, sf, sf.normal, g.diffuse.rgb);
             s.n = s.pb.N;
@@ -1691,6 +1697,9 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
             continue;
         }
         const bool viaGlass = specChain && depth > 0u;
+        // S6b: the hit is shaded by a live pack record (a character's pack, or a stage part's surface pack). The pack
+        // controls the surface like a character's, so the flat-face / toon indirect handling follows it as well.
+        bool packShaded = false;
 #ifdef MMDX_PT_PACK
         PtPackOut ptPackOut = (PtPackOut)0;
 #ifdef PT_PACK_HAS_LIGHTING
@@ -1748,8 +1757,10 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
         // PBR record is used unless a PT pack class wins the hit (raster rule).
         bool isPbrHit = s.pbr;
 #ifdef MMDX_PT_PACK
+        packShaded = isPtPackHit;
         if (isPtPackHit) { isPbrHit = false; s.pbr = false; }
 #endif
+        const bool toonSurf = s.character || packShaded;   // the surface takes the character / pack indirect handling
         if (specChain) {
             if (!primLocked) {   // S9c: a medium event before the surface kept the guides (item 7)
                 primHit = true;
@@ -1844,7 +1855,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
                 if (gNumLights >= 1.0)
                     sunDirect += (1.0 - pSpec) * s.albedo / PI * PunctualIrradiance(s, s.character, rng);
                 radiance += T * (hitEmission + sunDirect);
-                if (EmissiveOn()) radiance += T * EmissiveLighting(s, V, pSpec, s.character, emisMode, rng);
+                if (EmissiveOn()) radiance += T * EmissiveLighting(s, V, pSpec, toonSurf, emisMode, rng);
             } else
 #endif
             {
@@ -1873,7 +1884,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
 #ifdef PT_PACK_HAS_LIGHTING
                 if (isPtPackHit) flatIndirect = ptPackLgt.flatIndirect;
 #endif
-                if (s.character && flatIndirect) {
+                if (toonSurf && flatIndirect) {
                     radiance += T * s.albedo * kToonIndirect * Eic / PI;
                     break;
                 }
@@ -1907,7 +1918,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
 #ifdef PT_PACK_HAS_LIGHTING
         if (isPtPackHit) flatIndirect = ptPackLgt.flatIndirect;
 #endif
-        if (s.character && flatIndirect && !diffuseChain) {
+        if (toonSurf && flatIndirect && !diffuseChain) {
             // faces: even fill around the view direction, skipping nearby geometry (nose, fringe)
             nd = CosineSampleHemisphere(float2(Rand(rng), Rand(rng)), V);
             T *= s.albedo * kToonIndirect;
@@ -1937,7 +1948,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
         // S8a: the pdf of this continuation, for the MIS of an emitter the next ray happens to hit.
         prevPdfBsdf = PathBsdfPdf(isPbrHit, s.pb, s.rough, pSpec, s.n, V, nd);
         prevBsdfPos = s.pos;
-        prevBsdfValid = !(s.character && flatIndirect && !diffuseChain) && prevPdfBsdf > 0.0;
+        prevBsdfValid = !(toonSurf && flatIndirect && !diffuseChain) && prevPdfBsdf > 0.0;
         o = OffsetRayOrigin(s.pos, s.faceN);
         d = nd;
         if (depth >= 3u) {

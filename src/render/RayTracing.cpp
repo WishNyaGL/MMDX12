@@ -41,6 +41,16 @@ std::pair<uint32_t, uint32_t> PartRange(const GpuModel::RtResources& rt, int par
 
 // S2b: hash of the model's per-material "transmission > 0" set (a static stage BLAS is built once, but a runtime
 // stage target can make a material transmissive afterwards; the OPAQUE geometry flag must follow).
+// S6b: a model whose materials take a PT pack record. A character is one when it carries a surface pack with a
+// pt_surface.hlsl; a stage part is the same, with its bundled `surface` pack (App::ResolveStageSurfacePack) in
+// ShaderPackId(). Every other model keeps the default path tracer shading. `PackActive()` (all materials switched off)
+// drops the record: the materials then carry kPackClassOff and the shaders fall back per material anyway.
+bool TakesPtPack(const GpuModel& model) {
+    if (model.ShaderPackId().empty() || !model.PackActive()) return false;
+    const ShaderPack* pack = ShaderPacks().Find(model.ShaderPackId());
+    return pack && pack->hasPtSurface;
+}
+
 uint64_t TransmissiveSignature(const GpuModel& model) {
     uint64_t h = 1469598103934665603ull;   // FNV-1a
     for (size_t i = 0; i < model.Materials().size(); ++i) {
@@ -358,8 +368,7 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
     uint32_t packGeomCount = 0;
     uint32_t packExtSlotCount = 0;
     for (GpuModel* m : models) {
-        if (!usable(m) || m->Role() != ModelRole::Character || m->ShaderPackId().empty()) continue;
-        if (!m->PackActive()) continue;   // every material switched off
+        if (!usable(m) || !TakesPtPack(*m)) continue;
         const ShaderPack* sp = ShaderPacks().Find(m->ShaderPackId());
         if (sp && sp->hasPtSurface) {
             packGeomCount += (uint32_t)m->Rt().geometryMaterials.size();
@@ -458,11 +467,9 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
 
         bool isPtPack = false;
         const ShaderPack* sp = nullptr;
-        if (m->Role() == ModelRole::Character && !m->ShaderPackId().empty()) {
-            if (m->PackActive()) {
-                sp = ShaderPacks().Find(m->ShaderPackId());
-                if (sp && sp->hasPtSurface) isPtPack = true;
-            }
+        if (TakesPtPack(*m)) {
+            sp = ShaderPacks().Find(m->ShaderPackId());
+            if (sp && sp->hasPtSurface) isPtPack = true;
         }
 
         uint32_t modelExtBase = 0;

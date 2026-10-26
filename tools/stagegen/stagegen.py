@@ -815,8 +815,29 @@ PackResult PackShade(PackSurface s) {
     return r;
 }
 """)
-    # PT / offline GI keep their character-only pack hook (render/PtPackVariants, RayTracing: a stage part's surface
-    # pack shades raster / RT; its PT / GI form is not used), so the fixture ships no pt_surface.hlsl.
+    # the PT / offline GI form of the same tint (S6b): a stage part's surface pack shades PT / GI through
+    # pt_surface.hlsl exactly like a character's pack, so the offline stills show the tint too.
+    with open(os.path.join(surf_dir, "pt_surface.hlsl"), "w", encoding="utf-8") as f:
+        f.write("""// pack_test_surface's pt_surface.hlsl: PackEvaluate (shaders/pt_pack_api.hlsli, docs/shader_pt_api.md).
+// The PT / offline GI form of surface.hlsl's tint: the same `tint` / `amount` mix, so the offline stills show the
+// material this pack claims in the same colour the raster / RT pass draws.
+#define P_TINT PackParamColor(0)    // tint (linear)
+#define P_AMOUNT PackParam(1)       // amount 0..1
+
+PtPackOut PackEvaluate(PtPackIn i) {
+    PtPackOut o;
+    float3 tinted = lerp(i.baseColor, P_TINT * dot(i.baseColor, float3(0.299, 0.587, 0.114)) * 2.0,
+                         saturate(P_AMOUNT));
+    o.albedo = tinted;                     // the GI diffuse bounces carry the tint
+    o.shadowTint = lerp(float3(1.0, 1.0, 1.0), tinted / max(dot(tinted, float3(0.299, 0.587, 0.114)), 1e-4),
+                        saturate(P_AMOUNT));   // the shaded side keeps the tint's hue
+    o.shadowBias = 0.0;
+    o.terminator = float2(0.0, 0.0);       // engine default softness
+    o.specular = float3(0.0, 0.0, 0.0);
+    o.flatFace = false;
+    return o;
+}
+""")
 
     # ---- packs/world: the built-in snow pack, copied unchanged --------------------------------------------------------
     snow_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "shaders", "packs", "snow")
