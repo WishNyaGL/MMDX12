@@ -127,6 +127,7 @@ struct ProjectModel {    std::string name;                  // outliner label (U
     std::string stageVariant;          // S1b: an MMDX stage part's variant ("stageVariant", absent = the default; read
                                        // for version <= 3 files, converted to its StudioStage on load)
     uint32_t stageUid = 0;             // S3: the StudioStage the model is a part of (0 = not an MMDX stage part)
+    std::filesystem::path rigPath;     // rig file ("rig", relative to the project; empty = no rig)
     MotionData motion;                 // its keys; motion.modelName is written as the VMD header model name
 };
 

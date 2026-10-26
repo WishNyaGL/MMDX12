@@ -47,7 +47,7 @@ const RoleAlias kAliases[] = {
     {RigRole::Spine,        "上半身",     "spine"},
     {RigRole::Spine,        "",           "torso"},
     {RigRole::Chest,        "上半身2",    "chest"},
-    {RigRole::Neck,         "首",         "neck"},
+    {RigRole::Neck,         "首",         "neck", true},
     {RigRole::Head,         "頭",         "head"},
     {RigRole::LeftShoulder, "左肩",       "shoulder_l"},
     {RigRole::LeftUpperArm, "左上腕",     "upper_arm_l"},
@@ -63,16 +63,16 @@ const RoleAlias kAliases[] = {
     {RigRole::RightForearm, "右前腕",     "rightforearm"},
     {RigRole::RightHand,    "右手首",     "hand_r"},
     {RigRole::RightHand,    "右手",       "righthand"},
-    {RigRole::LeftThigh,    "左足",       "thigh_l"},
+    {RigRole::LeftThigh,    "左足",       "thigh_l", true},
     {RigRole::LeftThigh,    "左もも",     "leftthigh"},
     {RigRole::LeftShin,     "左すね",     "shin_l"},
     {RigRole::LeftShin,     "左ひざ",     "leftshin"},
-    {RigRole::LeftFoot,     "左足首",     "foot_l"},
-    {RigRole::RightThigh,   "右足",       "thigh_r"},
+    {RigRole::LeftFoot,     "左足首",     "foot_l", true},
+    {RigRole::RightThigh,   "右足",       "thigh_r", true},
     {RigRole::RightThigh,   "右もも",     "rightthigh"},
     {RigRole::RightShin,    "右すね",     "shin_r"},
     {RigRole::RightShin,    "右ひざ",     "rightshin"},
-    {RigRole::RightFoot,    "右足首",     "foot_r"},
+    {RigRole::RightFoot,    "右足首",     "foot_r", true},
 };
 
 std::string WithoutSpaces(const std::string& s) {
@@ -210,6 +210,7 @@ RigGenerateResult GenerateRig(const PmxModel& model) {
         bind.role = (RigRole)r;
         bind.boneIndex = assigned[(size_t)r];
         if (bind.boneIndex >= 0) {
+            bind.boneName = model.bones[(size_t)bind.boneIndex].name;
             bind.confidence = 1.0f;  // dictionary/structural match; refined later
         } else {
             diag.warnings.push_back(std::string("unresolved ") + RigRoleName(bind.role));

@@ -1,12 +1,14 @@
 // Rig generator self-test: builds synthetic skeletons (typical MMD-JP and English names) and asserts the core roles
 // resolve. Optionally analyzes a real PMX: studio_rig_test [model.pmx]
 #include "studio/RigGenerator.h"
+#include "studio/RigPersistence.h"
 
 #include "asset/PmxModel.h"
 #include "core/TextUtil.h"
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -38,19 +40,68 @@ int CheckRole(const RigDefinition& rig, RigRole role, const char* roleName) {
 
 } // namespace
 
+// Prints a compact one-line resolution summary for a model: resolved/19 roles + the set of unresolved roles.
+int Summarize(const PmxModel& model, const char* label) {
+    const RigGenerateResult res = GenerateRig(model);
+    int resolved = 0;
+    std::string unresolved;
+    for (int r = 0; r < (int)RigRole::Count; ++r) {
+        const RigBoneBinding& b = res.rig.bindings[(size_t)r];
+        if (b.boneIndex >= 0) ++resolved;
+        else { if (!unresolved.empty()) unresolved += ","; unresolved += RigRoleName(b.role); }
+    }
+    std::printf("%-46s %2d/19  %s\n", label, resolved, unresolved.c_str());
+    return resolved == (int)RigRole::Count ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     int failed = 0;
 
     if (argc > 1) {
-        const std::string file = argv[1];
+        const std::string arg = argv[1];
+        // directory mode: recursively scan for .pmx files
+        std::error_code ec;
+        if (std::filesystem::is_directory(arg, ec)) {
+            int total = 0, resolvedAll = 0;
+            std::vector<std::filesystem::path> files;
+            for (auto it = std::filesystem::recursive_directory_iterator(arg, ec);
+                 it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+                if (!ec && it->is_regular_file() && it->path().extension() == L".pmx")
+                    files.push_back(it->path());
+            }
+            std::sort(files.begin(), files.end());
+            for (const auto& f : files) {
+                PmxModel model;
+                std::string err;
+                const std::string pathStr = f.string();
+                if (!LoadPmx(f, model, &err)) {
+                    std::printf("%-46s LOAD-FAIL (%s)\n", pathStr.c_str(), err.c_str());
+                    std::fflush(stdout);
+                    continue;
+                }
+                ++total;
+                failed += Summarize(model, pathStr.c_str());
+                std::fflush(stdout);
+                resolvedAll += 0;
+            }
+            std::printf("\n%d models scanned\n", total);
+            return failed;
+        }
+        // single-file mode
         std::string err;
         PmxModel model;
-        if (!LoadPmx(Utf8ToPath(file), model, &err)) {
+        if (!LoadPmx(Utf8ToPath(arg), model, &err)) {
             std::printf("load failed: %s\n", err.c_str());
             return 2;
         }
+        if (argc > 2 && std::string(argv[2]) == "--bones") {
+            for (size_t i = 0; i < model.bones.size(); ++i)
+                std::printf("%3zu '%s' / '%s' parent=%d\n", i, model.bones[i].name.c_str(),
+                            model.bones[i].nameEn.c_str(), model.bones[i].parentIndex);
+            return 0;
+        }
         const RigGenerateResult res = GenerateRig(model);
-        std::printf("=== %s ===\n", file.c_str());
+        std::printf("=== %s ===\n", arg.c_str());
         for (int r = 0; r < (int)RigRole::Count; ++r) {
             const RigBoneBinding& b = res.rig.bindings[(size_t)r];
             if (b.boneIndex >= 0)
@@ -142,6 +193,57 @@ int main(int argc, char** argv) {
         failed += CheckRole(res.rig, RigRole::LeftForearm, "forearm_l");
         failed += CheckRole(res.rig, RigRole::LeftHand, "hand_l");
         failed += CheckRole(res.rig, RigRole::RightFoot, "foot_r");
+    }
+
+    // --- persistence round-trip on the MMD-JP synthetic skeleton
+    {
+        PmxModel m;
+        const int center = AddBone(m, "センター", "Center", -1);
+        const int spine = AddBone(m, "上半身", "Spine", center);
+        const int chest = AddBone(m, "上半身2", "Chest", spine);
+        const int neck = AddBone(m, "首", "Neck", chest);
+        const int head = AddBone(m, "頭", "Head", neck);
+        const int la = AddBone(m, "左腕", "Left Arm", chest);
+        const int lf = AddBone(m, "左ひじ", "Left Forearm", la);
+        const int lh = AddBone(m, "左手首", "Left Hand", lf);
+        const int lt = AddBone(m, "左足", "Left Thigh", center);
+        const int lsh = AddBone(m, "左ひざ", "Left Shin", lt);
+        const int lf2 = AddBone(m, "左足首", "Left Foot", lsh);
+        (void)head; (void)lh; (void)lf2;
+
+        const RigGenerateResult g = GenerateRig(m);
+        const std::filesystem::path rf = std::filesystem::temp_directory_path() / "rig_roundtrip_test.mmdxrig";
+        std::string err;
+        if (!SaveRig(rf, g.rig, &err)) {
+            std::printf("  FAIL rig save: %s\n", err.c_str());
+            ++failed;
+        } else {
+            RigDefinition loaded;
+            if (!LoadRig(rf, loaded, &err)) {
+                std::printf("  FAIL rig load: %s\n", err.c_str());
+                ++failed;
+            } else {
+                bool ok = loaded.bindings.size() == g.rig.bindings.size();
+                for (size_t i = 0; ok && i < loaded.bindings.size(); ++i) {
+                    if (loaded.bindings[i].role != g.rig.bindings[i].role ||
+                        loaded.bindings[i].boneIndex != g.rig.bindings[i].boneIndex ||
+                        loaded.bindings[i].boneName != g.rig.bindings[i].boneName)
+                        ok = false;
+                }
+                std::printf("  rig round-trip: %s\n", ok ? "ok" : "MISMATCH");
+                if (!ok) ++failed;
+                // rebind against the same model keeps every already-resolved binding
+                RebindRig(loaded, m);
+                int resolved = 0, savedResolved = 0;
+                for (const RigBoneBinding& b : loaded.bindings) if (b.boneIndex >= 0) ++resolved;
+                for (const RigBoneBinding& b : g.rig.bindings) if (b.boneIndex >= 0) ++savedResolved;
+                if (resolved != savedResolved) {
+                    std::printf("  FAIL rebind resolved=%d saved=%d\n", resolved, savedResolved);
+                    ++failed;
+                }
+            }
+            std::filesystem::remove(rf);
+        }
     }
 
     std::printf(failed == 0 ? "PASS\n" : "FAIL (%d)\n", failed);

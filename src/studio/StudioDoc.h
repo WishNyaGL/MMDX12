@@ -74,6 +74,7 @@ struct StudioModel {
     uint64_t boundVersion = 0;     // motionVersion `bound` was built from
     std::shared_ptr<BoundMotion> bound;
     std::shared_ptr<RigDefinition> rig;   // generated rig (null = none); stored separately from the model/animation
+    std::filesystem::path rigFile;        // persistence path of the rig (absolute); empty = in-memory only
     RigDiagnostics rigDiag;
     PoseLayer pose;                // unregistered viewport edits (override the motion at pose.frame)
     // stages: what the static BLAS was last built from (StudioUpdateModel rebuilds it when this changes)
@@ -719,6 +720,7 @@ struct StudioPackageModel {
     bool visible = true;
     bool physicsOff = false;                 // P2.2: physics off for this model (project files)
     std::filesystem::path defaultPackTextureFolder;  // model's MME face texture folder (shader pack default)
+    std::filesystem::path rigFile;                   // project-loaded rig file (absolute); empty = none
     std::vector<uint8_t> materialBlend;              // per-material .emd blend hint (asset/MmeHints::MmeBlendHint)
     uint8_t materialBlendDefault = 0;                // hint for materials with no own Obj entry
     PbrModelData pbr;                        // per-material Ray PBR records + decoded maps (work unit P2)

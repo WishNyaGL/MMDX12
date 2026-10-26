@@ -431,6 +431,7 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
             m.stageManifest = FindStageManifestFor(pm.path, m.stagePart);
             m.stageVariant = pm.stageVariant;
             m.stageUid = pm.stageUid;
+            m.rigFile = pm.rigPath;
             m.motion = std::move(pm.motion);
             if (m.stageManifest && !m.stageManifest->materials.empty() && m.pmx)
                 ApplyStageMaterialRules(*m.stageManifest, m.stageVariant, {}, 0.0,

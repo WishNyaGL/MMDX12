@@ -21,6 +21,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "studio/FileDialog.h"
+#include "studio/RigPersistence.h"
 
 namespace mmdx {
 
@@ -184,6 +185,7 @@ ProjectData App::StudioProjectData() const {
         pm.material = m.material;
         pm.mme = m.mme;
         pm.stageUid = m.stageUid;   // S3: the stage entity the part belongs to (variant / overrides live there)
+        pm.rigPath = m.rigFile;
         if (m.IsProp()) {
             pm.attach = m.attach;
             pm.attach.parent = m.attach.parent >= 0 ? d.IndexOfUid((uint32_t)m.attach.parent) : -1;  // uid -> index
@@ -256,13 +258,36 @@ bool App::StudioSave(bool saveAs) {
     return StudioSaveTo(picked);
 }
 
+bool App::StudioWriteRigFiles(const std::filesystem::path& projectFile, ProjectData& data, std::string* error) {
+    StudioDoc& d = *studio_;
+    const std::filesystem::path dir = projectFile.parent_path();
+    bool any = false;
+    for (size_t i = 0; i < data.models.size() && i < d.models.size(); ++i) {
+        StudioModel& m = *d.models[i];
+        if (!m.rig || m.kind == ModelKind::Stage) { data.models[i].rigPath.clear(); continue; }
+        any = true;
+        if (!dir.empty()) std::filesystem::create_directories(dir);
+        std::filesystem::path rf = dir / (Utf8ToWide(SanitizeFileName(data.models[i].name)) + L"-rig" + kRigExtension);
+        if (!SaveRig(rf, *m.rig, error)) return false;
+        m.rigFile = rf;
+        data.models[i].rigPath = rf;
+        (void)any;
+    }
+    return true;
+}
+
 bool App::StudioSaveTo(const std::filesystem::path& file) {
     StudioDoc& d = *studio_;
     std::filesystem::path target = std::filesystem::absolute(file);
     if (target.extension().empty()) target += kProjectExtension;
     const auto t0 = std::chrono::steady_clock::now();
-    const ProjectData data = StudioProjectData();
+    ProjectData data = StudioProjectData();
     std::string err;
+    if (!StudioWriteRigFiles(target, data, &err)) {
+        toast_ = {Tr("프로젝트를 저장하지 못했습니다"), err, {}, true, timeSeconds_ + 6.0};
+        LOG_ERROR("studio: rig save failed: %s", err.c_str());
+        return false;
+    }
     if (!SaveProject(target, data, &err)) {
         toast_ = {Tr("프로젝트를 저장하지 못했습니다"), err, {}, true, timeSeconds_ + 6.0};
         LOG_ERROR("studio: save failed: %s", err.c_str());
@@ -308,6 +333,10 @@ void App::StudioAutosave(bool force, bool wait) {
     data.recoveryOf = d.projectPath;
     d.autosavedStamp = d.ChangeStamp();
     const std::filesystem::path file = StudioRecoveryFile();
+    {   // write rig files on the UI thread (the snapshot below captures the paths)
+        std::string rerr;
+        if (!StudioWriteRigFiles(file, data, &rerr)) LOG_WARN("studio: rig autosave failed: %s", rerr.c_str());
+    }
     studioAutosave_ = std::async(std::launch::async, [data = std::move(data), file]() {
         const auto t0 = std::chrono::steady_clock::now();
         std::string err;
@@ -712,6 +741,18 @@ void App::StudioPollJobs() {
                     sm->path = pm.pmx->sourcePath;
                     sm->pmx = pm.pmx;
                     sm->inst = std::make_unique<ModelInstance>(pm.pmx);
+                    // attach a project-loaded rig (re-validated against this PMX)
+                    if (!pm.rigFile.empty()) {
+                        auto rig = std::make_shared<studio::RigDefinition>();
+                        std::string rerr;
+                        if (studio::LoadRig(pm.rigFile, *rig, &rerr)) {
+                            studio::RebindRig(*rig, *pm.pmx);
+                            sm->rig = std::move(rig);
+                            sm->rigFile = pm.rigFile;
+                        } else {
+                            LOG_WARN("studio: rig load failed for %s: %s", pm.name.c_str(), rerr.c_str());
+                        }
+                    }
                     sm->gpu = renderer_.CreateModel(batch, *pm.pmx, pm.textures,
                                                     (pm.kind == ModelKind::Stage) ? ModelRole::Stage : ModelRole::Character,
                                                     &pm.pbr, &pm.compressedTextures);

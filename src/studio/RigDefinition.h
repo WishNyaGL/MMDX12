@@ -43,6 +43,7 @@ bool RigRoleIsRight(RigRole role);
 struct RigBoneBinding {
     RigRole role = RigRole::Pelvis;
     int boneIndex = -1;         // index into PmxModel::bones; -1 = unresolved
+    std::string boneName;       // original bone name (for rebinding across model changes)
     float confidence = 0.0f;    // 0..1 match confidence
     bool manuallyAssigned = false;
 };
