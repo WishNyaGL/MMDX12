@@ -354,11 +354,16 @@ void StageScreens::Render(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, cons
         // drops whatever the slot held (the video decoder, the image / feed / program texture): a source switch and a
         // program pack switch both need the old content gone
         const auto releaseContent = [&]() {
-            if (s.video.IsOpen()) s.video.Release(ctx);
-            if (s.tex) {
+            // Frames in flight still sample the old picture (the materials' descriptors point at it): wait BEFORE
+            // anything is freed. The image used to be freed with no wait at all (only the feed / program texture set
+            // needWait, and that wait came after the release): switching a screen from an image to a camera in the
+            // studio removed the device (page fault at VA 0).
+            if ((s.video.IsOpen() || s.tex || s.imageRes) && !needWait) {
+                ctx.WaitForGpu();
                 needWait = true;
-                s.tex.Release(ctx);
             }
+            if (s.video.IsOpen()) s.video.Release(ctx);
+            if (s.tex) s.tex.Release(ctx);
             s.imageRes.Reset();
             ++s.generation;
         };
@@ -448,7 +453,6 @@ void StageScreens::Render(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, cons
             break;
         }
     }
-    if (needWait) ctx.WaitForGpu();
 
     // 3. Video decode / upload for this frame (loops by duration; exact for offline renders).
     for (Impl::Slot& s : impl.slots) {

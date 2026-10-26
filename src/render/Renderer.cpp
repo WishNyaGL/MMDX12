@@ -622,7 +622,9 @@ bool Renderer::RenderScreenFeed(ID3D12GraphicsCommandList* cmd, const FrameView&
         target.Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const D3D12_GPU_DESCRIPTOR_HANDLE table = feedTransient_.SrvTable(*ctx_, {&f.color});
         feedResolve_.Draw(pc, {&target}, table, nullptr, 0);
-        target.Transition(cmd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        // every reader: the scene PS, the screen-light average and the path tracers (compute); StageScreens records the
+        // same state (it used to record ALL while the texture was left in PIXEL_SHADER_RESOURCE)
+        target.Transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         drew = true;
     }
     stats_ = savedStats;

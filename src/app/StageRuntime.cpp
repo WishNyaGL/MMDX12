@@ -249,7 +249,6 @@ std::vector<StageScreenState> ResolveStageScreens(const StageManifest& manifest,
         st.height = s.height;
         st.brightness = s.brightness;
         st.enabled = true;
-        if (edit) edit(st);
         out.push_back(std::move(st));
     }
     // the evaluator's screen targets (in assignment order): the last one per field wins
@@ -270,6 +269,11 @@ std::vector<StageScreenState> ResolveStageScreens(const StageManifest& manifest,
             break;
         }
     }
+    // The caller's per-screen edits (the studio's inspector overrides) come AFTER the evaluator's targets: an explicit
+    // user choice must win over a param binding / cue (arena_live binds screenBrightness to every screen's brightness, so
+    // the inspector's brightness slider changed nothing). Before the program packs, so an edit to "program" finds one.
+    if (edit)
+        for (StageScreenState& st : out) edit(st);
     // S6: the program pack of each screen (after the targets, so a target that switches `source` to "program" or
     // rewrites `file` picks that pack up too). A `packs[]` entry of role "screen" naming the screen wins over the
     // screen's own `file` (the same pack folder can be named by either; the packs[] entry is the explicit one).
