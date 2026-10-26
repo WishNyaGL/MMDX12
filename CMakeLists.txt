@@ -269,6 +269,13 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/gallery_index_test.cpp)
   target_include_directories(gallery_index_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(gallery_index_test PRIVATE mmdx_render winhttp)
 endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/tools/stage_store_test.cpp)
+  # The stage gallery data layer + install core (app/StageStore.cpp) without the whole app; NetUtil pulls WinHTTP and
+  # the real tar.exe extractor, the asset layer parses stage.json.
+  add_executable(stage_store_test tools/stage_store_test.cpp src/app/StageStore.cpp)
+  target_include_directories(stage_store_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(stage_store_test PRIVATE mmdx_core winhttp)
+endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tools/pack_guard_test.cpp)
   add_executable(pack_guard_test tools/pack_guard_test.cpp src/render/PackCrashGuard.cpp)
   target_include_directories(pack_guard_test PRIVATE ${CMAKE_SOURCE_DIR}/src)

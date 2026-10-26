@@ -54,6 +54,16 @@ progress.md is the session log. Read its latest entry first.
   lights are scene lights tagged with the stage and are replayed every frame (editor and offline), the fields a binding
   drives are read-only in the light inspector. Script: `studiostageparam` / `studiostagekey` / `studiostagecues`,
   `studiostate` logs one `STUDIOSTAGE` line per stage.
+- Stage gallery (S12, docs/stage_format.md "Distribution"): `app/StageStore.*` (the shader-pack store's rules: index
+  sources, SHA-256, revoked, `minEngine`) fetches `stages/index.json`, downloads a stage zip **resumably**
+  (`net::DownloadToFileResumable`, `<exe>/cache/stage_downloads/<id>-<version>.zip.part`, `Range: bytes=` + 206 / 200 /
+  416 handling) and installs it into `<exe>/stages/<id>/` through `InstallStageZip` (extract into
+  `<exe>/stages/.incoming/`, one `stage.json` with `"format": "mmdx-stage"` and the index's id, rename into place; an
+  update keeps the old folder until the new one is in, restores it on failure). `Screen::Gallery` + `app/UiGallery.cpp`
+  (top nav "갤러리", card grid + detail pane, `--screen gallery`, `--gallery-index <url|path>` for one run; online stages
+  only so far) uninstalls by deleting the folder (refused while a scene / the studio uses it) and calls
+  `StartRevalidation()` after every install / update / uninstall so the lobby's stage list updates without a restart.
+  `tools/stage_store_test` covers the index parse, the install core and the resume decision seam.
 - Stage screens (S5, docs/stage_format.md "screens"): `render/StageScreens.*` owns one texture per screen (owned by the
   Renderer, updated before the scene passes) and binds it to the materials the screen claims through
   `GpuModel::BindMaterialTexture`, marked `MatFlag_Screen` (the texture is the emission; raster / RT / PT / offline GI

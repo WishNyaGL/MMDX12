@@ -112,7 +112,7 @@ void App::DrawBenchLobby() {
     if (refresh) RefreshLeaderboard();
 
     BeginScreen("##benchlobby");
-    DrawAppBar(3);
+    DrawAppBar(4);
     const Palette& p = P();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 ds = ImGui::GetIO().DisplaySize;
@@ -679,7 +679,7 @@ void App::DrawBenchResult() {
     if (refresh) RefreshLeaderboard();
 
     BeginScreen("##benchresult");
-    DrawAppBar(3);
+    DrawAppBar(4);
     const Palette& p = P();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 ds = ImGui::GetIO().DisplaySize;

@@ -93,7 +93,7 @@ void App::SyncPlayMmeDraft() {
 
 void App::DrawMme() {
     BeginScreen("##mme");
-    DrawAppBar(2);
+    DrawAppBar(3);
     const Palette& p = P();
     const ImVec2 ds = ImGui::GetIO().DisplaySize;
     const float pad = Dp(kPad), gap = Dp(24.0f);

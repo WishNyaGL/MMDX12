@@ -535,3 +535,46 @@ runs Blender.
    `stage_check` reports the problems.
 10. **Budgets**: `stage_check` reports the file size per extension and errors above 512 MB (a gallery zip is expected
     to stay under 256 MB).
+
+## Distribution (S12: stage gallery)
+
+A stage is distributed as a **zip of one stage folder**: `stage.json` at the archive root, or inside a single top
+folder (`cyclorama/stage.json` — the shape "compress this folder" makes). Its `id` must match the gallery entry's id
+(the store refuses a zip whose `stage.json` names another id) and `models` must list at least one part.
+
+```
+https://mmdx.codingbot.kr/stages/index.json
+{
+  "format": "mmdx-stages",           // informational
+  "formatVersion": 1,
+  "stages": [
+    {"id": "cyclorama", "version": "1.0.0",
+     "name": {"ko": "사이클로라마", "en": "Cyclorama"},
+     "author": "…", "license": "CC0-1.0",
+     "description": {"en": "…"}, "tags": ["dance", "studio"],
+     "preview": "prev/cyclorama.png",   // relative to the index, or absolute
+     "download": "https://cdn.example.com/cyclorama-1.0.0.zip",   // absolute; big zips never live on the home server
+     "size": 30720, "sha256": "…64 hex…", "minEngine": "2.0.0"}
+  ]
+}
+```
+
+`download`, `sha256` and a valid `id` / `version` are required; an entry missing them is skipped. `revoked: true`
+(with an optional `reason`, plain or localized) keeps the entry listed — the card shows the reason and installation is
+disabled — and an installed revoked stage gets a warning badge but is **never auto-deleted**. `minEngine` is compared
+with the app version (a newer requirement marks the entry incompatible).
+
+The app's gallery (`Screen::Gallery`, `app/StageStore`) fetches the index, verifies the zip's size and SHA-256, then
+installs it into `<exe>/stages/<id>/` (never into the user's library) and triggers a background library rescan, so the
+stage appears in the lobby without a restart. Downloads are **resumable**: the transfer writes
+`<exe>/cache/stage_downloads/<id>-<version>.zip.part` and a later attempt asks the server for `Range: bytes=<size>-`
+(a `206` appends, a `200` restarts, `416` restarts); the `.part` is renamed onto the zip only when it is complete.
+Install extracts into `<exe>/stages/.incoming/`, requires exactly one `stage.json` with `"format": "mmdx-stage"` and the
+index's id, and renames the folder into place; an update keeps the previous folder until the new one is in place and
+restores it when the rename fails. Uninstall deletes the folder (refused while a scene or the studio uses the stage).
+`--gallery-index <url|path>` (with `--screen gallery`) points one run at another index; local paths / `file:` URLs work.
+
+```
+python tools/stagegen/stagegen.py --out build/bin/stages      # a stage to zip for the index
+build/bin/stage_store_test                                    # index / install / resume unit checks
+```

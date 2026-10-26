@@ -1363,6 +1363,25 @@ const Entry kEnglish[] = {
     {"환경 안개", "Environment fog"},
     {"정밀 안개 계산", "Precise fog"},
     {"오프라인 GI에서 안개를 경로 추적으로 계산", "Offline GI computes the fog along the paths"},
+    // Stage gallery (Screen::Gallery, UiGallery.cpp) + app/StageStore.cpp
+    {"갤러리", "Gallery"},
+    {"스테이지 목록을 불러오는 중...", "Loading the stage gallery..."},
+    {"스테이지 목록을 불러오지 못했습니다", "Could not load the stage gallery"},
+    {"스테이지를 설치하지 못했습니다", "Could not install the stage"},
+    {"스테이지를 삭제하지 못했습니다", "Could not delete the stage"},
+    {"아직 갤러리에 스테이지가 없습니다", "No stages in the gallery yet"},
+    {"조건에 맞는 스테이지가 없습니다", "No stages match"},
+    {"갤러리에서 차단된 스테이지입니다", "This stage is blocked in the gallery"},
+    {"이 스테이지는 배포가 중단되었습니다.", "Distribution of this stage has been withdrawn."},
+    {"이 버전의 MMDX12 에서는 쓸 수 없는 스테이지입니다. 앱을 업데이트하세요.", "This stage needs a newer MMDX12. Update the app."},
+    {"설치된 버전이 차단되었습니다. 새 장면에서 쓰지 않는 것을 권장합니다.", "The installed version is blocked. Avoid it in new scenes."},
+    {"설치된 스테이지 폴더 열기", "Open the installed stages folder"},
+    {"설치 위치", "Installed at"},
+    {"이 스테이지를 쓰는 장면 / 스튜디오를 닫은 뒤 삭제할 수 있습니다", "Close the scene / studio that uses this stage to delete it"},
+    {"차단됨", "Blocked"},
+    {"필요한 앱 버전", "Required app version"},
+    {"라이선스", "License"},
+    {" 삭제됨", " deleted"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 
