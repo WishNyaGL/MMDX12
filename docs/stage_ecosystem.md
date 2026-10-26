@@ -70,7 +70,7 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S10 | Planar mirrors in raster (RT / PT / GI reflect natively) | done 2026-10-26 |
 | S11 | Compressed textures: DDS BCn (+ glTF `MSFT_texture_dds`), VRAM budget report | done 2026-10-26 |
 | S12 | Gallery screen + stage store (index, resumable download, install, update, revoke) | done 2026-10-26 |
-| S13 | Website stage gallery (MMDX12_Web): index + pages; deploy only after the owner says so | |
+| S13 | Website stage gallery (MMDX12_Web): index + pages; deploy only after the owner says so | built 2026-10-26 (MMDX12_Web: build-stages.mjs, /<lang>/stages/ pages, creator doc); not deployed, zips not uploaded (STAGE_CDN_BASE unset) |
 
 ## 3. Runtime model (shared by all milestones)
 
