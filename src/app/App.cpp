@@ -404,6 +404,11 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             else LOG_WARN("unknown --studio-renderer value: %s (want raster|rt|pt|gi)", v.c_str());
         } else if (arg == L"--offline-prepass") {
             opt.offlinePrepass = _wtoi(next().c_str()) != 0 ? 1 : 0;
+        } else if (arg == L"--offline-volumetric") {
+            const std::string v = ToLowerAscii(WideToUtf8(next()));
+            if (v == "single" || v == "0") opt.offlineVolumetric = 0;
+            else if (v == "full" || v == "1") opt.offlineVolumetric = 1;
+            else LOG_WARN("unknown --offline-volumetric value: %s (want single|full)", v.c_str());
         } else if (arg == L"--offline-fps") {
             opt.offlineFps = _wtoi(next().c_str());
         } else if (arg == L"--offline-bitrate") {

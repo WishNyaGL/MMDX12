@@ -130,6 +130,8 @@ namespace mmdx {
 //                                sequence (<output stem>_frames/<stem>_00000.png), --offline-still one RGBA PNG
 //   --offline-probe              with --autoplay: sample render from the middle of the song (the lobby dialog's
 //                                time measurement) with the dialog's settings, log "VIDEO PROBE", then quit
+//   --offline-volumetric <m>     offline GI haze for this run: single (the single-scatter pass) or full (the paths
+//                                compute the medium); default: the saved volumetricFull / videoVolumetricFull
 //                                Studio (--project / --screen studio): --offline-video renders the project once it is
 //                                open (range: --offline-range in timeline seconds, else the timeline range, else the
 //                                whole project; motion camera; project audio) and quits; --offline-still renders the
@@ -226,6 +228,7 @@ struct AppOptions {
     bool classic = false;      // --classic: vanilla-MMD look for this run (SSAO/SSR/bloom/volumetric/DoF/LUT/effects/soft shadows off)
     int motionLighting = -1;   // --motion-lighting <0|1>: camera VMD light/self-shadow tracks in play mode, this run
     float volumetricDensity = -1.0f;                 // --volumetric-density (< 0 = settings)
+    int offlineVolumetric = -1;                      // --offline-volumetric single|full (-1 = settings)
     std::string lut;           // --lut <substr|none>: override for this run (resolved against the LUT list)
     std::filesystem::path offlineStill, offlineVideo;  // --offline-still / --offline-video
     double offlineRange[2] = {-1.0, -1.0};             // --offline-range (seconds; < 0 = unset)

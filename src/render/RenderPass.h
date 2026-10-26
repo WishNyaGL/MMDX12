@@ -138,6 +138,9 @@ struct PassContext {
     // S9: StructuredBuffer<GpuFogVolume> of pc.view.light.fogVolumes (t4 space1) for the volumetric passes; 0 when
     // there is no volume (the shaders then read no buffer at all).
     D3D12_GPU_VIRTUAL_ADDRESS fogVolumes = 0;
+    // S9c: StructuredBuffer<GpuMedium> (one element, t5 space1) of the offline GI renderer's in-path medium; 0 = the
+    // shaders must not read it (they only do when GpuMedium::mode is 1).
+    D3D12_GPU_VIRTUAL_ADDRESS medium = 0;
 };
 
 class IRenderPass {
@@ -213,6 +216,7 @@ private:
 //   8: table, unbounded ByteAddressBuffer t0 space3 starting at SrvHeap index 0
 //   9: root SRV t3 space1 StructuredBuffer<float4> gPackExtSlots (pc.rt ? pc.rt->PackExtSlots() : 0)
 //  10: root SRV t4 space1 StructuredBuffer<GpuFogVolume> (pc.fogVolumes; 0 = no local fog volume)
+//  11: root SRV t5 space1 StructuredBuffer<GpuMedium> (pc.medium; 0 = no in-path medium)
 //   static samplers s0 point clamp, s1 linear clamp, s2 linear wrap, s4 linear wrap.
 // Shaders are compiled with CompileShaderDxc as cs_6_5. Root parameters 4/5 are bound to
 // pc.rt (0 when null; shaders must not touch the TLAS then).

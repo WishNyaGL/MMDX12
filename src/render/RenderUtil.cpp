@@ -323,7 +323,7 @@ bool ComputePipeline::Create(Dx12Context& ctx, const std::filesystem::path& file
     uav.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 16, 0, 0);
     tex.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 2, 0);
     buf.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 3, 0);
-    CD3DX12_ROOT_PARAMETER p[11];
+    CD3DX12_ROOT_PARAMETER p[12];
     p[0].InitAsConstantBufferView(0);
     p[1].InitAsConstants(16, 1);
     p[2].InitAsDescriptorTable(1, &srv);
@@ -335,6 +335,7 @@ bool ComputePipeline::Create(Dx12Context& ctx, const std::filesystem::path& file
     p[8].InitAsDescriptorTable(1, &buf);
     p[9].InitAsShaderResourceView(3, 1);   // gPackExtSlots: t3 space1
     p[10].InitAsShaderResourceView(4, 1);  // S9 gVolFog: t4 space1 (local fog volumes)
+    p[11].InitAsShaderResourceView(5, 1);  // S9c gMedium: t5 space1 (the offline GI in-path medium)
     CD3DX12_STATIC_SAMPLER_DESC samplers[4];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
                      D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
@@ -346,7 +347,7 @@ bool ComputePipeline::Create(Dx12Context& ctx, const std::filesystem::path& file
     // 1.0 keeps the descriptor tables volatile; required because the unbounded ranges cover
     // unused heap slots.
     CD3DX12_ROOT_SIGNATURE_DESC rs;
-    rs.Init(11, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+    rs.Init(12, p, 4, samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
     ComPtr<ID3DBlob> blob, err;
     if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err))) {
         LOG_ERROR("ComputePipeline: root signature serialization failed");
@@ -385,6 +386,7 @@ void ComputePipeline::Dispatch(PassContext& pc, D3D12_GPU_DESCRIPTOR_HANDLE srvT
     cmd->SetComputeRootDescriptorTable(8, heap0);
     cmd->SetComputeRootShaderResourceView(9, pc.rt ? pc.rt->PackExtSlots() : 0);
     cmd->SetComputeRootShaderResourceView(10, pc.fogVolumes);   // S9 local fog volumes (0 = none)
+    cmd->SetComputeRootShaderResourceView(11, pc.medium);       // S9c in-path medium (0 = none)
     cmd->Dispatch(groupsX, groupsY, 1);
 }
 

@@ -381,6 +381,8 @@ void App::DrawVideoRenderDialog() {
         if (cfg.volumetric) {
             ImGui::Indent(Dp(16.0f));
             SliderRow("##voldensity", Tr("안개 밀도"), &cfg.volumetricDensity, 0.25f, 4.0f, "%.2f");
+            Switch("##volfull", Tr("정밀 안개 계산"), &cfg.volumetricFull,
+                   Tr("오프라인 GI에서 안개를 경로 추적으로 계산"));
             ImGui::Unindent(Dp(16.0f));
         }
 

@@ -1361,6 +1361,8 @@ const Entry kEnglish[] = {
     {"안개 색", "Fog color"},
     {"안개", "Fog"},
     {"환경 안개", "Environment fog"},
+    {"정밀 안개 계산", "Precise fog"},
+    {"오프라인 GI에서 안개를 경로 추적으로 계산", "Offline GI computes the fog along the paths"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

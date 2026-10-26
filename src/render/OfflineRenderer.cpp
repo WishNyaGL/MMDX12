@@ -29,10 +29,13 @@ namespace {
 constexpr uint32_t kSlots = Dx12Context::kFramesInFlight;
 constexpr uint32_t kLightBytes = Renderer::kMaxPunctualLights * sizeof(GpuLight);
 constexpr uint32_t kFogBytes = Renderer::kMaxFogVolumes * sizeof(GpuFogVolume);
+constexpr uint32_t kMediumBytes = sizeof(GpuMedium);   // S9c: one element, the frame's in-path medium
 constexpr uint32_t kEdgeIterations = 64;   // outline layers averaged for DoF / motion blur
 constexpr float kConvolutionBloomGain = 6.0f;        // as the real-time convolution bloom output
 constexpr float kConvolutionBloomIntensity = 0.12f;  // CSFinalize multiplier of the convolved bloom  // outline layers averaged for motion blur / depth of field
 constexpr float kLensScale = 0.007f;       // lens radius / focus distance (~8 px background blur at 1080p)
+// S9c: medium scattering events per GI path (GpuMedium::maxEvents); past it a segment is handled by transmittance only.
+constexpr uint32_t kOfflineMediumEvents = 32;
 
 float Halton(uint32_t index, uint32_t base) {
     float f = 1.0f, r = 0.0f;
@@ -166,10 +169,11 @@ struct OfflineRenderer::Impl {
     Texture icFinal;                   // smoothed finest level: the irradiance cache CSRender reads
     bool icValid = false;              // icFinal holds this image's cache
     // per-image constants (UPLOAD heap, persistently mapped, written only in Begin while the GPU is idle)
-    ComPtr<ID3D12Resource> sceneCb, lightBuf, fogBuf;
+    ComPtr<ID3D12Resource> sceneCb, lightBuf, fogBuf, mediumBuf;
     uint8_t* sceneCbMapped = nullptr;
     uint8_t* lightMapped = nullptr;
     uint8_t* fogMapped = nullptr;
+    uint8_t* mediumMapped = nullptr;
     // readbacks, one entry per frame slot
     ComPtr<ID3D12Resource> counterReadback;       // kFramesInFlight * 512 bytes
     ComPtr<ID3D12QueryHeap> timestampHeap;        // 2 * kFramesInFlight
@@ -219,6 +223,8 @@ struct OfflineRenderer::Impl {
         pc.sceneConstantsCpu = &sceneCpu;
         // S9: the job's local fog volumes for the volumetric march (0 = none, the shader reads no buffer)
         pc.fogVolumes = view.light.fogVolumes.empty() || !fogBuf ? 0 : fogBuf->GetGPUVirtualAddress();
+        // S9c: the in-path medium of the GI paths (0 = none; the shader only reads it when GpuMedium::mode is 1)
+        pc.medium = mediumBuf ? mediumBuf->GetGPUVirtualAddress() : 0;
         return pc;
     }
     void UavBarrier(ID3D12GraphicsCommandList* cmd) {
@@ -230,6 +236,7 @@ struct OfflineRenderer::Impl {
     D3D12_GPU_DESCRIPTOR_HANDLE GiTable(ID3D12GraphicsCommandList* cmd, TransientDescriptors& t);
     void DispatchPost(PassContext& pc, const ComputePipeline& pipe, Texture* target, Texture* in5, Texture* in6,
                       const float* c, uint32_t groupsX, uint32_t groupsY, float lit = 0.0f);
+    GpuMedium MediumFor(const FrameView& v, const OfflineJobDesc& j);
     void Volumetric(PassContext& pc);
     void ConvolveBloom(PassContext& pc);
     void EffectInputs(PassContext& pc);
@@ -989,29 +996,39 @@ void OfflineRenderer::Impl::Prepass(PassContext& pc, OfflineProgress& pg) {
     }
 }
 
+// S9 / S9c: the frame's medium (the single-scatter pass and the GI paths describe one medium). A stage's
+// environment.fog replaces the built-in base sigma0 / falloff / tint; the user's density still scales the density.
+// mode 1 = the GI paths compute the medium, so the single-scatter pass does not run (no double counting).
+GpuMedium OfflineRenderer::Impl::MediumFor(const FrameView& v, const OfflineJobDesc& j) {
+    GpuMedium m{};
+    const float fogG = v.light.volumetricAnisotropy > -0.99f ? v.light.volumetricAnisotropy : j.volumetricAnisotropy;
+    m.g = fogG > -0.99f ? fogG : 0.3f;   // -1 = unset: the punctual lights' built-in constant (as the pass)
+    m.sunG = v.light.sunVolumetricG > -0.99f ? v.light.sunVolumetricG : (fogG > -0.99f ? fogG : 0.55f);
+    m.sigma0 = (v.light.volumetricSigma0 >= 0.0f ? v.light.volumetricSigma0 : 0.005f) * j.volumetricDensity;
+    m.falloff = v.light.volumetricFalloff >= 0.0f ? v.light.volumetricFalloff : 0.02f;
+    m.radius = VolumetricMediumRadius(v.light);
+    m.tint = v.light.volumetricColor;
+    m.numFog = (uint32_t)std::min<size_t>(v.light.fogVolumes.size(), Renderer::kMaxFogVolumes);
+    m.maxEvents = kOfflineMediumEvents;
+    m.sunVolumetric = v.light.sunVolumetric;
+    // Full: only when the haze is on at all, and only when there is something to scatter in.
+    m.mode = (j.volumetric && j.volumetricFull && (m.sigma0 > 0.0f || m.numFog > 0)) ? 1u : 0u;
+    return m;
+}
+
 // Sun shafts and spotlight beams: half-resolution ray march (offline_volumetric.hlsl) + depth-aware blur;
 // CSFinalize composites image * transmittance + in-scattered light (volReady).
 void OfflineRenderer::Impl::Volumetric(PassContext& pc) {
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     gbuf.Transition(cmd, kSrvAll);
     volA.Transition(cmd, kUav);
-    // S9: the fog's anisotropy (a stage's, else the job's; -1 = the built-in constants), the local volumes.
-    const float fogG = view.light.volumetricAnisotropy > -0.99f ? view.light.volumetricAnisotropy
-                                                             : job.volumetricAnisotropy;
-    const float sunG = view.light.sunVolumetricG > -0.99f ? view.light.sunVolumetricG
-                                                       : (fogG > -0.99f ? fogG : 0.55f);
-    const float punctualG = fogG > -0.99f ? fogG : 0.3f;
-    const uint32_t fogCount = (uint32_t)std::min<size_t>(view.light.fogVolumes.size(), Renderer::kMaxFogVolumes);
-    // S9: the job's medium is the frame's (a stage's environment.fog is already in view.light).
-    const float falloff = view.light.volumetricFalloff >= 0.0f ? view.light.volumetricFalloff : 0.02f;
-    const DirectX::XMFLOAT3 tint = view.light.volumetricColor;
-    // S9: a stage's environment.fog density replaces the built-in 0.005 base; the user's density still scales it.
-    const float sigma0 = (view.light.volumetricSigma0 >= 0.0f ? view.light.volumetricSigma0 : 0.005f) *
-                         job.volumetricDensity;
-    const float c0[16] = {sigma0, falloff, VolumetricMediumRadius(view.light), sunG,
-                          (float)width, (float)height, 3.0f, punctualG,
-                          (float)(serial & 0xFFFFu), 0.25f, 0.45f, tint.z,
-                          (float)fogCount, view.light.sunVolumetric, tint.x, tint.y};
+    // S9 / S9c: the fog's anisotropy (a stage's, else the job's; -1 = the built-in constants), the local volumes.
+    const GpuMedium med = MediumFor(view, job);
+    const float fogCount = (float)med.numFog;
+    const float c0[16] = {med.sigma0, med.falloff, med.radius, med.sunG,
+                          (float)width, (float)height, 3.0f, med.g,
+                          (float)(serial & 0xFFFFu), 0.25f, 0.45f, med.tint.z,
+                          fogCount, view.light.sunVolumetric, med.tint.x, med.tint.y};
     volMarch.Dispatch(pc, pc.transient.SrvTable(*ctx, {&gbuf}), pc.transient.UavTable(*ctx, {&volA}), c0, 16,
                       Groups(volA.width), Groups(volA.height));
     UavBarrier(cmd);
@@ -1054,7 +1071,9 @@ void OfflineRenderer::Impl::Finish(PassContext& pc) {
     const float d2[8] = {4.0f, 2.0f, 0.0f, 0.0f, (float)w, (float)h, 0.0f, 0.0f};
     DispatchPost(pc, denoise, &denoiseA, &denoiseB, nullptr, d2, Groups(w), Groups(h));
 
-    if (job.volumetric && volMarch && volA) Volumetric(pc);
+    // S9c: in full mode the GI paths computed the medium (no single-scatter composite: no double counting).
+    const bool singlePass = job.volumetric && MediumFor(view, job).mode == 0;
+    if (singlePass && volMarch && volA) Volumetric(pc);
 
     // Shader packs (job.effects; none = nothing below changes). The pre-bloom share runs on the lit HDR image, in the
     // real-time frame's order: albedo, volumetric light and outlines composed in (CSLitCompose). Bloom then reads the
@@ -1284,7 +1303,9 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
     m.lightBuf = CreateMappedUpload(device, kLightBytes, &m.lightMapped, L"offline.lights");
     // S9: the local fog volumes of the job (GpuFogVolume; zeroed entries when the job has none)
     m.fogBuf = CreateMappedUpload(device, kFogBytes, &m.fogMapped, L"offline.fogvolumes");
-    if (!m.sceneCb || !m.lightBuf || !m.fogBuf) return false;
+    // S9c: the frame's in-path medium (one GpuMedium; mode 0 = the GI paths ignore it)
+    m.mediumBuf = CreateMappedUpload(device, kMediumBytes, &m.mediumMapped, L"offline.medium");
+    if (!m.sceneCb || !m.lightBuf || !m.fogBuf || !m.mediumBuf) return false;
 
     // Readbacks, one entry per frame slot.
     D3D12_HEAP_PROPERTIES readback{D3D12_HEAP_TYPE_READBACK};
@@ -1335,10 +1356,12 @@ void OfflineRenderer::Shutdown() {
     if (m.sceneCb && m.sceneCbMapped) m.sceneCb->Unmap(0, nullptr);
     if (m.lightBuf && m.lightMapped) m.lightBuf->Unmap(0, nullptr);
     if (m.fogBuf && m.fogMapped) m.fogBuf->Unmap(0, nullptr);
-    m.sceneCbMapped = m.lightMapped = m.fogMapped = nullptr;
+    if (m.mediumBuf && m.mediumMapped) m.mediumBuf->Unmap(0, nullptr);
+    m.sceneCbMapped = m.lightMapped = m.fogMapped = m.mediumMapped = nullptr;
     m.sceneCb.Reset();
     m.lightBuf.Reset();
     m.fogBuf.Reset();
+    m.mediumBuf.Reset();
     m.counterReadback.Reset();
     m.timestampReadback.Reset();
     m.timestampHeap.Reset();
@@ -1415,6 +1438,10 @@ void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors
     if (fogVolumes && fogVolumeCount)
         memcpy(m.fogMapped, fogVolumes,
                (size_t)std::min(fogVolumeCount, Renderer::kMaxFogVolumes) * sizeof(GpuFogVolume));
+    // S9c: the frame's in-path medium for the GI paths (GpuMedium::mode 1 = the GI paths compute the medium, so the
+    // single-scatter pass does not run)
+    const GpuMedium medium = m.MediumFor(m.view, m.job);
+    memcpy(m.mediumMapped, &medium, kMediumBytes);
 
     // 3. image targets
     const bool created = m.EnsureTargets(m.job.width, m.job.height);

@@ -166,6 +166,22 @@ struct GpuFogVolume {
 };
 static_assert(sizeof(GpuFogVolume) == 48, "GpuFogVolume layout");
 
+// S9c: the frame's participating medium for the offline GI path tracer (one element, t5 space1). mode 0 = the medium
+// is not computed in the paths (the single-scatter pass or no haze at all); 1 = in-path media (full).
+struct GpuMedium {
+    float sigma0;    // height fog extinction at y <= 0 (already scaled by the density slider)
+    float falloff;   // height falloff
+    float radius;    // the haze sphere around the stage (VolumetricMediumRadius)
+    float g;         // the fog's Henyey-Greenstein anisotropy (punctual / path continuation)
+    DirectX::XMFLOAT3 tint;  // scattering albedo of the height fog (the volume colours blend over it)
+    uint32_t mode;   // 0 = off, 1 = full (in-path media)
+    uint32_t numFog;     // local fog volumes in the t4 space1 buffer
+    uint32_t maxEvents;  // medium scattering events per path (0 = the shader default)
+    float sunG;          // the sun's Henyey-Greenstein g (g above is the fog's, for punctual lights and continuations)
+    float sunVolumetric; // the sun's share of the haze (LightParams::sunVolumetric)
+};
+static_assert(sizeof(GpuMedium) == 48, "GpuMedium layout");
+
 // Vertex buffer slot 0 (static, DEFAULT heap). 60 bytes.
 struct GpuVertex {
     float position[3];   // POSITION      R32G32B32_FLOAT
