@@ -2466,10 +2466,9 @@ word to deploy. Workers: opencode deepseek 4.1 1017 #low; Claude designed, revie
   antigravity auto-picks the Gemini flash family first (gemini-3.8-flash-high).
 
 ### Open / not verified
-- A short `--screen select --frames 3000` run (~9 s) ended before the library scan was saved (`SaveLibraryScanResult`
-  is skipped when the scan is cancelled at exit), and `build/bin/cache/library_result.json` had disappeared at that
-  point; why the old file vanished is not understood yet. A longer run (`--frames 30000`) writes it again.
-- A worker reported `[E] TransientDescriptors: window exhausted` on a PT run with an upscaler on; it did not appear in
-  the `--upscaler none` QA captures. Not investigated.
+- RESOLVED (2283d5e): the vanished library_result.json was a worker's `rm -f` to force a rescan; a short run cannot
+  rebuild it (a scan cancelled by the quit is never saved). run_capture's refusal and CLAUDE.md now say so.
+- RESOLVED (2283d5e): `TransientDescriptors: window exhausted` = the per-frame window (512) overflowed on path-traced
+  MMDX stage frames with haze + DoF (440 steady, 512+ on the first frame); not sky-specific. Window raised to 768.
 - S8b: one average colour per screen (a two-colour image lights the floor with the mix); raster / RT get no
   directional shadow from an image sky's own sun; clouds cast no ground shadows (the sun only dims with coverage).
