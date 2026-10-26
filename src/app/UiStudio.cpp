@@ -5097,21 +5097,22 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
             DrawStudioCameraPanel(w);
         }
     }
-    // models: keys / bone (pose) / morph tabs
+    // models: keys / bone (pose) / morph / rig tabs
     if (StudioPoseModel()) {
         ImGui::Dummy(ImVec2(w, Dp(4.0f)));
-        const char* tabs[] = {Tr("키"), Tr("본"), Tr("모프")};
-        const char* tabIcons[] = {icon::Diamond, icon::Bone, icon::Sliders};
-        d.inspectorTab = std::clamp(d.inspectorTab, 0, 2);
+        const char* tabs[] = {Tr("키"), Tr("본"), Tr("모프"), Tr("리그")};
+        const char* tabIcons[] = {icon::Diamond, icon::Bone, icon::Sliders, icon::PersonSimple};
+        d.inspectorTab = std::clamp(d.inspectorTab, 0, 3);
         if (studioInspectorToBones_) {   // a bone was just picked in the viewport
             ImGui::SetScrollHereY(0.0f);
             studioInspectorToBones_ = false;
         }
-        Segmented("##inspectortab", tabs, 3, &d.inspectorTab, w / Dpi(), 32.0f, tabIcons);
+        Segmented("##inspectortab", tabs, 4, &d.inspectorTab, w / Dpi(), 32.0f, tabIcons);
         ImGui::Dummy(ImVec2(w, Dp(10.0f)));
-        if (d.inspectorTab == 1 || d.inspectorTab == 2) {
+        if (d.inspectorTab == 1 || d.inspectorTab == 2 || d.inspectorTab == 3) {
             if (d.inspectorTab == 1) DrawStudioBoneTab(w);
-            else DrawStudioMorphTab(w);
+            else if (d.inspectorTab == 2) DrawStudioMorphTab(w);
+            else DrawStudioRigTab(w);
             ImGui::EndChild();
             return;
         }

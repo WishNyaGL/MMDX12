@@ -258,6 +258,11 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_pose_test.cpp)
   target_include_directories(studio_pose_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(studio_pose_test PRIVATE mmdx_core)
 endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_rig_test.cpp)
+  add_executable(studio_rig_test tools/studio_rig_test.cpp src/studio/RigGenerator.cpp src/studio/RigDefinition.cpp)
+  target_include_directories(studio_rig_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(studio_rig_test PRIVATE mmdx_core)
+endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_project_test.cpp)
   # SceneLight.cpp comes from mmdx_core (see above), never listed twice.
   add_executable(studio_project_test tools/studio_project_test.cpp src/studio/StudioProject.cpp src/studio/StudioMotion.cpp

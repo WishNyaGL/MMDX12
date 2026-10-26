@@ -1528,6 +1528,11 @@ const Entry kEnglish[] = {
     {"열 줄이기", "Fewer columns"},
     {"열 늘리기", "More columns"},
     {"재생/일시정지 (Space)", "Play / pause (Space)"},
+    {"리그", "Rig"},
+    {"리그 생성", "Generate Rig"},
+    {"현재 모델의 골격을 분석해 기본 리그(컨트롤러 뼈)를 생성합니다. 아직 컨트롤러 조작은 미구현입니다.", "Analyzes the model's skeleton and builds a base rig (controller bones). Controller manipulation is not implemented yet."},
+    {"역할 %d / %d 연결됨", "%d / %d roles mapped"},
+    {"연결 안 됨", "unmapped"},
     {"0..1. 1을 넘으면 물리 뼈를 심하게 흔들 수 있어요", "0..1. Above 1 the physics bones can be shaken violently."},
     {"열 %d", "Cols %d"},
     // Studio ribbon (app/UiStudioRibbon.cpp)
