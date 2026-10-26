@@ -673,6 +673,9 @@ private:
     void StudioRequest(StudioAction a, const std::filesystem::path& file = {});  // prompts first when dirty
     void StudioRunAction(StudioAction a, const std::filesystem::path& file);
     bool StudioSave(bool saveAs);                     // dialog when untitled or saveAs; false: cancelled / failed
+    // Writes each model's rig (if it has one in-memory) to a .mmdxrig next to `projectFile` and fills
+    // ProjectModel::rigPath. Returns false on write failure (with *error). No-op when no rigs are present.
+    bool StudioWriteRigFiles(const std::filesystem::path& projectFile, studio::ProjectData& data, std::string* error);
     bool StudioSaveTo(const std::filesystem::path& file);
     studio::ProjectData StudioProjectData() const;    // snapshot of the document (copies the motions)
     std::filesystem::path StudioRecoveryFile() const; // <exe>/recovery/autosave.mmdxproj

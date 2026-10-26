@@ -594,6 +594,8 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                         jm["mme"]["file"] = RelPath(m.mme.file, dir);
                 }
             }
+            // Rig file (relative to the project; absent = no rig).
+            if (!m.rigPath.empty()) jm["rig"] = RelPath(m.rigPath, dir);
             // M5c: an effect object shares the accessory key track (its keys drive the controller panel).
             if (m.kind == ModelKind::Prop || m.kind == ModelKind::Effect) {
                 const PropAttach& a = m.attach;
@@ -885,6 +887,11 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                         const std::string file = ReadString(mm, "file", "");
                         if (!file.empty()) pm.mme.file = ResolvePath(file, dir);
                     }
+                }
+                // Rig file (relative to the project; absent = no rig).
+                {
+                    const std::string rig = ReadString(m, "rig", "");
+                    if (!rig.empty()) pm.rigPath = ResolvePath(rig, dir);
                 }
                 if ((kind == ModelKind::Prop || kind == ModelKind::Effect) && m.contains("attach") &&
                     m["attach"].is_object()) {

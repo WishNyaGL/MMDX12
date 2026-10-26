@@ -345,6 +345,7 @@ bool LoadStudioProjectPackage(const std::filesystem::path& file, bool recovery, 
             m.shader = pm.shader;
             m.material = pm.material;
             m.mme = pm.mme;
+            m.rigFile = pm.rigPath;
             m.motion = std::move(pm.motion);
             if (m.pmx) {
                 m.motion.CanonicalizeNames(*m.pmx);
