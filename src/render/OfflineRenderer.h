@@ -124,6 +124,16 @@ public:
     bool Initialize(Dx12Context& ctx, const std::filesystem::path& shaderDir);
     void Shutdown();  // the GPU must be idle
 
+    // S8a: the emissive-triangle pick table of one image (Renderer::BuildEmissiveTable over the RtScene geometry
+    // table); Begin uploads it. triCount 0 = the image has no emitters.
+    struct EmissiveTable {
+        const GpuEmissiveTri* tris = nullptr;
+        uint32_t triCount = 0;
+        const float* cdf = nullptr;
+        const uint32_t* base = nullptr;
+        uint32_t baseCount = 0;
+    };
+
     // Starts a new image and records this frame's first share of work. The GPU must be idle (the
     // Renderer waits) and `rt` must already be built for view.models in `cmd`. With
     // view.motionBlur the models' previous ring entry (frame - 1) must hold the shutter-open pose. `sc` was filled for
@@ -131,16 +141,14 @@ public:
     // ctx.FrameNumber() (bone/morph ring entry for the outline pass).
     // S7a: `lightCdf` (lightCdfCount floats, the normalised inclusive pick CDF) is the image's light distribution
     // (Renderer::FillLightCdf); SceneConstants::lightCdfParams must already point at LightCdfSrv().
+    // S8a: `emissive` (the emissive-triangle pick table of the built RtScene, Renderer::BuildEmissiveTable) is uploaded
+    // with the image's constants and bound through the bindless buffer table; SceneConstants::emissiveParams must
+    // already point at EmissiveSrv() (x = -1 when triCount is 0).
     void Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, const BuiltinTextures* builtin,
                RtScene& rt, const FrameView& view, const SceneConstants& sc, const GpuLight* lights,
                uint32_t lightCount, const float* lightCdf, uint32_t lightCdfCount, const GpuFogVolume* fogVolumes,
-               uint32_t fogVolumeCount, const OfflineJobDesc& job, uint64_t frame, MmeRuntime* mme = nullptr,
-               MmeSkin* mmeSkin = nullptr);
-    // S7a: the heap index of the raw ByteAddressBuffer SRV holding this renderer's light CDF (for
-    // SceneConstants::lightCdfParams.x): the shaders read it through the bindless buffer table. DescriptorHeap::kInvalid
-    // before Initialize.
-    uint32_t LightCdfSrv() const;
-
+               uint32_t fogVolumeCount, const OfflineJobDesc& job, uint64_t frame,
+               const EmissiveTable& emissive = {}, MmeRuntime* mme = nullptr, MmeSkin* mmeSkin = nullptr);
     // Records this frame's share of work (no-op when Idle or Done).
     void Render(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, const BuiltinTextures* builtin,
                 RtScene& rt);
@@ -155,10 +163,21 @@ public:
     // called outside frame recording. preserveAlpha: keep the coverage alpha (job.exportAlpha) and
     // un-premultiply the colour, giving straight RGBA8 for a transparent export.
     bool ReadImage(ImageRGBA8& out, bool preserveAlpha = false);
+    // S7a: the heap index of the raw ByteAddressBuffer SRV holding this renderer's light CDF (for
+    // SceneConstants::lightCdfParams.x): the shaders read it through the bindless buffer table. DescriptorHeap::kInvalid
+    // before Initialize.
+    uint32_t LightCdfSrv() const;
+    // S8a: the heap indices of this renderer's emissive-triangle pick table (triangle list, CDF, per-geometry base), for
+    // SceneConstants::emissiveParams; DescriptorHeap::kInvalid before Initialize.
+    struct EmissiveSrvs {
+        uint32_t tris = 0xFFFFFFFFu;
+        uint32_t cdf = 0xFFFFFFFFu;
+        uint32_t base = 0xFFFFFFFFu;
+    };
+    EmissiveSrvs EmissiveSrv() const;
 
 private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    struct Impl;    std::unique_ptr<Impl> impl_;
     OfflineProgress progress_;
 };
 

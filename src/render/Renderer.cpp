@@ -275,6 +275,50 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     }
     lightCdfSrvCount_ = kTotalCbSlots;
 
+    // S8a: the emissive-triangle pick table (one raw SRV each for the triangle list, its CDF and the per-geometry base
+    // table; same slot layout as the light CDF). A frame without emitters leaves SceneConstants::emissiveParams.x = -1
+    // and the path tracers skip every NEE / MIS branch.
+    emissiveTriBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kEmissiveTriBytes * kTotalCbSlots,
+                                         &emissiveTriMapped_, L"scene.emissivetris");
+    emissiveCdfBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kEmissiveCdfBytes * kTotalCbSlots,
+                                         (uint8_t**)&emissiveCdfMapped_, L"scene.emissivecdf");
+    emissiveBaseBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kEmissiveBaseBytes * kTotalCbSlots,
+                                          (uint8_t**)&emissiveBaseMapped_, L"scene.emissivebase");
+    if (!emissiveTriBuf_ || !emissiveCdfBuf_ || !emissiveBaseBuf_) return false;
+    if (kTotalCbSlots > (uint32_t)std::size(emissiveTriSrv_)) {
+        LOG_ERROR("emissive NEE: SRV table too small for %u slots", kTotalCbSlots);
+        return false;
+    }
+    for (uint32_t slot = 0; slot < kTotalCbSlots; ++slot) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;   // raw ByteAddressBuffer (the shaders' bindless buffer table)
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.NumElements = kEmissiveTriMax * (sizeof(GpuEmissiveTri) / 4);
+        srv.Buffer.FirstElement = (UINT)((uint64_t)slot * kEmissiveTriMax * (sizeof(GpuEmissiveTri) / 4));
+        srv.Buffer.StructureByteStride = 0;
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        const uint32_t triIdx = ctx.SrvHeap().Allocate(1);
+        if (triIdx == DescriptorHeap::kInvalid) return false;
+        ctx.Device()->CreateShaderResourceView(emissiveTriBuf_.Get(), &srv, ctx.SrvHeap().Cpu(triIdx));
+        emissiveTriSrv_[slot] = triIdx;
+
+        srv.Buffer.NumElements = kEmissiveTriMax;
+        srv.Buffer.FirstElement = (UINT)((uint64_t)slot * kEmissiveTriMax);
+        const uint32_t cdfIdx = ctx.SrvHeap().Allocate(1);
+        if (cdfIdx == DescriptorHeap::kInvalid) return false;
+        ctx.Device()->CreateShaderResourceView(emissiveCdfBuf_.Get(), &srv, ctx.SrvHeap().Cpu(cdfIdx));
+        emissiveCdfSrv_[slot] = cdfIdx;
+
+        srv.Buffer.NumElements = kEmissiveBaseMax;
+        srv.Buffer.FirstElement = (UINT)((uint64_t)slot * kEmissiveBaseMax);
+        const uint32_t baseIdx = ctx.SrvHeap().Allocate(1);
+        if (baseIdx == DescriptorHeap::kInvalid) return false;
+        ctx.Device()->CreateShaderResourceView(emissiveBaseBuf_.Get(), &srv, ctx.SrvHeap().Cpu(baseIdx));
+        emissiveBaseSrv_[slot] = baseIdx;
+    }
+    emissiveSrvCount_ = kTotalCbSlots;
+
     // S7c: the per-slot light-cluster blocks (PassLightCull writes them as a RAW UAV, the scene shaders read them as a
     // raw ByteAddressBuffer through the bindless buffer table). A DEFAULT-heap buffer: the UAV is not allowed on an
     // upload heap, and it is written / read on the GPU only.
@@ -444,6 +488,7 @@ bool Renderer::RenderScreenFeed(ID3D12GraphicsCommandList* cmd, const FrameView&
     sc.edgeScale = (float)h / 1080.0f;
     sc.shading = 0.0f;   // always lit
     sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};   // S7c: the feed's camera is not the frame's cluster grid
+    sc.emissiveParams = emissiveParams_;   // S8a: the frame's emissive-triangle pick table (raster feed: unused)
     memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
 
     // The feed reads the frame's lights + shadow maps: its own slot in the light buffer is a copy of the frame's.
@@ -747,6 +792,7 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
     // S7c: no light clusters by default (FillSceneConstants is also the base for the camera feeds and the extra views,
     // whose cameras differ from the frame's cluster grid); RecordScene turns them on for the main view.
     sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};
+    sc.emissiveParams = {-1.0f, -1.0f, 0.0f, -1.0f};   // S8a: RecordScene sets it after the RtScene build
 }
 
 uint32_t Renderer::FillGpuLights(const LightParams& light, GpuLight* out, const std::vector<int>* spotSlices,
@@ -896,6 +942,148 @@ uint32_t Renderer::FillLightCdf(const LightParams& light, float* out, uint32_t c
     return (uint32_t)count;
 }
 
+// S8a: the emissive-triangle pick table of the last RtScene build. Per geometry (index = geometry id) the material's
+// rest-pose triangles are appended with weight = rest-pose area x EmitEstimate, and the running sum is normalised into an
+// inclusive CDF. Above kEmissiveTriMax entries the largest-weight geometries win (a geometry's triangles stay together,
+// so the per-geometry base table stays a contiguous range); a zero total falls back to a uniform CDF over the entries.
+uint32_t Renderer::BuildEmissiveTable(const std::vector<RtScene::GeometryRef>& geometries, EmissiveTable& out,
+                                      bool& warned) {
+    out.tris.clear();
+    out.cdf.clear();
+    out.base.assign(std::min<size_t>(std::max<size_t>(geometries.size(), 1), kEmissiveBaseMax), kEmissiveTriNone);
+    if (geometries.size() > kEmissiveBaseMax) {
+        if (!warned) LOG_WARN("emissive NEE: %zu geometries exceed the base table (%u), the extra ones do not emit",
+                              geometries.size(), kEmissiveBaseMax);
+        warned = true;
+    }
+
+    // Per geometry: its first triangle's weight and its triangle count (a material's triangles are contiguous).
+    struct Cand {
+        uint32_t geometry;
+        uint32_t first;
+        uint32_t count;
+        double weight;
+    };
+    std::vector<Cand> cands;
+    cands.reserve(geometries.size());
+    for (size_t gi = 0; gi < geometries.size() && gi < kEmissiveBaseMax; ++gi) {
+        const RtScene::GeometryRef& ref = geometries[gi];
+        if (!ref.model) continue;
+        const float estimate = ref.model->EmitEstimate(ref.material);
+        if (!(estimate > 0.0f)) continue;
+        const auto& mats = ref.model->Materials();
+        if (ref.material >= mats.size()) continue;
+        const std::vector<float>& areas = ref.model->TriAreas();
+        const uint32_t triCount = mats[ref.material].indexCount / 3;
+        const uint32_t firstTri = mats[ref.material].indexStart / 3;
+        if (triCount == 0 || (size_t)firstTri + triCount > areas.size()) continue;
+        double w = 0.0;
+        for (uint32_t t = 0; t < triCount; ++t) w += std::max(areas[firstTri + t], 0.0f);
+        if (!(w > 0.0)) continue;
+        cands.push_back({(uint32_t)gi, firstTri, triCount, w * (double)estimate});
+    }
+    if (cands.empty()) return 0;
+
+    // Cap: keep the heaviest geometries (stable: ties keep geometry order) until the entry budget is spent.
+    size_t total = 0;
+    for (const Cand& c : cands) total += c.count;
+    if (total > kEmissiveTriMax) {
+        if (!warned) {
+            LOG_WARN("emissive NEE: %zu triangles exceed the pick table (%u), the largest-area materials are kept",
+                     total, kEmissiveTriMax);
+            warned = true;
+        }
+        std::stable_sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.weight > b.weight; });
+        size_t kept = 0, count = 0;
+        while (kept < cands.size() && count + cands[kept].count <= kEmissiveTriMax) count += cands[kept++].count;
+        if (kept == 0) {
+            // a single material larger than the whole table: keep the start of it (a partial CDF over its triangles)
+            cands[0].count = kEmissiveTriMax;
+            kept = 1;
+        }
+        cands.resize(kept);
+        // Back to geometry order, so the base table and the entry list read in one pass.
+        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.geometry < b.geometry; });
+    }
+
+    size_t totalEntries = 0;
+    for (const Cand& c : cands) totalEntries += c.count;
+    out.tris.reserve(totalEntries);
+    out.cdf.resize(totalEntries);
+    std::vector<double> weights(totalEntries, 0.0);
+    double totalWeight = 0.0;
+    for (const Cand& c : cands) {
+        const uint32_t first = (uint32_t)out.tris.size();
+        out.base[c.geometry] = first;
+        const float estimate = geometries[c.geometry].model->EmitEstimate(geometries[c.geometry].material);
+        const std::vector<float>& areas = geometries[c.geometry].model->TriAreas();
+        for (uint32_t t = 0; t < c.count; ++t) {
+            out.tris.push_back({c.geometry, t});
+            const double w = (double)std::max(areas[c.first + t], 0.0f) * (double)estimate;
+            weights[first + t] = w;
+            totalWeight += w;
+        }
+    }
+    // Inclusive running sum, normalised to 1 (the last entry is exactly 1).
+    double acc = 0.0;
+    for (size_t i = 0; i < totalEntries; ++i) {
+        acc += weights[i];
+        out.cdf[i] = totalWeight > 0.0 ? (float)(acc / totalWeight) : (float)(i + 1) / (float)totalEntries;
+    }
+    out.cdf[totalEntries - 1] = 1.0f;
+    return (uint32_t)totalEntries;
+}
+
+// S8a: uploads the emissive pick table of the geometry table the last RtScene::Build produced into `cbSlot`'s buffers.
+// The table itself is rebuilt only when its key changes (geometry list + per-material emission estimates), so a static
+// stage does not rebuild it every frame; a bound screen texture or a runtime PBR override changes the key and the next
+// frame picks it up. A slot that does not hold the current key gets it uploaded again (the slots rotate), so a slot bound
+// by a frame in flight always reads the table this frame's SceneConstants describe.
+void Renderer::UpdateEmissiveTable(uint32_t cbSlot) {
+    emissiveParams_ = {-1.0f, -1.0f, 0.0f, -1.0f};
+    if (!rt_ || !emissiveTriBuf_ || cbSlot >= emissiveSrvCount_) return;
+    const std::vector<RtScene::GeometryRef>& refs = rt_->GeometryRefs();
+    if (refs.empty()) return;
+
+    // Key: geometry count plus, per geometry, the model uid, the material and the emission estimate (bit pattern).
+    uint64_t key = 1469598103934665603ull;   // FNV-1a
+    const auto fold = [&key](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+    fold(refs.size());
+    for (const RtScene::GeometryRef& r : refs) {
+        fold(r.model ? r.model->Uid() : 0ull);
+        fold((uint64_t)r.material);
+        const float e = r.model ? r.model->EmitEstimate(r.material) : 0.0f;
+        uint32_t bits = 0;
+        std::memcpy(&bits, &e, sizeof(bits));
+        fold(bits);
+    }
+    // A key of 0 would read as "nothing built": keep it out of the way by folding it to 1.
+    if (key == 0) key = 1;
+    if (key != emissiveKey_) {
+        emissiveKey_ = key;
+        emissiveCount_ = BuildEmissiveTable(refs, emissiveTable_, emissiveWarned_);
+        std::fill(std::begin(emissiveSlotKey_), std::end(emissiveSlotKey_), 0ull);
+        if (emissiveCount_ > 0)
+            LOG_INFO("EMISSIVE tris=%u emitterGeometries=%u", emissiveCount_, (uint32_t)emissiveTable_.base.size());
+    }
+    if (emissiveCount_ == 0) return;
+    if (emissiveSlotKey_[cbSlot] != emissiveKey_) {
+        std::memcpy(emissiveTriMapped_ + (size_t)cbSlot * kEmissiveTriBytes, emissiveTable_.tris.data(),
+                    (size_t)emissiveCount_ * sizeof(GpuEmissiveTri));
+        std::memcpy(emissiveCdfMapped_ + (size_t)cbSlot * kEmissiveTriMax, emissiveTable_.cdf.data(),
+                    (size_t)emissiveCount_ * sizeof(float));
+        // the base table is indexed by geometry id: unset entries must read 0xFFFFFFFF, not a stale range
+        std::fill_n(emissiveBaseMapped_ + (size_t)cbSlot * kEmissiveBaseMax, kEmissiveBaseMax, kEmissiveTriNone);
+        const size_t baseCount = std::min<size_t>(emissiveTable_.base.size(), kEmissiveBaseMax);
+        if (baseCount)
+            std::memcpy(emissiveBaseMapped_ + (size_t)cbSlot * kEmissiveBaseMax, emissiveTable_.base.data(),
+                        baseCount * sizeof(uint32_t));
+        emissiveSlotKey_[cbSlot] = emissiveKey_;
+    }
+    emissiveParams_ = {(float)emissiveTriSrv_[cbSlot], (float)emissiveCdfSrv_[cbSlot], (float)emissiveCount_,
+                       (float)emissiveBaseSrv_[cbSlot]};
+}
+
 void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t w, uint32_t h,
                            uint32_t cbSlot, uint64_t frame, bool offscreen) {
     EnsurePointShadowMap(view.light, offscreen);
@@ -967,6 +1155,13 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
             rt = rt_.get();
         else
             path = RenderPath::Raster;
+    }
+    // S8a: the emissive-triangle pick table of the geometry table just built (the path tracers' emissive NEE). Filled
+    // after the build (it walks the same RtGeometry order) and before the scene constants are uploaded a second time.
+    if (rt) {
+        UpdateEmissiveTable(cbSlot);
+        sc.emissiveParams = emissiveParams_;
+        memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
     }
     const bool quad = !offscreen && !view.extraViews.empty() && path == RenderPath::Raster;
     IUpscaler* up = (offscreen || quad) ? nullptr : EffectiveUpscaler();
@@ -1120,6 +1315,7 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
             esc.invViewportSize = {1.0f / pxW, 1.0f / pxH};
             esc.edgeScale = pxH / 1080.0f;
             esc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};   // S7c: an extra view has its own camera
+            esc.emissiveParams = {-1.0f, -1.0f, 0.0f, -1.0f};    // S8a: the ortho views draw raster
             const size_t slot = (size_t)kCbSlots + (size_t)cbSlot * kMaxExtraViews + e;
             memcpy(sceneCbMapped_ + slot * kSceneCbSize, &esc, sizeof(esc));
             pc.extraSceneConstants[e] = sceneCb_->GetGPUVirtualAddress() + (uint64_t)slot * kSceneCbSize;
@@ -1826,6 +2022,31 @@ void Renderer::Shutdown() {
     }
     std::fill(std::begin(lightClusterSrv_), std::end(lightClusterSrv_), DescriptorHeap::kInvalid);
     lightClusterSrvCount_ = 0;
+    // S8a: the emissive-triangle pick table (three raw SRVs per slot + the UPLOAD buffers)
+    if (emissiveTriBuf_ && emissiveTriMapped_) emissiveTriBuf_->Unmap(0, nullptr);
+    if (emissiveCdfBuf_ && emissiveCdfMapped_) emissiveCdfBuf_->Unmap(0, nullptr);
+    if (emissiveBaseBuf_ && emissiveBaseMapped_) emissiveBaseBuf_->Unmap(0, nullptr);
+    if (ctx_) {
+        for (uint32_t i = 0; i < emissiveSrvCount_; ++i) {
+            for (uint32_t* srv : {&emissiveTriSrv_[i], &emissiveCdfSrv_[i], &emissiveBaseSrv_[i]})
+                if (*srv != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(*srv, 1);
+        }
+    }
+    std::fill(std::begin(emissiveTriSrv_), std::end(emissiveTriSrv_), DescriptorHeap::kInvalid);
+    std::fill(std::begin(emissiveCdfSrv_), std::end(emissiveCdfSrv_), DescriptorHeap::kInvalid);
+    std::fill(std::begin(emissiveBaseSrv_), std::end(emissiveBaseSrv_), DescriptorHeap::kInvalid);
+    emissiveSrvCount_ = 0;
+    emissiveTriMapped_ = nullptr;
+    emissiveCdfMapped_ = nullptr;
+    emissiveBaseMapped_ = nullptr;
+    emissiveTriBuf_.Reset();
+    emissiveCdfBuf_.Reset();
+    emissiveBaseBuf_.Reset();
+    emissiveKey_ = 0;
+    emissiveTable_ = EmissiveTable{};
+    emissiveCount_ = 0;
+    std::fill(std::begin(emissiveSlotKey_), std::end(emissiveSlotKey_), 0ull);
+    emissiveParams_ = {-1.0f, -1.0f, 0.0f, -1.0f};
     sceneCbMapped_ = lightBufMapped_ = fogBufMapped_ = nullptr;
     lightCdfMapped_ = nullptr;
     sceneCb_.Reset();

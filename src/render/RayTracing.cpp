@@ -154,6 +154,7 @@ void RtScene::Shutdown() {
     tlasBytes_ = tlasScratchBytes_ = 0;
     tlasCapacity_ = instanceCapacity_ = geometryCapacity_ = packRecordCapacity_ = packExtSlotCapacity_ = 0;
     lastSlot_ = 0;
+    geometryRefs_.clear();
     skinPso_.Reset();
     skinRootSig_.Reset();
     device5_.Reset();
@@ -432,6 +433,8 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
         instancesMapped_ + (size_t)slot * instanceCapacity_ * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
     auto* geom = reinterpret_cast<RtGeometry*>(
         geometriesMapped_ + (size_t)slot * geometryCapacity_ * sizeof(RtGeometry));
+    geometryRefs_.clear();
+    geometryRefs_.reserve(g);
     uint32_t base = 0;
     for (size_t modelIdx = 0; modelIdx < models.size(); ++modelIdx) {
         GpuModel* m = models[modelIdx];
@@ -598,6 +601,7 @@ bool RtScene::Build(ID3D12GraphicsCommandList* cmd, const std::vector<GpuModel*>
             e.toonMul = c.toonMul;
             e.toonAdd = c.toonAdd;
             *geom++ = e;
+            geometryRefs_.push_back({m, mi});
         }
         base += (uint32_t)rt.geometryMaterials.size();
     }

@@ -50,6 +50,13 @@ public:
     D3D12_GPU_VIRTUAL_ADDRESS Tlas() const;        // RaytracingAccelerationStructure (t0 space1)
     D3D12_GPU_VIRTUAL_ADDRESS Geometries() const;  // StructuredBuffer<RtGeometry> of the last Build (t1 space1)
     D3D12_GPU_VIRTUAL_ADDRESS PackExtSlots() const;// StructuredBuffer<float4> (t3 space1)
+    // S8a: the geometry table of the last Build, one entry per RtGeometry in buffer order (index = geometry id): the
+    // model and material it was built from. Empty before the first Build.
+    struct GeometryRef {
+        GpuModel* model = nullptr;
+        uint32_t material = 0;
+    };
+    const std::vector<GeometryRef>& GeometryRefs() const { return geometryRefs_; }
 
 private:
     bool EnsureModelResources(GpuModel& model);
@@ -77,6 +84,7 @@ private:
     uint8_t* packExtSlotsMapped_ = nullptr;
     uint32_t packExtSlotCapacity_ = 0;                       // float4 count per slot
     uint32_t lastSlot_ = 0;
+    std::vector<GeometryRef> geometryRefs_;   // S8a: the geometry table of the last Build (index = geometry id)
     PackTextures* packTextures_ = nullptr;
     bool ready_ = false;
 };

@@ -15,6 +15,21 @@ inline constexpr uint32_t kSpotShadowSlices = 16;
 // S7a: a light CDF lives in a raw ByteAddressBuffer SRV (bindless buffer table): one float per light, the normalised
 // inclusive running sum of the pick weight (Renderer::FillLightCdf). At most one per Renderer::kMaxPunctualLights.
 inline constexpr uint32_t kLightCdfMax = 256;
+// S8a: emissive-triangle next-event estimation (LED screens / AutoLuminous / PBR emissive). One entry per emitcing
+// triangle: geometry id (index into the RtScene geometry table) and the triangle's index inside that geometry. The
+// pick CDF holds one float per entry (normalised inclusive running sum of area x emission estimate), and a per-geometry
+// base table maps a geometry id to its first entry (0xFFFFFFFF = the geometry does not emit).
+struct GpuEmissiveTri {
+    uint32_t geometry;
+    uint32_t triangle;
+};
+static_assert(sizeof(GpuEmissiveTri) == 8, "GpuEmissiveTri layout");
+inline constexpr uint32_t kEmissiveTriMax = 262144;   // entries in the pick table (largest-weight geometries first)
+inline constexpr uint32_t kEmissiveTriBytes = kEmissiveTriMax * sizeof(GpuEmissiveTri);
+inline constexpr uint32_t kEmissiveCdfBytes = kEmissiveTriMax * sizeof(float);
+inline constexpr uint32_t kEmissiveBaseMax = 8192;    // geometries the base table can address
+inline constexpr uint32_t kEmissiveBaseBytes = kEmissiveBaseMax * sizeof(uint32_t);
+inline constexpr uint32_t kEmissiveTriNone = 0xFFFFFFFFu;
 // S7c: clustered light culling (Forward+ with depth slices). The view is cut into a fixed froxel grid: screen tiles x
 // exponential (log) view-depth slices. Each cluster stores one header uint (the light count, or 0xFFFF = "too many:
 // the shaders loop over every light") followed by up to kClusterMaxLights light indices in ASCENDING light order, so a
@@ -111,6 +126,12 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     // w = log-slice bias: a fragment at view depth z belongs to slice clamp(floor(log(max(z, nearZ)) * scale + bias),
     // 0, slices - 1); slice k starts at view depth exp((k - bias) / scale). Layout / order: see kCluster* above.
     DirectX::XMFLOAT4 lightClusterParams;
+    // S8a: the frame's emissive-triangle pick table (Renderer::BuildEmissiveTable), read by the path tracers through
+    // the bindless buffer table. x = SrvHeap index of the RawBuffer of GpuEmissiveTri (uint2 per entry, negative =
+    // none: no NEE, no MIS), y = SrvHeap index of the float pick CDF (normalised inclusive, one entry per triangle),
+    // z = triangle count, w = SrvHeap index of the per-geometry base table (a uint per geometry id: index of the
+    // geometry's first entry in the triangle list, or 0xFFFFFFFF when the geometry does not emit).
+    DirectX::XMFLOAT4 emissiveParams;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 

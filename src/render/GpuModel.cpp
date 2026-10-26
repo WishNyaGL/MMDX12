@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -183,6 +184,20 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     ibv_.Format = DXGI_FORMAT_R32_UINT;
     ibv_.SizeInBytes = (UINT)(pmx.indices.size() * sizeof(uint32_t));
     ibv_.BufferLocation = ib_->GetGPUVirtualAddress();
+
+    // S8a: rest-pose triangle areas (the emissive-triangle CDF weighs a triangle by area x emission estimate).
+    triAreas_.assign(pmx.indices.size() / 3, 0.0f);
+    for (size_t t = 0; t < triAreas_.size(); ++t) {
+        const DirectX::XMFLOAT3& a = pmx.vertices[pmx.indices[t * 3 + 0]].position;
+        const DirectX::XMFLOAT3& b = pmx.vertices[pmx.indices[t * 3 + 1]].position;
+        const DirectX::XMFLOAT3& c = pmx.vertices[pmx.indices[t * 3 + 2]].position;
+        const float e1[3] = {b.x - a.x, b.y - a.y, b.z - a.z};
+        const float e2[3] = {c.x - a.x, c.y - a.y, c.z - a.z};
+        const float cx = e1[1] * e2[2] - e1[2] * e2[1];
+        const float cy = e1[2] * e2[0] - e1[0] * e2[2];
+        const float cz = e1[0] * e2[1] - e1[1] * e2[0];
+        triAreas_[t] = 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
+    }
 
     // SDEF parameters (slot 3), precomputed like saba / MMD: with w1 = 1 - w0 and rw = R0 w0 + R1 w1,
     // R0' = C + R0 - rw, R1' = C + R1 - rw, stored as (C + R0') / 2 and (C + R1') / 2.
@@ -755,8 +770,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     return true;
 }
 
-void GpuModel::SetMaterialBlendHints(const std::vector<uint8_t>& hints, uint8_t def) {
-    if (materials_.empty()) return;
+void GpuModel::SetMaterialBlendHints(const std::vector<uint8_t>& hints, uint8_t def) {    if (materials_.empty()) return;
     materialBlend_.assign(materials_.size(), 0);
     for (size_t i = 0; i < materials_.size(); ++i) {
         const uint8_t h = i < hints.size() ? hints[i] : def;  // slots past the vector use the bare Obj default
@@ -1132,6 +1146,43 @@ void GpuModel::BindMaterialTexture(Dx12Context& ctx, size_t materialIndex, ID3D1
         if (hasTex) c->flags |= MatFlag_HasTexture;
     }
     for (uint64_t& v : materialEntryVersion_) v = ~0ull;   // re-upload the constants on the next UpdateMaterials
+}
+
+// S8a: the material's emission estimate, in the same terms the shaders' emission functions add at an average texel
+// (ScreenEmission / AutoLumEmission / PbrEmissive). The path tracers weigh a triangle by area x this value to build
+// their emissive-triangle pick CDF; the exact radiance is evaluated in the shader at the sampled uv, so this only
+// decides where the samples go. A bound emission map is assumed to average one.
+float GpuModel::EmitEstimate(size_t material) const {
+    if (material >= materialConsts_.size()) return 0.0f;
+    const MaterialConstants& c = materialConsts_[material];
+    // S5 screen: the bound texture IS the emission, scaled by the brightness in the reflectivity slot.
+    if ((c.flags & MatFlag_Screen) != 0) return std::max(c.reflectivity, 0.0f);
+    float e = 0.0f;
+    // そぼろ AutoLuminous: luminance(diffuse) x the shader's strength ramp x its HDR gain.
+    if ((c.flags & MatFlag_AutoLuminous) != 0) {
+        const float lum = 0.2126f * std::max(c.diffuse.x, 0.0f) + 0.7152f * std::max(c.diffuse.y, 0.0f) +
+                          0.0722f * std::max(c.diffuse.z, 0.0f);
+        e += lum * std::clamp((c.specularPower - 100.0f) * 0.1f, 0.0f, 20.0f) * 4.0f;
+    }
+    // PBR record emissive (PbrEmissive): a map contributes its slot colour (the map averages one), a constant its
+    // sRGB-decoded value (HDR records carry a linear value, see GpuPbrMaterial::flags bit 3).
+    const uint32_t rec = PbrIndex(material);
+    if (rec != DescriptorHeap::kInvalid && rec < pbrRecords_.size()) {
+        const GpuPbrMaterial& r = pbrRecords_[rec];
+        if ((r.flags & 4u) != 0) {
+            const GpuPbrSlot& s = r.slots[(int)PbrSlotId::Emissive];
+            DirectX::XMFLOAT3 v = {std::max(s.value.x, 0.0f), std::max(s.value.y, 0.0f), std::max(s.value.z, 0.0f)};
+            if (s.textureSrv < 0 && (r.flags & 8u) == 0) {
+                const auto srgb = [](float x) {
+                    x = std::clamp(x, 0.0f, 1.0f);
+                    return x <= 0.0031308f ? x * 12.92f : 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f;
+                };
+                v = {srgb(v.x), srgb(v.y), srgb(v.z)};
+            }
+            e += 0.2126f * v.x + 0.7152f * v.y + 0.0722f * v.z;
+        }
+    }
+    return e;
 }
 
 void GpuModel::SetMaterialScreen(size_t materialIndex, bool on, float brightness) {

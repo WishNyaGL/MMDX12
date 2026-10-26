@@ -65,12 +65,30 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     // ray paths see this frame's screen flags.
     UpdateStageScreens(cmd, view, sc);
     if (!rt_->Build(cmd, view.models, ctx_->FrameNumber(), ctx_->FrameSlot())) return false;
+    // S8a: the image's emissive-triangle pick table (the LED walls / AutoLuminous / PBR emitters of the built scene),
+    // uploaded by the offline renderer with the image's other constants.
+    Renderer::EmissiveTable emissive;
+    const uint32_t emissiveCount = BuildEmissiveTable(rt_->GeometryRefs(), emissive, emissiveWarned_);
+    OfflineRenderer::EmissiveTable emissiveUpload;
+    const OfflineRenderer::EmissiveSrvs emissiveSrv = offline_->EmissiveSrv();
+    if (emissiveCount > 0) {
+        sc.emissiveParams = {(float)(int32_t)emissiveSrv.tris, (float)(int32_t)emissiveSrv.cdf, (float)emissiveCount,
+                             (float)(int32_t)emissiveSrv.base};
+        emissiveUpload.tris = emissive.tris.data();
+        emissiveUpload.triCount = emissiveCount;
+        emissiveUpload.cdf = emissive.cdf.data();
+        emissiveUpload.base = emissive.base.data();
+        emissiveUpload.baseCount = (uint32_t)emissive.base.size();
+    } else {
+        sc.emissiveParams = {-1.0f, -1.0f, 0.0f, -1.0f};
+    }
+    memcpy(sceneCbMapped_ + (size_t)ctx_->FrameSlot() * kSceneCbSize, &sc, sizeof(sc));
     // M5b: the offline job's post-effect list is filled by the caller (app) from the same list; this is only a
     // fallback for callers that did not (the renderer's current MME list).
     OfflineJobDesc jobWithMme = job;
     if (jobWithMme.mmeEffects.empty()) jobWithMme.mmeEffects = settings_.mmeEffects;
     offline_->Begin(cmd, transient_, &builtin_, *rt_, view, sc, lights.data(), count, lightCdf.data(), cdfCount,
-                    fogVolumes, fogCount, jobWithMme, ctx_->FrameNumber(), mme_.get(), mmeSkin_.get());
+                    fogVolumes, fogCount, jobWithMme, ctx_->FrameNumber(), emissiveUpload, mme_.get(), mmeSkin_.get());
     float area[4];
     ViewportArea(settings_, (float)ctx_->Width(), (float)ctx_->Height(), area);
     if (offlinePresent_) offline_->Present(cmd, transient_, presentRect_, area);

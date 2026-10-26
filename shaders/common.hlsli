@@ -70,6 +70,10 @@ cbuffer SceneCB : register(b0) {
     // (tilesY & 0xFF) << 8 | (slices & 0xFF) << 16 (0 = none), z = log-slice scale, w = log-slice bias
     // (shaders/light_cluster.hlsli). Layout: ShaderInterop.h kCluster*.
     float4 gLightCluster;
+    // S8a: the emissive-triangle pick table (ShaderInterop.h emissiveParams): x = SrvHeap index of the RawBuffer of
+    // GpuEmissiveTri (negative = no emitters: no NEE, no MIS), y = the pick CDF index, z = entry count, w = the
+    // per-geometry base table index. See shaders/emissive_nee.hlsli.
+    float4 gEmissive;
 };
 
 static const float PI = 3.14159265;
