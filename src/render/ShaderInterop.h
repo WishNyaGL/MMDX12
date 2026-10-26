@@ -73,6 +73,10 @@ struct GpuPackInputs {
 };
 static_assert(sizeof(GpuPackInputs) == 544, "GpuPackInputs layout");
 
+// S10: the planar mirrors of one frame (Renderer::UpdateMirrors). Two slots at most: the largest on-screen planes
+// that face the camera. Mirrors are raster-only; the ray-traced paths reflect at the hit instead.
+inline constexpr uint32_t kMaxMirrorPlanes = 2;
+
 struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     DirectX::XMFLOAT4X4 view;
     DirectX::XMFLOAT4X4 proj;          // jittered when TAA is on
@@ -132,6 +136,19 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     // z = triangle count, w = SrvHeap index of the per-geometry base table (a uint per geometry id: index of the
     // geometry's first entry in the triangle list, or 0xFFFFFFFF when the geometry does not emit).
     DirectX::XMFLOAT4 emissiveParams;
+    // S10: planar mirrors of the frame (Renderer::UpdateMirrors), raster only. mirrorViewProj[i] is the frame camera
+    // reflected about mirror slot i's plane, with the frame camera's own projection: a mirror pixel at world position
+    // P samples slot i's texture at project(P, mirrorViewProj[i]) (P lies on the plane, so the reflected view sees
+    // exactly the reflected ray). mirrorParams: x = mirror count (0 = none: a mirror material shows its tint only),
+    // y = SrvHeap index of slot 0's reflection texture, z = slot 1's (-1 = none), w = unused.
+    DirectX::XMFLOAT4X4 mirrorViewProj[kMaxMirrorPlanes];
+    // mirrorPlane[i]: xyz = unit world normal, w = -dot(normal, point on the plane). A mirror pixel picks the slot
+    // whose plane it lies on.
+    DirectX::XMFLOAT4 mirrorPlane[kMaxMirrorPlanes];
+    DirectX::XMFLOAT4 mirrorParams;
+    // S10: the mirror pass's clip plane (world space, front side positive: the lit PS discards fragments behind it);
+    // (0,0,0,0) = off, which every other view / pass keeps.
+    DirectX::XMFLOAT4 clipPlane;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 
@@ -189,6 +206,11 @@ enum MaterialShaderFlags : uint32_t {
     // S5: an MMDX stage screen surface: the bound texture is the emission (HDR, x the material's reflectivity slot as
     // brightness), the material itself is black (no diffuse / specular / AO).
     MatFlag_Screen        = 1u << 12,
+    // S10: a planar mirror (docs/stage_format.md "mirror"): a perfect specular surface whose base colour is the
+    // reflection tint and whose roughness blurs it (0 = sharp). Raster samples the planar reflection texture of the
+    // frame (SceneConstants::mirrorParams), RT / PT / offline GI reflect natively; without a reflection texture
+    // (quad / ortho views, camera feeds, RenderToImage) the material shows the tint only.
+    MatFlag_Mirror        = 1u << 13,
 };
 
 struct MaterialConstants {            // b1, one 256-byte slot per material

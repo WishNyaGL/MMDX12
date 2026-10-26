@@ -45,6 +45,18 @@ struct PbrOverride {
     std::optional<float> ior;
     std::optional<bool> castShadow;
     std::optional<bool> receiveShadow;
+    std::optional<bool> mirror;   // S10: MatFlag_Mirror (a planar mirror; see GpuModel::MirrorPlanes)
+};
+
+// S10 planar mirror: the plane a mirror material's rest-pose triangles lie on (model space), fitted once at load.
+// `valid` false = the material's triangles are not coplanar (1 % of the material's extent) or degenerate: the material
+// still shows its reflection tint, but no reflection is rendered for it.
+struct MirrorPlane {
+    size_t material = 0;                  // index into GpuModel::Materials()
+    DirectX::XMFLOAT3 centroid{0, 0, 0};
+    DirectX::XMFLOAT3 normal{0, 1, 0};    // unit, model space
+    float area = 0.0f;                    // rest-pose triangle area (model space): ranks the frame's two slots
+    bool valid = false;
 };
 
 // Per-material PBR source (MaterialSource) and the PBR debug channel (PbrDebug) live in render/RenderTypes.h
@@ -240,6 +252,10 @@ public:
     float PbrTransmission(size_t material) const {
         return material < pbrTransmission_.size() ? pbrTransmission_[material] : 0.0f;
     }
+    // S10 planar mirrors: the planes of the model's mirror materials, fitted once at Create from their rest-pose
+    // triangles (model space; the caller applies the model's root transform). A material whose triangles are not
+    // coplanar within 1 % of the material's extent is listed with valid = false (it shows its tint only).
+    const std::vector<MirrorPlane>& MirrorPlanes() const { return mirrorPlanes_; }
     // Runtime PBR overrides (MMDX stage material targets): applies `list` for ring entry `frame % 3` and only when
     // `version` differs from the one that entry was written with (same contract as UpdateMaterials). The FIRST call
     // with a non-empty list moves the PBR records into a 3-entry UPLOAD-heap ring with one SRV each (a model that
@@ -357,6 +373,10 @@ private:
     bool pbrOverridesActive_ = false;   // the ring exists (PbrSrv() follows it)
     // Per material receive-shadow override from SetPbrOverrides (-1 none, 0 off, 1 on); applied in UpdateMaterials.
     std::vector<int8_t> stageReceive_;   // per material receiveShadow override (-1 none, 0 off, 1 on)
+    // S10: per material mirror override (-1 none, 0 off, 1 on) from SetPbrOverrides, applied in UpdateMaterials like
+    // stageReceive_, plus the mirror planes fitted once at Create.
+    std::vector<int8_t> stageMirror_;
+    std::vector<MirrorPlane> mirrorPlanes_;
     uint64_t stageFlagsGen_ = 0;         // bumped when a shadow flag override changes (UpdateMaterials version)
     ModelRole role_ = ModelRole::Character;
     bool dynamic_ = false;   // M8a: an animated stage rebuilds its BLAS

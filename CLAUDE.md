@@ -76,6 +76,21 @@ progress.md is the session log. Read its latest entry first.
   the studio's stage panel writes per-screen overrides into the project (`"screens"`, version 6) and the ui-script
   command `studioscreen <stage index> <screen id> <none|image|video|camera> [file|camera]` sets one (`studiostate` logs
   one `STUDIOSCREEN` line per screen).
+- Planar mirrors (S10, docs/stage_format.md "Planar mirrors"): a stage material rule's `"mirror": true` sets
+  `MatFlag_Mirror` (`render/ShaderInterop.h`, `shaders/common.hlsli` / `rt_common.hlsli`). `GpuModel::Create` fits one
+  plane per mirror material once from its rest-pose vertices (area-weighted centroid + area-weighted vertex normals,
+  coplanar within 1 % of the material's extent; otherwise the material shows its tint only) and exposes it through
+  `GpuModel::MirrorPlanes()` (model space; the frame's root transform makes it world space). Raster only,
+  `Renderer::UpdateMirrors` (called from `RecordScene` after the S5 feeds, so a mirror sees this frame's screens) keeps
+  the at most two largest planes that face the eye and touch the view frustum, `EnsureMirrorTargets` creates the
+  RGBA16F reflection targets at half the render resolution on the first mirror frame (released in `Shutdown`, recreated
+  on resize), and `RenderMirror` draws the scene from the reflected camera (own constant-buffer / light slots,
+  `SceneConstants::clipPlane` discards geometry behind the mirror, `mirrorParams.x = 0` so mirrors inside it show their
+  tint). The scene PS samples the reflection in `MirrorReflection` (`shaders/pbr_common.hlsli`) by the pixel's own world
+  position projected through `mirrorViewProj[slot]`, tinted by the base colour and blurred by the roughness. RT / PT /
+  offline GI reflect a mirror hit as a delta event (tint weight, cone lobe when rough; `prevBsdfValid = false`); quad /
+  ortho views, feeds and `RenderToImage` show the tint only. No mirror material = no textures, no extra render, identical
+  frame.
 - No debugger is installed (no cdb). For crashes, use the dbghelp `CrashFilter` in `tools/render_smoke.cpp`.
 - Visual verification without a human: render a frame headlessly, then Read the PNG. First read "Running MMDX12.exe from the CLI" below.
   - Play scene: `MMDX12.exe --character <s> --stage <s|none> --song <s> --autoplay --seek <sec> --frames N --capture out.png`

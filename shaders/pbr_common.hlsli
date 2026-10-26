@@ -512,4 +512,30 @@ float3 TraceShadowRayTinted(float3 origin, float3 dir, float tMax, uint mask) {
 
 #endif // MMDX_RT_COMMON_HLSLI (tinted shadow rays exist in the ray paths only)
 
+// S10: the planar reflection of a mirror pixel, sampled through the frame's bindless texture table (the reflection
+// textures live in the shared SrvHeap, exactly like a PBR map: SceneConstants::mirrorParams carries their indices).
+// `worldPos` lies on the mirror's plane, so projecting it through the plane's reflected camera gives exactly the
+// reflected ray through the pixel; the sample is tinted by the material's base colour and a roughness > 0 blurs it
+// (3x3 taps, spread with the roughness). `srv` < 0 (no reflection this frame: quad / ortho views, camera feeds,
+// RenderToImage, RT / PT / GI) or `slot` < 0 -> the tint alone. `slot` picks the mirror the pixel lies on.
+float3 MirrorReflection(int srv, int slot, float3 worldPos, float3 tint, float roughness) {
+    if (srv < 0 || slot < 0 || slot > 1) return tint;
+    const float4 clip = mul(float4(worldPos, 1.0), gMirrorViewProj[slot]);
+    if (clip.w <= 0.0) return tint;
+    const float2 uv = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
+    if (any(uv < 0.0) || any(uv > 1.0)) return tint;   // the reflected ray leaves the reflection view
+    const uint s = NonUniformResourceIndex((uint)srv);
+    if (roughness <= 0.02) return tint * gPbrTex[s].SampleLevel(gPbrWrap, uv, 0).rgb;
+    // Rough mirror: 3x3 taps, spread with the roughness (a "blurrier" reflection at half the render resolution).
+    uint tw = 0, th = 0;
+    gPbrTex[s].GetDimensions(tw, th);
+    const float2 texel = 1.0 / max(float2((float)tw, (float)th), 1.0);
+    const float spread = max(roughness, 0.02) * 3.0;
+    float3 sum = 0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+            sum += gPbrTex[s].SampleLevel(gPbrWrap, saturate(uv + float2(x, y) * texel * spread), 0).rgb;
+    return tint * (sum / 9.0);
+}
+
 #endif // MMDX_PBR_COMMON_HLSLI

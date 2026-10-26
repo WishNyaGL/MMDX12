@@ -39,6 +39,7 @@ uint64_t HashMaterialRules(const std::vector<StageMaterialRule>& rules) {
         if (r.transmission) h = HashFloat(h, *r.transmission);
         if (r.ior) h = HashFloat(h, *r.ior);
         if (r.alpha) h = HashFloat(h, *r.alpha);
+        if (r.mirror) h = HashMix(h, *r.mirror ? 13u : 17u);
         if (r.castShadow) h = HashMix(h, *r.castShadow ? 3u : 5u);
         if (r.receiveShadow) h = HashMix(h, *r.receiveShadow ? 7u : 11u);
     }
@@ -87,7 +88,7 @@ void ApplyStageMaterialList(GpuModel& gpu, int part, const StageMaterialBinding&
     for (size_t m = 0; m < materialCount; ++m) {
         const StageMaterialRule v = StageEffectiveMaterialValues(rules, binding, m);
         if (!(v.baseColor || v.roughness || v.metallic || v.emissive || v.emissiveStrength || v.transmission || v.ior ||
-              v.alpha || v.castShadow || v.receiveShadow))
+              v.alpha || v.mirror || v.castShadow || v.receiveShadow))
             continue;
         PbrOverride o;
         o.material = m;
@@ -102,6 +103,7 @@ void ApplyStageMaterialList(GpuModel& gpu, int part, const StageMaterialBinding&
         if (v.alpha) o.alpha = *v.alpha;
         if (v.transmission) o.transmission = *v.transmission;
         if (v.ior) o.ior = *v.ior;
+        if (v.mirror) o.mirror = *v.mirror;
         if (v.castShadow) o.castShadow = *v.castShadow;
         if (v.receiveShadow) o.receiveShadow = *v.receiveShadow;
         list.push_back(std::move(o));

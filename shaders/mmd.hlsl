@@ -375,6 +375,27 @@ PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivi
 
 // ---- MMD material -----------------------------------------------------------------
 
+// S10: the mirror plane pick for a mirror pixel (the slot the pixel lies on; -1 = none). A mirror pixel is drawn by
+// MatFlag_Mirror: the frame's planar reflection is tinted by the material's base colour and blurred by its roughness.
+int MirrorSlotOf(float3 worldPos, float3 normal) {
+    if (gMirrorParams.x < 0.5) return -1;
+    const int count = min((int)gMirrorParams.x, 2);
+    [unroll] for (int i = 0; i < 2; ++i) {
+        if (i >= count) break;
+        // the interpolated position may sit a hair off the fitted plane (0.5 MMD units is well below a pixel at any
+        // usable distance); the surface normal must be the plane's, so another plane's pixels never match
+        if (abs(dot(gMirrorPlane[i].xyz, worldPos) + gMirrorPlane[i].w) < 0.5 && dot(gMirrorPlane[i].xyz, normal) > 0.5)
+            return i;
+    }
+    return -1;
+}
+// The reflection texture's SrvHeap index for a slot (-1 = none this frame: the mirror shows its tint only).
+int MirrorSrv(int slot) {
+    if (slot == 0) return (int)gMirrorParams.y;
+    if (slot == 1) return (int)gMirrorParams.z;
+    return -1;
+}
+
 // ---- per-material PBR debug view (work unit P2) ---------------------------------------------
 // A material with a PBR record outputs one channel (CLI --pbr-debug); materials without one render as before.
 // The buffer is read through the model's SRV (absolute SrvHeap index), as the ray paths do.
@@ -515,6 +536,22 @@ PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, 
     float3 celAlbedo = (gFlags & MAT_STAGE) ? gDiffuse.rgb * tex.rgb
                                             : saturate(gAmbient + gDiffuse.rgb) * 0.8 * tex.rgb;
     float3 diffAlbedo = celLike ? celAlbedo : pbrAlbedoGamma;   // gamma, for the MMD diffuse term
+
+    // S10 planar mirror: the surface is the frame's planar reflection tinted by the material's own colour and blurred
+    // by its roughness (no diffuse / specular of its own). The reflection texture is the scene drawn from the camera
+    // reflected about this material's plane; a pixel samples it by its own world position (which lies on the plane),
+    // so the projection is exact. Without a reflection texture for this frame (quad / ortho views, camera feeds,
+    // RenderToImage) the material shows its tint only. Inside the mirror pass itself no slot matches, so the mirror
+    // surfaces of the reflected view draw their tint (no recursion). ISO rough -> the record's perceptual roughness.
+    if ((gFlags & MAT_MIRROR) != 0) {
+        const int slot = MirrorSlotOf(i.worldPos, n);
+        const float rough = PbrSlotRoughness(m.slots[PBR_SLOT_SMOOTHNESS], uv);
+        const float3 refl = MirrorReflection(MirrorSrv(slot), slot, i.worldPos, pbrAlbedo, rough);
+        // A planar reflection this frame owns the pixel (reflectivity 0: the screen-space / ray-traced reflection must
+        // not add a second one over it). Without a slot (RT / PT / GI, quad, feeds) reflectivity 1 hands the pixel to
+        // the ray-traced reflection, which then reflects natively -- the tint fills whatever it does not cover.
+        return PackOutput(refl, alpha, n, slot >= 0 ? 0.0 : 1.0, i.curClip, i.prevClip);
+    }
 
     float rawSh = (gFlags & MAT_RECEIVE) ? SHADOW_TERM(i.worldPos, n, i.viewZ, i.pos.xy) : 1.0;
     float occAmt = (1.0 - rawSh) * gSunShadowParams.z;
@@ -670,6 +707,9 @@ PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, 
 // over the PBR shading; the lit path only. The default run never enters either, so its frame is unchanged.
 PSOut PSMain(VSOut i, bool front : SV_IsFrontFace) {
     PbrSetUvGradients(ddx(i.uv), ddy(i.uv));
+    // S10: the mirror pass's clip plane: geometry behind the mirror must not leak into the reflection (the oblique
+    // near plane is approximated by this world-space test). Every other pass keeps (0,0,0,0).
+    if (dot(gClipPlane, float4(i.worldPos, 1.0)) < 0.0) discard;
     float3 n = normalize(i.nrm);
     if (!front) n = -n;
     float3 L = -gLightDir;
@@ -924,6 +964,8 @@ VSOut VSFloor(uint id : SV_VertexID) {
 }
 
 PSOut PSFloor(VSOut i) {
+    // S10: the mirror pass's clip plane (see PSMain): the floor behind the mirror must not leak into the reflection.
+    if (dot(gClipPlane, float4(i.worldPos, 1.0)) < 0.0) discard;
     float3 n = float3(0, 1, 0);
     float3 L = -gLightDir;
     float sh = SHADOW_TERM(i.worldPos, n, i.viewZ, i.pos.xy);

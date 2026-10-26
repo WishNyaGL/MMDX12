@@ -183,7 +183,18 @@ private:
     // S5: reconciles the stage screens of `view` / renders their camera feeds / binds the textures (before the
     // scene passes, so the ray-traced geometry sees the screen material flags). `baseSc` is the frame's
     // SceneConstants.
-    void UpdateStageScreens(ID3D12GraphicsCommandList* cmd, const FrameView& view, const SceneConstants& baseSc);    void RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t w, uint32_t h,
+    void UpdateStageScreens(ID3D12GraphicsCommandList* cmd, const FrameView& view, const SceneConstants& baseSc);
+    // S10 planar mirrors: picks the frame's mirror planes (at most kMaxMirrorPlanes: the largest on-screen ones
+    // facing the eye), renders each one's reflection into its slot's target and fills `sc`'s mirror fields. Raster
+    // main views only: RT / PT / offline GI reflect at the hit, quad / ortho / feeds / RenderToImage show the tint.
+    // Runs before the scene passes (they sample the reflection textures through the bindless table).
+    void UpdateMirrors(ID3D12GraphicsCommandList* cmd, const FrameView& view, SceneConstants& sc, uint32_t w,
+                       uint32_t h);
+    bool EnsureMirrorTargets(uint32_t slot, uint32_t width, uint32_t height);
+    bool RenderMirror(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t slot,
+                      const DirectX::XMFLOAT4& plane, const DirectX::XMMATRIX& reflectedView,
+                      const DirectX::XMMATRIX& proj, const SceneConstants& base);
+    void RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t w, uint32_t h,
                      uint32_t cbSlot, uint64_t frame, bool offscreen);
     // Fills jitterPx_ (render pixels, FSR convention) for this frame and the constants.
     void FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h, bool offscreen, SceneConstants& sc);
@@ -334,9 +345,24 @@ private:
         uint32_t width = 0, height = 0;
     };
     FeedTargets feeds_[StageScreens::kMaxFeedsPerFrame];
+    // S10 planar mirrors: one RGBA16F/reflect-target set per slot at half the render resolution (created on the
+    // first mirror frame, never freed until the renderer goes away: a frame that has no mirror just does not bind
+    // them). `srv` is the persistent SrvHeap index the shaders sample through the bindless table.
+    struct MirrorTargets {
+        Texture color, normal, velocity, depth;
+        uint32_t width = 0, height = 0;
+        uint32_t srv = DescriptorHeap::kInvalid;
+    };
+    MirrorTargets mirrors_[kMaxMirrorPlanes];
     // The feeds' own descriptor windows (the main window belongs to the scene passes; a feed runs before them and
     // must not consume their per-frame budget). kFramesInFlight x kMaxFeedsPerFrame windows.
     TransientDescriptors feedTransient_;
+    // S10: the mirror passes' own descriptor window (same reason: they run before the scene passes).
+    TransientDescriptors mirrorTransient_;
+    // This frame's mirror count (SceneConstants::mirrorParams.x); loggedMirrors_ keeps the last logged value so the
+    // debug log gets one MIRRORS line per change of the set, not one per frame.
+    uint32_t mirrorCount_ = 0;
+    uint32_t loggedMirrors_ = UINT32_MAX;
     FullscreenPipeline feedResolve_;
     bool feedResolveTried_ = false;
     ScenePass* scenePass_ = nullptr;   // the scene pass (owned by passes_): the S5 camera feeds draw with it

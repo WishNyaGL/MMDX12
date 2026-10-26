@@ -67,7 +67,7 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S9b-2 | Sky lighting: the sky as image-based light (raster / RT ambient + specular from a filtered sky cubemap, PT / GI importance-sampled environment) | |
 | S9b-3 | Image skies: HDRI (.hdr / .exr equirect) and MME / Ray-MMD sky domes (DDS cubemap) as the sky light's map, rotation + intensity | |
 | S9b-4 | Clouds: procedural cloud layer on the physical sky (coverage, height, wind; keyable), lit by the sun | |
-| S10 | Planar mirrors in raster (RT / PT / GI reflect natively) | |
+| S10 | Planar mirrors in raster (RT / PT / GI reflect natively) | done 2026-10-26 |
 | S11 | Compressed textures: DDS BCn (+ glTF `MSFT_texture_dds`), VRAM budget report | done 2026-10-26 |
 | S12 | Gallery screen + stage store (index, resumable download, install, update, revoke) | done 2026-10-26 |
 | S13 | Website stage gallery (MMDX12_Web): index + pages; deploy only after the owner says so | |

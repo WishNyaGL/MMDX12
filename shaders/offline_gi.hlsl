@@ -1795,6 +1795,24 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
             prevBsdfValid = false;   // S8a: a delta event
             continue;
         }
+        // S10 planar mirror: a perfect specular surface, handled as a delta event before the BSDF (the same policy as
+        // pathtrace.hlsl). The reflection keeps the full weight, tinted by the mirror's base colour; a roughness > 0
+        // turns it into the cone lobe. `prevBsdfValid = false` keeps the S8a MIS of an emitter found through it at
+        // weight 1 (a delta event has no BSDF pdf).
+        if ((s.g.flags & MAT_MIRROR) != 0) {
+            const float3 tint = isPbrHit ? s.pb.baseColor : s.albedo;
+            const float mrough = isPbrHit ? s.pb.rough : 0.0;
+            if (depth == maxDepth) break;
+            T *= tint;
+            d = mrough > 0.02 ? SampleCone(float2(Rand(rng), Rand(rng)), reflect(d, s.n), cos(mrough * 0.5))
+                              : reflect(d, s.n);
+            o = OffsetRayOrigin(s.pos, s.faceN);
+            tMinNext = 0.0;
+            prevBsdfValid = false;   // S8a: a delta event
+            viaMesh = true;
+            continue;
+        }
+
         float3 V = -d;
         float cosV = saturate(dot(s.n, V));
         float pSpec = s.refl > 0.001 ? saturate(s.refl + (1.0 - s.refl) * pow(1.0 - cosV, 5.0) * s.refl) : 0.0;

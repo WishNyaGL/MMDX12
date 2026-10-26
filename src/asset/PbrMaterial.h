@@ -91,6 +91,10 @@ struct PbrMaterial {
         float sheenRoughness = 0.0f;
         float uvRotation = 0.0f;        // KHR_texture_transform rotation in radians (one per material)
         float emissiveStrength = 1.0f;  // KHR_materials_emissive_strength (HDR multiplier on the emissive slot)
+        // S10 planar mirror (an MMDX stage rule's "mirror"): the material is a perfect specular surface in every
+        // render path. Raster samples the frame's planar reflection, RT / PT / offline GI reflect at the hit. The
+        // base colour is the reflection tint and smoothness / roughness the blur.
+        bool mirror = false;
     } ext;
     PbrSlot slots[kPbrSlotCount];
 };

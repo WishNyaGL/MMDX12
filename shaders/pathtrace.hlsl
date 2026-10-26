@@ -444,6 +444,40 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 radiance += throughput * emission;
             }
 
+            // S10 planar mirror: a delta event, like a perfect specular interface. The reflected ray keeps the full
+            // weight, tinted by the material's own base colour (linear diffuse x texture, white by default); a
+            // roughness > 0 turns it into the ordinary cone lobe (a "rough mirror"). It runs before the diffuse /
+            // specular split, so a mirror vertex has no NEE and no BSDF-sampled continuation to weigh (a delta event
+            // keeps weight 1 in the S8a MIS state).
+            if (hitMesh && (LoadGeometry(hit.instanceId, hit.geometryIndex).flags & MAT_MIRROR) != 0) {
+                const float3 tint = isPbrHit ? pbr.baseColor : albedo;
+                const float mrough = isPbrHit ? pbr.rough : 0.0;
+                if (bounce == 0 && s == 0) {   // the denoiser demodulates the mirror, not what it reflects
+                    primAlbedo = max(tint, 0.02);
+                    primNormal = n;
+                    primRefl = 1.0;
+                    primRough = max(mrough, 0.03);
+                    primCosV = saturate(dot(n, -dir));
+                    primPos = pos;
+                    primPrev = prevPos;
+                    primHit = true;
+                    primId = hitId;
+                }
+                if (bounce == bounces) break;
+                throughput *= tint;
+                prevBsdfValid = false;   // a delta event: an emitter found through it keeps weight 1
+                dir = mrough > 0.02
+                          ? SampleCone(float2(Rand(rng), Rand(rng)), reflect(dir, n), cos(mrough * 0.5))
+                          : reflect(dir, n);
+                origin = OffsetRayOrigin(pos, faceN);
+                if (bounce >= 2) {
+                    float q = min(max(throughput.r, max(throughput.g, throughput.b)), 0.95);
+                    if (Rand(rng) > q) break;
+                    throughput /= q;
+                }
+                continue;
+            }
+
             // S2b mesh dielectric: a transmissive PBR hit continues with the transmission event (probability =
             // the transmission factor) or the ordinary surface BSDF below. The event is the analytic glass cube's
             // dielectric step with the material's own ior: thin-walled goes straight through (Fresnel still applies),

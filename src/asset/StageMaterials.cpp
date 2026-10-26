@@ -162,6 +162,9 @@ void ApplyRuleToRecord(const StageMaterialRule& rule, PbrMaterial& m, PmxMateria
     // the material a dielectric in every render path (raster / RT Fresnel alpha, RT / PT / GI refraction).
     if (rule.transmission) m.ext.transmission = std::clamp(*rule.transmission, 0.0f, 1.0f);
     if (rule.ior) m.ext.ior = std::clamp(*rule.ior, 1.0f, 3.0f);
+    // S10: a planar mirror. The record carries the flag so the GPU record (GpuModel::Create) and the ray-traced
+    // geometry (RtScene) see it; the material keeps its own albedo / roughness (tint / blur).
+    if (rule.mirror) m.ext.mirror = *rule.mirror;
     // castShadow / receiveShadow are the PMX material flags (see ApplyStageMaterialRules).
 }
 
@@ -218,8 +221,10 @@ StageMaterialRule StageEffectiveMaterialValues(const std::vector<StageMaterialRu
 }
 
 bool StageRuleSetsPbr(const StageMaterialRule& rule) {
+    // S10: a mirror needs a record too: the shaders take the mirror branch inside the PBR path (the flag itself
+    // reaches the material constants from the record in GpuModel::Create).
     return rule.baseColor || rule.roughness || rule.metallic || rule.emissive || rule.emissiveStrength ||
-           rule.transmission || rule.ior;
+           rule.transmission || rule.ior || rule.mirror;
 }
 
 void ApplyStageMaterialRules(const std::vector<StageMaterialRule>& rules, const StageMaterialBinding& binding,

@@ -156,7 +156,7 @@ one rule per material family). Every override is optional:
 | `transmission` | 0..1 | dielectric transmission (`KHR_materials_transmission`); raster / RT blend the surface see-through, RT / PT / GI refract it (S2b) |
 | `ior` | float | 1.0..3.0 (`KHR_materials_ior`) |
 | `alpha` | 0..1 | opacity |
-| `mirror` | bool | planar mirror surface (S10) |
+| `mirror` | bool | planar mirror surface (S10, see below) |
 | `screen` | string | a screen id from `screens`: this material is that screen's surface |
 | `castShadow`, `receiveShadow` | bool | shadow participation |
 
@@ -297,6 +297,29 @@ recursion), and at most two feeds re-render per frame (round robin beyond that).
 `screens.<id>.brightness` / `.enabled` / `.source` / `.file` / `.camera` binding targets override the manifest per
 frame (play mode and the studio), and the studio's stage panel writes per-screen overrides into the project
 (`"screens": {id: {source, file, camera, brightness}}`, project version 6).
+
+## Planar mirrors
+
+**Rendered since S10 (2026-10-26).** A material rule with `"mirror": true` makes that material a true planar mirror in
+every render path. The plane is fitted once at load from the material's rest-pose triangles (area-weighted centroid
+and normal); a material whose vertices stray further than 1 % of its own extent from that plane is not a planar mirror
+and shows its reflection tint only (`[I] ... mirror material N is not planar`). Keep a mirror wall as one flat,
+coplanar group: split panels with different planes belong in separate materials (only the two largest on-screen planes
+get a reflection per frame).
+
+* The material's `baseColor` is the **reflection tint** (default white) and its `roughness` the blur: 0.02 or less is a
+  sharp reflection, higher values blur it (a 3x3 tap blur in raster, the cone / GGX lobe in RT / PT / GI).
+* **Raster** renders the scene once more per kept plane from the camera reflected about it, at half the render
+  resolution, with an oblique clipping plane on the mirror (nothing behind the mirror leaks in) and without TAA,
+  upscaler, DoF, volumetrics, effects or MME post. The scene PS samples that texture for mirror pixels by their own
+  world position, so the reflected image is exact. A second mirror plane is reflected the same way (two slots); mirrors
+  inside the reflection show their tint only (no recursion).
+* **RT / PT / offline GI** reflect at the hit as a delta event (weight = the tint; a rough mirror uses the cone lobe),
+  so a mirror reflects what the ray tracer sees, including other mirrors.
+* A quad / ortho view, a camera feed and `RenderToImage` (lobby thumbnails) show the tint only, since they would need
+  their own reflection render.
+* Zero cost without a mirror material: no textures are created, no extra scene render runs, and the frame is identical.
+  Mirror materials are excluded from the shadow-map casters by default in `mirror_room` (`"castShadow": false`).
 
 ## `environment`
 
@@ -467,10 +490,10 @@ warning; the stage still loads its other parts.
 * **Variant**: the lobby's select screen ("셰이더" tab) shows a combo when the selected stage has >= 2 variants, saved as
   `stageVariant=<variant id>|<stage id>` in `mmdx12.ini`; `--stage-variant <id>` wins for one run. Empty = the
   manifest's `defaultVariant`.
-* Ignored silently until their milestones: `screens.*`, `packs.*` and `environment.*` targets (S5 / S6 / S9) and the
-  `mirror` / `screen` material fields (S10 / S5). They are parsed, validated and carried, never warned about at run time.
-  S2a gives clearcoat its own specular lobe and S2b renders transmission as a mesh dielectric (see the glTF feature table
-  and “Transmission per render path”).
+* Ignored silently until their milestones: `packs.*` and `environment.*` targets (S6 / S9). They are parsed, validated
+  and carried, never warned about at run time. S2a gives clearcoat its own specular lobe, S2b renders transmission as a
+  mesh dielectric (see the glTF feature table and “Transmission per render path”), S5 renders `screen` and S10 renders
+  `mirror` (see “Planar mirrors”).
 * Installed stages live in `<exe>/stages/<id>/` (next to the executable, like `shader_packs`): their library ids are
   prefixed `stages:<id>` so they never collide with a user-library id. A missing folder is fine. The user's library can
   hold MMDX stages too (detection stays by content).

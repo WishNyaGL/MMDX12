@@ -74,6 +74,15 @@ cbuffer SceneCB : register(b0) {
     // GpuEmissiveTri (negative = no emitters: no NEE, no MIS), y = the pick CDF index, z = entry count, w = the
     // per-geometry base table index. See shaders/emissive_nee.hlsli.
     float4 gEmissive;
+    // S10: the frame's planar mirrors (ShaderInterop.h mirrorViewProj / mirrorPlane / mirrorParams): the frame
+    // camera reflected about each mirror plane, with the frame camera's own projection. x = mirror count (0 = none),
+    // y / z = SrvHeap index of each slot's reflection texture (-1 = none). Mirrors are raster only (RT / PT / GI
+    // reflect natively).
+    float4x4 gMirrorViewProj[2];
+    float4 gMirrorPlane[2];   // xyz = unit world normal, w = -dot(normal, point on the plane)
+    float4 gMirrorParams;
+    // S10: the mirror pass's clip plane (world space, front side positive; 0 = off). Only the mirror pass sets it.
+    float4 gClipPlane;
 };
 
 static const float PI = 3.14159265;
@@ -194,6 +203,12 @@ float3 ShadowTransmission(float vis, float density, float3 shadowColor) {
 // shading never reads as a reflection). No diffuse / specular / AO behind it.
 #ifndef MAT_SCREEN
 #define MAT_SCREEN 4096u
+#endif
+// S10 planar mirror (render/ShaderInterop.h MatFlag_Mirror): a perfect specular surface. The raster PS samples the
+// frame's planar reflection texture (MirrorReflection); the ray paths reflect as a delta event. The material's base
+// colour is the reflection tint, its roughness blurs the reflection (0 = sharp).
+#ifndef MAT_MIRROR
+#define MAT_MIRROR 8192u
 #endif
 float3 ScreenEmission(uint flags, float3 texLinear, float brightness) {
     if ((flags & MAT_SCREEN) == 0u) return 0.0;

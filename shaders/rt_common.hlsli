@@ -34,6 +34,11 @@
 #ifndef MAT_NO_DEPTH_WRITE
 #define MAT_NO_DEPTH_WRITE 2048u  // the model's own .emd effect draws with ZWriteEnable = false (no depth write)
 #endif
+// S10 planar mirror (ShaderInterop.h MatFlag_Mirror): a perfect specular surface. The ray paths reflect at the hit as
+// a delta event; the material's base colour is the reflection tint and its roughness blurs the lobe.
+#ifndef MAT_MIRROR
+#define MAT_MIRROR        8192u
+#endif
 #define RTG_CAST_SHADOW (1u << 16)
 #define RTG_ALPHA_TEST  (1u << 17)
 #define RTG_CHARACTER   (1u << 18)

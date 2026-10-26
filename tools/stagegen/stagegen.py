@@ -428,10 +428,10 @@ def build_mirror_room(out_dir):
 
     width, height, depth = 14.0, 5.0, 16.0
     # floor (inward, +y), ceiling, and the four walls (inward normals)
-    gltf.add(grid_part("Floor", wood, ((-width / 2, 0.0, -depth / 2), (width / 2, 0.0, -depth / 2),
-                                      (-width / 2, 0.0, depth / 2)), 8, 8, flip=False, uv_scale=(7.0, 8.0)))
-    gltf.add(grid_part("Ceiling", ceiling, ((-width / 2, height, depth / 2), (width / 2, height, depth / 2),
-                                           (-width / 2, height, -depth / 2)), 4, 4, flip=False))
+    gltf.add(grid_part("Floor", wood, ((-width / 2, 0.0, -depth / 2), (-width / 2, 0.0, depth / 2),
+                                      (width / 2, 0.0, -depth / 2)), 8, 8, flip=False, uv_scale=(7.0, 8.0)))
+    gltf.add(grid_part("Ceiling", ceiling, ((-width / 2, height, depth / 2), (-width / 2, height, -depth / 2),
+                                           (width / 2, height, depth / 2)), 4, 4, flip=False))
     # the mirror is the back wall (-z); it faces +z (into the room)
     gltf.add(grid_part("Mirror_Wall", mirror, ((-width / 2, 0.0, -depth / 2), (width / 2, 0.0, -depth / 2),
                                               (-width / 2, height, -depth / 2)), 4, 2, flip=False))
@@ -498,7 +498,7 @@ def build_mirror_room(out_dir):
         "params": [
             {"key": "mirrorTint", "type": "color", "label": {"ko": "거울 색", "en": "Mirror tint"},
              "default": [0.90, 0.92, 0.95, 1.0]},
-            {"key": "mirrorAmount", "type": "enum", "label": {"ko": "거울", "en": "Mirror"}, "default": 0.0,
+            {"key": "mirrorAmount", "type": "enum", "label": {"ko": "거울", "en": "Mirror"}, "default": "on",
              "options": [{"value": "off", "label": {"ko": "끔", "en": "Off"}},
                          {"value": "on", "label": {"ko": "켬", "en": "On"}}]},
             {"key": "lampIntensity", "type": "float", "label": {"ko": "조명 세기", "en": "Lamp intensity"},

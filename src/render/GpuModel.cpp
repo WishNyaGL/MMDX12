@@ -452,6 +452,9 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         // The shaders then add the material colour x texture as HDR radiance (AutoLumEmission). A PBR record that
         // already carries an emissive, or a Ray/glTF material, must not glow twice, so skip those.
         const bool hasPbrRecord = mIdx < pbr.materials.size() && pbr.materials[mIdx].valid;
+        // S10: a planar mirror (a stage rule's "mirror" with a PBR record). The flag reaches the shaders through the
+        // material constants; the planes are fitted below from the rest-pose triangles.
+        if (hasPbrRecord && pbr.materials[mIdx].ext.mirror) c.flags |= MatFlag_Mirror;
         if (m.specularPower > 100.0f && specLum <= 1e-4f && !hasPbrRecord)
             c.flags |= MatFlag_AutoLuminous;
     }
@@ -610,6 +613,75 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             IsScreenTextureName(pmx.textures[(size_t)m.textureIndex])) {
             screenMaterials_.push_back((uint32_t)mIdx);
         }
+    }
+
+    // S10: the plane of every mirror material (MatFlag_Mirror), fitted once from its rest-pose triangles. A mirror
+    // material is an authored flat surface, so the area-weighted centroid and normal of its triangles are the plane;
+    // a material whose vertices do not stay within 1 % of its own extent of that plane (a curved or scattered group)
+    // gets valid = false and shows its tint only.
+    for (size_t mIdx = 0; mIdx < pmx.materials.size() && mIdx < consts.size(); ++mIdx) {
+        if ((consts[mIdx].flags & MatFlag_Mirror) == 0) continue;
+        MirrorPlane plane;
+        plane.material = mIdx;
+        const uint32_t first = materials_[mIdx].indexStart;
+        const uint32_t count = std::min(materials_[mIdx].indexCount, (uint32_t)(pmx.indices.size() - first));
+        double cx = 0, cy = 0, cz = 0, nx = 0, ny = 0, nz = 0, area = 0;
+        for (uint32_t t = 0; t + 2 < count; t += 3) {
+            const DirectX::XMFLOAT3& a = pmx.vertices[pmx.indices[first + t + 0]].position;
+            const DirectX::XMFLOAT3& b = pmx.vertices[pmx.indices[first + t + 1]].position;
+            const DirectX::XMFLOAT3& c = pmx.vertices[pmx.indices[first + t + 2]].position;
+            const double e1[3] = {b.x - a.x, b.y - a.y, b.z - a.z};
+            const double e2[3] = {c.x - a.x, c.y - a.y, c.z - a.z};
+            const double cr[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                                  e1[0] * e2[1] - e1[1] * e2[0]};
+            const double tri = 0.5 * std::sqrt(cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]);
+            if (!(tri > 0.0)) continue;
+            // The plane's orientation is the surface's own: the area-weighted vertex normals (the importer mirrors the
+            // axis and flips the winding, so the winding cross product is not the visible side).
+            nx += tri * (pmx.vertices[pmx.indices[first + t + 0]].normal.x +
+                         pmx.vertices[pmx.indices[first + t + 1]].normal.x +
+                         pmx.vertices[pmx.indices[first + t + 2]].normal.x) / 3.0;
+            ny += tri * (pmx.vertices[pmx.indices[first + t + 0]].normal.y +
+                         pmx.vertices[pmx.indices[first + t + 1]].normal.y +
+                         pmx.vertices[pmx.indices[first + t + 2]].normal.y) / 3.0;
+            nz += tri * (pmx.vertices[pmx.indices[first + t + 0]].normal.z +
+                         pmx.vertices[pmx.indices[first + t + 1]].normal.z +
+                         pmx.vertices[pmx.indices[first + t + 2]].normal.z) / 3.0;
+            cx += tri * (a.x + b.x + c.x) / 3.0;
+            cy += tri * (a.y + b.y + c.y) / 3.0;
+            cz += tri * (a.z + b.z + c.z) / 3.0;
+            area += tri;
+        }
+        const double nl = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (area > 0.0 && nl > 1e-12) {
+            plane.area = (float)area;             // model-space triangle area: ranks the frame's two mirror slots
+            plane.centroid = {(float)(cx / area), (float)(cy / area), (float)(cz / area)};
+            plane.normal = {(float)(nx / nl), (float)(ny / nl), (float)(nz / nl)};
+            // coplanar test: every vertex within 1 % of the material's extent of the fitted plane
+            double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+            double maxDist = 0.0;
+            const auto addVertex = [&](const DirectX::XMFLOAT3& v) {
+                const double p[3] = {v.x, v.y, v.z};
+                for (int k = 0; k < 3; ++k) {
+                    lo[k] = std::min(lo[k], p[k]);
+                    hi[k] = std::max(hi[k], p[k]);
+                }
+                const double d = (p[0] - plane.centroid.x) * plane.normal.x +
+                                 (p[1] - plane.centroid.y) * plane.normal.y +
+                                 (p[2] - plane.centroid.z) * plane.normal.z;
+                maxDist = std::max(maxDist, std::abs(d));
+            };
+            for (uint32_t t = 0; t + 2 < count; t += 3) {
+                addVertex(pmx.vertices[pmx.indices[first + t + 0]].position);
+                addVertex(pmx.vertices[pmx.indices[first + t + 1]].position);
+                addVertex(pmx.vertices[pmx.indices[first + t + 2]].position);
+            }
+            const double extent = std::max(std::max(hi[0] - lo[0], hi[1] - lo[1]), hi[2] - lo[2]);
+            plane.valid = maxDist <= std::max(extent * 0.01, 1e-4);
+            if (!plane.valid)
+                LOG_INFO("model '%s': mirror material %zu is not planar, showing its tint only", name_.c_str(), mIdx);
+        }
+        mirrorPlanes_.push_back(plane);
     }
 
     // PBR records and their SRVs (work unit P2): one GpuPbrMaterial per material with a valid Ray record. The
@@ -863,6 +935,11 @@ void GpuModel::UpdateMaterials(uint64_t frame, const std::vector<PmxMorph::Mater
                 if (stageReceive_[i] == 1) c.flags |= MatFlag_ReceiveShadow;
                 else c.flags &= ~MatFlag_ReceiveShadow;
             }
+            if (i < stageMirror_.size() && stageMirror_[i] >= 0) {
+                // S10: a stage material rule's mirror (a runtime target keeps driving it)
+                if (stageMirror_[i] == 1) c.flags |= MatFlag_Mirror;
+                else c.flags &= ~MatFlag_Mirror;
+            }
             Material& mat = materials_[i];
             mat.visible = c.diffuse.w > 0.0f;
             mat.drawEdge = materialBase_[i].edgeFlag && c.edgeSize > 0 && c.edgeColor.w > 0 && mat.visible;
@@ -893,6 +970,7 @@ void GpuModel::SetPbrOverrides(uint64_t frame, const std::vector<PbrOverride>& l
     // The shadow flags do not live in the PBR record: apply them first, so a stage rule that only sets castShadow /
     // receiveShadow also works on a material without a record.
     if (stageReceive_.size() < materials_.size()) stageReceive_.resize(materials_.size(), -1);
+    if (stageMirror_.size() < materials_.size()) stageMirror_.resize(materials_.size(), -1);
     bool flagsChanged = false;
     for (const PbrOverride& o : list) {
         if (o.material >= materials_.size()) continue;
@@ -904,6 +982,13 @@ void GpuModel::SetPbrOverrides(uint64_t frame, const std::vector<PbrOverride>& l
             const int8_t v = *o.receiveShadow ? 1 : 0;
             if (stageReceive_[o.material] != v) {
                 stageReceive_[o.material] = v;
+                flagsChanged = true;
+            }
+        }
+        if (o.mirror) {   // S10: MatFlag_Mirror (the plane itself is fitted at load, the flag is per frame)
+            const int8_t v = *o.mirror ? 1 : 0;
+            if (stageMirror_[o.material] != v) {
+                stageMirror_[o.material] = v;
                 flagsChanged = true;
             }
         }
@@ -1297,6 +1382,9 @@ void GpuModel::Destroy() {
     materialConsts_.clear();
     baseConsts_.clear();
     materialBase_.clear();
+    stageReceive_.clear();
+    stageMirror_.clear();
+    mirrorPlanes_.clear();
     if (materialCb_ && materialMapped_) materialCb_->Unmap(0, nullptr);
     materialMapped_ = nullptr;
     for (uint32_t a : srvAllocations_) ctx_->SrvHeap().Free(a, 3);

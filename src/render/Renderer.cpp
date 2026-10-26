@@ -27,7 +27,9 @@ constexpr uint32_t kLightCdfBytes = kLightCdfMax * sizeof(float);
 // S5: the camera feeds get their own constant-buffer / light slots, after the on-screen + offscreen + extra-view slots
 // (never RenderToImage's kOffscreenSlot, which a feed would overwrite while the main scene still reads it).
 constexpr uint32_t kFeedCbBase = kCbSlots * (1 + kMaxExtraViews);
-constexpr uint32_t kTotalCbSlots = kFeedCbBase + kCbSlots * StageScreens::kMaxFeedsPerFrame;
+// S10: the planar mirror passes come after the feeds (they sample the frame's screen textures), one slot set per mirror.
+constexpr uint32_t kMirrorCbBase = kFeedCbBase + kCbSlots * StageScreens::kMaxFeedsPerFrame;
+constexpr uint32_t kTotalCbSlots = kMirrorCbBase + kCbSlots * kMaxMirrorPlanes;
 
 // post.hlsl's interleaved gradient noise (float2 unjitter(pos.xy)). Mirrored here to invert the per-pixel
 // dither when a transparent export is read back, so a flat background decodes to alpha 0 exactly.
@@ -176,6 +178,7 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     CreateBuiltinTextures();
     if (!transient_.Create(ctx, kCbSlots)) return false;
     if (!feedTransient_.Create(ctx, kCbSlots * StageScreens::kMaxFeedsPerFrame)) return false;
+    if (!mirrorTransient_.Create(ctx, kCbSlots * kMaxMirrorPlanes)) return false;
 
     passes_.clear();
     passes_.push_back(std::make_unique<ShadowPass>());
@@ -539,6 +542,265 @@ void Renderer::UpdateStageScreens(ID3D12GraphicsCommandList* cmd, const FrameVie
         return RenderScreenFeed(cmd, view, screen, target, feedIndex, baseSc);
     };
     stageScreens_->Render(*ctx_, cmd, view, renderFeed);
+}
+
+// S10 planar mirrors: the reflection targets one slot draws into (half the render resolution, RGBA16F colour like the
+// scene) and their persistent bindless SRV. Created on the first mirror frame, then kept.
+bool Renderer::EnsureMirrorTargets(uint32_t slot, uint32_t width, uint32_t height) {
+    if (slot >= kMaxMirrorPlanes) return false;
+    MirrorTargets& m = mirrors_[slot];
+    width = std::max(1u, width);
+    height = std::max(1u, height);
+    if (m.color && m.width == width && m.height == height) return true;
+    ctx_->WaitForGpu();   // targets still referenced by frames in flight
+    m.color.Release(*ctx_);
+    m.normal.Release(*ctx_);
+    m.velocity.Release(*ctx_);
+    m.depth.Release(*ctx_);
+    const D3D12_RESOURCE_STATES srvState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (!m.color.Create(*ctx_, width, height, RenderTargets::kColorFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                        srvState, L"mirror.color") ||
+        !m.normal.Create(*ctx_, width, height, RenderTargets::kNormalFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                         srvState, L"mirror.normal") ||
+        !m.velocity.Create(*ctx_, width, height, RenderTargets::kVelocityFormat,
+                           D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, srvState, L"mirror.velocity") ||
+        !m.depth.Create(*ctx_, width, height, RenderTargets::kDepthFormat, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+                        D3D12_RESOURCE_STATE_DEPTH_WRITE, L"mirror.depth")) {
+        m.color.Release(*ctx_);
+        m.normal.Release(*ctx_);
+        m.velocity.Release(*ctx_);
+        m.depth.Release(*ctx_);
+        m.width = m.height = 0;
+        LOG_WARN("planar mirror: target creation failed (%ux%u)", width, height);
+        return false;
+    }
+    if (m.srv == DescriptorHeap::kInvalid) {
+        m.srv = ctx_->SrvHeap().Allocate(1);
+        if (m.srv == DescriptorHeap::kInvalid) {
+            LOG_WARN("planar mirror: no SRV for the reflection texture");
+            m.color.Release(*ctx_);
+            m.normal.Release(*ctx_);
+            m.velocity.Release(*ctx_);
+            m.depth.Release(*ctx_);
+            m.width = m.height = 0;
+            return false;
+        }
+    }
+    m.color.WriteSrv(ctx_->Device(), ctx_->SrvHeap().Cpu(m.srv));   // the slot's texture changed: re-point the SRV
+    m.width = width;
+    m.height = height;
+    return true;
+}
+
+// S10: the scene drawn from the camera reflected about `plane` into the slot's reflection texture. Modelled on
+// RenderScreenFeed: lit raster at half the render resolution, the frame's lights / shadow maps, no TAA / upscaler /
+// DoF / volumetrics / effects / MME / packs; mirror materials inside it draw their tint only (mirrorParams.x = 0) and
+// `clipPlane` drops everything behind the mirror plane.
+bool Renderer::RenderMirror(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t slot,
+                            const DirectX::XMFLOAT4& plane, const DirectX::XMMATRIX& reflectedView,
+                            const DirectX::XMMATRIX& proj, const SceneConstants& base) {
+    if (!cmd || !scenePass_ || slot >= kMaxMirrorPlanes || !mirrors_[slot].color) return false;
+    MirrorTargets& m = mirrors_[slot];
+    const uint32_t w = m.width, h = m.height;
+
+    mirrorTransient_.Begin(slot * kCbSlots + ctx_->FrameSlot());
+    const uint32_t cbSlot = kMirrorCbBase + slot * kCbSlots + ctx_->FrameSlot();
+    SceneConstants sc = base;
+    const XMMATRIX vp = reflectedView * proj;
+    XMStoreFloat4x4(&sc.view, reflectedView);
+    XMStoreFloat4x4(&sc.proj, proj);
+    XMStoreFloat4x4(&sc.viewProj, vp);
+    XMStoreFloat4x4(&sc.viewProjNoJitter, vp);
+    XMStoreFloat4x4(&sc.prevViewProjNoJitter, vp);   // a reflection has no temporal history
+    XMStoreFloat4x4(&sc.invProj, XMMatrixInverse(nullptr, proj));
+    const XMMATRIX invView = XMMatrixInverse(nullptr, reflectedView);
+    XMStoreFloat4x4(&sc.invView, invView);
+    XMStoreFloat3(&sc.eyePos, invView.r[3]);
+    sc.jitterUv = {0, 0};
+    sc.nearZ = view.camera.nearZ;
+    sc.farZ = view.camera.farZ;
+    sc.viewportSize = {(float)w, (float)h};
+    sc.invViewportSize = {1.0f / (float)w, 1.0f / (float)h};
+    sc.edgeScale = (float)h / 1080.0f;
+    sc.shading = 0.0f;   // always lit
+    sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};   // S7c: the reflected camera is not the frame's cluster grid
+    sc.emissiveParams = {-1.0f, -1.0f, 0.0f, -1.0f};     // raster: unused
+    sc.mirrorParams = {0.0f, -1.0f, -1.0f, 0.0f};        // no recursion: a mirror inside the reflection shows its tint
+    sc.clipPlane = plane;                                // drop everything behind the mirror plane
+    memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
+    memcpy(lightBufMapped_ + (size_t)cbSlot * kLightBytes,
+           lightBufMapped_ + (size_t)ctx_->FrameSlot() * kLightBytes, kLightBytes);
+
+    RenderSettings mirrorSettings = settings_;
+    mirrorSettings.renderPath = RenderPath::Raster;
+    mirrorSettings.taa = false;
+    mirrorSettings.dof = false;
+    mirrorSettings.volumetric = false;
+    mirrorSettings.ssr = false;
+    mirrorSettings.packEffects.clear();
+    mirrorSettings.mmeEffects.clear();
+    const RenderStats savedStats = stats_;
+    PassContext pc{*ctx_, cmd, view, mirrorSettings, targets_, stats_, mirrorTransient_,
+                   sceneCb_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kSceneCbSize,
+                   lightBuf_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kLightBytes,
+                   ctx_->FrameNumber(), false, false, &builtin_, RenderPath::Raster, nullptr, nullptr,
+                   0.0f, 0.0f, frameTimeMs_};
+    pc.fogVolumes = 0;
+    stats_.drawCalls = 0;
+    stats_.triangles = 0;
+    const bool drew = scenePass_->DrawFeed(pc, m.color, m.normal, m.velocity, m.depth);
+    stats_ = savedStats;
+    return drew;
+}
+
+// S10: picks this frame's mirror planes and renders their reflections. A mirror material's plane was fitted once at
+// load in model space (GpuModel::MirrorPlanes); here the root transform makes it a world plane, the planes facing the
+// eye and on screen are ranked by projected size, and the at most kMaxMirrorPlanes largest get a slot. Zero cost
+// without mirror materials: no plane, no texture, no extra render, and the constants keep mirrorParams.x = 0.
+void Renderer::UpdateMirrors(ID3D12GraphicsCommandList* cmd, const FrameView& view, SceneConstants& sc, uint32_t w,
+                             uint32_t h) {
+    mirrorCount_ = 0;
+    // Zero cost without mirror materials: no model has a fitted mirror plane, so the constants keep what
+    // FillSceneConstants left (zero: no mirror, clip off) and the frame is byte for byte the one without the feature.
+    bool anyMirror = false;
+    for (const GpuModel* model : view.models)
+        if (model && !model->MirrorPlanes().empty()) {
+            anyMirror = true;
+            break;
+        }
+    if (!anyMirror) return;
+    sc.mirrorParams = {0.0f, -1.0f, -1.0f, 0.0f};
+    sc.clipPlane = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint32_t i = 0; i < kMaxMirrorPlanes; ++i) {
+        XMStoreFloat4x4(&sc.mirrorViewProj[i], XMMatrixIdentity());
+        sc.mirrorPlane[i] = {0.0f, 0.0f, 0.0f, 0.0f};
+    }
+    if (!cmd || !scenePass_) return;
+
+    const XMMATRIX viewM = XMLoadFloat4x4(&view.camera.view);
+    const XMMATRIX proj = XMMatrixPerspectiveFovLH(view.camera.fovYRadians, (float)std::max(1u, w) / (float)std::max(1u, h),
+                                                   view.camera.nearZ, view.camera.farZ);
+    const XMMATRIX vp = viewM * proj;
+    const XMVECTOR eye = XMLoadFloat3(&view.camera.eye);
+    // the camera's world axes are the rows of the INVERSE view matrix (the view matrix's rows hold their components)
+    const XMMATRIX camWorld = XMMatrixInverse(nullptr, viewM);
+    const XMVECTOR fwd = XMVector3Normalize(camWorld.r[2]);
+    const XMVECTOR up = XMVector3Normalize(camWorld.r[1]);
+
+    struct Candidate {
+        XMFLOAT4 plane{};
+        float score = 0.0f;
+    };
+    Candidate cand[kMaxMirrorPlanes];
+    uint32_t candCount = 0;
+    for (const GpuModel* model : view.models) {
+        if (!model || model->MirrorPlanes().empty()) continue;
+        // The planes are model space: the model root (nesting the root transform the scene reports for this model,
+        // identity when it has none) makes them world space.
+        XMMATRIX root = XMMatrixIdentity();
+        for (const MmeSceneObject& o : view.mmeObjects) {
+            if (o.gpu != model) continue;
+            root = XMLoadFloat4x4(&o.rootWorld);
+            break;
+        }
+        const float det = XMVectorGetX(XMMatrixDeterminant(root));
+        const XMMATRIX normalMat = XMMatrixTranspose(XMMatrixInverse(nullptr, root));
+        const float scale = std::cbrt(std::fabs(det));
+        for (const MirrorPlane& p : model->MirrorPlanes()) {
+            if (!p.valid || !(p.area > 0.0f)) continue;
+            const XMVECTOR c = XMVector3TransformCoord(XMLoadFloat3(&p.centroid), root);
+            // the ordinary normal transform (inverse transpose), which is also what the scene shaders use, so a
+            // model root with a reflection in it keeps the side the surface is actually drawn from
+            const XMVECTOR n = XMVector3Normalize(XMVector3TransformNormal(XMLoadFloat3(&p.normal), normalMat));
+            // the reflection is visible from the side the eye is on
+            if (XMVectorGetX(XMVector3Dot(n, XMVectorSubtract(eye, c))) <= 0.0f) continue;
+            // ... and the plane has to reach into the view frustum: test the sphere (centroid, sqrt(area)) against the
+            // six frustum planes, so a wall whose centre is off screen but which fills the view is kept.
+            const float radius = std::sqrt(p.area) * scale;
+            const XMMATRIX vpT = XMMatrixTranspose(vp);   // row-vector convention: a column of vp is a plane
+            const XMVECTOR fr[6] = {
+                vpT.r[3] + vpT.r[0], vpT.r[3] - vpT.r[0],   // left, right
+                vpT.r[3] + vpT.r[1], vpT.r[3] - vpT.r[1],   // bottom, top
+                vpT.r[2], vpT.r[3] - vpT.r[2]};             // near (z >= 0), far (z <= w)
+            bool inView = true;
+            for (const XMVECTOR& pl : fr) {
+                const float len = XMVectorGetX(XMVector3Length(pl));
+                if (!(len > 1e-6f)) continue;
+                const float dist = XMVectorGetX(XMVector4Dot(XMVectorSetW(c, 1.0f), pl)) / len;
+                if (dist < -radius) { inView = false; break; }
+            }
+            if (!inView) continue;
+            // projected size: world area x foreshortening / distance^2
+            const float dist = std::max(XMVectorGetX(XMVector3Length(XMVectorSubtract(c, eye))), 1.0f);
+            const float face = std::fabs(XMVectorGetX(XMVector3Dot(n, XMVector3Normalize(XMVectorSubtract(eye, c)))));
+            const float score = p.area * scale * scale * std::max(face, 0.05f) / (dist * dist);
+            if (candCount < kMaxMirrorPlanes) {
+                cand[candCount].plane = {XMVectorGetX(n), XMVectorGetY(n), XMVectorGetZ(n),
+                                         -XMVectorGetX(XMVector3Dot(n, c))};
+                cand[candCount].score = score;
+                ++candCount;
+            } else {
+                uint32_t worst = 0;
+                for (uint32_t i = 1; i < candCount; ++i)
+                    if (cand[i].score < cand[worst].score) worst = i;
+                if (score > cand[worst].score) {
+                    cand[worst].plane = {XMVectorGetX(n), XMVectorGetY(n), XMVectorGetZ(n),
+                                         -XMVectorGetX(XMVector3Dot(n, c))};
+                    cand[worst].score = score;
+                }
+            }
+        }
+    }
+    if (candCount == 0) {
+        if (loggedMirrors_ != 0) {
+            loggedMirrors_ = 0;
+            LOG_INFO("MIRRORS count=0");
+        }
+        return;
+    }
+    // largest first (kMaxMirrorPlanes is 2: a fixed 2-slot sort keeps this allocation-free)
+    if (candCount == 2 && cand[0].score < cand[1].score) std::swap(cand[0], cand[1]);
+
+    const uint32_t mw = std::max(1u, w / 2), mh = std::max(1u, h / 2);
+    uint32_t count = 0;
+    for (uint32_t s = 0; s < candCount; ++s) {
+        if (!EnsureMirrorTargets(s, mw, mh)) break;
+        const XMVECTOR n = XMVectorSet(cand[s].plane.x, cand[s].plane.y, cand[s].plane.z, 0.0f);
+        const float d = cand[s].plane.w;
+        // the mirror plane through the reflection of the eye: reflect points / directions about it
+        const auto reflectPoint = [&](XMVECTOR p) {
+            return XMVectorSubtract(p, XMVectorScale(n, 2.0f * (XMVectorGetX(XMVector3Dot(n, p)) + d)));
+        };
+        const auto reflectDir = [&](XMVECTOR v) {
+            return XMVectorSubtract(v, XMVectorScale(n, 2.0f * XMVectorGetX(XMVector3Dot(n, v))));
+        };
+        const XMVECTOR mEye = reflectPoint(eye);
+        const XMVECTOR mTarget = reflectPoint(XMVectorAdd(eye, fwd));
+        XMVECTOR mUp = reflectDir(up);
+        if (XMVectorGetX(XMVector3Length(XMVector3Cross(XMVector3Normalize(XMVectorSubtract(mTarget, mEye)), mUp))) < 1e-3f)
+            mUp = XMVectorSet(0, 1, 0, 0);   // looking straight at the plane: any up will do
+        // An ordinary LookAt of the reflected camera: the winding stays normal, so the mirror pass needs no cull flip.
+        const XMMATRIX mView = XMMatrixLookAtLH(mEye, mTarget, mUp);
+        if (!RenderMirror(cmd, view, s, cand[s].plane, mView, proj, sc)) break;
+        XMStoreFloat4x4(&sc.mirrorViewProj[s], mView * proj);
+        sc.mirrorPlane[s] = cand[s].plane;
+        ++count;
+    }
+    mirrorCount_ = count;
+    if (count == 0) {
+        sc.mirrorParams = {0.0f, -1.0f, -1.0f, 0.0f};
+        if (loggedMirrors_ != 0) {
+            loggedMirrors_ = 0;
+            LOG_INFO("MIRRORS count=0");
+        }
+        return;
+    }
+    sc.mirrorParams = {(float)count, (float)mirrors_[0].srv,
+                       count > 1 ? (float)mirrors_[1].srv : -1.0f, 0.0f};
+    if (loggedMirrors_ != count) {
+        loggedMirrors_ = count;
+        LOG_INFO("MIRRORS count=%u resolution=%ux%u", count, mw, mh);
+    }
 }
 
 void Renderer::ReadGpuTimer() {
@@ -1139,6 +1401,17 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     // S5: the stage screens' sources + camera feeds, then their texture bindings on the stage materials. Runs before
     // the acceleration structures are built so a ray-traced frame sees this frame's screen material flags.
     UpdateStageScreens(cmd, view, sc);
+
+    // S10: the frame's planar mirrors (raster main views only; the ray paths reflect at the hit instead, and a quad /
+    // ortho view, a camera feed or RenderToImage shows the tint). Rendered after the screens bound their textures so a
+    // mirror sees this frame's LED walls, and before the scene passes that sample the reflection textures. Fills the
+    // mirror fields of `sc`, so the constants are uploaded again right after.
+    const bool mirrorView = !offscreen && EffectivePath() == RenderPath::Raster && view.extraViews.empty() &&
+                            settings_.shading == ViewShading::Lit;
+    if (mirrorView) {
+        UpdateMirrors(cmd, view, sc, w, h);
+        memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
+    }
 
     // Temporal history survives only consecutive on-screen frames without a camera cut.
     bool historyValid = !offscreen && havePrev_ && prevTaa_ && settings_.taa && !view.cameraCut;
@@ -1992,6 +2265,17 @@ void Renderer::Shutdown() {
         f.depth.Release(*ctx_);
     }
     feedResolve_ = FullscreenPipeline{};
+    for (MirrorTargets& m : mirrors_) {
+        m.color.Release(*ctx_);
+        m.normal.Release(*ctx_);
+        m.velocity.Release(*ctx_);
+        m.depth.Release(*ctx_);
+        if (m.srv != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(m.srv, 1);
+        m.srv = DescriptorHeap::kInvalid;
+        m.width = m.height = 0;
+    }
+    mirrorCount_ = 0;
+    loggedMirrors_ = UINT32_MAX;
     targets_.shadowMap.Release(*ctx_);
     targets_.spotShadowMap.Release(*ctx_);
     targets_.pointShadowMap.Release(*ctx_);
@@ -2001,6 +2285,7 @@ void Renderer::Shutdown() {
     pipelineMsaa_ = 0;
     transient_.Release(*ctx_);
     feedTransient_.Release(*ctx_);
+    mirrorTransient_.Release(*ctx_);
     if (backdropSrv_ != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(backdropSrv_, 1);
     backdropSrv_ = DescriptorHeap::kInvalid;
     for (auto& t : builtin_.toon) t.Reset();
