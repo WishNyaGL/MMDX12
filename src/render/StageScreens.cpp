@@ -173,7 +173,7 @@ bool CreateProgramPipe(Dx12Context& ctx, const std::filesystem::path& shaderDir,
 }
 
 // Draws one program screen: the pack's PSO over the screen's own texture, at `time` seconds. The texture is left in
-// PIXEL_SHADER_RESOURCE (the state the screen binding / the material shaders read).
+// ALL_SHADER_RESOURCE (the raster material shaders and the PT / GI compute shaders read it).
 bool DrawProgramScreen(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, ProgramPipe& pipe, const ShaderPack& pack,
                        Texture& target, float time, uint64_t frame, const std::map<std::string, float>& params) {
     if (!pipe.pso || !target) return false;
@@ -199,7 +199,7 @@ bool DrawProgramScreen(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, Program
     const D3D12_RECT sc{0, 0, (LONG)target.width, (LONG)target.height};
     cmd->RSSetScissorRects(1, &sc);
     cmd->DrawInstanced(3, 1, 0, 0);
-    target.Transition(cmd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    target.Transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);   // PT / offline GI read it from compute
     return true;
 }
 
@@ -207,7 +207,6 @@ bool DrawProgramScreen(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, Program
 // instead of showing the material's own texture. A texture cannot live in an UPLOAD heap, so the value is copied in
 // once through a tiny upload buffer on the frame's command list.
 bool EnsureBlack(ComPtr<ID3D12Resource>& black, Dx12Context& ctx, ID3D12GraphicsCommandList* cmd) {
-
     if (black) return true;
     CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, 1, 1, 1, 1, 1, 0,
                                                               D3D12_RESOURCE_FLAG_NONE);

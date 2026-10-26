@@ -792,9 +792,14 @@ void App::StudioRemoveModel(int index) {
         const std::string stageName = stage ? (stage->manifest ? stage->manifest->DisplayName(StageLanguage())
                                                               : stage->stageId)
                                             : name;
-        // S6: the stage's bundled packs leave the registry with it (adding the stage again re-reads them)
-        if (stage && stage->manifest)
-            ShaderPacks().UnregisterStagePacks(stage->manifest->id);
+        // S6: the stage's bundled packs leave the registry with it (adding the stage again re-reads them), unless
+        // another entity of the same stage still uses them
+        if (stage && stage->manifest) {
+            bool shared = false;
+            for (const StudioStage& other : d.stages)
+                if (&other != stage && other.manifest && other.manifest->id == stage->manifest->id) shared = true;
+            if (!shared) ShaderPacks().UnregisterStagePacks(stage->manifest->id);
+        }
         std::set<uint32_t> partUids;
         std::set<int> propParents;
         for (auto& m : d.models) {
