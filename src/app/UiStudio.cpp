@@ -362,6 +362,10 @@ void App::LeaveStudio() {
     StudioDiscardRecovery();
     ctx_.WaitForGpu();
     renderer_.ReleaseVideoLayers();   // stop the studio's background AVI decode (and any song layers)
+    // S6: the project's stage-bundled packs leave the registry with the studio (a reopened project re-reads them)
+    if (studio_)
+        for (const studio::StudioStage& stage : studio_->stages)
+            if (stage.manifest) ShaderPacks().UnregisterStagePacks(stage.manifest->id);
     studio_.reset();
     audio_.Unload();
     RenderSettings rs = renderer_.Settings();
@@ -1634,8 +1638,8 @@ void App::BuildStudioFrameView(FrameView& view) {
             }
             return false;
         };
-        AppendStageWorldPacks(*stage.manifest, packs, d.time, !d.playing, studioColliders_, kStageWorldUidBase,
-                              resolveNode, view.worlds);
+        AppendStageWorldPacks(*stage.manifest, packs, d.time, !d.playing, studioColliders_,
+                              kStageWorldUidBase + stage.uid * 256u, resolveNode, view.worlds);
     }
 }
 

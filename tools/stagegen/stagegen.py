@@ -696,10 +696,218 @@ def build_led_stage(out_dir):
     return stage_dir
 
 
+def build_pack_test(out_dir):
+    """S6 fixture: one bundled pack of each role (docs/stage_format.md `packs`).
+
+    screen  packs/led     screen.hlsl draws animated bars from `time` and the `bars` param (source "program")
+    surface packs/tint    surface.hlsl tints the material its globs claim; every other material keeps the default
+    world   packs/snow    the built-in snow pack, copied unchanged, at the "world" socket
+    """
+    stage_id = "pack_test"
+    gltf = Gltf(stage_id)
+    deck = gltf.material("stage_deck", base_color=(0.18, 0.19, 0.22, 1.0), roughness=0.3, metallic=0.2)
+    cove = gltf.material("cove_wall", base_color=(0.72, 0.73, 0.78, 1.0), roughness=0.55, metallic=0.0)
+    led = gltf.material("led_main", base_color=(0.02, 0.02, 0.03, 1.0), roughness=0.35, metallic=0.0,
+                        emissive=(0.35, 0.45, 0.8), double_sided=True)
+
+    deck_w, deck_d = 14.0, 9.0
+    gltf.add(grid_part("Stage_Top", deck, ((-deck_w / 2, 0.0, -deck_d / 2), (deck_w / 2, 0.0, -deck_d / 2),
+                                          (-deck_w / 2, 0.0, deck_d / 2)), 7, 5, uv_scale=(7.0, 5.0)))
+    z_back = -deck_d / 2
+    gltf.add(grid_part("Cove_Wall", cove, ((-deck_w / 2, 0.0, z_back), (deck_w / 2, 0.0, z_back),
+                                          (-deck_w / 2, 9.0, z_back)), 6, 4, uv_scale=(6.0, 4.0)))
+    gltf.add(grid_part("Screen_Main", led, ((-6.0, 1.0, z_back + 0.2), (6.0, 1.0, z_back + 0.2),
+                                            (-6.0, 7.0, z_back + 0.2)), 6, 3))
+
+    stage_dir = os.path.join(out_dir, stage_id)
+    os.makedirs(os.path.join(stage_dir, "packs"), exist_ok=True)
+    with open(os.path.join(stage_dir, stage_id + ".glb"), "wb") as f:
+        f.write(gltf.build())
+
+    # ---- packs/screen: animated bars from `time` and the `bars` param --------------------------------------------------
+    screen_dir = os.path.join(stage_dir, "packs", "screen")
+    os.makedirs(screen_dir, exist_ok=True)
+    with open(os.path.join(screen_dir, "pack.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "format": 1,
+            "id": "pack_test_screen",
+            "version": "1.0.0",
+            "apiVersion": 6,
+            "type": "screen",
+            "name": {"ko": "테스트 바 화면", "en": "Test bar screen"},
+            "description": {"ko": "시간에 따라 흐르는 막대를 그리는 테스트 화면 팩.",
+                            "en": "A test screen pack that draws bars scrolling with time."},
+            "authors": [{"name": "MMDX stagegen", "role": "procedural"}],
+            "license": "CC0-1.0",
+            "tags": ["screen", "test"],
+            "params": [
+                {"key": "bars", "type": "float", "label": {"ko": "막대 수", "en": "Bars"},
+                 "default": 8.0, "min": 1.0, "max": 16.0, "step": 1.0},
+                {"key": "speed", "type": "float", "label": {"ko": "속도", "en": "Speed"},
+                 "default": 0.35, "min": 0.0, "max": 2.0},
+            ],
+        }, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(screen_dir, "screen.hlsl"), "w", encoding="utf-8") as f:
+        f.write("""// pack_test_screen's screen.hlsl: PackScreen (shaders/screen_api.hlsli, docs/shader_screen_api.md).
+// Bars scroll with the song / timeline time and their count comes from the pack's `bars` parameter, so a still
+// capture of an offline render shows a fixed pattern (time is the rendered frame's seconds).
+#define P_BARS PackParamInt(0)     // bars: how many stripes across the screen
+#define P_SPEED PackParam(1)       // speed: bars per second
+
+float4 PackScreen(PackScreenInput i) {
+    // three bands: the top third is the raw bar pattern, the middle adds a gradient, the bottom stays dark (a
+    // reference the surface pack's tint does not reach)
+    const float bars = max((float)P_BARS, 1.0);
+    const float phase = i.time * P_SPEED * bars;
+    const float bar = frac(i.uv.x * bars + phase);
+    const float lit = smoothstep(0.0, 0.08, bar) * smoothstep(1.0, 0.92, bar);
+    float3 c = lerp(float3(0.02, 0.03, 0.06), float3(0.35, 0.75, 1.0), lit);
+    c *= lerp(0.55, 1.0, i.uv.y);                  // a gentle vertical falloff, like an LED wall
+    if (i.uv.y < 0.3) c *= 0.25;                   // lower band: dim
+    return float4(c, 1.0);
+}
+""")
+
+    # ---- packs/surface: tints the materials it claims ---------------------------------------------------------------
+    surf_dir = os.path.join(stage_dir, "packs", "surface")
+    os.makedirs(surf_dir, exist_ok=True)
+    with open(os.path.join(surf_dir, "pack.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "format": 1,
+            "id": "pack_test_surface",
+            "version": "1.0.0",
+            "apiVersion": 6,
+            "type": "surface",
+            "name": {"ko": "테스트 틴트", "en": "Test tint"},
+            "description": {"ko": "선택한 스테이지 머티리얼을 색으로 물들이는 테스트 표면 팩.",
+                            "en": "A test surface pack that tints the stage materials it claims."},
+            "authors": [{"name": "MMDX stagegen", "role": "procedural"}],
+            "license": "CC0-1.0",
+            "tags": ["surface", "test"],
+            # a colour parameter reads through PackParamColor, which needs the params.ext block
+            "requires": ["params.ext"],
+            # no class rule names a stage material: ClassifyStage falls back to the first rule's class, which keeps
+            # the claimed materials shaded by the pack
+            "classes": [{"class": "weapon", "match": ["cove_wall"]}],
+            "params": [
+                {"key": "tint", "type": "color", "label": {"ko": "색", "en": "Tint"},
+                 "default": [0.95, 0.45, 0.25]},
+                {"key": "amount", "type": "float", "label": {"ko": "강도", "en": "Amount"},
+                 "default": 0.85, "min": 0.0, "max": 1.0},
+            ],
+        }, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(surf_dir, "surface.hlsl"), "w", encoding="utf-8") as f:
+        f.write("""// pack_test_surface's surface.hlsl: PackShade (shaders/pack_api.hlsli).
+// Mixes the MMD lit colour with the `tint` parameter by `amount`, so the material it claims (cove_wall) reads clearly
+// different from the parts the pack leaves alone.
+#define P_TINT PackParamColor(0)    // tint (linear)
+#define P_AMOUNT PackParam(1)       // amount 0..1
+
+PackResult PackShade(PackSurface s) {
+    PackResult r;
+    r.alpha = s.alpha;
+    r.reflectivity = 0.0;
+    r.noAo = false;
+    float3 lit = PackMmdLit(s);
+    float3 tinted = lerp(lit, P_TINT * dot(lit, float3(0.299, 0.587, 0.114)) * 2.0, saturate(P_AMOUNT));
+    r.color = SrgbToLinear(saturate(tinted)) * gSunIntensity;
+    r.color += SrgbToLinear(saturate(tinted)) * PunctualDiffuse(s.worldPos, s.N, 1.0, 1.0);
+    return r;
+}
+""")
+    # PT / offline GI keep their character-only pack hook (render/PtPackVariants, RayTracing: a stage part's surface
+    # pack shades raster / RT; its PT / GI form is not used), so the fixture ships no pt_surface.hlsl.
+
+    # ---- packs/world: the built-in snow pack, copied unchanged --------------------------------------------------------
+    snow_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "shaders", "packs", "snow")
+    snow_src = os.path.normpath(snow_src)
+    world_dir = os.path.join(stage_dir, "packs", "world")
+    os.makedirs(world_dir, exist_ok=True)
+    if os.path.isdir(snow_src):
+        for name in os.listdir(snow_src):
+            src = os.path.join(snow_src, name)
+            if os.path.isfile(src) and (name == "pack.json" or name.endswith(".hlsl")):
+                with open(src, "rb") as fi, open(os.path.join(world_dir, name), "wb") as fo:
+                    fo.write(fi.read())
+    else:
+        raise SystemExit(f"the built-in snow pack was not found at {snow_src}")
+
+    manifest = {
+        "format": "mmdx-stage",
+        "formatVersion": 1,
+        "id": stage_id,
+        "version": "1.0.0",
+        "name": {"ko": "팩 테스트 스테이지", "en": "Pack test stage", "ja": "パックテストステージ"},
+        "description": {"ko": "S6 번들 팩 픽스처: 프로그램 스크린, 표면 팩, 소켓에 붙은 월드 팩.",
+                        "en": "The S6 bundled-pack fixture: a program screen, a surface pack and a world pack at a socket."},
+        "authors": [{"name": "MMDX stagegen", "role": "procedural"}],
+        "license": "CC0-1.0",
+        "tags": ["test", "packs", "fixture"],
+        "models": [{"file": stage_id + ".glb", "name": "Pack room", "role": "floor"}],
+        "materials": [
+            {"match": "stage_deck", "roughness": 0.3, "metallic": 0.2},
+            {"match": "cove_wall", "roughness": 0.55},
+            {"match": "led_main", "screen": "main", "castShadow": False},
+        ],
+        "lights": [
+            light("sun", "key", intensity=0.5, color=(0.8, 0.84, 0.95), direction=(-0.25, -1.0, 0.35)),
+            light("ambient", "ambient", intensity=0.12, color=(1.0, 1.0, 1.0)),
+            light("spot", "front", intensity=2.0, color=(1.0, 0.94, 0.86), position=(-24.0, 40.0, 44.0),
+                  aim=(0.0, 4.0, -20.0), cone=(0.3, 0.2)),
+        ],
+        "sockets": [
+            {"name": "world", "position": [0.0, 6.0, -50.0]},
+            {"name": "stage_center", "node": "Stage_Top"},
+        ],
+        "cameras": [
+            {"name": "wide", "position": [0.0, 20.0, 120.0], "target": [0.0, 20.0, -40.0], "fov": 40.0},
+        ],
+        "screens": [
+            {"id": "main", "materials": ["led_main"], "source": "program", "file": "packs/screen",
+             "width": 1024, "height": 512, "brightness": 1.4, "emitLight": True},
+        ],
+        "packs": [
+            {"folder": "packs/surface", "role": "surface", "materials": ["cove_wall"],
+             "params": {"amount": 0.85}},
+            {"folder": "packs/world", "role": "world", "socket": "world",
+             "params": {"density": 0.85, "flake_size": 0.08}},
+        ],
+        "params": [
+            {"key": "barCount", "type": "float", "label": {"ko": "막대 수", "en": "Bar count"},
+             "default": 8.0, "min": 1.0, "max": 16.0},
+            {"key": "tintAmount", "type": "float", "label": {"ko": "틴트 강도", "en": "Tint amount"},
+             "default": 0.85, "min": 0.0, "max": 1.0},
+        ],
+        "variants": [
+            {"id": "mixed", "label": {"ko": "혼합", "en": "Mixed"},
+             "values": {"barCount": 8.0, "tintAmount": 0.85}},
+            {"id": "calm", "label": {"ko": "차분", "en": "Calm"},
+             "values": {"barCount": 14.0, "tintAmount": 0.35}},
+        ],
+        "defaultVariant": "mixed",
+        # `packs.<index>` is the array position: 0 = the surface pack, 1 = the world pack
+        "bindings": [
+            {"param": "tintAmount", "target": "packs.0.params.amount"},
+        ],
+        "cues": [
+            {"param": "barCount", "keys": [{"frame": 0, "value": 8.0}, {"frame": 120, "value": 14.0}]},
+        ],
+    }
+    # the screen's bars parameter: the pack is named by `screens[].source` (no packs[] entry), so its params come
+    # from a packs[] entry on the same folder — bind the exposed barCount there
+    manifest["packs"].append({"folder": "packs/screen", "role": "screen", "screen": "main",
+                              "params": {"bars": 8.0, "speed": 0.35}})
+    manifest["bindings"].append({"param": "barCount", "target": "packs.2.params.bars"})
+    with open(os.path.join(stage_dir, "stage.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return stage_dir
+
+
 STAGES = {
     "cyclorama": build_cyclorama,
     "mirror_room": build_mirror_room,
     "led_stage": build_led_stage,
+    "pack_test": build_pack_test,
 }
 
 

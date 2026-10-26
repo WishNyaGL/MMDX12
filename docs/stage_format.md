@@ -278,14 +278,13 @@ and holds `pack.json`).
 material of the stage's parts that matches the screen's `materials` globs or a `material` rule whose `"screen"` names
 it. The texture is the material's *emission* (`MatFlag_Screen`: HDR radiance x `brightness`; the material itself is
 black, no diffuse / specular / AO) in raster, RT, PT and the offline GI, and `source: "none"` is black (an off LED).
-
 | `source` | what it shows |
 |---|---|
 | `none` | black |
 | `image` | `file`, decoded once (downscaled to <= 2048 when larger) |
 | `video` | `file`, one decoder per video screen, looped by the clip's duration; an offline render decodes the exact frame |
 | `camera` | a live feed: the scene re-rendered from the `camera` (see below) |
-| `program` | not implemented yet (S6): black with one `[W]` per load |
+| `program` | a bundled screen pack (`packs`, role `screen`): its `screen.hlsl` draws the content (S6, see below) |
 
 A **camera feed** is the scene rendered from that camera into the screen texture *before* the main scene: raster and
 lit, with the user's shading and shadow maps but without TAA, upscaler, DoF, volumetrics, effects or MME post, and at
@@ -293,6 +292,14 @@ most 960x540 (min(screen size, 960x540)). Screens shown *inside* a feed keep the
 recursion), and at most two feeds re-render per frame (round robin beyond that). Every render path shows the feeds.
 `camera` names a `cameras` entry in play mode and in the studio; in the studio `uid:<n>` also names an S4 studio camera
 (its evaluated pose at the timeline time).
+
+A **program** screen is drawn by a bundled screen pack (S6): `render/StageScreens` makes the screen's texture a render
+target and draws the pack's `screen.hlsl` into it once per frame, before the scene passes, with a fullscreen pass
+(DXC `ps_6_0`). The pack implements `float4 PackScreen(PackScreenInput)` (contract `shaders/screen_api.hlsli`, guide
+docs/shader_screen_api.md) and gets the uv, the screen texture size, the song / timeline seconds (so an offline render
+is exact), its `packs[]` parameters and the pack's `textures`. The result is linear RGB and becomes the screen's
+emission like any other source, in every render path. `file` names the pack folder; a `packs[]` entry of role `screen`
+naming the same screen wins over it. A broken or missing pack leaves the screen black (one `[W]` at load).
 
 `screens.<id>.brightness` / `.enabled` / `.source` / `.file` / `.camera` binding targets override the manifest per
 frame (play mode and the studio), and the studio's stage panel writes per-screen overrides into the project
@@ -338,6 +345,25 @@ ground colours and hemisphere strength.
 `materials` globs), `world` (needs an existing `socket`), `screen` (needs an existing `screen` id). `params` are the
 initial parameter values (float); a binding reaches them as `packs.<index>.params.<key>` (the index is the array
 position). S6 wires them into the renderer.
+
+**Rendered since S6 (2026-10-26).** Every entry is registered in the shader pack registry under
+`stage:<stage id>/<folder>` (never installed, never listed in the manager / pickers / gallery, no hot reload; a broken
+pack is one `[W]` and the stage keeps loading). A stage with no `packs` entry costs nothing: no registry entries, no
+PSOs, no render targets.
+
+| role | what it does |
+|---|---|
+| `surface` | the FIRST entry whose `materials` globs match a material of a stage part shades that part's materials with the pack (`surface.hlsl`); the part's other materials keep the default shading. The pack's class comes from its own class rules, else its first rule's class (a stage material rarely matches a character pack's rules), else `body` |
+| `world` | a `WorldInstance` at the `socket`'s transform (the socket node's world matrix x the socket's explicit offset, resolved after the parts are posed), appended after the user's world stack in play mode and after the project's world entities in the studio. Not an editable outliner entity |
+| `screen` | the content of the `screen` with that id, drawn by the pack's `screen.hlsl` (docs/shader_screen_api.md); wins over the screen's own `source: "program"` / `file` |
+
+`packs.<index>.params.<key>` binding targets override the entry's `params` per frame for all three roles (play mode and
+the studio). The mapped pack classes are the pack.json `classes` values; a pack with no class rule at all classifies
+stage materials as `body`.
+
+`tools/stagegen/stagegen.py --only pack_test` writes the fixture (`captures/stages/pack_test`): a `program` screen
+drawing animated bars from the time and a param, a surface pack tinting `cove_wall`, and the built-in `snow` pack copied
+as the world pack at the `world` socket. `tools/stage_check` passes on it.
 
 ## `params`, `groups`, `variants`
 

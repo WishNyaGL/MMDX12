@@ -1,5 +1,6 @@
 #include "app/StageRuntime.h"
 #include "asset/StageLights.h"
+#include "core/TextUtil.h"
 #include "render/RenderTypes.h"
 #include "render/ShaderPack.h"
 
@@ -211,35 +212,6 @@ std::vector<StageScreenState> ResolveStageScreens(const StageManifest& manifest,
         if (edit) edit(st);
         out.push_back(std::move(st));
     }
-    // S6: the program pack of each screen. A `packs[]` entry of role "screen" naming it wins over the screen's own
-    // `file` (the same pack folder can be named by either).
-    const std::vector<StagePackState> packs = ResolveStagePacks(manifest, eval);
-    for (StageScreenState& st : out) {
-        for (const StagePackState& p : packs) {
-            if (p.role != StagePackRole::Screen || manifest.packs[(size_t)p.index].screen != st.id) continue;
-            st.pack = p.id;
-            st.params = p.params;
-        }
-    }
-    // the manifest's `screens[].source == "program"` + `file` = the pack folder: same id, unless a packs[] entry won
-    for (StageScreenState& st : out) {
-        if (!st.pack.empty()) continue;
-        const StageScreen* src = manifest.FindScreen(st.id);
-        if (!src || src->source != StageScreenSource::Program || src->file.empty()) continue;
-        st.pack = StagePackId(manifest.id, src->file);
-        // the folder's parameters, when a packs[] entry names that same folder (any role)
-        for (size_t i = 0; i < manifest.packs.size(); ++i)
-            if (manifest.packs[i].folder == src->file) {
-                for (const StagePackState& p : packs)
-                    if (p.index == (int)i) st.params = p.params;
-                break;
-            }
-    }
-    // a screen that shows a program pack but whose pack is not a registered "screen" pack draws black: the runtime has
-    // nothing to sample. Not an error here: the loader warned once per broken pack.
-    for (StageScreenState& st : out) {
-        if (st.source == StageScreenSource::Program && st.pack.empty()) st.pack.clear();
-    }
     // the evaluator's screen targets (in assignment order): the last one per field wins
     for (const StageAssignment& a : eval.targets) {
         const StageTargetSpec spec = ResolveStageTarget(manifest, a.target);
@@ -256,6 +228,31 @@ std::vector<StageScreenState> ResolveStageScreens(const StageManifest& manifest,
             } else if (spec.field == "file") st.file = a.value.text;
             else if (spec.field == "camera") st.camera = a.value.text;
             break;
+        }
+    }
+    // S6: the program pack of each screen (after the targets, so a target that switches `source` to "program" or
+    // rewrites `file` picks that pack up too). A `packs[]` entry of role "screen" naming the screen wins over the
+    // screen's own `file` (the same pack folder can be named by either; the packs[] entry is the explicit one).
+    {
+        const std::vector<StagePackState> packs = ResolveStagePacks(manifest, eval);
+        for (StageScreenState& st : out) {
+            if (st.source != StageScreenSource::Program || st.file.empty()) continue;
+            for (const StagePackState& p : packs) {
+                if (p.role != StagePackRole::Screen) continue;
+                if (manifest.packs[(size_t)p.index].screen != st.id) continue;
+                st.pack = p.id;
+                st.params = p.params;
+            }
+            if (!st.pack.empty()) continue;
+            // `screens[].source == "program"` + `file` = the pack folder: the same id the registry used at load
+            st.pack = StagePackId(manifest.id, st.file);
+            // the folder's parameters, when a packs[] entry names that same folder (any role)
+            for (size_t i = 0; i < manifest.packs.size(); ++i)
+                if (manifest.packs[i].folder == st.file) {
+                    for (const StagePackState& p : packs)
+                        if (p.index == (int)i) st.params = p.params;
+                    break;
+                }
         }
     }
     return out;
@@ -288,11 +285,15 @@ std::vector<StagePackState> ResolveStagePacks(const StageManifest& manifest, con
 }
 
 void RegisterStagePacks(const StageManifest& manifest) {
-    for (const StagePackRef& ref : manifest.packs) {
-        const std::string id = StagePackId(manifest.id, ref.folder);
-        // the folder is relative to the stage folder and SafeRelativeFile rejected ".." at parse time
-        ShaderPacks().RegisterStagePack(id, manifest.dir / Utf8ToPath(ref.folder));
-    }
+    // Every `packs[]` folder, plus the folder of each `source: "program"` screen that no `packs[]` entry names (that
+    // form drives a screen through its own `file`); registering is idempotent per folder.
+    const auto registerFolder = [&manifest](const std::string& folder) {
+        if (folder.empty()) return;
+        ShaderPacks().RegisterStagePack(StagePackId(manifest.id, folder), manifest.dir / Utf8ToPath(folder));
+    };
+    for (const StagePackRef& ref : manifest.packs) registerFolder(ref.folder);   // SafeRelativeFile at parse time
+    for (const StageScreen& screen : manifest.screens)
+        if (screen.source == StageScreenSource::Program && !screen.file.empty()) registerFolder(screen.file);
 }
 
 StageSurfacePack ResolveStageSurfacePack(const StageManifest& manifest, const GpuModel& part) {
@@ -337,7 +338,7 @@ void ApplyStageSurfacePack(const std::vector<StagePackState>& packs, const Stage
         if (p.id != part.surfacePack.id) continue;
         const ShaderPack* pack = ShaderPacks().Find(p.id);
         if (!pack || pack->type != PackType::Surface || !pack->Selectable()) return;
-        part.gpu->SetShaderPack(pack, p.params, {}, part.surfacePack.materials, p.params);
+        part.gpu->SetShaderPack(pack, p.params, std::filesystem::path{}, part.surfacePack.materials);
         return;
     }
 }

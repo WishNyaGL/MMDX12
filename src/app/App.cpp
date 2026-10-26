@@ -2258,6 +2258,9 @@ void App::UnloadScene() {
     renderer_.ReleaseVideoLayers();   // M8b: stop the song's video decode threads, free their buffers
     haveLastLiveCamera_ = false;
     if (scene_ && scene_->colliderFuture.valid()) scene_->colliderFuture.wait();
+    // S6: the scene's stage-bundled packs leave the registry with it (a reloaded stage re-reads its folders)
+    if (scene_ && scene_->stage && scene_->stage->Valid())
+        ShaderPacks().UnregisterStagePacks(scene_->stage->Manifest()->id);
     scene_.reset();
     mmeControllerQueue_.clear();      // auto-loaded MME controllers are per scene (freed with it)
     mmeControllerQueued_.clear();

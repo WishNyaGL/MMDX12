@@ -20,12 +20,23 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
 namespace mmdx {
+
+// S6: one `packs[]` entry of a stage at one frame: the registry id its folder is registered under (StagePackId) and its
+// parameter values (the manifest's initial values with the `packs.<index>.params.<key>` targets replayed in assignment
+// order). `index` is the entry's position in manifest.packs (the binding index). ResolveStagePacks fills it.
+struct StagePackState {
+    int index = 0;
+    std::string id;                        // "stage:<stage id>/<folder>"
+    StagePackRole role = StagePackRole::Surface;
+    std::map<std::string, float> params;
+};
 
 // One loaded stage part: its GPU model plus the rule -> material binding of its materials.
 struct StageRuntimePart {
@@ -124,15 +135,6 @@ std::vector<StageScreenState> ResolveStageScreens(const StageManifest& manifest,
                                                   const std::function<void(StageScreenState&)>& edit = {});
 
 // ---- S6 bundled packs ---------------------------------------------------------------------------------------------
-// One `packs[]` entry of a stage at one frame: the registry id its folder is registered under (StagePackId) and its
-// parameter values (the manifest's initial values with the `packs.<index>.params.<key>` targets replayed in assignment
-// order). `index` is the entry's position in manifest.packs (the binding index).
-struct StagePackState {
-    int index = 0;
-    std::string id;                        // "stage:<stage id>/<folder>"
-    StagePackRole role = StagePackRole::Surface;
-    std::map<std::string, float> params;
-};
 // Every `packs[]` entry with this frame's parameters. Empty when the stage bundles no packs (zero cost).
 std::vector<StagePackState> ResolveStagePacks(const StageManifest& manifest, const StageEvalResult& eval);
 
@@ -154,7 +156,8 @@ void ApplyStageSurfacePack(const std::vector<StagePackState>& packs, const Stage
 // S6 world packs: one WorldInstance per `packs[]` entry of role "world", placed at its socket (the socket's node bone's
 // world matrix, times the socket's explicit offset; resolved after the parts are posed) and evaluated at `time`.
 // `resolveNode` answers a node / bone world matrix (empty name = not resolvable, the socket's explicit transform is used
-// on its own). `uidBase` keeps the instances apart from the host's own worlds: each gets uidBase + pack index.
+// on its own). `uidBase` keeps the instances apart from the host's own worlds: each gets uidBase + pack index (the
+// studio adds the stage entity's uid * 256 to the base so two stages never share a uid).
 void AppendStageWorldPacks(const StageManifest& manifest, const std::vector<StagePackState>& packs, double time,
                            bool exact, const std::shared_ptr<const WorldColliderTrack>& colliders, uint32_t uidBase,
                            const std::function<bool(const std::string& node, DirectX::XMFLOAT4X4& out)>& resolveNode,

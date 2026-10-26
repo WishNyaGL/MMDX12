@@ -792,6 +792,9 @@ void App::StudioRemoveModel(int index) {
         const std::string stageName = stage ? (stage->manifest ? stage->manifest->DisplayName(StageLanguage())
                                                               : stage->stageId)
                                             : name;
+        // S6: the stage's bundled packs leave the registry with it (adding the stage again re-reads them)
+        if (stage && stage->manifest)
+            ShaderPacks().UnregisterStagePacks(stage->manifest->id);
         std::set<uint32_t> partUids;
         std::set<int> propParents;
         for (auto& m : d.models) {
@@ -901,8 +904,11 @@ bool App::StudioReplaceModel(int index, StudioPackageModel& pm, std::string* not
     m.stageUid = pm.stageUid;
     m.stageBinding = pm.stageManifest ? MatchStageMaterialRules(pm.stageManifest->materials, *pm.pmx)
                                       : StageMaterialBinding{};
+    m.stageSurfacePack = {};   // S6: resolved once the GPU model exists (below)
     m.inst = std::make_unique<ModelInstance>(pm.pmx);
     m.gpu = std::move(gpu);
+    // S6: the part's bundled surface pack (resolved once; its params follow the timeline every frame)
+    if (m.stageManifest) m.stageSurfacePack = ResolveStageSurfacePack(*m.stageManifest, *m.gpu);
     m.defaultPackTextureFolder = pm.defaultPackTextureFolder;
     // keys stay keyed by name; tracks the new model lacks are kept (saved / exported as they were)
     m.motion.CanonicalizeNames(*m.pmx);

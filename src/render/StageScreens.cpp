@@ -11,7 +11,7 @@
 #include "core/TextUtil.h"
 #include <algorithm>
 #include <cstring>
-#include <set>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -75,8 +75,6 @@ struct StageScreens::Impl {
         Slot& operator=(Slot&&) = default;
     };
 
-    // S6: one screen pack's PSO (a fullscreen pass into the screen texture). Compiled on first use; a compile error is
-    // one [W] and the screen keeps its last content (black before the first frame).
     std::vector<Slot> slots;
     ComPtr<ID3D12Resource> black;          // 1x1 black texture for source none / off
     std::unordered_map<uint64_t, ModelBinding> bound;
@@ -351,7 +349,6 @@ void StageScreens::Render(Dx12Context& ctx, ID3D12GraphicsCommandList* cmd, cons
         s.materials = sv.materials;
         s.brightness = sv.brightness;
         s.enabled = sv.enabled;
-        s.pack = sv.pack;
         s.width = std::clamp(sv.width, 1u, kScreenCap);
         s.height = std::clamp(sv.height, 1u, kScreenCap);
         const StageScreenSource source = sv.enabled ? sv.source : StageScreenSource::None;

@@ -1497,43 +1497,18 @@ std::string StagePackId(const std::string& stageId, const std::string& folder) {
 const ShaderPack* ShaderPackRegistry::RegisterStagePack(const std::string& id, const std::filesystem::path& dir) {
     for (const ShaderPack& p : stagePacks_)
         if (p.id == id) return &p;   // registered once per stage folder
-    // the same parser and compile paths as an installed pack; failures stay local to this stage
-    if (!fs::is_regular_file(dir / Utf8ToPath(kManifestName))) return nullptr;
+    // the same loader as an installed pack (manifest parser, PACK_HAS_EDGE probe); failures stay local to this stage
     ShaderPack pack;
-    pack.dir = dir;
-    pack.source = PackSource::Stage;
-    {
-        std::ifstream in(dir / Utf8ToPath(kManifestName), std::ios::binary);
-        std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        if (!in && json.empty()) {
-            LOG_WARN("stage pack '%s': pack.json cannot be read (%s)", id.c_str(), PathToUtf8(dir).c_str());
-            return nullptr;
-        }
-        std::string error;
-        ParseShaderPackManifest(json, dir, pack, error);
+    if (!LoadPackFolder(dir, PackSource::Stage, pack)) {
+        LOG_WARN("stage pack '%s': no readable pack.json (%s; the stage keeps loading)", id.c_str(),
+                 PathToUtf8(dir).c_str());
+        return nullptr;
     }
     // the registry id is the stage's, never the folder's own: keep the manifest's metadata, replace the id
     pack.id = id;
-    // PACK_HAS_EDGE: surface packs only (same rule as LoadPackFolder)
-    if (pack.type == PackType::Surface) {
-        std::ifstream surf(dir / L"surface.hlsl", std::ios::binary);
-        std::string line;
-        while (surf && std::getline(surf, line)) {
-            const size_t p = line.find_first_not_of(" \t");
-            if (p == std::string::npos || line[p] != '#') continue;
-            const size_t d = line.find_first_not_of(" \t", p + 1);
-            if (d != std::string::npos && line.compare(d, 6, "define") == 0) {
-                const size_t n = line.find_first_not_of(" \t", d + 6);
-                if (n != std::string::npos && line.compare(n, 13, "PACK_HAS_EDGE") == 0) {
-                    pack.hasEdge = true;
-                    break;
-                }
-            }
-        }
-    }
     if (!pack.Selectable()) {
-        LOG_WARN("stage %s: pack '%s': %s (the stage keeps loading)", id.c_str(), PathToUtf8(dir).c_str(),
-                 pack.statusMessage.c_str());
+        LOG_WARN("stage pack '%s': %s (%s; the stage keeps loading)", id.c_str(), pack.statusMessage.c_str(),
+                 PathToUtf8(dir).c_str());
         return nullptr;
     }
     LOG_INFO("stage pack '%s': %s (%s)", id.c_str(), pack.name.Get(PackLanguage()).c_str(),
