@@ -1017,8 +1017,49 @@ void App::DrawStudioLightInspector(float w) {
                 [&](SceneLight& l) { l.skyMapEncoding = studio::SkyMapEncodingName((studio::SkyMapEncoding)enc); });
         }
 
+        // S9b-4: the cloud layer on the procedural sky (an image sky draws its own clouds, so these are only used while
+        // no image is loaded). Every value is keyable: coverage / opacity / softness, the layer's height and noise size
+        // in km, and the wind that drifts it (direction in degrees, speed in m/s over the scene time).
+        ImGui::Dummy(ImVec2(w, Dp(6.0f)));
+        SectionLabel(Tr("구름"));
+        {
+            float coverage = cur.cloudCoverage;
+            keyedEdit(Tr("피복"),
+                [&] { return ImGui::SliderFloat("##cloudcov", &coverage, 0.0f, 1.0f, "%.2f"); },
+                [&](LightValues& v) { v.cloudCoverage = std::clamp(coverage, 0.0f, 1.0f); }, "sky.cloudCoverage");
+
+            float opacity = cur.cloudOpacity;
+            keyedEdit(Tr("불투명도"),
+                [&] { return ImGui::SliderFloat("##cloudopacity", &opacity, 0.0f, 1.0f, "%.2f"); },
+                [&](LightValues& v) { v.cloudOpacity = std::clamp(opacity, 0.0f, 1.0f); }, "sky.cloudOpacity");
+
+            float softness = cur.cloudSoftness;
+            keyedEdit(Tr("부드러움"),
+                [&] { return ImGui::SliderFloat("##cloudsoft", &softness, 0.02f, 1.0f, "%.2f"); },
+                [&](LightValues& v) { v.cloudSoftness = std::clamp(softness, 0.02f, 1.0f); }, "sky.cloudSoftness");
+
+            float height = cur.cloudHeightKm;
+            keyedEdit(Tr("높이 (km)"),
+                [&] { return ImGui::SliderFloat("##cloudheight", &height, 0.3f, 12.0f, "%.2f km"); },
+                [&](LightValues& v) { v.cloudHeightKm = std::clamp(height, 0.3f, 12.0f); }, "sky.cloudHeight");
+
+            float scale = cur.cloudScaleKm;
+            keyedEdit(Tr("크기 (km)"),
+                [&] { return ImGui::SliderFloat("##cloudscale", &scale, 0.2f, 20.0f, "%.2f km"); },
+                [&](LightValues& v) { v.cloudScaleKm = std::clamp(scale, 0.2f, 20.0f); }, "sky.cloudScale");
+
+            float windDeg = cur.cloudWindDeg;
+            keyedEdit(Tr("바람 방향"),
+                [&] { return ImGui::DragFloat("##cloudwinddeg", &windDeg, 1.0f, -360.0f, 360.0f, "%.0f°"); },
+                [&](LightValues& v) { v.cloudWindDeg = std::clamp(windDeg, -360.0f, 360.0f); }, "sky.cloudWindDeg");
+
+            float windSpeed = cur.cloudWindSpeed;
+            keyedEdit(Tr("바람 속도"),
+                [&] { return ImGui::SliderFloat("##cloudwindspeed", &windSpeed, 0.0f, 100.0f, "%.1f m/s"); },
+                [&](LightValues& v) { v.cloudWindSpeed = std::clamp(windSpeed, 0.0f, 100.0f); }, "sky.cloudWindSpeed");
+        }
+
         ImGui::Dummy(ImVec2(w, Dp(4.0f)));
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
         PushFont(Font::Regular, size::Caption);
         ImGui::TextWrapped("%s", Tr("하늘 조명은 배경, 안개 색과 태양 색을 함께 정합니다. 태양 조명이 있으면 그 방향을 씁니다."));

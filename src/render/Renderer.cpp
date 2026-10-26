@@ -1307,6 +1307,14 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
             sc.groundColor = {map->avg[2].x * k, map->avg[2].y * k, map->avg[2].z * k};
         }
     }
+    // S9b-4: the cloud layer of the procedural physical sky. Only when the S9b-1 model itself draws (x = 1): an image
+    // sky (x = 2) and no sky at all leave both zero, so those frames stay byte-identical.
+    sc.cloudParams = {0.0f, 0.0f, 0.0f, 0.0f};
+    sc.cloudParams2 = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (lp.physicalSky && sc.skyParams.x > 0.5f && sc.skyParams.x < 1.5f) {
+        sc.cloudParams = {lp.cloudCoverage, lp.cloudOpacity, lp.cloudSoftness, lp.cloudHeightKm};
+        sc.cloudParams2 = {lp.cloudScaleKm, lp.cloudWindOffset.x, lp.cloudWindOffset.y, 0.0f};
+    }
     // S9b-2: no sky environment until RecordScene (or the offline image) builds one for this frame
     sc.skyEnvParams = {(float)(int32_t)DescriptorHeap::kInvalid, (float)kSkyEnvW, (float)kSkyEnvH, 0.0f};
     sc.floorGloss = (settings_.ssr || EffectivePath() == RenderPath::PathTraced) ? settings_.floorGloss : 0.0f;

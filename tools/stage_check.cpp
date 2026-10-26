@@ -420,6 +420,41 @@ int SelfTest() {
         check(!mmdx::ValidateStageManifest(badMapInt).empty(), "a negative sky map intensity rejected");
     }
 
+    // S9b-4: the cloud layer on the physical sky (its seven values in "values") and its nested targets
+    {
+        const std::string cloudJson = R"({
+          "format": "mmdx-stage", "formatVersion": 1, "id": "cloudtest", "version": "1", "name": "Cloud test",
+          "models": [{"file": "x.glb"}],
+          "lights": [{"kind": "sky", "name": "sky",
+                      "values": {"cloudCoverage": 0.5, "cloudOpacity": 0.8, "cloudSoftness": 0.3,
+                                 "cloudHeightKm": 3.0, "cloudScaleKm": 6.0, "cloudWindDeg": 90.0,
+                                 "cloudWindSpeed": 25.0}}],
+          "params": [{"key": "cov", "type": "float", "default": 0.4, "min": 0.0, "max": 1.0}],
+          "bindings": [{"param": "cov", "target": "lights.sky.sky.cloudCoverage"}]
+        })";
+        StageManifest cm;
+        check(mmdx::ParseStageManifest(cloudJson, fs::path("cloudtest"), cm, error), "cloud manifest parses", error);
+        check(mmdx::ValidateStageManifest(cm).empty(), "cloud manifest validates",
+              mmdx::ValidateStageManifest(cm).empty() ? "" : mmdx::ValidateStageManifest(cm).front());
+        check(cm.lights.size() == 1 && cm.lights[0].kind == mmdx::studio::LightKind::Sky &&
+                  cm.lights[0].v.cloudCoverage == 0.5f && cm.lights[0].v.cloudOpacity == 0.8f &&
+                  cm.lights[0].v.cloudSoftness == 0.3f && cm.lights[0].v.cloudHeightKm == 3.0f &&
+                  cm.lights[0].v.cloudScaleKm == 6.0f && cm.lights[0].v.cloudWindDeg == 90.0f &&
+                  cm.lights[0].v.cloudWindSpeed == 25.0f,
+              "cloud values parsed");
+        const mmdx::StageTargetSpec cs = mmdx::ResolveStageTarget(cm, "lights.sky.sky.cloudCoverage");
+        check(cs.ok && cs.owner == "sky" && cs.field == "sky.cloudCoverage" &&
+                  cs.type == mmdx::StageTargetSpec::ValueType::Float,
+              "cloud target splits owner / field");
+        check(!mmdx::ResolveStageTarget(cm, "lights.sky.sky.cloudNope").ok, "unknown cloud field rejected");
+        mmdx::StageManifest badCov = cm;
+        badCov.lights[0].v.cloudCoverage = 1.5f;
+        check(!mmdx::ValidateStageManifest(badCov).empty(), "cloud coverage above 1 rejected");
+        mmdx::StageManifest badSpeed = cm;
+        badSpeed.lights[0].v.cloudWindSpeed = 200.0f;
+        check(!mmdx::ValidateStageManifest(badSpeed).empty(), "a cloud wind speed above 100 rejected");
+    }
+
     // enum -> screen source (string target)
     const std::string enumJson = R"({
       "format": "mmdx-stage", "formatVersion": 1, "id": "enumtest", "version": "1", "name": "Enum test",

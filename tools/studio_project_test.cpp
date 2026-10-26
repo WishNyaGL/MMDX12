@@ -126,6 +126,14 @@ static std::string DiffLight(const SceneLight& a, const SceneLight& b) {
     if (a.v.skyMaxElevationDeg != b.v.skyMaxElevationDeg) return "v.skyMaxElevationDeg";
     if (a.v.skyMapRotationDeg != b.v.skyMapRotationDeg) return "v.skyMapRotationDeg";
     if (a.v.skyMapIntensity != b.v.skyMapIntensity) return "v.skyMapIntensity";
+    // S9b-4: the cloud layer on the physical sky
+    if (a.v.cloudCoverage != b.v.cloudCoverage) return "v.cloudCoverage";
+    if (a.v.cloudOpacity != b.v.cloudOpacity) return "v.cloudOpacity";
+    if (a.v.cloudSoftness != b.v.cloudSoftness) return "v.cloudSoftness";
+    if (a.v.cloudHeightKm != b.v.cloudHeightKm) return "v.cloudHeightKm";
+    if (a.v.cloudScaleKm != b.v.cloudScaleKm) return "v.cloudScaleKm";
+    if (a.v.cloudWindDeg != b.v.cloudWindDeg) return "v.cloudWindDeg";
+    if (a.v.cloudWindSpeed != b.v.cloudWindSpeed) return "v.cloudWindSpeed";
     return "";
 }
 
@@ -1221,6 +1229,14 @@ static void TestSkyLightProject() {
     sky.skyMapMirror = true;
     sky.v.skyMapRotationDeg = -72.5f;
     sky.v.skyMapIntensity = 1.75f;
+    // S9b-4: the cloud layer (keyable with the rest of the sky values)
+    sky.v.cloudCoverage = 0.45f;
+    sky.v.cloudOpacity = 0.8f;
+    sky.v.cloudSoftness = 0.35f;
+    sky.v.cloudHeightKm = 3.25f;
+    sky.v.cloudScaleKm = 2.5f;
+    sky.v.cloudWindDeg = 90.0f;
+    sky.v.cloudWindSpeed = 25.0f;
     LightKey k0, k1;
     k0.frame = 0;
     k0.v = sky.v;
@@ -1243,6 +1259,10 @@ static void TestSkyLightProject() {
         Check(l["skyMap"] == "sky/test_sky.hdr" && l["skyMapEncoding"] == "rgbt" && l["skyMapMirror"] == true &&
                   l["values"]["skyMapRotationDeg"] == -72.5f && l["values"]["skyMapIntensity"] == 1.75f,
               "sky light: the image and its values are written");
+        Check(l["values"]["cloudCoverage"] == 0.45f && l["values"]["cloudSoftness"] == 0.35f &&
+                  l["values"]["cloudHeightKm"] == 3.25f && l["values"]["cloudWindDeg"] == 90.0f &&
+                  l["values"]["cloudWindSpeed"] == 25.0f,
+              "sky light: the cloud layer's values are written");
         Check(l["keys"].size() == 2 && l["keys"][1]["values"]["skyTimeOfDay"] == 18.25f,
               "sky light: key values carry the time of day");
     }
@@ -1278,6 +1298,10 @@ static void TestSkyLightProject() {
             Check(got.skyMap.empty() && got.skyMapEncoding == "auto" && !got.skyMapMirror &&
                       got.v.skyMapRotationDeg == 0.0f && got.v.skyMapIntensity == 1.0f,
                   "sky image defaults: no map, auto encoding, no mirror, rotation 0, intensity 1");
+            Check(got.v.cloudCoverage == 0.0f && got.v.cloudOpacity == 1.0f && got.v.cloudSoftness == 0.25f &&
+                      got.v.cloudHeightKm == 2.0f && got.v.cloudScaleKm == 1.5f && got.v.cloudWindDeg == 0.0f &&
+                      got.v.cloudWindSpeed == 10.0f,
+                  "cloud defaults: no clouds, opaque, softness 0.25, 2 km, 1.5 km, north wind 10 m/s");
         }
         ProjectData plain;
         SceneLight def;
@@ -1292,7 +1316,7 @@ static void TestSkyLightProject() {
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
         const nlohmann::json& vals = j["editor"]["lights"][0]["values"];
         Check(!vals.contains("skyTimeOfDay") && !vals.contains("skyTurbidity") && !vals.contains("skyIntensity") &&
-                  !vals.contains("skyMapIntensity"),
+                  !vals.contains("skyMapIntensity") && !vals.contains("cloudCoverage") && !vals.contains("cloudWindSpeed"),
               "a default sky light writes no sky value keys (an older file's bytes are kept)");
         Check(!j["editor"]["lights"][0].contains("skyMap"),
               "a sky light with no image writes no skyMap key");

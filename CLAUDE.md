@@ -437,6 +437,18 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     sky light's own sun stays (time of day); with `skySunIntensity` 0 it casts no shadow, and raster / RT then get the
     image's light as ambient only (no directional shadow from the image's sun; PT / GI find it through the NEE).
     The offline background override (`gBgOverride.w > 0.5`) disables the build, since that escaped radiance is not sky.
+    Clouds (S9b-4): a procedural layer on the S9b-1 sky (`shaders/physical_sky.hlsli` CloudHash / CloudNoise / CloudFbm /
+    CloudDensity / `PhysicalSkyClouds`, called from `SkyColor` between the glow and `* gSunIntensity`). Values (keyable,
+    defaults in brackets): `cloudCoverage` [0] 0..1, `cloudOpacity` [1], `cloudSoftness` [0.25] 0.02..1, `cloudHeightKm`
+    [2] 0.3..12, `cloudScaleKm` [1.5] 0.2..20, `cloudWindDeg` [0] -360..360, `cloudWindSpeed` [10] 0..100 m/s; targets
+    `lights.<name>.sky.cloudCoverage|cloudOpacity|cloudSoftness|cloudHeight|cloudScale|cloudWindDeg|cloudWindSpeed`.
+    `SceneConstants::cloudParams` = (coverage, opacity, softness, heightKm), `cloudParams2` = (scaleKm, wind offset km x / z
+    from `FillSceneConstants` at `view.sceneTime`); both stay 0 unless the procedural sky draws (never on an image sky), so
+    coverage 0 is byte-identical to the frames before S9b-4. The layer is sampled on the ground plane at the ray's height
+    (`dir.xz / dir.y * height` + wind), lit by the sun's colour (Henyey-Greenstein forward lobe + a self-shadow step 0.3 km
+    toward the sun) and by the sky / ground ambient; the CPU dims the sky-owned sun colour by `1 - 0.6 * coverage * opacity`.
+    Every path reads `SkyColor`, so raster / RT / PT / offline GI all show the clouds and (through S9b-2) light from them.
+    Limit: no cloud shadows on the ground.
     AutoLuminous (そぼろ convention, native): `GpuModel::Create` flags a non-PBR material with black specular and
     specular power >= 100 as `MatFlag_AutoLuminous` (cleared for pack-shaded materials); `AutoLumEmission`
     (common.hlsli) adds diffuse x texture x (power - 100) / 10 x 4 as HDR after lighting in the raster / RT PS, PT and

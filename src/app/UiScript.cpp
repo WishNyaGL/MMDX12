@@ -617,6 +617,12 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                     else if (f == "skymap") light->skyMap = args[2];
                     else if (f == "skymaprot") light->v.skyMapRotationDeg = num(2);
                     else if (f == "skymapint") light->v.skyMapIntensity = std::max(0.0f, num(2));
+                    // S9b-4: the cloud layer on the physical sky (cloudwind takes direction and speed in one command)
+                    else if (f == "cloudcov") light->v.cloudCoverage = std::clamp(num(2), 0.0f, 1.0f);
+                    else if (f == "cloudwind") {
+                        light->v.cloudWindDeg = std::clamp(num(2), -360.0f, 360.0f);
+                        light->v.cloudWindSpeed = std::clamp(num(3), 0.0f, 100.0f);
+                    }
 
                     studioLightChanged_ = true;
                     studio_->rowsKey = ~0ull;

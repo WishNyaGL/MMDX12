@@ -113,6 +113,11 @@ cbuffer SceneCB : register(b0) {
     // gSkyParams.x = 2 while an image is loaded (1 = the procedural S9b-1 sky, 0 = the hand-set gradient).
     float4 gSkyMapParams;
     float4 gSkyMapSize;
+    // S9b-4: the physical sky's cloud layer (ShaderInterop.h cloudParams / shaders/physical_sky.hlsli). gCloudParams =
+    // (coverage, opacity, softness, heightKm) with coverage 0 = no clouds (the procedural sky draws as before);
+    // gCloudParams2 = (scaleKm, windOffsetX_km, windOffsetZ_km, 0).
+    float4 gCloudParams;
+    float4 gCloudParams2;
 };
 
 static const float PI = 3.14159265;
@@ -181,6 +186,8 @@ float3 SkyColor(float3 dir) {
     // soft sun glow toward the key light (driven by sun colour so black = no glow)
     float s = saturate(dot(dir, -gLightDir));
     c += glowTint * ((gLightColor.r + gLightColor.g + gLightColor.b) > 1e-4 ? 1.0 : 0.0) * (pow(s, 24.0) * 0.35 + pow(s, 600.0) * 2.0) * (y > -0.05 ? 1.0 : 0.0);
+    // S9b-4: the cloud layer over the procedural physical sky (coverage 0 / an image sky = no change)
+    if (gSkyParams.x > 0.5 && gSkyParams.x < 1.5) c = PhysicalSkyClouds(dir, c);
     return c * gSunIntensity;
 }
 

@@ -317,6 +317,15 @@ struct LightParams {
     bool skyMapMirror = false;
     float skyMapRotationRad = 0.0f;
     float skyMapIntensity = 1.0f;
+    // S9b-4: the procedural cloud layer of the physical sky (unused on an image sky). cloudCoverage is already gated
+    // (0 with no physical sky); height and noise size are in km, the wind offset is the layer's drift at the scene
+    // time (km). Raster / RT / PT / offline GI all read the same values through SkyColor.
+    float cloudCoverage = 0.0f;
+    float cloudOpacity = 1.0f;
+    float cloudSoftness = 0.25f;
+    float cloudHeightKm = 2.0f;
+    float cloudScaleKm = 1.5f;
+    DirectX::XMFLOAT2 cloudWindOffset{0.0f, 0.0f};
 
     // Sun shadow properties
     LightShadowType sunShadow = LightShadowType::Hard;

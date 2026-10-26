@@ -71,6 +71,14 @@ nlohmann::json LightValuesJson(const LightValues& v) {
     // S9b-3: the image sky's rotation / radiance scale (unused / the defaults while the light has no image).
     if (v.skyMapRotationDeg != 0.0f) j["skyMapRotationDeg"] = v.skyMapRotationDeg;
     if (v.skyMapIntensity != 1.0f) j["skyMapIntensity"] = v.skyMapIntensity;
+    // S9b-4: the physical sky's cloud layer (omitted at their defaults, so a cloudless sky writes as before).
+    if (v.cloudCoverage != 0.0f) j["cloudCoverage"] = v.cloudCoverage;
+    if (v.cloudOpacity != 1.0f) j["cloudOpacity"] = v.cloudOpacity;
+    if (v.cloudSoftness != 0.25f) j["cloudSoftness"] = v.cloudSoftness;
+    if (v.cloudHeightKm != 2.0f) j["cloudHeightKm"] = v.cloudHeightKm;
+    if (v.cloudScaleKm != 1.5f) j["cloudScaleKm"] = v.cloudScaleKm;
+    if (v.cloudWindDeg != 0.0f) j["cloudWindDeg"] = v.cloudWindDeg;
+    if (v.cloudWindSpeed != 10.0f) j["cloudWindSpeed"] = v.cloudWindSpeed;
     return j;
 }
 
@@ -96,6 +104,13 @@ void ReadLightValues(const nlohmann::json& j, LightValues& v) {
     v.skyMaxElevationDeg = (float)ReadDouble(j, "skyMaxElevationDeg", v.skyMaxElevationDeg);
     v.skyMapRotationDeg = (float)ReadDouble(j, "skyMapRotationDeg", v.skyMapRotationDeg);
     v.skyMapIntensity = (float)ReadDouble(j, "skyMapIntensity", v.skyMapIntensity);
+    v.cloudCoverage = (float)ReadDouble(j, "cloudCoverage", v.cloudCoverage);
+    v.cloudOpacity = (float)ReadDouble(j, "cloudOpacity", v.cloudOpacity);
+    v.cloudSoftness = (float)ReadDouble(j, "cloudSoftness", v.cloudSoftness);
+    v.cloudHeightKm = (float)ReadDouble(j, "cloudHeightKm", v.cloudHeightKm);
+    v.cloudScaleKm = (float)ReadDouble(j, "cloudScaleKm", v.cloudScaleKm);
+    v.cloudWindDeg = (float)ReadDouble(j, "cloudWindDeg", v.cloudWindDeg);
+    v.cloudWindSpeed = (float)ReadDouble(j, "cloudWindSpeed", v.cloudWindSpeed);
 }
 
 } // namespace

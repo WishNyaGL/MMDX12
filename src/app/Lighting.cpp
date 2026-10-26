@@ -227,6 +227,18 @@ void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std
         out.skyMapMirror = sky->skyMapMirror;
         out.skyMapRotationRad = DirectX::XMConvertToRadians(v.skyMapRotationDeg);
         out.skyMapIntensity = std::max(0.0f, v.skyMapIntensity);
+        // S9b-4: the cloud layer. Only the procedural physical sky draws it: an image sky keeps coverage at 0, so the
+        // sun dimming below follows the gate too. The wind offset is the layer's drift at the scene time (sin / cos of
+        // the direction, so 0 degrees blows toward +z).
+        const bool imageSky = !sky->skyMap.empty();
+        out.cloudCoverage = imageSky ? 0.0f : std::clamp(v.cloudCoverage, 0.0f, 1.0f);
+        out.cloudOpacity = std::clamp(v.cloudOpacity, 0.0f, 1.0f);
+        out.cloudSoftness = std::clamp(v.cloudSoftness, 0.02f, 1.0f);
+        out.cloudHeightKm = std::clamp(v.cloudHeightKm, 0.3f, 12.0f);
+        out.cloudScaleKm = std::clamp(v.cloudScaleKm, 0.2f, 20.0f);
+        const float windRad = DirectX::XMConvertToRadians(v.cloudWindDeg);
+        const float windKm = std::clamp(v.cloudWindSpeed, 0.0f, 100.0f) * (float)t / 1000.0f;
+        out.cloudWindOffset = {std::sin(windRad) * windKm, std::cos(windRad) * windKm};
         if (!sun) out.direction = out.sky.sunDirToScene;
         // The sun colour: LightParams::color is gamma space (the shaders SrgbToLinear it), so the model's linear colour
         // is encoded here. With no Sun light the sky light also owns the sun's magnitude: it stays under 0.6 (the
@@ -248,6 +260,9 @@ void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std
             out.color = {0.0f, 0.0f, 0.0f};
             if (!sun) out.sunIntensity = 1.0f;
         }
+        // S9b-4: clouds dim the sun on average (no cloud shadows on the ground). Coverage 0 leaves the colour untouched.
+        const float cloudDim = 1.0f - 0.6f * out.cloudCoverage * out.cloudOpacity;
+        out.color = {out.color.x * cloudDim, out.color.y * cloudDim, out.color.z * cloudDim};
         if (!sun) {
             // the sky's own sun casts like a default sun light; a dark sun (night, skySunIntensity 0 with an image
             // sky whose own sun lights the scene) casts nothing (a hard shadow with no light was a ghost shadow)

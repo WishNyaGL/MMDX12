@@ -191,6 +191,11 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     // texture's width / height in texels (the v clamp keeps sampling off the edge rows), zw = 0.
     DirectX::XMFLOAT4 skyMapParams;
     DirectX::XMFLOAT4 skyMapSize;
+    // S9b-4: the physical sky's cloud layer (shaders/physical_sky.hlsli PhysicalSkyClouds). cloudParams = (coverage,
+    // opacity, softness, heightKm); coverage is 0 unless the procedural physical sky draws (never on an image sky, so
+    // 0 coverage leaves every frame byte-identical). cloudParams2 = (scaleKm, windOffsetX_km, windOffsetZ_km, 0).
+    DirectX::XMFLOAT4 cloudParams;
+    DirectX::XMFLOAT4 cloudParams2;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 

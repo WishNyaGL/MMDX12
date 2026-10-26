@@ -66,7 +66,7 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S9b-1 | Physical Sky light (C4D-like): `LightKind::Sky`, procedural sky (sun position / time of day, turbidity, horizon haze, ground) as the background, the fog colour and the sun colour, every render path | done 2026-10-27 |
 | S9b-2 | Sky lighting: the sky as a light (SH irradiance for the raster / RT ambient, importance-sampled with MIS in PT / GI) | done 2026-10-27 |
 | S9b-3 | Image skies: HDRI (.hdr / .exr equirect) and MME / Ray-MMD sky domes (DDS cubemap) as the sky light's map, rotation + intensity | done 2026-10-27 (.hdr / png / jpg / RGBA8 dds incl. Ray-MMD RGBT and cube maps; no EXR / BC6H) |
-| S9b-4 | Clouds: procedural cloud layer on the physical sky (coverage, height, wind; keyable), lit by the sun | |
+| S9b-4 | Clouds: procedural cloud layer on the physical sky (coverage, height, wind; keyable), lit by the sun | done 2026-10-27 |
 | S10 | Planar mirrors in raster (RT / PT / GI reflect natively) | done 2026-10-26 |
 | S11 | Compressed textures: DDS BCn (+ glTF `MSFT_texture_dds`), VRAM budget report | done 2026-10-26 |
 | S12 | Gallery screen + stage store (index, resumable download, install, update, revoke) | done 2026-10-26 |

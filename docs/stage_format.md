@@ -277,6 +277,14 @@ image is equirectangular: its centre column looks along +Z, u grows to the right
 through the sky lighting, the ambient light everywhere and a real light in the path tracers. The light's own sun still
 shines (set `skySunIntensity` to 0 when the image has its own sun; raster / RT then have no sharp sun shadow).
 
+**Clouds (S9b-4).** The procedural sky (not an image sky) may carry a cloud layer, keyable like the sky values:
+`cloudCoverage` (0, 0..1: 0 = a clear sky, exactly as before), `cloudOpacity` (1), `cloudSoftness` (0.25, 0.02..1: the
+hardness of the cloud edges), `cloudHeightKm` (2, 0.3..12), `cloudScaleKm` (1.5, 0.2..20: the size of the noise),
+`cloudWindDeg` (0, -360..360) and `cloudWindSpeed` (10, 0..100 m/s). Targets
+`lights.<name>.sky.cloudCoverage` / `.cloudOpacity` / `.cloudSoftness` / `.cloudHeight` / `.cloudScale` / `.cloudWindDeg`
+/ `.cloudWindSpeed`. The layer drifts with the song time (the wind offset is direction x speed x seconds) and is lit by
+the sky's sun; the sun's colour dims with `coverage * opacity`. Limit: clouds cast no shadows on the ground.
+
 ### `gltfLights` (S2a)
 
 A glTF part may carry lights with `KHR_lights_punctual`. They are imported into the model as light descriptions
@@ -525,7 +533,7 @@ order and applied in that order. Target paths:
 
 | path | value type |
 |---|---|
-| `lights.<name>.<field>` | see the light fields: `enabled` (bool), `intensity` / `range` / `coneOuter` / `coneInner` / `shadowSoftness` / `shadowDensity` / `rimStrength` / `swayPhase` / `gobo.rotation` / `gobo.scale` / `gobo.spin` / `gobo.focus` / `sky.timeOfDay` / `sky.northDeg` / `sky.turbidity` / `sky.haze` / `sky.intensity` / `sky.sunIntensity` (float), `color` / `rimColor` / `shadowColor` / `sky.ground` (colour), `position` / `aim` / `direction` / `size` (vec3), `vmdLink` (bool) |
+| `lights.<name>.<field>` | see the light fields: `enabled` (bool), `intensity` / `range` / `coneOuter` / `coneInner` / `shadowSoftness` / `shadowDensity` / `rimStrength` / `swayPhase` / `gobo.rotation` / `gobo.scale` / `gobo.spin` / `gobo.focus` / `sky.timeOfDay` / `sky.northDeg` / `sky.turbidity` / `sky.haze` / `sky.intensity` / `sky.sunIntensity` / `sky.mapRotation` / `sky.mapIntensity` / `sky.cloudCoverage` / `sky.cloudOpacity` / `sky.cloudSoftness` / `sky.cloudHeight` / `sky.cloudScale` / `sky.cloudWindDeg` / `sky.cloudWindSpeed` (float), `color` / `rimColor` / `shadowColor` / `sky.ground` (colour), `position` / `aim` / `direction` / `size` (vec3), `vmdLink` (bool) |
 | `materials.<rule match>.<field>` | `baseColor` (colour), `roughness` / `metallic` / `emissiveStrength` / `transmission` / `ior` / `alpha` (float), `emissive` (vec3), `mirror` / `castShadow` / `receiveShadow` (bool), `screen` (string) |
 | `screens.<id>.<field>` | `brightness` (float), `width` / `height` (int), `emitLight` / `enabled` (bool), `source` / `file` / `camera` (string) |
 | `packs.<index>.params.<key>` | float |

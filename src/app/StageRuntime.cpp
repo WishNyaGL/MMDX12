@@ -85,6 +85,14 @@ bool ApplyStageLightField(studio::SceneLight& l, const std::string& field, const
     // S9b-3: the sky image's values (the file / encoding / mirror are not bound, as the gobo's)
     if (field == "sky.mapRotation") { l.v.skyMapRotationDeg = v.AsNumber(); return true; }
     if (field == "sky.mapIntensity") { l.v.skyMapIntensity = std::max(0.0f, v.AsNumber()); return true; }
+    // S9b-4: the cloud layer on the physical sky
+    if (field == "sky.cloudCoverage") { l.v.cloudCoverage = std::clamp(v.AsNumber(), 0.0f, 1.0f); return true; }
+    if (field == "sky.cloudOpacity") { l.v.cloudOpacity = std::clamp(v.AsNumber(), 0.0f, 1.0f); return true; }
+    if (field == "sky.cloudSoftness") { l.v.cloudSoftness = std::clamp(v.AsNumber(), 0.02f, 1.0f); return true; }
+    if (field == "sky.cloudHeight") { l.v.cloudHeightKm = std::clamp(v.AsNumber(), 0.3f, 12.0f); return true; }
+    if (field == "sky.cloudScale") { l.v.cloudScaleKm = std::clamp(v.AsNumber(), 0.2f, 20.0f); return true; }
+    if (field == "sky.cloudWindDeg") { l.v.cloudWindDeg = std::clamp(v.AsNumber(), -360.0f, 360.0f); return true; }
+    if (field == "sky.cloudWindSpeed") { l.v.cloudWindSpeed = std::clamp(v.AsNumber(), 0.0f, 100.0f); return true; }
     return false;
 }
 

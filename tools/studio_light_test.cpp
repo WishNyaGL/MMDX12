@@ -998,6 +998,49 @@ static void TestSkyLight() {
     BuildSceneLighting({mapKeyed}, {}, 30.0 / (double)kMmdFps, anchors, midMap);
     Check(std::abs(midMap.skyMapIntensity - 1.5f) < 1e-4f, "the sky map's intensity interpolates between keys");
 
+    // S9b-4: the cloud layer. A sky light with no clouds keeps coverage 0 (no change to the frame) and the values reach
+    // the renderer with the wind offset already at 0; a keyed layer interpolates and drifts with the scene time.
+    Check(noon.cloudCoverage == 0.0f && noon.cloudOpacity == 1.0f && noon.cloudSoftness == 0.25f &&
+              noon.cloudHeightKm == 2.0f && noon.cloudScaleKm == 1.5f,
+          "a sky light without clouds keeps the cloud defaults");
+    SceneLight cloudy = sky;
+    cloudy.v.cloudCoverage = 0.5f;
+    cloudy.v.cloudSoftness = 0.3f;
+    cloudy.v.cloudHeightKm = 3.0f;
+    cloudy.v.cloudScaleKm = 4.0f;
+    cloudy.v.cloudWindDeg = 90.0f;
+    cloudy.v.cloudWindSpeed = 25.0f;
+    LightParams withClouds;
+    BuildSceneLighting({cloudy}, {}, 10.0, anchors, withClouds);
+    const float drift = 25.0f * 10.0f / 1000.0f;   // speed (m/s) x seconds / 1000 = km
+    Check(withClouds.cloudCoverage == 0.5f && withClouds.cloudSoftness == 0.3f &&
+              withClouds.cloudHeightKm == 3.0f && withClouds.cloudScaleKm == 4.0f &&
+              std::abs(withClouds.cloudWindOffset.x - drift) < 1e-5f &&
+              std::abs(withClouds.cloudWindOffset.y) < 1e-5f,
+          "the cloud fields and the 90 degree wind drift reach the renderer's light");
+    // clouds dim the sky's sun by coverage * opacity * 0.6 (no cloud shadows on the ground)
+    LightParams clearSky;
+    BuildSceneLighting({sky}, {}, 10.0, anchors, clearSky);
+    const float dimScale = 1.0f - 0.6f * 0.5f;
+    Check(std::abs(withClouds.color.x - clearSky.color.x * dimScale) < 1e-5f &&
+              std::abs(withClouds.color.y - clearSky.color.y * dimScale) < 1e-5f &&
+              std::abs(withClouds.color.z - clearSky.color.z * dimScale) < 1e-5f,
+          "cloud coverage dims the sky's sun");
+    // an image sky draws its own clouds: the layer stays off there
+    LightParams imageClouds;
+    mapped.v.cloudCoverage = 0.5f;
+    BuildSceneLighting({mapped}, {}, 0.0, anchors, imageClouds);
+    Check(!mapped.skyMap.empty() && imageClouds.cloudCoverage == 0.0f, "an image sky ignores the cloud layer");
+    // keyed: coverage and wind interpolate between the keys
+    SceneLight cloudKeyed = cloudy;
+    LightValues few = cloudy.v;
+    few.cloudCoverage = 0.1f;
+    few.cloudWindSpeed = 0.0f;
+    cloudKeyed.keys = {{0, few}, {60, cloudy.v}};
+    LightParams midClouds;
+    BuildSceneLighting({cloudKeyed}, {}, 30.0 / (double)kMmdFps, anchors, midClouds);
+    Check(std::abs(midClouds.cloudCoverage - 0.3f) < 1e-4f, "the cloud coverage interpolates between keys");
+
     // encoding names: the file-facing strings map onto the shader ids
     SkyMapEncoding enc = SkyMapEncoding::Rgbt;
     Check(std::string(SkyMapEncodingName(SkyMapEncoding::Auto)) == "auto" &&

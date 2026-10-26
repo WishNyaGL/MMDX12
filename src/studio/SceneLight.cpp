@@ -135,7 +135,11 @@ bool LightValues::operator==(const LightValues& o) const {
            skyTimeOfDay == o.skyTimeOfDay && skyNorthDeg == o.skyNorthDeg && skyTurbidity == o.skyTurbidity &&
            skyHaze == o.skyHaze && Same(skyGround, o.skyGround) && skyIntensity == o.skyIntensity &&
            skySunIntensity == o.skySunIntensity && skyMaxElevationDeg == o.skyMaxElevationDeg &&
-           skyMapRotationDeg == o.skyMapRotationDeg && skyMapIntensity == o.skyMapIntensity;
+           skyMapRotationDeg == o.skyMapRotationDeg && skyMapIntensity == o.skyMapIntensity &&
+           cloudCoverage == o.cloudCoverage && cloudOpacity == o.cloudOpacity &&
+           cloudSoftness == o.cloudSoftness && cloudHeightKm == o.cloudHeightKm &&
+           cloudScaleKm == o.cloudScaleKm && cloudWindDeg == o.cloudWindDeg &&
+           cloudWindSpeed == o.cloudWindSpeed;
 }
 
 bool LightKey::operator==(const LightKey& o) const { return frame == o.frame && v == o.v; }
@@ -188,6 +192,13 @@ LightValues SampleLightValues(const SceneLight& light, int frame) {
     out.skyMaxElevationDeg = Lerp(a.v.skyMaxElevationDeg, b.v.skyMaxElevationDeg, t);
     out.skyMapRotationDeg = Lerp(a.v.skyMapRotationDeg, b.v.skyMapRotationDeg, t);
     out.skyMapIntensity = Lerp(a.v.skyMapIntensity, b.v.skyMapIntensity, t);
+    out.cloudCoverage = Lerp(a.v.cloudCoverage, b.v.cloudCoverage, t);
+    out.cloudOpacity = Lerp(a.v.cloudOpacity, b.v.cloudOpacity, t);
+    out.cloudSoftness = Lerp(a.v.cloudSoftness, b.v.cloudSoftness, t);
+    out.cloudHeightKm = Lerp(a.v.cloudHeightKm, b.v.cloudHeightKm, t);
+    out.cloudScaleKm = Lerp(a.v.cloudScaleKm, b.v.cloudScaleKm, t);
+    out.cloudWindDeg = Lerp(a.v.cloudWindDeg, b.v.cloudWindDeg, t);
+    out.cloudWindSpeed = Lerp(a.v.cloudWindSpeed, b.v.cloudWindSpeed, t);
     return out;
 }
 

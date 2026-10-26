@@ -83,6 +83,17 @@ struct LightValues {
     // scale. With no image both are unused and the procedural sky above draws exactly as before.
     float skyMapRotationDeg = 0.0f;
     float skyMapIntensity = 1.0f;
+    // S9b-4: procedural clouds on the S9b-1 physical sky (never on an image sky). coverage 0..1 (0 = no clouds, the
+    // sky is exactly the S9b-1 / S9b-3 image), opacity 0..1 how solid the layer is, softness 0.02..1 the rain edge,
+    // height 0.3..12 km the layer's altitude, scale 0.2..20 km the noise's size, wind direction -360..360 degrees and
+    // speed 0..100 m/s drift the layer over the scene time. The sun dims with coverage * opacity.
+    float cloudCoverage = 0.0f;
+    float cloudOpacity = 1.0f;
+    float cloudSoftness = 0.25f;
+    float cloudHeightKm = 2.0f;
+    float cloudScaleKm = 1.5f;
+    float cloudWindDeg = 0.0f;
+    float cloudWindSpeed = 10.0f;
     bool operator==(const LightValues& o) const;     // exact, every field
 };
 

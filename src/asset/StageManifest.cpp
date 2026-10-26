@@ -350,6 +350,12 @@ StageTargetSpec::ValueType LightFieldType(const std::string& field) {
         // S9b-3: the sky light's image: rotation degrees and radiance scale (the file / encoding / mirror are base
         // values, like the gobo's file)
         {"sky.mapRotation", StageTargetSpec::ValueType::Float}, {"sky.mapIntensity", StageTargetSpec::ValueType::Float},
+        // S9b-4: the physical sky's cloud layer (coverage / opacity / softness 0..1, height and noise size in km, wind
+        // direction in degrees and speed in m/s)
+        {"sky.cloudCoverage", StageTargetSpec::ValueType::Float}, {"sky.cloudOpacity", StageTargetSpec::ValueType::Float},
+        {"sky.cloudSoftness", StageTargetSpec::ValueType::Float}, {"sky.cloudHeight", StageTargetSpec::ValueType::Float},
+        {"sky.cloudScale", StageTargetSpec::ValueType::Float},    {"sky.cloudWindDeg", StageTargetSpec::ValueType::Float},
+        {"sky.cloudWindSpeed", StageTargetSpec::ValueType::Float},
     };
     for (const auto& f : kFields)
         if (field == f.name) return f.type;
@@ -1410,6 +1416,21 @@ std::vector<std::string> ValidateStageManifest(const StageManifest& manifest) {
             if (!studio::ParseSkyMapEncoding(l.skyMapEncoding, enc))
                 err("lights: " + l.name + ": skyMapEncoding must be auto / linear / srgb / rgbt");
             if (l.v.skyMapIntensity < 0.0f) err("lights: " + l.name + ": sky.mapIntensity must be >= 0");
+            // S9b-4: the cloud layer on the physical sky.
+            if (l.v.cloudCoverage < 0.0f || l.v.cloudCoverage > 1.0f)
+                err("lights: " + l.name + ": sky.cloudCoverage must be 0..1");
+            if (l.v.cloudOpacity < 0.0f || l.v.cloudOpacity > 1.0f)
+                err("lights: " + l.name + ": sky.cloudOpacity must be 0..1");
+            if (l.v.cloudSoftness < 0.02f || l.v.cloudSoftness > 1.0f)
+                err("lights: " + l.name + ": sky.cloudSoftness must be 0.02..1");
+            if (l.v.cloudHeightKm < 0.3f || l.v.cloudHeightKm > 12.0f)
+                err("lights: " + l.name + ": sky.cloudHeight must be 0.3..12 km");
+            if (l.v.cloudScaleKm < 0.2f || l.v.cloudScaleKm > 20.0f)
+                err("lights: " + l.name + ": sky.cloudScale must be 0.2..20 km");
+            if (l.v.cloudWindDeg < -360.0f || l.v.cloudWindDeg > 360.0f)
+                err("lights: " + l.name + ": sky.cloudWindDeg must be -360..360");
+            if (l.v.cloudWindSpeed < 0.0f || l.v.cloudWindSpeed > 100.0f)
+                err("lights: " + l.name + ": sky.cloudWindSpeed must be 0..100 m/s");
         }
     }
     {

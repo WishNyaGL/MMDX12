@@ -1221,6 +1221,88 @@ def build_sky_test(out_dir):
     return stage_dir
 
 
+def build_sky_cloud_test(out_dir):
+    """S9b-4 fixture: the sky_test floor + pillars under a Physical Sky light whose cloud layer is on (coverage 0.5,
+    softness 0.3, wind 90 deg / 25 m/s) and whose time of day runs 7 -> 12 -> 17 over the first 30 s.
+
+    Geometry is in metres (the importer scales by 12.5 to MMD units); `lights` / `cameras` are in MMD units like every
+    other stage. As in sky_test there is no sun light and no fog: the sky light owns the sun and the background.
+    """
+    stage_id = "sky_cloud_test"
+    gltf = Gltf(stage_id)
+    floor = gltf.material("floor_open", base_color=(0.58, 0.58, 0.60, 1.0), roughness=0.62, metallic=0.0)
+    pillar = gltf.material("pillar_stone", base_color=(0.72, 0.71, 0.68, 1.0), roughness=0.55, metallic=0.0)
+
+    w, d = 26.0, 26.0
+    gltf.add(grid_part("Floor", floor, ((-w / 2, 0.0, -d / 2), (-w / 2, 0.0, d / 2), (w / 2, 0.0, -d / 2)),
+                       10, 10, uv_scale=(10.0, 10.0)))
+    for i, (px, pz) in enumerate(((-9.0, -9.0), (9.0, -9.0), (-9.0, 9.0), (9.0, 9.0))):
+        for part in box_parts(f"Pillar_{i}", pillar, (px, 2.5, pz), (0.45, 2.5, 0.45)):
+            gltf.add(part)
+
+    stage_dir = os.path.join(out_dir, stage_id)
+    os.makedirs(stage_dir, exist_ok=True)
+    with open(os.path.join(stage_dir, stage_id + ".glb"), "wb") as f:
+        f.write(gltf.build())
+
+    manifest = {
+        "format": "mmdx-stage",
+        "formatVersion": 1,
+        "id": stage_id,
+        "version": "1.0.0",
+        "name": {"ko": "구름 하늘 테스트", "en": "Cloudy sky test", "ja": "クラウドスカイテスト"},
+        "description": {"ko": "S9b-4: 하늘 조명의 구름층 (피복 0.5, 부드러움 0.3, 바람 90도 25 m/s). 시간대 7 -> 12 -> 17 (30초).",
+                        "en": "S9b-4: a cloud layer on the Physical Sky light (coverage 0.5, softness 0.3, wind "
+                              "90 deg / 25 m/s); the time of day runs 7 -> 12 -> 17 over 30 s."},
+        "authors": [{"name": "MMDX stagegen", "role": "procedural"}],
+        "license": "CC0-1.0",
+        "tags": ["sky", "cloud", "light", "test"],
+        "models": [{"file": stage_id + ".glb", "name": "Room", "role": "floor"}],
+        "materials": [
+            {"match": "floor_open", "baseColor": [0.58, 0.58, 0.60, 1.0], "roughness": 0.62},
+            {"match": "pillar_stone", "baseColor": [0.72, 0.71, 0.68, 1.0], "roughness": 0.55},
+        ],
+        "lights": [
+            # one Physical Sky light with clouds, no sun light (the sky owns the sun). The ambient light only supplies
+            # the hemisphere fill's strength, as in sky_test.
+            {"kind": "sky", "name": "sky", "enabled": True,
+             "values": {"skyTimeOfDay": 7.0, "skyTurbidity": 3.2, "skyHaze": 0.35, "skyNorthDeg": 35.0,
+                        "skyGround": [0.34, 0.33, 0.31], "skyIntensity": 1.0, "skySunIntensity": 1.0,
+                        "skyMaxElevationDeg": 60.0, "cloudCoverage": 0.5, "cloudOpacity": 1.0,
+                        "cloudSoftness": 0.3, "cloudHeightKm": 2.0, "cloudScaleKm": 1.5,
+                        "cloudWindDeg": 90.0, "cloudWindSpeed": 25.0}},
+            {"kind": "ambient", "name": "ambient", "enabled": True, "values": {"intensity": 0.18}},
+        ],
+        "sockets": [
+            {"name": "world", "position": [0.0, 30.0, -160.0]},
+            {"name": "stage_center", "position": [0.0, 15.0, 0.0]},
+        ],
+        "cameras": [
+            # raised toward the sky, as sky_test: most of the frame is the cloud layer
+            {"name": "wide", "position": [0.0, 26.0, 180.0], "target": [0.0, 52.0, -70.0], "fov": 50.0},
+        ],
+        "environment": {
+            "fog": {"density": 0.0, "color": [0.6, 0.65, 0.75], "anisotropy": 0.5, "heightFalloff": 0.008},
+        },
+        "groups": [{"id": "sky", "label": {"ko": "하늘", "en": "Sky"}}],
+        "params": [
+            {"key": "timeOfDay", "type": "float", "label": {"ko": "시간", "en": "Time of day"},
+             "group": "sky", "default": 12.0, "min": 0.0, "max": 24.0},
+        ],
+        "variants": [{"id": "default", "label": {"ko": "기본", "en": "Default"}, "values": {"timeOfDay": 7.0}}],
+        "defaultVariant": "default",
+        "bindings": [{"param": "timeOfDay", "target": "lights.sky.sky.timeOfDay"}],
+        # morning -> noon -> late afternoon over the first 30 s (30 fps): the clouds drift 0.75 km toward +x meanwhile
+        "cues": [
+            {"param": "timeOfDay", "keys": [{"frame": 0, "value": 7.0}, {"frame": 450, "value": 12.0},
+                                            {"frame": 900, "value": 17.0}]},
+        ],
+    }
+    with open(os.path.join(stage_dir, "stage.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return stage_dir
+
+
 def write_sky_map_hdr(path, width=1024, height=512):
     """S9b-3: a Radiance RGBE .hdr equirect test panorama (flat scanlines, 4 bytes per texel).
 
@@ -1365,6 +1447,7 @@ STAGES = {
     "gobo_test": build_gobo_test,
     "screen_light_test": build_screen_light_test,
     "sky_test": build_sky_test,
+    "sky_cloud_test": build_sky_cloud_test,
     "sky_map_test": build_sky_map_test,
 }
 
