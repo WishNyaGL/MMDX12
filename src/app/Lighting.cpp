@@ -1,6 +1,7 @@
 #include "anim/Motion.h"
 #include "core/I18n.h"
 #include "app/Lighting.h"
+#include "render/PhysicalSky.h"
 #include "render/Renderer.h"
 #include <algorithm>
 #include <cmath>
@@ -12,6 +13,12 @@ namespace {
 DirectX::XMFLOAT3 Srgb(float r, float g, float b) {
     auto f = [](float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); };
     return {f(r), f(g), f(b)};
+}
+
+// linear -> sRGB, the inverse of Srgb above (LightParams::color is the MMD light colour, gamma space).
+DirectX::XMFLOAT3 SrgbOut(const DirectX::XMFLOAT3& c) {
+    auto f = [](float v) { return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(std::max(v, 0.0f), 1.0f / 2.4f) - 0.055f; };
+    return {f(c.x), f(c.y), f(c.z)};
 }
 
 } // namespace
@@ -139,10 +146,12 @@ void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std
 
     const studio::SceneLight* sun = nullptr;
     const studio::SceneLight* ambient = nullptr;
+    const studio::SceneLight* sky = nullptr;
     for (const studio::SceneLight& l : lights) {
         if (!l.enabled) continue;
         if (l.kind == LightKind::Sun && !sun) sun = &l;
         else if (l.kind == LightKind::Ambient && !ambient) ambient = &l;
+        else if (l.kind == LightKind::Sky && !sky) sky = &l;
     }
 
     if (sun) {
@@ -185,6 +194,59 @@ void BuildSceneLighting(const std::vector<studio::SceneLight>& lights, const std
         out.hemiStrength = ambient->v.intensity;
     } else {
         out.hemiStrength = 0.0f;  // the default sky colours stay
+    }
+
+    // S9b-1: the Physical Sky light (at most one, the first enabled). Its model replaces the hand-set gradient in
+    // every render path and owns the sun: the direction comes from the time of day unless the scene has a Sun light
+    // (then that light's direction is used and only its colour is replaced). The model also writes the ambient
+    // colours above, so the hemisphere fill, the floor and the haze follow the sky.
+    if (sky) {
+        const studio::LightValues v = studio::SampleLightValues(*sky, frame);
+        PhysicalSkyInput in;
+        in.timeOfDay = v.skyTimeOfDay;
+        in.northDeg = v.skyNorthDeg;
+        in.maxElevationDeg = v.skyMaxElevationDeg;
+        in.turbidity = v.skyTurbidity;
+        in.haze = v.skyHaze;
+        in.intensity = v.skyIntensity;
+        in.sunIntensity = v.skySunIntensity;
+        in.ground = v.skyGround;
+        in.useSunDir = sun != nullptr;
+        in.sunDirToScene = out.direction;
+        EvaluatePhysicalSky(in, out.sky);
+        out.physicalSky = true;
+        out.skyZenith = out.sky.skyZenith;
+        out.skyHorizon = out.sky.skyHorizon;
+        out.groundColor = out.sky.groundColor;
+        if (!sun) out.direction = out.sky.sunDirToScene;
+        // The sun colour: LightParams::color is gamma space (the shaders SrgbToLinear it), so the model's linear colour
+        // is encoded here. With no Sun light the sky light also owns the sun's magnitude: it stays under 0.6 (the
+        // model's own limit) so it rides in the colour and sunIntensity stays 1, which keeps the sky itself unscaled.
+        // A Sun light in the scene keeps its own intensity (it is the brightness control), so the colour is normalized
+        // there and its magnitude dropped.
+        const DirectX::XMFLOAT3 c = out.sky.sunColor;
+        const float m = std::max(c.x, std::max(c.y, c.z));
+        if (m > 1e-5f) {
+            // no Sun light: the transmittance (c / 0.6, <= 1) is encoded, then scaled so a white noon sun is MMD's
+            // default 0.6 in gamma space (encoding 0.6 linear itself would brighten it to ~0.8)
+            out.color = sun ? SrgbOut({c.x / m, c.y / m, c.z / m})
+                            : [&] {
+                                  const DirectX::XMFLOAT3 e = SrgbOut({c.x / 0.6f, c.y / 0.6f, c.z / 0.6f});
+                                  return DirectX::XMFLOAT3{e.x * 0.6f, e.y * 0.6f, e.z * 0.6f};
+                              }();
+            if (!sun) out.sunIntensity = 1.0f;
+        } else {
+            out.color = {0.0f, 0.0f, 0.0f};
+            if (!sun) out.sunIntensity = 1.0f;
+        }
+        if (!sun) {
+            // the sky's own sun casts like a default sun light
+            out.rimStrength = 0.0f;
+            out.sunShadow = LightShadowType::Hard;
+            out.sunShadowSoftness = 0.5f;
+            out.sunShadowDensity = 1.0f;
+            out.sunShadowColor = {0.0f, 0.0f, 0.0f};
+        }
     }
 
     for (const studio::SceneLight& l : lights) {

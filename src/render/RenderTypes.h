@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include "render/PhysicalSky.h"
 #include "render/ShaderInterop.h"
 #include "render/WorldTypes.h"
 #include "asset/StageManifest.h"
@@ -301,6 +302,12 @@ struct LightParams {
     float volumetricAnisotropy = -1.0f;
     // S9: radius of the haze sphere around the origin (a stage's environment.fog.radius); <= 0 = the built-in 180.
     float volumetricRadius = -1.0f;
+
+    // S9b-1: the Physical Sky light (studio::LightKind::Sky, render/PhysicalSky.h). physicalSky = true only with an
+    // enabled Sky light: SkyColor then renders the model instead of skyZenith / skyHorizon / groundColor, which the
+    // model also writes (the hemisphere fill, the floor and the haze stay coherent with it).
+    bool physicalSky = false;
+    PhysicalSkyState sky;
 
     // Sun shadow properties
     LightShadowType sunShadow = LightShadowType::Hard;

@@ -9,6 +9,9 @@
 //   - Point / Spot: punctual lights. A spot aims by hand, at a character, or sways like the concert preset's beams.
 //   - FogVolume (S9): a local participating-medium volume (box or sphere): its `intensity` adds to the global haze density
 //     inside it and its `color` tints that part of the medium. It never lights a surface and has no shadow.
+//   - Sky (S9b-1): a C4D-like Physical Sky: a Preetham 1999 clear sky from the time of day, turbidity, horizon haze and
+//     ground colour replaces the hand-set sky gradient, and the light owns the sun (its direction unless the scene has a
+//     Sun light, and its colour). At most one counts (the first enabled); see render/PhysicalSky.h.
 //
 // SceneLightToJson / SceneLightFromJson (asset/SceneLightJson.h) are the ONE implementation of the "lights" file
 // schema: a project file's editor.lights array and an MMDX stage's stage.json "lights" array both use them
@@ -21,7 +24,7 @@
 
 namespace mmdx::studio {
 
-enum class LightKind : uint8_t { Sun = 0, Point = 1, Spot = 2, Ambient = 3, Area = 4, FogVolume = 5 };
+enum class LightKind : uint8_t { Sun = 0, Point = 1, Spot = 2, Ambient = 3, Area = 4, FogVolume = 5, Sky = 6 };
 // S9: the shape of a FogVolume light's local medium (project-file names "box" / "sphere").
 enum class FogShape : uint8_t { Box = 0, Sphere = 1 };
 enum class AimMode : uint8_t { Manual = 0, Target = 1, Sway = 2 };
@@ -59,6 +62,18 @@ struct LightValues {
     DirectX::XMFLOAT2 size{20, 20};                  // area: width, height (MMD units)
     DirectX::XMFLOAT3 extent{20, 10, 20};            // fog volume: half size (box) / radii (sphere), MMD units
     float volumetric = 1.0f;                         // S9: how much of the light shows in the haze (0 = none, 5..10 = bold beam)
+    // S9b-1: the Physical Sky light (a Preetham clear sky instead of the hand-set gradient). timeOfDay is in hours
+    // (sunrise 6:00, sunset 18:00, the sun peaks at 12:00), northDeg rotates the sun's arc around +y, turbidity is
+    // 1.7..10, haze blends the lower ~15 degrees toward the horizon colour, intensity scales the sky's radiance,
+    // sunIntensity the sun's colour and ground is the ground's albedo (a lower bound for the below-horizon blend).
+    float skyTimeOfDay = 12.0f;
+    float skyNorthDeg = 0.0f;
+    float skyTurbidity = 3.0f;
+    float skyHaze = 0.2f;
+    DirectX::XMFLOAT3 skyGround{0.35f, 0.35f, 0.35f};
+    float skyIntensity = 1.0f;
+    float skySunIntensity = 1.0f;
+    float skyMaxElevationDeg = 60.0f;
     bool operator==(const LightValues& o) const;     // exact, every field
 };
 

@@ -1132,10 +1132,17 @@ void App::DrawStudioAddMenu() {
                 ImGui::CloseCurrentPopup();
                 StudioAddLight(LightKind::FogVolume);
             }
-            bool hasSun = false, hasAmbient = false;
+            bool hasSun = false, hasAmbient = false, hasSky = false;
             for (const auto& l : d.lights) {
                 if (l.kind == LightKind::Sun) hasSun = true;
                 if (l.kind == LightKind::Ambient) hasAmbient = true;
+                if (l.kind == LightKind::Sky) hasSky = true;
+            }
+            if (!hasSky) {
+                if (MenuItemChip("##add_sky", Tr("하늘"), icon::Sun)) {
+                    ImGui::CloseCurrentPopup();
+                    StudioAddLight(LightKind::Sky);
+                }
             }
             if (!hasSun) {
                 if (MenuItemChip("##add_sun", Tr("메인 조명"), icon::Sun)) {

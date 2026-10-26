@@ -1136,6 +1136,91 @@ def build_screen_light_test(out_dir):
     return stage_dir
 
 
+def build_sky_test(out_dir):
+    """S9b-1 fixture: an open floor with a few pillars under a Physical Sky light whose time of day is keyed
+    6.5 -> 12 -> 18.5 over the first 30 s (a low orange dawn sun, a blue noon, a low sunset), no fog.
+
+    Geometry is in metres (the importer scales by 12.5 to MMD units); `lights` / `cameras` are in MMD units like every
+    other stage. There is no sun light: the sky light owns the sun (direction from the time of day, colour from the
+    model), and no ambient light either: the model writes the ambient colours itself.
+    """
+    stage_id = "sky_test"
+    gltf = Gltf(stage_id)
+    floor = gltf.material("floor_open", base_color=(0.58, 0.58, 0.60, 1.0), roughness=0.62, metallic=0.0)
+    pillar = gltf.material("pillar_stone", base_color=(0.72, 0.71, 0.68, 1.0), roughness=0.55, metallic=0.0)
+
+    w, d = 26.0, 26.0
+    gltf.add(grid_part("Floor", floor, ((-w / 2, 0.0, -d / 2), (-w / 2, 0.0, d / 2), (w / 2, 0.0, -d / 2)),
+                       10, 10, uv_scale=(10.0, 10.0)))
+    # four pillars on a 2 x 2 ring: they throw the sun's shadow across the floor through the day
+    for i, (px, pz) in enumerate(((-9.0, -9.0), (9.0, -9.0), (-9.0, 9.0), (9.0, 9.0))):
+        for part in box_parts(f"Pillar_{i}", pillar, (px, 2.5, pz), (0.45, 2.5, 0.45)):
+            gltf.add(part)
+
+    stage_dir = os.path.join(out_dir, stage_id)
+    os.makedirs(stage_dir, exist_ok=True)
+    with open(os.path.join(stage_dir, stage_id + ".glb"), "wb") as f:
+        f.write(gltf.build())
+
+    manifest = {
+        "format": "mmdx-stage",
+        "formatVersion": 1,
+        "id": stage_id,
+        "version": "1.0.0",
+        "name": {"ko": "하늘 조명 테스트", "en": "Physical sky test", "ja": "物理スカイテスト"},
+        "description": {"ko": "S9b-1: 하늘 조명 하나가 배경과 태양 색을 정한다. 시간대 6.5 -> 12 -> 18.5 (30초).",
+                        "en": "S9b-1: one Physical Sky light drives the background and the sun colour; the time of "
+                              "day runs 6.5 -> 12 -> 18.5 over 30 s."},
+        "authors": [{"name": "MMDX stagegen", "role": "procedural"}],
+        "license": "CC0-1.0",
+        "tags": ["sky", "light", "test"],
+        "models": [{"file": stage_id + ".glb", "name": "Room", "role": "floor"}],
+        "materials": [
+            {"match": "floor_open", "baseColor": [0.58, 0.58, 0.60, 1.0], "roughness": 0.62},
+            {"match": "pillar_stone", "baseColor": [0.72, 0.71, 0.68, 1.0], "roughness": 0.55},
+        ],
+        "lights": [
+            # one Physical Sky light, no sun light: the sky owns the sun. The ambient light only supplies the
+            # hemisphere fill's strength (the sky light writes its colours), so the floor and the pillars read even
+            # when the sun is near the horizon.
+            {"kind": "sky", "name": "sky", "enabled": True,
+             "values": {"skyTimeOfDay": 6.5, "skyTurbidity": 3.2, "skyHaze": 0.35, "skyNorthDeg": 35.0,
+                        "skyGround": [0.34, 0.33, 0.31], "skyIntensity": 1.0, "skySunIntensity": 1.0,
+                        "skyMaxElevationDeg": 60.0}},
+            {"kind": "ambient", "name": "ambient", "enabled": True, "values": {"intensity": 0.18}},
+        ],
+        "sockets": [
+            {"name": "world", "position": [0.0, 30.0, -160.0]},
+            {"name": "stage_center", "position": [0.0, 15.0, 0.0]},
+        ],
+        "cameras": [
+            # raised toward the sky: the dawn / noon / sunset half of the frame must be sky, not floor
+            {"name": "wide", "position": [0.0, 26.0, 180.0], "target": [0.0, 52.0, -70.0], "fov": 50.0},
+        ],
+        "environment": {
+            # no fog: the sky's own colour must read on the floor and the pillars (S9's haze is not this fixture)
+            "fog": {"density": 0.0, "color": [0.6, 0.65, 0.75], "anisotropy": 0.5, "heightFalloff": 0.008},
+        },
+        "groups": [{"id": "sky", "label": {"ko": "하늘", "en": "Sky"}}],
+        "params": [
+            {"key": "timeOfDay", "type": "float", "label": {"ko": "시간", "en": "Time of day"},
+             "group": "sky", "default": 12.0, "min": 0.0, "max": 24.0},
+        ],
+        "variants": [{"id": "default", "label": {"ko": "기본", "en": "Default"}, "values": {"timeOfDay": 6.5}}],
+        "defaultVariant": "default",
+        "bindings": [{"param": "timeOfDay", "target": "lights.sky.sky.timeOfDay"}],
+        # dawn -> noon -> sunset over the first 30 s (30 fps). The last key is sunset itself (the sun exactly on the
+        # horizon): a little later and the sun's colour is already gone and the frame is a dark dusk.
+        "cues": [
+            {"param": "timeOfDay", "keys": [{"frame": 0, "value": 6.5}, {"frame": 450, "value": 12.0},
+                                            {"frame": 900, "value": 18.0}]},
+        ],
+    }
+    with open(os.path.join(stage_dir, "stage.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return stage_dir
+
+
 STAGES = {
     "cyclorama": build_cyclorama,
     "mirror_room": build_mirror_room,
@@ -1143,6 +1228,7 @@ STAGES = {
     "pack_test": build_pack_test,
     "gobo_test": build_gobo_test,
     "screen_light_test": build_screen_light_test,
+    "sky_test": build_sky_test,
 }
 
 

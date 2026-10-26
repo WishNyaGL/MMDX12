@@ -910,6 +910,108 @@ static void TestFogVolumes() {
           "fog shape names and parse");
 }
 
+// S9b-1: the Physical Sky light (render/PhysicalSky.h) through BuildSceneLighting: it owns the sun and the ambient
+// colours, its time-of-day keys sample, and no Sky light leaves the frame's sky fields off.
+static void TestSkyLight() {
+    LightAnchors anchors;
+    SceneLight sky;
+    sky.uid = 40;
+    sky.kind = LightKind::Sky;
+    sky.enabled = true;
+
+    // noon by default: a physical sky is on, the sun is high, the sun's colour is warm-neutral, ambient from the model
+    LightParams noon;
+    BuildSceneLighting({sky}, {}, 0.0, anchors, noon);
+    Check(noon.physicalSky && noon.sky.params.x == 1.0f, "a sky light turns the physical sky on");
+    Check(noon.sky.perezY.x != 0.0f && noon.sky.zenithOverF.x != 0.0f && noon.sky.params.y > 0.0f,
+          "the model's Perez coefficients and zenith quotient are filled");
+    Check(noon.direction.y < -0.5f, "the noon sun is high", "y=%f", noon.direction.y);
+    Check(noon.color.x > 0.5f && noon.color.z > 0.0f && noon.sunIntensity > 0.1f && noon.sunIntensity < 2.0f,
+          "the noon sun has a bright colour and a sane intensity");
+    Check(noon.skyZenith.z > noon.skyZenith.x, "the noon zenith is blue", "r=%f b=%f", noon.skyZenith.x, noon.skyZenith.z);
+    Check(!Same3(noon.skyZenith, LightParams{}.skyZenith) && noon.groundColor.x > 0.0f,
+          "the sky light writes the ambient sky / ground colours");
+
+    // 18.5 h is below the horizon: the sun is black and the night floor carries the sky
+    SceneLight evening = sky;
+    evening.v.skyTimeOfDay = 18.5f;
+    LightParams night;
+    BuildSceneLighting({evening}, {}, 0.0, anchors, night);
+    Check(Same3(night.color, {0, 0, 0}), "below the horizon the sun's colour is black");
+    Check(night.sky.params.w < 0.5f && night.sky.night.x > 0.0f,
+          "below the horizon the model fades out and the night floor stays", "day=%f", night.sky.params.w);
+
+    // the time of day is keyable (the sky light's keys sample like any other light's)
+    SceneLight keyed = sky;
+    LightValues eveningValues = SceneLight{}.v;
+    eveningValues.skyTimeOfDay = 18.0f;
+    keyed.keys = {{0, sky.v}, {300, eveningValues}};
+    LightParams mid;
+    BuildSceneLighting({keyed}, {}, 150.0 / (double)kMmdFps, anchors, mid);
+    LightParams early;
+    BuildSceneLighting({keyed}, {}, 0.0, anchors, early);
+    LightParams late;
+    BuildSceneLighting({keyed}, {}, 300.0 / (double)kMmdFps, anchors, late);
+    Check(mid.physicalSky && !Near3(mid.direction, early.direction, 1e-4f) && !Near3(mid.direction, late.direction, 1e-4f),
+          "a keyed sky light samples between its keys");
+
+    // a sun light in the scene keeps its own direction (the sky only recolours it)
+    SceneLight sun;
+    sun.uid = 41;
+    sun.kind = LightKind::Sun;
+    sun.v.direction = {0.2f, -0.9f, 0.3f};
+    sun.v.intensity = 0.7f;
+    LightParams withSun;
+    BuildSceneLighting({sun, sky}, {}, 0.0, anchors, withSun);
+    Check(Near3(withSun.direction, sun.v.direction, 1e-6f) && withSun.sunIntensity == 0.7f && withSun.physicalSky,
+          "with a sun light the sky keeps that light's direction and intensity and recolours it");
+    LightParams withoutSky;
+    BuildSceneLighting({sun}, {}, 0.0, anchors, withoutSky);
+    Check(!Same3(withSun.color, withoutSky.color), "the sky light recolours the sun light");
+
+    // no sky light at all: the sky constants stay zero (byte-identical frames)
+    Check(!withoutSky.physicalSky && withoutSky.sky.params.x == 0.0f && withoutSky.sky.perezY.z == 0.0f,
+          "no sky light leaves the physical sky off");
+
+    LightKind kind = LightKind::Point;
+    Check(std::string(LightKindName(LightKind::Sky)) == "sky" && ParseLightKind("sky", kind) && kind == LightKind::Sky,
+          "sky kind name and parse");
+
+    // The model's course over a day: a low warm dawn sun, a blue noon, a low warm sunset, then the night floor.
+    const auto zenithAt = [&](float h) {
+        SceneLight s = sky;
+        s.v.skyTimeOfDay = h;
+        LightParams lp;
+        BuildSceneLighting({s}, {}, 0.0, anchors, lp);
+        return std::make_pair(PhysicalSkyRadiance(lp.sky, {0, 1, 0}), lp);
+    };
+    const auto noonSky = zenithAt(12.0f);
+    const auto dawnSky = zenithAt(6.9f);
+    const auto duskSky = zenithAt(17.4f);
+    // toward the sun, low: warm at dawn and sunset, blue at noon
+    const auto towardSunLow = [](const LightParams& lp) {
+        const DirectX::XMFLOAT3 s{-lp.direction.x, std::max(-lp.direction.y, 0.0f), -lp.direction.z};
+        return PhysicalSkyRadiance(lp.sky, {s.x, 0.08f, s.z});
+    };
+    const auto noonLow = towardSunLow(noonSky.second);
+    const auto dawnLow = towardSunLow(dawnSky.second);
+    Check(noonSky.first.z > noonSky.first.x * 1.8f, "the zenith is blue at noon");
+    Check(dawnLow.x > dawnLow.z && noonLow.z > noonLow.x,
+          "the horizon toward the sun is warm at dawn and blue at noon");
+    Check(dawnSky.second.color.x > dawnSky.second.color.z * 1.5f, "the dawn sun is orange");
+    Check(!Same3(dawnSky.second.direction, noonSky.second.direction) &&
+              dawnSky.second.direction.y > noonSky.second.direction.y,
+          "the sun climbs from dawn to noon");
+    const auto duskLate = zenithAt(18.1f);
+    const auto nightSky = zenithAt(20.0f);
+    Check(duskLate.second.color.x < 0.05f, "the sun's colour is gone just after sunset");
+    Check(PhysicalSkyRadiance(nightSky.second.sky, {0, 1, 0}).y <
+                  PhysicalSkyRadiance(duskLate.second.sky, {0, 1, 0}).y &&
+              PhysicalSkyRadiance(nightSky.second.sky, {0, 1, 0}).y > 0.0f,
+          "the night sky falls to a dim floor (never black)");
+    Check(duskSky.second.color.x > duskSky.second.color.z * 1.2f, "the sunset sun is warm");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // unbuffered: a crash mid-test loses buffered PASS lines
     TestPresetRegression();
@@ -927,6 +1029,7 @@ int main() {
     TestPerLightProperties();
     TestAreaLight();
     TestFogVolumes();
+    TestSkyLight();
     std::printf("studio_light_test: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed > 0 ? 1 : 0;
 }

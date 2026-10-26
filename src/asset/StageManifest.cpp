@@ -342,6 +342,11 @@ StageTargetSpec::ValueType LightFieldType(const std::string& field) {
         // S7b: the spot gobo (rotation degrees, uv scale, deg/s spin, 0..1 focus)
         {"gobo.rotation", StageTargetSpec::ValueType::Float}, {"gobo.scale", StageTargetSpec::ValueType::Float},
         {"gobo.spin", StageTargetSpec::ValueType::Float},     {"gobo.focus", StageTargetSpec::ValueType::Float},
+        // S9b-1: the Physical Sky light's values (hours, compass degrees, turbidity, haze, radiance / sun scale)
+        {"sky.timeOfDay", StageTargetSpec::ValueType::Float}, {"sky.northDeg", StageTargetSpec::ValueType::Float},
+        {"sky.turbidity", StageTargetSpec::ValueType::Float}, {"sky.haze", StageTargetSpec::ValueType::Float},
+        {"sky.intensity", StageTargetSpec::ValueType::Float}, {"sky.sunIntensity", StageTargetSpec::ValueType::Float},
+        {"sky.ground", StageTargetSpec::ValueType::Color},
     };
     for (const auto& f : kFields)
         if (field == f.name) return f.type;
@@ -412,11 +417,20 @@ StageTargetSpec ResolveStageTarget(const StageManifest& manifest, const std::str
         spec.kind = StageTargetSpec::Kind::Lights;
         // S7b: a gobo target nests one level ("lights.<name>.gobo.rotation"), so the last dot above split the owner
         // into "<name>.gobo" and the field into "rotation": put the two back together as the field "gobo.rotation".
+        // S9b-1: the same for the Physical Sky light's "lights.<name>.sky.timeOfDay" (and the other sky fields).
         std::string lightOwner = owner;
         std::string lightField = field;
-        if ((int)LightFieldType(field) == 255 && owner.size() > 5 && owner.compare(owner.size() - 5, 5, ".gobo") == 0)
-            lightField = "gobo." + field;
-        if (lightField != field) lightOwner = owner.substr(0, owner.size() - 5);
+        if ((int)LightFieldType(field) == 255) {
+            for (const char* block : {".gobo", ".sky"}) {
+                const size_t n = std::char_traits<char>::length(block);
+                if (owner.size() <= n || owner.compare(owner.size() - n, n, block) != 0) continue;
+                const std::string nested = std::string(block + 1) + "." + field;
+                if ((int)LightFieldType(nested) == 255) continue;
+                lightField = nested;
+                lightOwner = owner.substr(0, owner.size() - n);
+                break;
+            }
+        }
         spec.type = LightFieldType(lightField);
         if ((int)spec.type == 255) {
             spec.error = "unknown light field \"" + field + "\"";
@@ -1373,15 +1387,29 @@ std::vector<std::string> ValidateStageManifest(const StageManifest& manifest) {
             if (!(l.goboScale > 0.0f)) err("lights: " + l.name + ": gobo.scale must be > 0");
             if (l.goboFocus < 0.0f || l.goboFocus > 1.0f) err("lights: " + l.name + ": gobo.focus must be 0..1");
         }
+        // S9b-1: the Physical Sky light's ranges (the model clamps too; a typo should still be a stage_check error).
+        if (l.kind == studio::LightKind::Sky) {
+            if (l.v.skyTimeOfDay < 0.0f || l.v.skyTimeOfDay > 24.0f)
+                err("lights: " + l.name + ": sky.timeOfDay must be 0..24 hours");
+            if (l.v.skyTurbidity < 1.7f || l.v.skyTurbidity > 10.0f)
+                err("lights: " + l.name + ": sky.turbidity must be 1.7..10");
+            if (l.v.skyHaze < 0.0f || l.v.skyHaze > 1.0f) err("lights: " + l.name + ": sky.haze must be 0..1");
+            if (l.v.skyIntensity < 0.0f) err("lights: " + l.name + ": sky.intensity must be >= 0");
+            if (l.v.skySunIntensity < 0.0f) err("lights: " + l.name + ": sky.sunIntensity must be >= 0");
+            if (l.v.skyMaxElevationDeg <= 0.0f || l.v.skyMaxElevationDeg >= 90.0f)
+                err("lights: " + l.name + ": sky.maxElevationDeg must be 0..90");
+        }
     }
     {
-        int suns = 0, ambients = 0;
+        int suns = 0, ambients = 0, skies = 0;
         for (const auto& l : manifest.lights) {
             if (l.kind == studio::LightKind::Sun) ++suns;
             if (l.kind == studio::LightKind::Ambient) ++ambients;
+            if (l.kind == studio::LightKind::Sky) ++skies;
         }
         if (suns > 1) err("lights: at most one sun light");
         if (ambients > 1) err("lights: at most one ambient light");
+        if (skies > 1) err("lights: at most one sky light");
     }
 
     // S9: local fog volumes (environment.fogVolumes). A zero / inverted extent has no volume to fill.

@@ -111,6 +111,15 @@ static std::string DiffLight(const SceneLight& a, const SceneLight& b) {
     if (a.goboScale != b.goboScale) return "goboScale";
     if (a.goboSpin != b.goboSpin) return "goboSpin";
     if (a.goboFocus != b.goboFocus) return "goboFocus";
+    // S9b-1: the Physical Sky light's values
+    if (a.v.skyTimeOfDay != b.v.skyTimeOfDay) return "v.skyTimeOfDay";
+    if (a.v.skyNorthDeg != b.v.skyNorthDeg) return "v.skyNorthDeg";
+    if (a.v.skyTurbidity != b.v.skyTurbidity) return "v.skyTurbidity";
+    if (a.v.skyHaze != b.v.skyHaze) return "v.skyHaze";
+    if (!SameVec3(a.v.skyGround, b.v.skyGround)) return "v.skyGround";
+    if (a.v.skyIntensity != b.v.skyIntensity) return "v.skyIntensity";
+    if (a.v.skySunIntensity != b.v.skySunIntensity) return "v.skySunIntensity";
+    if (a.v.skyMaxElevationDeg != b.v.skyMaxElevationDeg) return "v.skyMaxElevationDeg";
     return "";
 }
 
@@ -1181,6 +1190,94 @@ static void TestFogVolumeProject() {
     }
 }
 
+// S9b-1: a Sky light project round trip (its values in "values", omitted at their defaults, and a keyed time of day).
+static void TestSkyLightProject() {
+    const std::filesystem::path projDir = kTemp / "skylight";
+    std::filesystem::create_directories(projDir);
+    const std::filesystem::path projFile = projDir / "sky.mmdxproj";
+
+    ProjectData data;
+    SceneLight sky;
+    sky.uid = 9;
+    sky.name = "\xED\x95\x98\xEB\x8A\x98";  // 하늘
+    sky.kind = LightKind::Sky;
+    sky.v.skyTimeOfDay = 6.75f;
+    sky.v.skyNorthDeg = -32.0f;
+    sky.v.skyTurbidity = 4.25f;
+    sky.v.skyHaze = 0.45f;
+    sky.v.skyGround = {0.3f, 0.29f, 0.27f};
+    sky.v.skyIntensity = 1.4f;
+    sky.v.skySunIntensity = 0.85f;
+    sky.v.skyMaxElevationDeg = 52.0f;
+    LightKey k0, k1;
+    k0.frame = 0;
+    k0.v = sky.v;
+    k1.frame = 300;
+    k1.v = sky.v;
+    k1.v.skyTimeOfDay = 18.25f;
+    sky.keys = {k0, k1};
+    data.editor.lights = {sky};
+
+    std::string err;
+    Check(SaveProject(projFile, data, &err), "SaveProject with a sky light", "%s", err.c_str());
+    {
+        std::ifstream in(projFile, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+        const nlohmann::json& l = j["editor"]["lights"][0];
+        Check(l["kind"] == "sky" && l["values"]["skyTimeOfDay"] == 6.75f && l["values"]["skyGround"].size() == 3 &&
+                  l["values"]["skySunIntensity"] == 0.85f,
+              "sky light: kind and values are written");
+        Check(l["keys"].size() == 2 && l["keys"][1]["values"]["skyTimeOfDay"] == 18.25f,
+              "sky light: key values carry the time of day");
+    }
+
+    ProjectData loaded;
+    std::vector<std::string> warnings;
+    Check(LoadProject(projFile, loaded, &err, &warnings) && warnings.empty(), "LoadProject with a sky light", "%s",
+          err.c_str());
+    Check(loaded.editor.lights.size() == 1, "1 sky light loaded");
+    if (loaded.editor.lights.size() == 1) {
+        const std::string diff = DiffLight(sky, loaded.editor.lights[0]);
+        Check(diff.empty(), "sky light round-trip field by field", "differs: %s", diff.c_str());
+        Check(sky == loaded.editor.lights[0], "sky light round-trip exactly (operator==)");
+    }
+
+    // A sky light without the new keys loads with the defaults, and a file of one writes no sky value keys at all.
+    {
+        const std::filesystem::path oldFile = projDir / "old.mmdxproj";
+        {
+            std::ofstream f(oldFile, std::ios::binary);
+            f << "{\"format\":\"mmdx12-studio-project\",\"version\":2,\"models\":[],\"camera\":null,\"audio\":null,"
+                 "\"editor\":{\"lights\":[{\"kind\":\"sky\",\"uid\":4}]}}";
+        }
+        ProjectData d;
+        warnings.clear();
+        Check(LoadProject(oldFile, d, &err, &warnings) && d.editor.lights.size() == 1, "sky without the new keys loads");
+        if (d.editor.lights.size() == 1) {
+            const SceneLight& got = d.editor.lights[0];
+            Check(got.v.skyTimeOfDay == 12.0f && got.v.skyNorthDeg == 0.0f && got.v.skyTurbidity == 3.0f &&
+                      got.v.skyHaze == 0.2f && got.v.skyGround.x == 0.35f && got.v.skyIntensity == 1.0f &&
+                      got.v.skySunIntensity == 1.0f && got.v.skyMaxElevationDeg == 60.0f,
+                  "sky defaults: noon, north 0, turbidity 3, haze 0.2, grey ground, intensity 1, elevation 60");
+        }
+        ProjectData plain;
+        SceneLight def;
+        def.uid = 5;
+        def.name = "sky";
+        def.kind = LightKind::Sky;
+        plain.editor.lights = {def};
+        const std::filesystem::path plainFile = projDir / "plain.mmdxproj";
+        Check(SaveProject(plainFile, plain, &err), "SaveProject with a default sky light", "%s", err.c_str());
+        std::ifstream in(plainFile, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+        const nlohmann::json& vals = j["editor"]["lights"][0]["values"];
+        Check(!vals.contains("skyTimeOfDay") && !vals.contains("skyTurbidity") && !vals.contains("skyIntensity"),
+              "a default sky light writes no sky value keys (an older file's bytes are kept)");
+    }
+}
+
 // Version 1 projects: the old lighting source + key override + spot rig become scene lights.
 static void TestLegacyConversion() {
     const std::filesystem::path projDir = kTemp / "legacy";
@@ -1820,6 +1917,7 @@ int main() {
     TestSceneLightReading();
     TestAreaLightProject();
     TestFogVolumeProject();
+    TestSkyLightProject();
     TestLegacyConversion();
     TestLegacyLightMigration();
     TestDuplicateNamesAndCleanup();

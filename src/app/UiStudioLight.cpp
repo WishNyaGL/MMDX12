@@ -127,6 +127,10 @@ void App::StudioAddLight(LightKind kind) {
         l.name = "메인 조명";
     } else if (kind == LightKind::Ambient) {
         l.name = "환경광";
+    } else if (kind == LightKind::Sky) {
+        // S9b-1: the Physical Sky light: one per scene, the sun at noon by default
+        l.name = "하늘";
+        l.shadow = ShadowType::NoCast;
     } else if (kind == LightKind::FogVolume) {
         // S9: a box of local medium around the performer. intensity = the density it adds to the global haze.
         l.v.position = {focus.x + 0.0f, focus.y + 6.0f, focus.z};
@@ -285,6 +289,7 @@ void App::DrawStudioLightOutliner() {
         else if (l.kind == LightKind::Ambient) { glyph = icon::Globe; sub = Tr("환경광"); }
         else if (l.kind == LightKind::Area) { glyph = icon::Image; sub = Tr("면광원"); }
         else if (l.kind == LightKind::FogVolume) { glyph = icon::Globe; sub = Tr("안개 볼륨"); }
+        else if (l.kind == LightKind::Sky) { glyph = icon::Sun; sub = Tr("하늘"); }
 
         char subBuf[64];
         if (!l.keys.empty()) {
@@ -524,7 +529,8 @@ void App::DrawStudioLightInspector(float w) {
                                 light->kind == LightKind::Point ? Tr("점광원") :
                                 light->kind == LightKind::Spot ? Tr("스팟") :
                                 light->kind == LightKind::Area ? Tr("면광원") :
-                                light->kind == LightKind::FogVolume ? Tr("안개 볼륨") : Tr("환경광");
+                                light->kind == LightKind::FogVolume ? Tr("안개 볼륨") :
+                                light->kind == LightKind::Sky ? Tr("하늘") : Tr("환경광");
         Text(cdl, Font::Regular, size::Caption, ImGui::GetCursorScreenPos(), p.ink3, kindLabel);
         ImGui::Dummy(ImVec2(w, Dp(16.0f)));
 
@@ -898,6 +904,57 @@ void App::DrawStudioLightInspector(float w) {
             [&] { return ImGui::DragFloat("##ambstrength", &strength, 0.02f, 0.0f, 10.0f, "%.2f"); },
             [&](SceneLight& l) { l.v.intensity = std::max(0.0f, strength); });
 
+    } else if (light->kind == LightKind::Sky) {
+        // S9b-1: the Physical Sky light (render/PhysicalSky.h): a Preetham clear sky from the time of day. The sun's
+        // direction follows the time unless the scene has a Sun light; the sun's colour always comes from the model.
+        float tod = cur.skyTimeOfDay;
+        keyedEdit(Tr("시간"),
+            [&] { return ImGui::SliderFloat("##skytod", &tod, 0.0f, 24.0f, "%.2f h"); },
+            [&](LightValues& v) { v.skyTimeOfDay = std::clamp(tod, 0.0f, 24.0f); }, "sky.timeOfDay");
+
+        float turbidity = cur.skyTurbidity;
+        keyedEdit(Tr("탁도"),
+            [&] { return ImGui::SliderFloat("##skyturbidity", &turbidity, 1.7f, 10.0f, "%.2f"); },
+            [&](LightValues& v) { v.skyTurbidity = std::clamp(turbidity, 1.7f, 10.0f); }, "sky.turbidity");
+
+        float haze = cur.skyHaze;
+        keyedEdit(Tr("지평선 안개"),
+            [&] { return ImGui::SliderFloat("##skyhaze", &haze, 0.0f, 1.0f, "%.2f"); },
+            [&](LightValues& v) { v.skyHaze = std::clamp(haze, 0.0f, 1.0f); }, "sky.haze");
+
+        float north = cur.skyNorthDeg;
+        keyedEdit(Tr("방위"),
+            [&] { return ImGui::DragFloat("##skynorth", &north, 1.0f, -360.0f, 360.0f, "%.0f°"); },
+            [&](LightValues& v) { v.skyNorthDeg = north; }, "sky.northDeg");
+
+        float ground[3] = {cur.skyGround.x, cur.skyGround.y, cur.skyGround.z};
+        keyedEdit(Tr("지면 색"),
+            [&] { return ui::ColorField("##skyground", ground); },
+            [&](LightValues& v) { v.skyGround = {ground[0], ground[1], ground[2]}; }, "sky.ground");
+
+        float skyInt = cur.skyIntensity;
+        keyedEdit(Tr("하늘 밝기"),
+            [&] { return ImGui::DragFloat("##skyintensity", &skyInt, 0.02f, 0.0f, 20.0f, "%.2f"); },
+            [&](LightValues& v) { v.skyIntensity = std::max(0.0f, skyInt); }, "sky.intensity");
+
+        float sunInt = cur.skySunIntensity;
+        keyedEdit(Tr("태양 밝기"),
+            [&] { return ImGui::DragFloat("##skysunintensity", &sunInt, 0.02f, 0.0f, 20.0f, "%.2f"); },
+            [&](LightValues& v) { v.skySunIntensity = std::max(0.0f, sunInt); }, "sky.sunIntensity");
+
+        float maxElev = cur.skyMaxElevationDeg;
+        keyedEdit(Tr("최대 고도"),
+            [&] { return ImGui::SliderFloat("##skymaxelev", &maxElev, 1.0f, 89.0f, "%.0f°"); },
+            [&](LightValues& v) { v.skyMaxElevationDeg = std::clamp(maxElev, 1.0f, 89.0f); }, "sky.maxElevationDeg");
+
+        ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
+        PushFont(Font::Regular, size::Caption);
+        ImGui::TextWrapped("%s", Tr("하늘 조명은 배경, 안개 색과 태양 색을 함께 정합니다. 태양 조명이 있으면 그 방향을 씁니다."));
+        PopFont();
+        ImGui::PopStyleColor();
+        ImGui::PopTextWrapPos();
     } else if (light->kind == LightKind::FogVolume) {
         // S9: a local medium volume. It lights nothing; its density adds to the global haze inside the shape.
         float pos[3] = {cur.position.x, cur.position.y, cur.position.z};
@@ -936,7 +993,8 @@ void App::DrawStudioLightInspector(float w) {
     }
 
     // Shadow section (sun, point, spot)
-    if (light->kind != LightKind::Ambient && light->kind != LightKind::FogVolume) {
+    if (light->kind != LightKind::Ambient && light->kind != LightKind::FogVolume &&
+        light->kind != LightKind::Sky) {
         separator(8.0f);
         SectionLabel(Tr("그림자"));
 
@@ -1026,7 +1084,7 @@ void App::DrawStudioLightInspector(float w) {
             [&](SceneLight& l) { l.volumetricG = ownG ? std::clamp(aniso, -0.9f, 0.95f) : -1.0f; });
     }
 
-    if (light->kind != LightKind::Ambient && light->kind != LightKind::FogVolume) {
+    if (light->kind != LightKind::Ambient && light->kind != LightKind::FogVolume && light->kind != LightKind::Sky) {
         separator(8.0f);
         bool diff = light->affectDiffuse;
         if (Switch("##diffuse", Tr("디퓨즈 영향"), &diff)) {

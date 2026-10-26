@@ -55,7 +55,8 @@ inline constexpr uint32_t kPointShadowFaces = 6;
 inline constexpr uint32_t kPointShadowMapSize = 1024;
 inline constexpr uint32_t kPointShadowMinSize = 256;
 inline constexpr uint32_t kPointShadowFullResLights = 4;
-inline constexpr uint32_t kSceneCbSize = 3072;  // 256-aligned slot; supports spot matrices + pack inputs
+// 256-aligned slot; supports spot matrices + pack inputs + the S9b-1 physical sky (8 float4s added in S9b-1)
+inline constexpr uint32_t kSceneCbSize = 3328;
 
 // Typed scene role for pack inputs (ShaderPack::PackInput order)
 struct GpuPackInputRole {
@@ -161,6 +162,22 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     // (at most kMaxScreenLights), z = SrvHeap index of the average-colour buffer (Renderer::screenAverageBuf_, one
     // float4 per screen light: xyz = that screen texture's average in linear light), w = unused.
     DirectX::XMFLOAT4 screenLightParams;
+    // S9b-1: the Physical Sky light (LightParams::physicalSky / sky, render/PhysicalSky.h). skyParams.x = 1 with a
+    // physical sky this frame (0 = today's hand-set gradient: every other field is then 0). y = the radiance scale
+    // (0.04 x the light's intensity), z = horizon haze 0..1, w = the day factor (scales the model's sky: 1 with the sun
+    // up, 0 below the horizon where only skyNight is left). The Perez coefficients and the zenith quotient of
+    // shaders/physical_sky.hlsli:
+    //   skyPerezY / X / Yy = A, B, C, D of the Y / x / y distribution, skyPerezE = (E_Y, E_x, E_y, 0),
+    //   skyZenithOverF = (zenith Y, zenith x, zenith y) each divided by its F(0, sun), skySunToward = the unit vector
+    //   toward the sun, skyNight = the night floor's linear rgb.
+    DirectX::XMFLOAT4 skyParams;
+    DirectX::XMFLOAT4 skyPerezY;
+    DirectX::XMFLOAT4 skyPerezX;
+    DirectX::XMFLOAT4 skyPerezYy;
+    DirectX::XMFLOAT4 skyPerezE;
+    DirectX::XMFLOAT4 skyZenithOverF;
+    DirectX::XMFLOAT4 skySunToward;
+    DirectX::XMFLOAT4 skyNight;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 

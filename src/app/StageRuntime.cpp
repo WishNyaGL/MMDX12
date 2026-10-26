@@ -74,6 +74,14 @@ bool ApplyStageLightField(studio::SceneLight& l, const std::string& field, const
     if (field == "gobo.scale") { l.goboScale = v.AsNumber(); return true; }
     if (field == "gobo.spin") { l.goboSpin = v.AsNumber(); return true; }
     if (field == "gobo.focus") { l.goboFocus = std::clamp(v.AsNumber(), 0.0f, 1.0f); return true; }
+    // S9b-1: the Physical Sky light's values (a bound field is read-only in the inspector, as the gobo's)
+    if (field == "sky.timeOfDay") { l.v.skyTimeOfDay = std::clamp(v.AsNumber(), 0.0f, 24.0f); return true; }
+    if (field == "sky.northDeg") { l.v.skyNorthDeg = v.AsNumber(); return true; }
+    if (field == "sky.turbidity") { l.v.skyTurbidity = std::clamp(v.AsNumber(), 1.7f, 10.0f); return true; }
+    if (field == "sky.haze") { l.v.skyHaze = std::clamp(v.AsNumber(), 0.0f, 1.0f); return true; }
+    if (field == "sky.ground") { l.v.skyGround = vec; return true; }
+    if (field == "sky.intensity") { l.v.skyIntensity = std::max(0.0f, v.AsNumber()); return true; }
+    if (field == "sky.sunIntensity") { l.v.skySunIntensity = std::max(0.0f, v.AsNumber()); return true; }
     return false;
 }
 

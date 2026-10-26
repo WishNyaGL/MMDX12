@@ -58,6 +58,16 @@ nlohmann::json LightValuesJson(const LightValues& v) {
     // S9: omitted while at the default, so a file of an older scene is byte-identical.
     if (v.extent.x != 20.0f || v.extent.y != 10.0f || v.extent.z != 20.0f) j["extent"] = Vec3Json(v.extent);
     if (v.volumetric != 1.0f) j["volumetric"] = v.volumetric;
+    // S9b-1: the Physical Sky light's values (omitted at their defaults, like the S9 ones). The binding targets are
+    // `lights.<name>.sky.timeOfDay` ..., the same names as the fields here.
+    if (v.skyTimeOfDay != 12.0f) j["skyTimeOfDay"] = v.skyTimeOfDay;
+    if (v.skyNorthDeg != 0.0f) j["skyNorthDeg"] = v.skyNorthDeg;
+    if (v.skyTurbidity != 3.0f) j["skyTurbidity"] = v.skyTurbidity;
+    if (v.skyHaze != 0.2f) j["skyHaze"] = v.skyHaze;
+    if (v.skyGround.x != 0.35f || v.skyGround.y != 0.35f || v.skyGround.z != 0.35f) j["skyGround"] = Vec3Json(v.skyGround);
+    if (v.skyIntensity != 1.0f) j["skyIntensity"] = v.skyIntensity;
+    if (v.skySunIntensity != 1.0f) j["skySunIntensity"] = v.skySunIntensity;
+    if (v.skyMaxElevationDeg != 60.0f) j["skyMaxElevationDeg"] = v.skyMaxElevationDeg;
     return j;
 }
 
@@ -73,6 +83,14 @@ void ReadLightValues(const nlohmann::json& j, LightValues& v) {
     v.size = ReadVec2(j, "size", v.size);
     v.extent = ReadVec3(j, "extent", v.extent);
     v.volumetric = (float)ReadDouble(j, "volumetric", v.volumetric);
+    v.skyTimeOfDay = (float)ReadDouble(j, "skyTimeOfDay", v.skyTimeOfDay);
+    v.skyNorthDeg = (float)ReadDouble(j, "skyNorthDeg", v.skyNorthDeg);
+    v.skyTurbidity = (float)ReadDouble(j, "skyTurbidity", v.skyTurbidity);
+    v.skyHaze = (float)ReadDouble(j, "skyHaze", v.skyHaze);
+    v.skyGround = ReadVec3(j, "skyGround", v.skyGround);
+    v.skyIntensity = (float)ReadDouble(j, "skyIntensity", v.skyIntensity);
+    v.skySunIntensity = (float)ReadDouble(j, "skySunIntensity", v.skySunIntensity);
+    v.skyMaxElevationDeg = (float)ReadDouble(j, "skyMaxElevationDeg", v.skyMaxElevationDeg);
 }
 
 } // namespace

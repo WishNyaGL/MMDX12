@@ -1278,6 +1278,16 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
     sc.skyHorizon = lp.skyHorizon;
     sc.numLights = (float)std::min<size_t>(lp.punctual.size(), kMaxPunctualLights);
     sc.groundColor = lp.groundColor;
+    // S9b-1: the Physical Sky light (render/PhysicalSky.h evaluated the model in app/Lighting.cpp). With no Sky light
+    // the fields stay zero and SkyColor keeps today's gradient: the frame is byte for byte the one before S9b-1.
+    sc.skyParams = lp.physicalSky ? lp.sky.params : DirectX::XMFLOAT4{0, 0, 0, 0};
+    sc.skyPerezY = lp.physicalSky ? lp.sky.perezY : DirectX::XMFLOAT4{0, 0, 0, 0};
+    sc.skyPerezX = lp.physicalSky ? lp.sky.perezX : DirectX::XMFLOAT4{0, 0, 0, 0};
+    sc.skyPerezYy = lp.physicalSky ? lp.sky.perezYy : DirectX::XMFLOAT4{0, 0, 0, 0};
+    sc.skyPerezE = lp.physicalSky ? lp.sky.perezE : DirectX::XMFLOAT4{0, 0, 0, 0};
+    sc.skyZenithOverF = lp.physicalSky ? lp.sky.zenithOverF : DirectX::XMFLOAT4{0, 0, 0, 0};
+    sc.skySunToward = lp.physicalSky ? lp.sky.sunToward : DirectX::XMFLOAT4{0, 1, 0, 0};
+    sc.skyNight = lp.physicalSky ? lp.sky.night : DirectX::XMFLOAT4{0, 0, 0, 0};
     sc.floorGloss = (settings_.ssr || EffectivePath() == RenderPath::PathTraced) ? settings_.floorGloss : 0.0f;
     sc.rimColor = lp.rimColor;
     sc.fog = settings_.fog;

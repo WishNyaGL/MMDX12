@@ -781,8 +781,8 @@ void App::StudioViewportLightHandles(bool hovered) {
         XMFLOAT3 anchor = cur.position;
         if (l.kind == LightKind::Sun) {
             anchor = focus;
-        } else if (l.kind == LightKind::Ambient) {
-            continue;
+        } else if (l.kind == LightKind::Ambient || l.kind == LightKind::Sky) {
+            continue;   // no position of its own (the S9b-1 sky light has none either)
         }
 
         ImVec2 screenPos;
@@ -820,7 +820,7 @@ void App::StudioViewportLightHandles(bool hovered) {
     }
 
     SceneLight* light = (d.selectedModel < 0 && d.selectedLightUid != 0) ? d.FindLight(d.selectedLightUid) : nullptr;
-    if (!light || !light->viewportVisible || light->kind == LightKind::Ambient) {
+    if (!light || !light->viewportVisible || light->kind == LightKind::Ambient || light->kind == LightKind::Sky) {
         studioLightGizmoShown_ = false;
         if (studioViewDrag_ == 8) {
             StudioEndLightEdit(studioLightEditingUid_);

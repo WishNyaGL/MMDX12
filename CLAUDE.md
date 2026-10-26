@@ -391,6 +391,24 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     `RenderSettings::volumetricMultiScatter` (default on, ini `volumetricMultiScatter=`, CLI `--volumetric-ms 0|1`) adds
     the three Wrenninge 2015 octaves in the injector (a = b = c = 0.5: energy a^n, phase g c^n; the stored extinction
     stays the medium's own, since a and b coincide); off = single scattering exactly.
+    Physical Sky light (S9b-1, `LightKind::Sky`, "sky"): a stage / studio light of kind `sky` replaces the hand-set sky
+    gradient with Preetham 1999's clear sky (the Perez distribution in Yxy). `render/PhysicalSky.{h,cpp}` evaluates the
+    model on the CPU: the sun's direction from `skyTimeOfDay` (sunrise 6:00, sunset 18:00, peaking at
+    `skyMaxElevationDeg`) and `skyNorthDeg`, the 5 Perez coefficients of Y / x / y for `skyTurbidity`, the zenith Yxy
+    divided by F(0, thetaS), the night floor and the sun's Rayleigh + Mie transmittance. `BuildSceneLighting` puts those
+    into `LightParams::sky` (also writing `skyZenith` / `skyHorizon` / `groundColor`, so the hemisphere fill, the floor
+    and the haze follow the sky) and the sun's direction / colour; `FillSceneConstants` copies them into the eight
+    appended `SceneConstants::sky*` float4s. `SkyColor` (common.hlsli) branches on `gSkyParams.x` to
+    `shaders/physical_sky.hlsli`; every path (raster, RT, PT, offline GI) calls `SkyColor`, so all of them change with no
+    call-site edits. The model's chromaticity y gets + 0.012 on both sides (Preetham sits magenta of the daylight locus:
+    a mauve noon horizon), and the sky-owned sun's colour peaks at MMD's default 0.6 in gamma space. A Sun light in the scene keeps its own direction and intensity (the sky only recolours it); with no
+    Sun light the sky light owns the sun (and its shadows). No Sky light = `gSkyParams = 0` = the frame byte for byte
+    the one before S9b-1.
+    Stage / project data: the values live in the light's `values` (keyable, so their key frames carry them too):
+    `skyTimeOfDay` (default 12), `skyNorthDeg` (0), `skyTurbidity` (3, 1.7..10), `skyHaze` (0.2, 0..1),
+    `skyGround` (a ground albedo, 0.35 grey), `skyIntensity` (1), `skySunIntensity` (1), `skyMaxElevationDeg` (60). Their
+    binding targets are `lights.<name>.sky.timeOfDay|northDeg|turbidity|haze|ground|intensity|sunIntensity` (the same
+    nested one-level split as the S7b gobo's). Cloudless sky only: image skies / IBL are S9b-2..S9b-4.
     AutoLuminous (そぼろ convention, native): `GpuModel::Create` flags a non-PBR material with black specular and
     specular power >= 100 as `MatFlag_AutoLuminous` (cleared for pack-shaded materials); `AutoLumEmission`
     (common.hlsli) adds diffuse x texture x (power - 100) / 10 x 4 as HDR after lighting in the raster / RT PS, PT and

@@ -92,6 +92,17 @@ cbuffer SceneCB : register(b0) {
     // skipped), y = the count (at most kMaxScreenLights), z = SrvHeap index of the average-colour buffer (one float4
     // per light, shaders/screen_light_avg.hlsl), w unused.
     float4 gScreenLights;
+    // S9b-1: the Physical Sky light (ShaderInterop.h skyParams / skyPerez* / shaders/physical_sky.hlsli): x = 1 with a
+    // physical sky this frame (0 = today's hand-set gradient), y = the radiance scale, z = horizon haze 0..1,
+    // w = the day factor (1 with the sun up, 0 below the horizon: only the night floor's rgb is left).
+    float4 gSkyParams;
+    float4 gSkyPerezY;       // A, B, C, D of the Y distribution
+    float4 gSkyPerezX;       // A, B, C, D of the x distribution
+    float4 gSkyPerezYy;      // A, B, C, D of the y distribution
+    float4 gSkyPerezE;       // E of Y, x, y, unused
+    float4 gSkyZenithOverF;  // zenith Y, x, y, each divided by its F(0, sun)
+    float4 gSkySunToward;    // xyz = unit vector toward the sun
+    float4 gSkyNight;        // xyz = the night floor's linear rgb
 };
 
 static const float PI = 3.14159265;
@@ -131,6 +142,9 @@ float2 ViewToUv(float3 v) {
     return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 }
 
+// S9b-1: the Physical Sky light's radiance (needs the SceneCB fields above; read by SkyColor only).
+#include "physical_sky.hlsli"
+
 // Linear sky radiance for a world direction (also the fog colour source).
 float3 SkyColor(float3 dir) {
     float y = dir.y;
@@ -138,9 +152,16 @@ float3 SkyColor(float3 dir) {
     float3 sky = lerp(gSkyHorizon, gSkyZenith, pow(up, 0.55));
     float3 below = lerp(gSkyHorizon, gGroundColor, saturate(-y * 6.0));
     float3 c = y >= 0.0 ? sky : below;
+    float3 glowTint = gSkyHorizon;
+    // S9b-1: a Physical Sky light replaces the hand-set gradient (its ground colour is written to gGroundColor by the
+    // CPU, so the below-horizon blend stays the same) and draws the sun's glow in the sun's own colour.
+    if (gSkyParams.x > 0.5) {
+        c = PhysicalSkyRadiance(dir);
+        glowTint = SrgbToLinear(saturate(gLightColor));
+    }
     // soft sun glow toward the key light (driven by sun colour so black = no glow)
     float s = saturate(dot(dir, -gLightDir));
-    c += gSkyHorizon * ((gLightColor.r + gLightColor.g + gLightColor.b) > 1e-4 ? 1.0 : 0.0) * (pow(s, 24.0) * 0.35 + pow(s, 600.0) * 2.0) * (y > -0.05 ? 1.0 : 0.0);
+    c += glowTint * ((gLightColor.r + gLightColor.g + gLightColor.b) > 1e-4 ? 1.0 : 0.0) * (pow(s, 24.0) * 0.35 + pow(s, 600.0) * 2.0) * (y > -0.05 ? 1.0 : 0.0);
     return c * gSunIntensity;
 }
 

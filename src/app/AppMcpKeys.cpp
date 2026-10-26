@@ -494,12 +494,12 @@ bool App::ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, st
         int outIndex = index;
         if (create) {
             if (!args["create"].is_string()) {
-                promise->Reject("create must be a light kind: sun, point, spot, area or ambient");
+                promise->Reject("create must be a light kind: sun, point, spot, area, ambient, fog_volume or sky");
                 return true;
             }
             LightKind kind;
             if (!ParseLightKind(ToLowerAscii(args["create"].get<std::string>()), kind)) {
-                promise->Reject("create must be sun, point, spot, area or ambient");
+                promise->Reject("create must be sun, point, spot, area, ambient, fog_volume or sky");
                 return true;
             }
             if (kind == LightKind::Sun) {
@@ -509,6 +509,10 @@ bool App::ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, st
             if (kind == LightKind::Ambient) {
                 for (const SceneLight& l : d.lights)
                     if (l.kind == LightKind::Ambient) { promise->Reject("The scene already has an ambient light (only one is allowed)"); return true; }
+            }
+            if (kind == LightKind::Sky) {
+                for (const SceneLight& l : d.lights)
+                    if (l.kind == LightKind::Sky) { promise->Reject("The scene already has a sky light (only one is allowed)"); return true; }
             }
             SceneLight l;
             l.uid = d.nextLightUid++;
@@ -532,6 +536,8 @@ bool App::ExecuteMcpKeys(const std::string& tool, const nlohmann::json& args, st
                 l.v.size = {20.0f, 20.0f};
             } else if (kind == LightKind::Sun) {
                 l.name = "메인 조명";
+            } else if (kind == LightKind::Sky) {
+                l.name = "하늘";
             } else {
                 l.name = "환경광";
             }

@@ -338,6 +338,39 @@ int SelfTest() {
         check(spin && std::abs(spin->value.x - 45.0f) < 1e-4f, "gobo spin binding assignment");
     }
 
+    // S9b-1: a sky light's values and its nested targets ("lights.<name>.sky.<field>"), and the ranges stage_check adds
+    {
+        const std::string skyJson = R"({
+          "format": "mmdx-stage", "formatVersion": 1, "id": "skytest", "version": "1", "name": "Sky test",
+          "models": [{"file": "x.glb"}],
+          "lights": [{"kind": "sky", "name": "sky",
+                      "values": {"skyTimeOfDay": 6.5, "skyTurbidity": 4.5, "skyHaze": 0.4, "skyNorthDeg": -20.0,
+                                 "skyGround": [0.3, 0.3, 0.28], "skyIntensity": 1.2, "skySunIntensity": 0.9,
+                                 "skyMaxElevationDeg": 55.0}}],
+          "params": [{"key": "tod", "type": "float", "default": 12.0, "min": 0.0, "max": 24.0}],
+          "bindings": [{"param": "tod", "target": "lights.sky.sky.timeOfDay"}]
+        })";
+        StageManifest sm;
+        check(mmdx::ParseStageManifest(skyJson, fs::path("skytest"), sm, error), "sky manifest parses", error);
+        check(mmdx::ValidateStageManifest(sm).empty(), "sky manifest validates",
+              mmdx::ValidateStageManifest(sm).empty() ? "" : mmdx::ValidateStageManifest(sm).front());
+        check(sm.lights.size() == 1 && sm.lights[0].kind == mmdx::studio::LightKind::Sky &&
+                  sm.lights[0].v.skyTimeOfDay == 6.5f && sm.lights[0].v.skyTurbidity == 4.5f &&
+                  sm.lights[0].v.skyHaze == 0.4f && sm.lights[0].v.skySunIntensity == 0.9f,
+              "sky values parsed");
+        const mmdx::StageTargetSpec ss = mmdx::ResolveStageTarget(sm, "lights.sky.sky.timeOfDay");
+        check(ss.ok && ss.owner == "sky" && ss.field == "sky.timeOfDay" &&
+                  ss.type == mmdx::StageTargetSpec::ValueType::Float,
+              "sky target splits owner / field");
+        check(!mmdx::ResolveStageTarget(sm, "lights.sky.sky.nope").ok, "unknown sky field rejected");
+        mmdx::StageManifest badSky = sm;
+        badSky.lights[0].v.skyTurbidity = 30.0f;
+        check(!mmdx::ValidateStageManifest(badSky).empty(), "turbidity out of range rejected");
+        mmdx::StageManifest twoSkies = sm;
+        twoSkies.lights.push_back(sm.lights[0]);
+        check(!mmdx::ValidateStageManifest(twoSkies).empty(), "two sky lights rejected");
+    }
+
     // enum -> screen source (string target)
     const std::string enumJson = R"({
       "format": "mmdx-stage", "formatVersion": 1, "id": "enumtest", "version": "1", "name": "Enum test",

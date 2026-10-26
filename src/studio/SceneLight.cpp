@@ -29,6 +29,7 @@ const char* LightKindName(LightKind k) {
     case LightKind::Ambient: return "ambient";
     case LightKind::Area: return "area";
     case LightKind::FogVolume: return "fog_volume";
+    case LightKind::Sky: return "sky";
     case LightKind::Sun: break;
     }
     return "sun";
@@ -41,6 +42,7 @@ bool ParseLightKind(const std::string& s, LightKind& out) {
     if (s == "ambient") { out = LightKind::Ambient; return true; }
     if (s == "area") { out = LightKind::Area; return true; }
     if (s == "fog_volume" || s == "fogvolume") { out = LightKind::FogVolume; return true; }
+    if (s == "sky") { out = LightKind::Sky; return true; }
     return false;
 }
 
@@ -111,7 +113,10 @@ bool ParseFogShape(const std::string& s, FogShape& out) {
 bool LightValues::operator==(const LightValues& o) const {
     return Same(position, o.position) && Same(aim, o.aim) && Same(direction, o.direction) && Same(color, o.color) &&
            intensity == o.intensity && range == o.range && coneOuter == o.coneOuter && coneInner == o.coneInner &&
-           size.x == o.size.x && size.y == o.size.y && Same(extent, o.extent) && volumetric == o.volumetric;
+           size.x == o.size.x && size.y == o.size.y && Same(extent, o.extent) && volumetric == o.volumetric &&
+           skyTimeOfDay == o.skyTimeOfDay && skyNorthDeg == o.skyNorthDeg && skyTurbidity == o.skyTurbidity &&
+           skyHaze == o.skyHaze && Same(skyGround, o.skyGround) && skyIntensity == o.skyIntensity &&
+           skySunIntensity == o.skySunIntensity && skyMaxElevationDeg == o.skyMaxElevationDeg;
 }
 
 bool LightKey::operator==(const LightKey& o) const { return frame == o.frame && v == o.v; }
@@ -153,6 +158,14 @@ LightValues SampleLightValues(const SceneLight& light, int frame) {
     out.size = {Lerp(a.v.size.x, b.v.size.x, t), Lerp(a.v.size.y, b.v.size.y, t)};
     out.extent = Lerp3(a.v.extent, b.v.extent, t);
     out.volumetric = Lerp(a.v.volumetric, b.v.volumetric, t);
+    out.skyTimeOfDay = Lerp(a.v.skyTimeOfDay, b.v.skyTimeOfDay, t);
+    out.skyNorthDeg = Lerp(a.v.skyNorthDeg, b.v.skyNorthDeg, t);
+    out.skyTurbidity = Lerp(a.v.skyTurbidity, b.v.skyTurbidity, t);
+    out.skyHaze = Lerp(a.v.skyHaze, b.v.skyHaze, t);
+    out.skyGround = Lerp3(a.v.skyGround, b.v.skyGround, t);
+    out.skyIntensity = Lerp(a.v.skyIntensity, b.v.skyIntensity, t);
+    out.skySunIntensity = Lerp(a.v.skySunIntensity, b.v.skySunIntensity, t);
+    out.skyMaxElevationDeg = Lerp(a.v.skyMaxElevationDeg, b.v.skyMaxElevationDeg, t);
     return out;
 }
 

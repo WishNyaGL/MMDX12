@@ -182,7 +182,7 @@ binding key); `uid` is ignored in a stage (the stage's order is its identity).
 ```
 
 Fields (all optional except `kind` and `name`; a missing one keeps the `SceneLight` default):
-`kind` (`sun` / `point` / `spot` / `ambient` / `area` / `fog_volume`), `enabled`, `values` (`position`, `aim`, `direction`, `color`,
+`kind` (`sun` / `point` / `spot` / `ambient` / `area` / `fog_volume` / `sky`), `enabled`, `values` (`position`, `aim`, `direction`, `color`,
 `intensity`, `range`, `coneOuter`, `coneInner` radians, `size`, `extent`, `volumetric`), `sun` (`vmdLink`, `rimStrength`, `rimColor`), `spot`
 (`aim` = `manual` / `target` / `sway`, `target`, `part` = `centre` / `head`, `swayPhase`), `sky` (`zenith`,
 `horizon`, `ground`), `shadow` (`type` = `nocast` / `hard` / `soft`, `softness`, `density`, `color`), `falloff`
@@ -231,6 +231,41 @@ them read-only while a stage binding drives them, exactly like the shadow proper
 Limits: a gobo is a **spot** feature (a point / area light has no cone); the legacy per-pixel march
 (`--volumetric-mode march`) keeps a plain beam (the default froxel grid and the offline march carry gobos), and the
 `world.lights` world-pack API does not read gobos.
+
+### `sky` (S9b-1): a Physical Sky light
+
+A light of kind `sky` replaces the hand-set sky gradient with a physical clear sky (Preetham 1999, a Perez distribution in
+Yxy): it is the background, the fog colour source and the sun's colour in every render path (raster, RT, path tracing and
+offline GI). At most one sky light counts (the first enabled); with none the frame is exactly the one before S9b-1.
+
+```json
+{"kind": "sky", "name": "sky",
+ "values": {"skyTimeOfDay": 6.5, "skyTurbidity": 3.2, "skyHaze": 0.35, "skyNorthDeg": -25,
+            "skyGround": [0.34, 0.33, 0.31], "skyIntensity": 1.0, "skySunIntensity": 1.0,
+            "skyMaxElevationDeg": 60}}
+```
+
+| key | default | meaning |
+| --- | --- | --- |
+| `skyTimeOfDay` | `12` | hours, 0..24: the sun's arc (sunrise 6:00, sunset 18:00, the peak at 12:00). Ignored while the scene has a `sun` light |
+| `skyNorthDeg` | `0` | compass rotation of the arc around +y |
+| `skyMaxElevationDeg` | `60` | the sun's elevation at 12:00 (1..89) |
+| `skyTurbidity` | `3` | haze in the atmosphere, 1.7..10 (3 = a clear blue sky, 10 = a milky one) |
+| `skyHaze` | `0.2` | 0..1: how strongly the lowest ~15 degrees blend toward the horizon colour |
+| `skyGround` | `[0.35, 0.35, 0.35]` | the ground's albedo: the below-horizon blend target (the light's ground colour x the sky's irradiance) |
+| `skyIntensity` | `1` | scales the sky's radiance |
+| `skySunIntensity` | `1` | scales the sun's colour |
+
+The light owns the sun: without a `sun` light its direction comes from `skyTimeOfDay` / `skyNorthDeg` and its colour from
+the model's transmittance, and it casts shadows like a hard sun. With a `sun` light that light keeps its own direction
+and intensity and only its colour is replaced. Below the horizon the sun goes black and the sky falls to a dim night
+tone (a floor, so the scene is never pitch black). The model also writes the ambient sky / ground colours (the
+hemisphere fill, the floor and the haze follow the sky); image-based sky lighting is S9b-2.
+
+The values are **keyable** (they live in `values`, so a key's `values` carry them) and bindable:
+`lights.<name>.sky.timeOfDay` / `.northDeg` / `.turbidity` / `.haze` / `.ground` (colour) / `.intensity` /
+`.sunIntensity` (float). `stage_check` rejects out-of-range values, and a second sky light. A written file omits the
+values that are at their defaults, so a file without a sky light keeps its bytes.
 
 ### `gltfLights` (S2a)
 
@@ -480,7 +515,7 @@ order and applied in that order. Target paths:
 
 | path | value type |
 |---|---|
-| `lights.<name>.<field>` | see the light fields: `enabled` (bool), `intensity` / `range` / `coneOuter` / `coneInner` / `shadowSoftness` / `shadowDensity` / `rimStrength` / `swayPhase` / `gobo.rotation` / `gobo.scale` / `gobo.spin` / `gobo.focus` (float), `color` / `rimColor` / `shadowColor` (colour), `position` / `aim` / `direction` / `size` (vec3), `vmdLink` (bool) |
+| `lights.<name>.<field>` | see the light fields: `enabled` (bool), `intensity` / `range` / `coneOuter` / `coneInner` / `shadowSoftness` / `shadowDensity` / `rimStrength` / `swayPhase` / `gobo.rotation` / `gobo.scale` / `gobo.spin` / `gobo.focus` / `sky.timeOfDay` / `sky.northDeg` / `sky.turbidity` / `sky.haze` / `sky.intensity` / `sky.sunIntensity` (float), `color` / `rimColor` / `shadowColor` / `sky.ground` (colour), `position` / `aim` / `direction` / `size` (vec3), `vmdLink` (bool) |
 | `materials.<rule match>.<field>` | `baseColor` (colour), `roughness` / `metallic` / `emissiveStrength` / `transmission` / `ior` / `alpha` (float), `emissive` (vec3), `mirror` / `castShadow` / `receiveShadow` (bool), `screen` (string) |
 | `screens.<id>.<field>` | `brightness` (float), `width` / `height` (int), `emitLight` / `enabled` (bool), `source` / `file` / `camera` (string) |
 | `packs.<index>.params.<key>` | float |
@@ -599,7 +634,9 @@ numpy only — no Blender, no glTF library. The stages are `cyclorama` (cove, 3 
 spots), `mirror_room` (box room, `mirror: true` wall, wood floor PBR), `led_stage` (raised stage, 3 screen quads,
 truss, 8 swaying spots, fog values), `pack_test` (one bundled pack of each role) and `gobo_test` (S7b: two spots with a
 ring gobo straight down on the floor — one of them spinning a coloured stripe stencil — and a third with the stripe
-stencil across the back wall, haze on; `gobos/ring.png` / `gobos/stripes.png` are written with the stage).
+stencil across the back wall, haze on; `gobos/ring.png` / `gobos/stripes.png` are written with the stage), plus
+`sky_test` (S9b-1: an open floor with four pillars under one `sky` light whose `skyTimeOfDay` is keyed 6.5 -> 12 -> 18.5
+over the first 30 s — a low orange dawn sun, a blue noon, a low sunset — and no fog).
 
 `tools/testdata/make_ext_test.py` is the one Blender-made test asset (S2a / S2b): it writes `tools/testdata/ext_test.glb`,
 a committed GLB with a transmissive / volume glass sphere, a thick tinted glass block, a thin-walled window pane, a

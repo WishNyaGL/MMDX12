@@ -447,7 +447,7 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             const int p = std::clamp(std::atoi(args[0].c_str()), 0, 3);
             StudioApplyLightPreset(p);
         }
-    } else if (cmd == "studiolightadd") {  // studiolightadd <sun|point|spot|ambient>
+    } else if (cmd == "studiolightadd") {  // studiolightadd <sun|point|spot|area|ambient|fog_volume|sky>
         if (studio_ && !args.empty()) {
             studio::LightKind kind = studio::LightKind::Point;
             if (studio::ParseLightKind(ToLowerAscii(args[0]), kind)) {
