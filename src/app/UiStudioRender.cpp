@@ -206,6 +206,10 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
         if (settings_.volumetric) {
             Gap(4.0f);
             changed |= SliderRow("##vold", Tr("안개 밀도"), &settings_.volumetricDensity, 0.25f, 4.0f, "%.2f");
+            // the haze's light shares (same settings as the play panel): shafts read when the spots scatter strongly
+            // and the sun / sky barely do
+            changed |= SliderRow("##volgain", Tr("빛줄기 강도"), &settings_.volumetricLightGain, 0.0f, 8.0f, "%.2f");
+            changed |= SliderRow("##volamb", Tr("환경 산란"), &settings_.volumetricAmbientGain, 0.0f, 2.0f, "%.2f");
             changed |= Switch("##volfull", Tr("정밀 안개 계산"), &settings_.volumetricFull,
                               Tr("오프라인 GI에서 안개를 경로 추적으로 계산"));
             Gap(4.0f);
