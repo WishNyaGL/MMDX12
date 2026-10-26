@@ -364,9 +364,8 @@ float MediumShadowT(float3 o, float3 d, float tMax, inout uint rng) {
 }
 
 // In-scattered radiance at a medium collision p looking along d (the path's direction): next-event estimation to the
-// sun and to one punctual light (picked by its unshadowed contribution, the weighting the surface NEE uses), phase
-// weighted and scaled by each light's haze share (GpuLight::_pad, 1 = physical). The visibility is the tinted mesh
-// shadow ray times the medium transmittance along it.
+// sun and (S9c-2: only in the validation build) to one punctual light. The visibility is the tinted mesh shadow ray
+// times the medium transmittance along it.
 float3 MediumNee(float3 p, float3 d, inout uint rng) {
     float3 L = 0;
     // sun: the same soft cone the surfaces sample, the single pass's sun colour (offline_volumetric.hlsl CSVolMarch)
@@ -381,6 +380,10 @@ float3 MediumNee(float3 p, float3 d, inout uint rng) {
     visSun *= MediumShadowT(p, sd, 1e5, rng);   // the medium between the event and the sun
     const float3 sunCol = SrgbToLinear(gLightColor) / SrgbToLinear(float3(0.6, 0.6, 0.6)) * gSunIntensity;
     L += sunCol * (gMedium[0].sunVolumetric * HgEval(dot(d, sd), gMedium[0].sunG)) * visSun;
+    // S9c-2: the punctual / spot lights are equiangular light samples per segment (MediumPunctualSegment), not events:
+    // their in-scattering is not a density along the path, so the deltas-tracking estimator does not own it. Only the
+    // S9c validation build (which compares against the single pass's march) keeps the event's punctual NEE.
+#ifdef MMDX_MEDIUM_SINGLE_EVENT
 
     // punctual: one light by its unshadowed contribution (weights = the single pass's in-scattering integrand)
     const uint nl = (uint)gNumLights;
@@ -443,7 +446,135 @@ float3 MediumNee(float3 p, float3 d, inout uint rng) {
             L += l.color * (boost * l.volumetric) * (atten * HgEval(dot(d, ld), g)) * (total / w) * vis;
         }
     }
+#endif
     return L;
+}
+
+// ---- S9c-2: equiangular punctual / spot light in-scattering on one path segment ----------------
+// The punctual lights are delta lights: a path can never hit them, so their in-scattered radiance along a segment is the
+// whole radiance they add to the medium there (only glass crossings of the segment clip it, as for any light). It is
+// estimated per segment, independent of the medium's scattering events:
+//
+//   L = sum_lights int_a^b sigma_s(p(t)) * T(o->p(t)) * phase(d, ld) * Li(p(t)) * T(p(t)->light) dt
+//
+// with [a, b] the segment [0, tEnd] clipped to the haze sphere (MediumRange), the light's range sphere and, for a spot,
+// its cone -- so a beam that only clips the segment still gets samples inside it. t is drawn with the equiangular
+// (Kulla & Fajardo 2012) distribution around the light (MediumEquiangular), which for a point light makes
+// 1 / pdf * T(o->p) ~ constant, so the estimate does not spike where the delta-tracking distance sampler rarely puts
+// its events (a narrow cone seen along a long segment). Every light takes one sample (gNumLights <=
+// kMediumAllLights), else one light is picked with the weights MediumNee used (total / w compensates, so the mean is
+// the all-light sum).
+//
+// The scattering albedo is part of sigma_s here (unlike the collision event's NEE, which the path's albedo roulette
+// weights), so the single-scatter energy matches the single pass's march.
+static const uint kMediumAllLights = 8u;
+
+// The part of the segment [0, tEnd] where light `l` can reach the medium: the haze sphere (MediumRange), the light's
+// range sphere and, for a spot, its cone. Empty when x >= y.
+float2 MediumLightRange(PtLight l, float3 o, float3 d, float tEnd) {
+    const float2 seg = MediumRange(o, d, tEnd);
+    if (seg.x >= seg.y) return float2(1, 0);
+    float2 s = MediumRaySphere(o, d, l.pos, 1.0 / max(l.invRange, 1e-6), seg.y);
+    s.x = max(s.x, seg.x);
+    if (l.cosOuter > -1.0 && s.x < s.y) s = MediumRayCone(o, d, l.pos, l.dir, l.cosOuter, s.x, s.y);
+    return s;
+}
+
+// The light's haze radiance at `p` (the pick's weight): falloff * phase * the light's haze share, with the spot cone /
+// area window exactly as MediumNee's pick computed it.
+float MediumPickWeight(PtLight l, float3 p, float3 d) {
+    float3 dv = l.pos - p;
+    float dL = length(dv);
+    float atten = PunctualFalloff(dL, l.invRange, (int)l.falloff);
+    if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-dv / max(dL, 1e-4), l.dir));
+    else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -dv / max(dL, 1e-4)));
+    const float g = l.aniso > -0.99 ? l.aniso : gMedium[0].g;
+    return Luminance(l.color * (l.volumetric * atten * HgEval(dot(d, dv / max(dL, 1e-4)), g)));
+}
+
+// The pick's score: the weight at the middle of the light's own clipped interval (the stretch of the segment it actually
+// lights, so a beam that clips the segment scores by its in-beam radiance, not by a window test at one fixed point),
+// floored by a tiny share of the light's haze so the pick covers every light with a nonempty interval. Any pick is
+// unbiased (total / w compensates); the floor only removes a support hole (a phase lobe facing away from the segment).
+float MediumPickScore(PtLight l, float3 o, float3 d, float tEnd) {
+    const float2 s = MediumLightRange(l, o, d, tEnd);
+    if (s.x >= s.y) return 0.0;
+    return MediumPickWeight(l, o + d * (0.5 * (s.x + s.y)), d) + 1e-4 * Luminance(l.color * l.volumetric);
+}
+
+// One equiangular sample of light `l` on the segment [0, tEnd] (0 when the segment misses it): see the block comment.
+float3 MediumPunctualLight(PtLight l, float3 o, float3 d, float tEnd, float scale, inout uint rng) {
+    const float2 s = MediumLightRange(l, o, d, tEnd);
+    if (s.x >= s.y) return 0;
+    float pdf;
+    const float t = MediumEquiangular(o, d, l.pos, s.x, s.y, Rand(rng), pdf);
+    if (pdf <= 0.0) return 0;
+    float3 p = o + d * t;
+    float3 dv = l.pos - p;
+    float dL = length(dv);
+    float3 ld = dv / max(dL, 1e-4);
+    float atten = PunctualFalloff(dL, l.invRange, (int)l.falloff);
+    if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
+    else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
+    if (atten <= 0.0) return 0;
+    const float g = l.aniso > -0.99 ? l.aniso : gMedium[0].g;
+    const float boost = l.cosOuter > -1.0 ? kMediumSpotBoost : kMediumPointBoost;
+    // the tinted mesh shadow ray and the medium between the sample and the light (as MediumNee's punctual part)
+    float3 vis = 1.0;
+    if (l.shadowType != 0.0) {
+        float3 mesh = TraceShadowRayTinted(p, ld, max(dL - 0.05, 0.0), RT_MASK_CHARACTER);
+        float v = Luminance(mesh);
+        vis = (v > 0.0 ? ShadowTransmission(v, l.shadowDensity, l.shadowColor) * mesh
+                       : ShadowTransmission(0.0, l.shadowDensity, l.shadowColor));
+    }
+    vis *= MediumShadowT(p, ld, max(dL - 0.05, 0.0), rng);
+    const float3 sigmaS = MediumAlbedo(p) * MediumSigma(p);
+    const float Tview = MediumTransmittance(o, d, t, rng);
+    const float3 Li = l.color * (atten * (boost * l.volumetric)) * HgEval(dot(d, ld), g);
+    return sigmaS * Li * (Tview * scale * vis / pdf);
+}
+
+// The punctual / spot lights' in-scattered radiance on this segment (see the block comment above).
+float3 MediumPunctualSegment(float3 o, float3 d, float tEnd, inout uint rng) {
+#ifdef MMDX_MEDIUM_SINGLE_EVENT
+    return 0;   // validation: the event's punctual NEE below is the whole punctual contribution (matches the single pass)
+#endif
+    const uint nl = (uint)gNumLights;
+    if (nl == 0u) return 0;
+    if (nl <= kMediumAllLights) {
+        float3 L = 0;
+        [loop] for (uint i = 0; i < nl; ++i) {
+            PtLight l = gPtLights[i];
+            if (l.volumetric <= 0.0) continue;
+            L += MediumPunctualLight(l, o, d, tEnd, 1.0, rng);
+        }
+        return L;
+    }
+    // one light by its unshadowed contribution (the pick MediumNee's punctual part used): each light is scored at the
+    // middle of the stretch of this segment it lights, and total / w makes the one-sample mean the all-light sum.
+    if (MediumRange(o, d, tEnd).x >= MediumRange(o, d, tEnd).y) return 0;
+    float total = 0.0;
+    [loop] for (uint i = 0; i < nl; ++i) {
+        PtLight l = gPtLights[i];
+        if (l.volumetric <= 0.0) continue;
+        total += MediumPickScore(l, o, d, tEnd);
+    }
+    if (total <= 0.0) return 0;
+    const float u = Rand(rng) * total;
+    PtLight picked = gPtLights[0];
+    float w = 0.0;
+    float acc = 0.0;
+    [loop] for (uint i = 0; i < nl; ++i) {
+        PtLight l = gPtLights[i];
+        if (l.volumetric <= 0.0) continue;
+        w = MediumPickScore(l, o, d, tEnd);
+        if (w <= 0.0) continue;
+        picked = l;
+        if (u <= acc + w) break;
+        acc += w;
+    }
+    if (w <= 0.0) return 0;
+    return MediumPunctualLight(picked, o, d, tEnd, total / w, rng);
 }
 
 // One step through the medium along [0, tEnd] from o: a real collision consumes one event and reports the event point
@@ -454,6 +585,10 @@ float3 MediumNee(float3 p, float3 d, inout uint rng) {
 int MediumStep(inout float3 o, inout float3 d, float tEnd, inout float3 T, inout float3 radiance, inout uint events,
                inout uint rng, bool primary) {
     if (!MediumOn()) return 0;
+    // S9c-2: the punctual / spot lights in the medium are one equiangular sample over the whole segment, taken before the
+    // events (they are delta lights: no path can hit them, so this is the whole in-scattering they add here). Outside
+    // the event budget: it is not a scattering event, so a spent budget (transmittance only) still keeps it.
+    radiance += T * MediumPunctualSegment(o, d, tEnd, rng);
 #ifdef MMDX_MEDIUM_SINGLE_EVENT
     // Validation build (the S9c correctness check): ONE event per path, sun + punctual NEE only. The event adds its NEE
     // (and the sky's isotropic fill the fast pass adds as ambient * (1 - T), on the camera segment) and the path then

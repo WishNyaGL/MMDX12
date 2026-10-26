@@ -76,6 +76,75 @@ float2 MediumRange(float3 o, float3 d, float tMax) {
     return seg.x < seg.y ? seg : float2(1, 0);
 }
 
+// ---- S9c-2: punctual light ranges + equiangular sampling ---------------------------------------
+// Copies of volumetric_common.hlsli's VolRaySphere / VolRayCone: that file declares the single pass's own VolLight /
+// VolParams buffers, so the two clip helpers the medium NEE needs are repeated here (same maths).
+//
+// Ray / sphere: [t0, t1] clipped to [0, tMax]; empty when t0 >= t1.
+float2 MediumRaySphere(float3 o, float3 d, float3 c, float r, float tMax) {
+    float3 oc = o - c;
+    float b = dot(oc, d);
+    float h = b * b - (dot(oc, oc) - r * r);
+    if (h <= 0.0) return float2(1, 0);
+    h = sqrt(h);
+    return float2(max(-b - h, 0.0), min(-b + h, tMax));
+}
+
+// Ray / forward cone (apex a, unit axis, cos of the half angle): the parameter interval where the ray is inside the
+// cone, clipped to [lo, hi]; empty when x >= y.
+float2 MediumRayCone(float3 o, float3 d, float3 apex, float3 axis, float cosA, float lo, float hi) {
+    float3 co = o - apex;
+    float c2 = cosA * cosA;
+    float da = dot(d, axis), ca = dot(co, axis);
+    float a = da * da - c2;
+    float b = 2.0 * (da * ca - dot(d, co) * c2);
+    float c = ca * ca - dot(co, co) * c2;
+    float t0 = -1e30, t1 = 1e30;   // the inside interval on the double cone (forward nappe picked below)
+    float disc = b * b - 4.0 * a * c;
+    if (abs(a) < 1e-6) {
+        // ray parallel to the cone surface: one root
+        if (abs(b) < 1e-8) return float2(1, 0);
+        float r = -c / b;
+        if (b > 0.0) t0 = r; else t1 = r;
+    } else if (disc < 0.0) {
+        if (a < 0.0) return float2(1, 0);   // never inside
+        // always inside the double cone: the forward nappe test below decides
+    } else {
+        float sq = sqrt(disc);
+        float r0 = (-b - sq) / (2.0 * a), r1 = (-b + sq) / (2.0 * a);
+        float rl = min(r0, r1), rh = max(r0, r1);
+        if (a < 0.0) {
+            t0 = rl; t1 = rh;   // inside between the roots
+        } else {
+            // inside outside the roots: (-inf, rl] and [rh, inf), one per nappe
+            float axialHi = ca + da * (rh + 1.0);
+            if (axialHi > 0.0) t0 = rh; else t1 = rl;
+        }
+    }
+    t0 = max(t0, lo);
+    t1 = min(t1, hi);
+    if (t0 >= t1) return float2(1, 0);
+    // forward nappe only (apex side along the axis)
+    float tm = 0.5 * (t0 + t1);
+    if (ca + da * tm < 0.0) return float2(1, 0);
+    return float2(t0, t1);
+}
+
+// Equiangular (Kulla & Fajardo 2012) distance sample inside [segA, segB] of o + d t around the punctual light at `pos`:
+// with delta = the light's distance along the ray and D = its perpendicular distance, th = atan((t - delta) / D) is
+// uniform over [thA, thB], so t = delta + D tan(th) and the distance pdf is
+//   p(t) = D / ((thB - thA) * (D^2 + (t - delta)^2)).
+float MediumEquiangular(float3 o, float3 d, float3 pos, float segA, float segB, float u, out float pdf) {
+    const float delta = dot(pos - o, d);
+    const float D = max(length(o + d * delta - pos), 1e-3);
+    const float thA = atan2(segA - delta, D), thB = atan2(segB - delta, D);
+    const float t = clamp(delta + D * tan(lerp(thA, thB, u)), segA, segB);
+    const float dt = t - delta;
+    const float norm = (thB - thA) * (D * D + dt * dt);
+    pdf = norm > 1e-8 ? D / norm : 0.0;
+    return t;
+}
+
 // The height fog's maximum on the segment (its density at the segment's lowest point) plus the densities of the volumes
 // the segment overlaps (their shape is <= 1, so their full density bounds them). 0 = no medium on this segment.
 float MediumMajorant(float3 o, float3 d, float2 seg) {
