@@ -2,6 +2,7 @@
 // a tiny CHECK macro, prints PASS/FAIL per check and a summary, exit code 0 on success.
 #include "studio/StudioProject.h"
 #include "anim/Motion.h"
+#include "core/TextUtil.h"
 #include <DirectXMath.h>
 #include <json.hpp>
 #include <cstdarg>
@@ -345,7 +346,7 @@ static void TestEffects() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 5, "effect project format is version 5");
+        Check(!j.is_discarded() && j.value("version", 0) == 6, "effect project format is version 6");
         Check(j.contains("effects") && j["effects"].is_array() && j["effects"].size() == 2 &&
                   j["effects"][0]["pack"] == "hoyo_toon_v2" && j["effects"][1]["enabled"] == false &&
                   j["effects"][0]["textureFolder"] == "F:/tex/effect" && j["effects"][0]["tracks"].size() == 2 &&
@@ -390,7 +391,7 @@ static void TestWorlds() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 5, "world project format is version 5");
+        Check(!j.is_discarded() && j.value("version", 0) == 6, "world project format is version 6");
         Check(j.contains("worlds") && j["worlds"].is_array() && j["worlds"].size() == 1 &&
                   j["worlds"][0]["name"] == "snow field" && j["worlds"][0]["pack"] == "snow" &&
                   j["worlds"][0]["enabled"] == false && j["worlds"][0]["tracks"].size() == 1 &&
@@ -440,6 +441,13 @@ static void TestStages() {
     track.keys = {{0, 0.25f, false}, {30, 0.75f, true}};
     st.tracks.push_back(track);
     st.cuesOff.insert("keyIntensity");
+    // S5: a screen override (source / file / camera / brightness), saved in the stage entry
+    StageScreenOverride so;
+    so.source = std::string("video");
+    so.file = mmdx::PathToUtf8(kTemp / "stages" / "led.mp4");
+    so.camera = std::string("close_cam");
+    so.brightness = 2.5f;
+    st.screens["main"] = so;
     // a part model referring to it (the reference is a uid, and is remapped only when the id is repeated / missing)
     ProjectModel pm;
     pm.name = "cove";
@@ -453,7 +461,7 @@ static void TestStages() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 5, "stage project format is version 5");
+        Check(!j.is_discarded() && j.value("version", 0) == 6, "stage project format is version 6");
         Check(j.contains("stages") && j["stages"].is_array() && j["stages"].size() == 1 &&
                   j["stages"][0]["uid"] == 3 && j["stages"][0]["stageId"] == "stages:cyclorama" &&
                   j["stages"][0]["variant"] == "dusk" && j["stages"][0]["base"].is_object() &&
@@ -464,6 +472,12 @@ static void TestStages() {
                   j["stages"][0]["tracks"][0]["keys"][1][2] == 1 &&
                   j["stages"][0]["cuesOff"].size() == 1 && j["stages"][0]["cuesOff"][0] == "keyIntensity",
               "stages are written as uid / stageId / path / variant / base / tracks / cuesOff");
+        Check(j["stages"][0]["screens"].is_object() && j["stages"][0]["screens"].size() == 1 &&
+                  j["stages"][0]["screens"]["main"]["source"] == "video" &&
+                  j["stages"][0]["screens"]["main"]["file"] == "led.mp4" &&
+                  j["stages"][0]["screens"]["main"]["camera"] == "close_cam" &&
+                  j["stages"][0]["screens"]["main"]["brightness"] == 2.5f,
+              "a screen override is written as source / file / camera / brightness");
         Check(j["models"][0]["stageUid"] == 3, "a part model writes its stage uid");
     }
     ProjectData loaded;
@@ -473,6 +487,11 @@ static void TestStages() {
     if (loaded.stages.size() == data.stages.size()) {
         Check(loaded.stages[0] == data.stages[0], "stages round-trip exactly (ignoring uid)");
         Check(loaded.stages[0].uid == 3, "a saved stage uid survives (the parts refer to it)");
+        Check(loaded.stages[0].screens.count("main") == 1 &&
+                  loaded.stages[0].screens.at("main") == data.stages[0].screens.at("main") &&
+                  mmdx::PathToUtf8(Utf8ToPath(*loaded.stages[0].screens.at("main").file)) ==
+                      mmdx::PathToUtf8(*data.stages[0].screens.at("main").file),
+              "a screen override round-trips (its file resolves against the project folder)");
         Check(loaded.stages[0].base.at("coveColor").type == StageValue::Type::Color &&
                   Near(loaded.stages[0].base.at("coveColor").x, 0.1f) &&
                   loaded.stages[0].tracks[0].keys[1].stepped,
@@ -867,7 +886,7 @@ static void TestSceneLightFile() {
         text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     }
     const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-    Check(kProjectFormatVersion == 5 && !j.is_discarded() && j.value("version", 0) == 5, "project format version is 5");
+    Check(kProjectFormatVersion == 6 && !j.is_discarded() && j.value("version", 0) == 6, "project format version is 6");
     const nlohmann::json& e = j["editor"];
     Check(e.contains("lights") && e["lights"].is_array() && e["lights"].size() == 8 && !e.contains("lighting") &&
               !e.contains("useLightTrack"),
@@ -1030,7 +1049,7 @@ static void TestAreaLightProject() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 5, "area light project format is version 5");
+        Check(!j.is_discarded() && j.value("version", 0) == 6, "area light project format is version 6");
         const nlohmann::json& l = j["editor"]["lights"][0];
         Check(l["kind"] == "area", "area light JSON kind is \"area\"");
         Check(l["values"].contains("size") && l["values"]["size"].is_array() && l["values"]["size"].size() == 2 &&
@@ -1573,7 +1592,7 @@ static void TestCameraEntities() {
         std::ifstream in(projFile, std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-        Check(!j.is_discarded() && j.value("version", 0) == 5, "camera project format is version 5");
+        Check(!j.is_discarded() && j.value("version", 0) == 6, "camera project format is version 6");
         Check(j.contains("cameras") && j["cameras"].is_array() && j["cameras"].size() == 2 &&
                   j["cameras"][0]["uid"] == 1 && j["cameras"][0]["name"] == "wide" &&
                   j["cameras"][0]["visible"] == true && j["cameras"][0]["motion"].is_string() &&

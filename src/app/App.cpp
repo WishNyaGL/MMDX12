@@ -2628,8 +2628,7 @@ void App::BuildFrameView(float frame, FrameView& view) {
     const std::vector<studio::SceneLight>* stageRig = nullptr;
     if (scene_->stage && scene_->stage->Valid() && screen_ != Screen::BenchRun)
         stageRig = &scene_->stage->Apply(stageSeconds, ctx_.FrameNumber());
-    const bool stageLights = stageRig && !stageRig->empty();
-    if (stageLights && preset == LightingPreset::Stage) {
+    const bool stageLights = stageRig && !stageRig->empty();    if (stageLights && preset == LightingPreset::Stage) {
         // the stage's own rig (cue / binding targets on its lights included)
         LightAnchors stageAnchors;
         stageAnchors.focus = focus;
@@ -2734,6 +2733,34 @@ void App::BuildFrameView(float frame, FrameView& view) {
     if (scene_) {
         view.videoLayers = scene_->videos;
         for (VideoLayerDesc& v : view.videoLayers) v.time = playTime_;
+        // S5: the MMDX stage's screens (image / video / camera feed sources). The camera names resolve against the
+        // stage's own `cameras`; a screen's file is relative to the stage folder.
+        if (scene_->stage && scene_->stage->Valid() && !scene_->stage->Screens().empty()) {
+            const StageManifest& man = *scene_->stage->Manifest();
+            std::vector<StageRuntimePart> parts;
+            for (size_t i = 0; i < scene_->stageGpu.size(); ++i) {
+                StageRuntimePart p;
+                p.part = (int)i;
+                p.gpu = scene_->stageGpu[i].get();
+                parts.push_back(p);
+            }
+            const std::filesystem::path dir = man.dir;
+            view.screens = BuildStageScreenViews(
+                man, scene_->stage->Screens(), parts,
+                [&](const std::string& file) {
+                    if (file.empty()) return std::filesystem::path{};
+                    std::filesystem::path p = Utf8ToPath(file);
+                    return p.is_absolute() ? p : dir / p;
+                },
+                [&](const std::string& name, CameraParams& out) {
+                    const StageCamera* c = nullptr;
+                    for (const StageCamera& sc : man.cameras)
+                        if (sc.name == name) c = &sc;
+                    if (!c) return false;
+                    out = StageCameraView(*c);
+                    return true;
+                });
+        }
     }
     if (options_.quitAfterFrames > 0 || !options_.uiScript.empty() || options_.mcp == 1 || HeadlessRun()) {
         view.effectDt = 1.0f / 60.0f;

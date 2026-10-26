@@ -282,7 +282,13 @@ bool TraceScene(float3 o, float3 d, float tMin, inout uint rng, float lod, out S
         s.emission = s.character ? 0.0 : SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
         // AutoLuminous (そぼろ): a marked material emits its own colour (added once per hit, like the PBR emissive).
         s.emission += AutoLumEmission(g.flags, g.diffuse, g.specularPower, SrgbToLinear(saturate(tex.rgb)));
-        bool canPbr = (g.pbrIndex != 0xFFFFFFFFu);
+        // S5: a stage screen surface emits its texture and nothing else (black behind it, no ambient / bounce).
+        if (g.flags & MAT_SCREEN) {
+            s.emission = ScreenEmission(g.flags, SrgbToLinear(saturate(tex.rgb)), g.reflectivity);
+            s.albedo = 0.0;
+            s.refl = 0.0;
+        }
+        bool canPbr = !(g.flags & MAT_SCREEN) && (g.pbrIndex != 0xFFFFFFFFu);
 #ifdef MMDX_PT_PACK
         // a PT pack wins over the record (raster rule): keep the plain surface the pack expects
         if (canPbr && (g.flags & RTG_PT_PACK) && LoadPtPackRecord(g.packSrv).materialClass != PACK_CLASS_OFF)

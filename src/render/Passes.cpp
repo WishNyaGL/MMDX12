@@ -435,6 +435,7 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     shaderDir_ = shaderDir;
     litDesc_ = pso;
+    psLit_ = ps;   // litDesc_.PS points into it: the S5 feed PSOs derive from litDesc_ after this call returns
     litDescId_ = pso;
     litDescId_.NumRenderTargets = 4;
     litDescId_.RTVFormats[3] = RenderTargets::kIdFormat;
@@ -451,6 +452,14 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     vsRt_.Reset();
     vsDxc_.Reset();
     ReleasePackPsos(ctx);
+    // S5: the feed PSOs are derived from litDesc_: rebuild them with the lit PSOs.
+    feedTried_ = false;
+    psoFeedBack_.Reset();
+    psoFeedNoCull_.Reset();
+    psoFeedAddBack_.Reset();
+    psoFeedAddNoCull_.Reset();
+    psoFeedNdBack_.Reset();
+    psoFeedNdNoCull_.Reset();
     // ID-target variants (inputs.id effects) are built on first use (EnsureIdPipelines): no startup cost otherwise.
     idTried_ = false;
     for (ComPtr<ID3D12PipelineState>* p : {std::addressof(psoCullBackId_), std::addressof(psoNoCullId_), std::addressof(psoAddBackId_), std::addressof(psoAddNoCullId_),
@@ -2047,6 +2056,125 @@ void ScenePass::DrawGuides(PassContext& pc) {
     t.ptDiffuseAlbedo = &guideDiffuse_;
     t.ptSpecularAlbedo = &guideSpecular_;
     t.ptNormalRoughness = &guideNormal_;
+}
+
+// S5: a stage screen's camera feed. Raster, lit, default material shading only (no packs, MME, edges, outlines or ID
+// image): the feed is what an LED wall shows, so it must be cheap and must not recurse into another feed. The models
+// are drawn with the frame's own per-material constants (the screens already bound their textures) into `color` (HDR)
+// plus the normal / velocity / depth targets, then tonemapped by the caller into the screen's RGBA8 texture.
+bool ScenePass::EnsureFeedPipelines(Dx12Context& ctx) {
+    if (feedTried_) return psoFeedBack_ != nullptr;
+    feedTried_ = true;
+    if (!litDesc_.VS.pShaderBytecode || !litDesc_.PS.pShaderBytecode) return false;    // The feed targets are single sample whatever the frame's MSAA is: derive a 1x desc from the lit one.
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC d = litDesc_;
+    d.SampleDesc.Count = 1;
+    d.SampleDesc.Quality = 0;
+    d.RasterizerState.MultisampleEnable = FALSE;
+    d.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    if (!CheckHr(ctx.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoFeedBack_)), "ScenePass: PSO feed back"))
+        return false;
+    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    if (!CheckHr(ctx.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoFeedNoCull_)),
+                 "ScenePass: PSO feed no cull"))
+        return false;
+    // the .emd blend hints keep their own state in the feed too
+    d.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    if (!MakeBlendVariant(ctx.Device(), d, false, psoFeedNdBack_, psoFeedNdNoCull_, "ScenePass: PSO feed nd", false)) {
+        psoFeedBack_.Reset();
+        psoFeedNoCull_.Reset();
+        return false;
+    }
+    d.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    if (!MakeBlendVariant(ctx.Device(), d, true, psoFeedAddBack_, psoFeedAddNoCull_, "ScenePass: PSO feed add", false)) {
+        psoFeedBack_.Reset();
+        psoFeedNoCull_.Reset();
+        psoFeedNdBack_.Reset();
+        psoFeedNdNoCull_.Reset();
+        return false;
+    }
+    return true;
+}
+
+bool ScenePass::DrawFeed(PassContext& pc, Texture& color, Texture& normal, Texture& velocity, Texture& depth) {
+    if (!psoCullBack_ || !psoNoCull_ || pc.view.models.empty()) return false;
+    if (!EnsureFeedPipelines(pc.ctx)) return false;
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    Dx12Context& ctx = pc.ctx;
+    const uint32_t w = color.width, h = color.height;
+    const RenderTargets& t = pc.targets;
+
+    color.Transition(cmd, kRt);
+    normal.Transition(cmd, kRt);
+    velocity.Transition(cmd, kRt);
+    depth.Transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] = {ctx.RtvHeap().Cpu(color.rtv), ctx.RtvHeap().Cpu(normal.rtv),
+                                           ctx.RtvHeap().Cpu(velocity.rtv)};
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.DsvHeap().Cpu(depth.dsv);
+    const float zero[4] = {0, 0, 0, 0};
+    for (int i = 0; i < 3; ++i) cmd->ClearRenderTargetView(rtvs[i], zero, 0, nullptr);
+    cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    cmd->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
+    D3D12_VIEWPORT viewport{0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f};
+    D3D12_RECT scissor{0, 0, (LONG)w, (LONG)h};
+    cmd->RSSetViewports(1, &viewport);
+    cmd->RSSetScissorRects(1, &scissor);
+
+    // The sky (the scene's gradient) then the models; no outline layer (a feed is a lit image, not an editing view).
+    cmd->SetGraphicsRootSignature(rootSig_.Get());
+    cmd->SetGraphicsRootDescriptorTable(5, pc.transient.SrvTable(ctx, {&t.shadowMap}));
+    cmd->SetGraphicsRootDescriptorTable(11, pc.transient.SrvTable(ctx, {&t.spotShadowMap}));
+    cmd->SetGraphicsRootDescriptorTable(13, pc.transient.SrvTable(ctx, {&t.pointShadowMap}));
+    cmd->SetGraphicsRootShaderResourceView(6, pc.lights);
+    cmd->SetGraphicsRootDescriptorTable(9, ctx.SrvHeap().Gpu(0));
+    cmd->SetGraphicsRootDescriptorTable(10, ctx.SrvHeap().Gpu(0));
+    cmd->SetGraphicsRootConstantBufferView(0, pc.sceneConstants);
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    if (psoSky_) {
+        cmd->SetPipelineState(psoSky_.Get());
+        cmd->DrawInstanced(3, 1, 0, 0);
+    }
+    const uint32_t pbrDebugChannel = (uint32_t)pc.settings.pbrDebug;
+    ID3D12PipelineState* curPso = nullptr;
+    for (size_t mi = 0; mi < pc.view.models.size(); ++mi) {
+        GpuModel* model = pc.view.models[mi];
+        if (!model) continue;
+        const uint32_t modelIdInfo = (((uint32_t)(mi + 1) & 0xFFu) << 8) | (model->Role() == ModelRole::Character ? 0x80u : 0u);
+        BindModelBuffers(cmd, *model, pc.frame);
+        cmd->SetGraphicsRootShaderResourceView(2, model->BoneBuffer(pc.frame));
+        cmd->SetGraphicsRootShaderResourceView(4, model->PrevBoneBuffer(pc.frame));
+        if (model->HasPackParamsExt())
+            cmd->SetGraphicsRootConstantBufferView(15, model->PackParamsExtBuffer(pc.frame));
+        for (const GpuModel::Material& m : model->Materials()) {
+            if (m.indexCount == 0 || !m.visible) continue;   // MMD skips materials with alpha 0
+            // The material's .emd blend hints keep their own PSOs (an additive surface must not become opaque).
+            ID3D12PipelineState* want;
+            if (m.additive) want = m.doubleSided ? psoFeedAddNoCull_.Get() : psoFeedAddBack_.Get();
+            else if (m.noDepthWrite) want = m.doubleSided ? psoFeedNdNoCull_.Get() : psoFeedNdBack_.Get();
+            else want = m.doubleSided ? psoFeedNoCull_.Get() : psoFeedBack_.Get();
+            if (!want) want = m.doubleSided ? psoFeedNoCull_.Get() : psoFeedBack_.Get();
+            if (want != curPso) {
+                cmd->SetPipelineState(want);
+                curPso = want;
+            }
+            cmd->SetGraphicsRootConstantBufferView(1, m.constants);
+            cmd->SetGraphicsRootDescriptorTable(3, ctx.SrvHeap().Gpu(m.srvTable));
+            const size_t matIndex = (size_t)(&m - model->Materials().data());
+            const bool pbrRecord = model->HasPbrRecords() && model->HasPbr() &&
+                                   model->PbrIndex(matIndex) != DescriptorHeap::kInvalid;
+            const uint32_t c[5] = {pbrRecord ? model->PbrSrv() : 0xFFFFFFFFu,
+                                   pbrRecord ? model->PbrIndex(matIndex) : 0xFFFFFFFFu, pbrDebugChannel,
+                                   pbrRecord ? 1u : 0u, modelIdInfo};
+            cmd->SetGraphicsRoot32BitConstants(14, 5, c, 0);
+            cmd->DrawIndexedInstanced(m.indexCount, 1, m.indexStart, 0, 0);
+            pc.stats.drawCalls++;
+            pc.stats.triangles += m.indexCount / 3;
+        }
+    }
+    color.Transition(cmd, kSrv);
+    normal.Transition(cmd, kSrv);
+    velocity.Transition(cmd, kSrv);
+    depth.Transition(cmd, kSrv);
+    return true;
 }
 
 void ScenePass::Execute(PassContext& pc) {

@@ -53,12 +53,19 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S2b | Mesh dielectrics: transmissive materials refract in RT / PT / offline GI (thin + volume), raster approximation | done 2026-10-26 |
 | S3 | Studio stage entity: outliner group, overrides saved in the project, keyable stage params (timeline rows) | done 2026-10-26 |
 | S4 | Camera entities: N cameras with own tracks, an active-camera switch track, VMD export flattens cuts | done 2026-10-26 |
-| S5 | Screens: N screen surfaces, sources none / image / video / camera feed, multi-video decode, feed render pass | |
+| S5 | Screens: N screen surfaces, sources none / image / video / camera feed, multi-video decode, feed render pass | done 2026-10-26 |
 | S6 | Stage-bundled packs: screen packs (new type), surface packs on stage materials, world packs on sockets | |
-| S7 | Many lights: punctual cap 16 -> 256, clustered raster lighting, shadow budget, PT / GI light sampling, volumetric over all lights | |
+| S7 | Many lights: punctual cap 16 -> 256, clustered forward lighting (Forward+ with depth slices; no deferred: shader packs, MSAA, translucent hair and MME object effects need forward), shadow budget, PT / GI light sampling, volumetric over all lights | |
 | S7b | Spot cookies / gobos: a projected texture per spot (stage-bundled PNGs, rotatable, keyable) in raster / RT / PT / GI and the volumetric beams | |
 | S8 | Emissive lights: emissive-triangle NEE in PT / GI (screens and LED walls light the scene), raster screen lights | |
-| S9 | Haze without heavy fog: per-light volumetric scattering + anisotropy, local fog volumes, stage `environment.fog` / `environment.fogVolumes` (done) | |
+| S9 | Haze without heavy fog: per-light volumetric scattering + anisotropy, local fog volumes, stage `environment.fog` / `environment.fogVolumes` | done 2026-10-26 |
+| S9c | Fully path-traced haze in offline GI: delta-tracked medium on every path segment (multiple scattering, bounce / emissive / sky light in the fog, fog-attenuated surface light), "정밀" mode next to today's single-scatter pass | |
+| S9c-2 | Less noise in path-traced haze: equiangular sampling of punctual / spot lights at medium events (MIS with distance sampling), all-light NEE when few lights | |
+| S9d | Real-time froxel volumetric fog (after S7): a camera-aligned 3D grid (froxels, the S7 cluster layout) injects medium density (height fog + fog volumes) and lighting from every light via the S7 cluster lists (shadow maps / ray-query shadows), temporal reprojection over frames, front-to-back integration; an approximate multiple-scattering term; replaces the per-pixel ray march in raster / RT / PT, same medium parameters as S9 / S9c | |
+| S9b-1 | Physical Sky light (C4D-like): `LightKind::Sky`, procedural sky (sun position / time of day, turbidity, horizon haze, ground) as the background and the sun colour, every render path | |
+| S9b-2 | Sky lighting: the sky as image-based light (raster / RT ambient + specular from a filtered sky cubemap, PT / GI importance-sampled environment) | |
+| S9b-3 | Image skies: HDRI (.hdr / .exr equirect) and MME / Ray-MMD sky domes (DDS cubemap) as the sky light's map, rotation + intensity | |
+| S9b-4 | Clouds: procedural cloud layer on the physical sky (coverage, height, wind; keyable), lit by the sun | |
 | S10 | Planar mirrors in raster (RT / PT / GI reflect natively) | |
 | S11 | Compressed textures: DDS BCn (+ glTF `MSFT_texture_dds`), VRAM budget report | |
 | S12 | Gallery screen + stage store (index, resumable download, install, update, revoke) | |

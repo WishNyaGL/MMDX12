@@ -54,6 +54,18 @@ progress.md is the session log. Read its latest entry first.
   lights are scene lights tagged with the stage and are replayed every frame (editor and offline), the fields a binding
   drives are read-only in the light inspector. Script: `studiostageparam` / `studiostagekey` / `studiostagecues`,
   `studiostate` logs one `STUDIOSTAGE` line per stage.
+- Stage screens (S5, docs/stage_format.md "screens"): `render/StageScreens.*` owns one texture per screen (owned by the
+  Renderer, updated before the scene passes) and binds it to the materials the screen claims through
+  `GpuModel::BindMaterialTexture`, marked `MatFlag_Screen` (the texture is the emission; raster / RT / PT / offline GI
+  read it via `ScreenEmission` in `shaders/common.hlsli`). Sources: `none` (black), `image` (decoded once),
+  `video` (`render/VideoTexture.*`, one decoder per video screen, exact frames offline) and `camera` (the scene
+  re-rendered from that camera into the screen before the main scene: raster lit, own constant-buffer / light slots,
+  no TAA / upscaler / DoF / volumetrics / effects / MME / packs, at most 960x540, two feeds per frame round robin);
+  `program` stays unimplemented (S6, black + one `[W]`). The app fills `FrameView::screens` (`ScreenView` per screen per
+  part) from `app/StageRuntime` (play) / `StudioStageScreens` (studio, `camera` may be `uid:<n>` = an S4 studio camera);
+  the studio's stage panel writes per-screen overrides into the project (`"screens"`, version 6) and the ui-script
+  command `studioscreen <stage index> <screen id> <none|image|video|camera> [file|camera]` sets one (`studiostate` logs
+  one `STUDIOSCREEN` line per screen).
 - No debugger is installed (no cdb). For crashes, use the dbghelp `CrashFilter` in `tools/render_smoke.cpp`.
 - Visual verification without a human: render a frame headlessly, then Read the PNG. First read "Running MMDX12.exe from the CLI" below.
   - Play scene: `MMDX12.exe --character <s> --stage <s|none> --song <s> --autoplay --seek <sec> --frames N --capture out.png`

@@ -113,6 +113,9 @@ enum MaterialShaderFlags : uint32_t {
     MatFlag_AutoLuminous  = 1u << 9,  // そぼろ AutoLuminous convention: this material glows (black specular, power >= 100)
     MatFlag_Additive      = 1u << 10, // the model's own .emd effect is additive (SrcBlend SRC_ALPHA, DestBlend ONE, no depth write)
     MatFlag_NoDepthWrite  = 1u << 11, // the model's own .emd effect draws with ZWriteEnable = false (alpha blend, no depth write)
+    // S5: an MMDX stage screen surface: the bound texture is the emission (HDR, x the material's reflectivity slot as
+    // brightness), the material itself is black (no diffuse / specular / AO).
+    MatFlag_Screen        = 1u << 12,
 };
 
 struct MaterialConstants {            // b1, one 256-byte slot per material

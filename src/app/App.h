@@ -627,6 +627,17 @@ private:
     void StudioApplyStageLightRig(uint32_t stageUid);
     // S1b: the studio's per-frame MMDX stage targets (material values + light values on the stage's own rig lights).
     void StudioApplyStageTargets();
+    // S5: BuildStudioFrameView's stage screens (image / video / camera feed sources), the project's overrides applied.
+    void StudioStageScreens(FrameView& view);
+    // S5: the stage panel's screen rows (source combo, file picker, camera combo, brightness slider).
+    void DrawStudioStageScreens(float w, uint32_t stageUid);
+    // S5: one screen override edit (one StagesCommand step).
+    void StudioSetScreenOverride(uint32_t stageUid, const std::string& screenId, const studio::StageScreenOverride& ov,
+                                 const char* name);
+    // S5: one screen's state at the timeline time: the manifest's values, the evaluator's screen targets, then the
+    // project's override for that id (the studio panel, `studioscreen` and `studiostate` share it).
+    std::vector<StageScreenState> StudioStageScreenStates(const studio::StudioStage& stage,
+                                                          const StageEvalResult& eval) const;
     // S3: one StudioStage per stage entity for the parts that have none yet (`legacyVariants`: model uid -> the S1b
     // per-part variant a version <= 3 project / the library carried). Project stages already come as entities.
     void StudioConsolidateStages(studio::StudioDoc& doc, const std::map<uint32_t, std::string>& legacyVariants);

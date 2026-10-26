@@ -43,6 +43,7 @@ cbuffer PbrRoot : register(b3) {
 #define MAT_AUTO_LUMINOUS 512u
 #define MAT_ADDITIVE      1024u
 #define MAT_NO_DEPTH_WRITE 2048u
+#define MAT_SCREEN        4096u
 #endif
 
 // Shader-pack material class: the PackClass lives in bits 0..7 of gPackClass, bits 8..15 hold the class's alpha key
@@ -671,6 +672,12 @@ PSOut PSMain(VSOut i, bool front : SV_IsFrontFace) {
                                             : float4(1, 1, 1, 1);
     float alpha = gDiffuse.a * tex.a;
     if (alpha < 0.004) discard;
+
+    // S5: a stage screen surface shows only its bound texture, as HDR emission (see ScreenEmission).
+    if (gFlags & MAT_SCREEN) {
+        float3 emission = ScreenEmission(gFlags, SrgbToLinear(saturate(tex.rgb)), gReflectivity);
+        return PackOutput(emission, alpha, n, 0.0, i.curClip, i.prevClip);
+    }
 
     if (gPbrActive != 0u && gShading < 0.5) {
         GpuPbrMaterial pbr = PbrLoadMaterial(gPbrSrv, gPbrIndex);

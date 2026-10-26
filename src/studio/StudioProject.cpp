@@ -125,12 +125,15 @@ size_t StudioStage::ApproxBytes() const {
     for (const EffectParamTrack& t : tracks)
         bytes += sizeof(EffectParamTrack) + t.param.size() + t.keys.capacity() * sizeof(EffectParamKey);
     for (const std::string& c : cuesOff) bytes += sizeof(std::string) + c.size();
+    for (const auto& [id, s] : screens)
+        bytes += id.size() + sizeof(StageScreenOverride) + (s.source ? s.source->size() : 0) +
+                 (s.file ? s.file->size() : 0) + (s.camera ? s.camera->size() : 0);
     return bytes;
 }
 
 bool StudioStage::operator==(const StudioStage& o) const {
     if (stageId != o.stageId || manifestPath != o.manifestPath || variant != o.variant || base != o.base ||
-        cuesOff != o.cuesOff || tracks.size() != o.tracks.size())
+        cuesOff != o.cuesOff || screens != o.screens || tracks.size() != o.tracks.size())
         return false;
     for (size_t i = 0; i < tracks.size(); ++i) {
         const EffectParamTrack& a = tracks[i];
@@ -766,6 +769,17 @@ bool SaveProject(const std::filesystem::path& file, const ProjectData& data, std
                 nlohmann::json cues = nlohmann::json::array();
                 for (const std::string& c : st.cuesOff) cues.push_back(c);
                 js["cuesOff"] = std::move(cues);
+                // S5 (version 6): the project's screen overrides (absent members keep the manifest's values)
+                nlohmann::json screens = nlohmann::json::object();
+                for (const auto& [id, s] : st.screens) {
+                    nlohmann::json so;
+                    if (s.source) so["source"] = *s.source;
+                    if (s.file) so["file"] = RelPath(Utf8ToPath(*s.file), dir);
+                    if (s.camera) so["camera"] = *s.camera;
+                    if (s.brightness) so["brightness"] = *s.brightness;
+                    screens[id] = std::move(so);
+                }
+                js["screens"] = std::move(screens);
                 stages.push_back(std::move(js));
             }
             j["stages"] = std::move(stages);
@@ -1234,6 +1248,24 @@ bool LoadProject(const std::filesystem::path& file, ProjectData& out, std::strin
                 if (js.contains("cuesOff") && js["cuesOff"].is_array()) {
                     for (const auto& c : js["cuesOff"])
                         if (c.is_string()) st.cuesOff.insert(c.get<std::string>());
+                }
+                // S5 (version 6): the project's screen overrides (a relative file resolves against the project folder)
+                if (version >= 6 && js.contains("screens") && js["screens"].is_object()) {
+                    for (const auto& [id, so] : js["screens"].items()) {
+                        if (id.empty() || !so.is_object()) continue;
+                        StageScreenOverride ov;
+                        if (so.contains("source") && so["source"].is_string())
+                            ov.source = so["source"].get<std::string>();
+                        if (so.contains("file") && so["file"].is_string()) {
+                            const std::string f = so["file"].get<std::string>();
+                            ov.file = f.empty() ? std::string() : PathToUtf8(ResolvePath(f, dir));
+                        }
+                        if (so.contains("camera") && so["camera"].is_string())
+                            ov.camera = so["camera"].get<std::string>();
+                        if (so.contains("brightness") && so["brightness"].is_number())
+                            ov.brightness = so["brightness"].get<float>();
+                        if (ov.source || ov.file || ov.camera || ov.brightness) st.screens[id] = std::move(ov);
+                    }
                 }
                 out.stages.push_back(std::move(st));
             }

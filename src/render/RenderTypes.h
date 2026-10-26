@@ -8,6 +8,7 @@
 #include <vector>
 #include "render/ShaderInterop.h"
 #include "render/WorldTypes.h"
+#include "asset/StageManifest.h"
 
 namespace mmdx {
 
@@ -378,6 +379,21 @@ struct ExtraView {
     float nearZ = 0.1f, farZ = 4000.0f;
 };
 
+// S5: one LED / video surface of the frame (docs/stage_format.md `screens`). The app resolves the manifest for this
+// frame (screens.<id>.<field> targets included) into a ScreenView per screen; the renderer owns the textures
+// (render/StageScreens.h), binds them to the listed materials of `modelUid` and renders camera feeds.
+struct ScreenView {
+    std::string key;                    // the screen id (a stable key across frames: the same screen keeps its texture)
+    uint64_t modelUid = 0;              // the part model the materials belong to (GpuModel::Uid)
+    std::vector<uint32_t> materials;    // material indices of that model this screen draws on
+    StageScreenSource source = StageScreenSource::None;
+    std::filesystem::path path;         // image / video file (absolute; empty = not resolved / no file)
+    CameraParams camera;                // source camera: a stage camera name resolved by the app, or a studio camera
+    uint32_t width = 1920, height = 1080;   // the LED pixel grid (the texture is capped at 2048)
+    float brightness = 1.0f;
+    bool enabled = true;                // off = black (the surface stays dark)
+};
+
 struct FrameView {
     CameraParams camera;
     // Where `camera` is drawn (fractions of the render target). With extraViews it is one quadrant of the target.
@@ -428,6 +444,8 @@ struct FrameView {
     // Screen-video layers (screen == true) decode synchronously for the rendered time (offline renders): the frame
     // is exact instead of the async decode-ahead ring. Ignored without a screen layer.
     bool videoExact = false;
+    // S5: the LED / video surfaces of this frame (render/StageScreens.h). Empty = no screen cost.
+    std::vector<ScreenView> screens;
     // Shader pack typed scene and audio inputs
     GpuPackInputs packInputs{};
     // World pack entities (falling snow, ground cover ...): simulated and drawn by WorldPass (render/WorldTypes.h)

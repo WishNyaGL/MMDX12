@@ -177,6 +177,16 @@ float3 ShadowTransmission(float vis, float density, float3 shadowColor) {
 #ifndef MAT_NO_DEPTH_WRITE
 #define MAT_NO_DEPTH_WRITE 2048u
 #endif
+// S5 stage screen (render/ShaderInterop.h MatFlag_Screen): an LED / video surface. The material's bound texture IS the
+// emission: HDR radiance, scaled by the screen's brightness (kept in the material's reflectivity slot, which a screen's
+// shading never reads as a reflection). No diffuse / specular / AO behind it.
+#ifndef MAT_SCREEN
+#define MAT_SCREEN 4096u
+#endif
+float3 ScreenEmission(uint flags, float3 texLinear, float brightness) {
+    if ((flags & MAT_SCREEN) == 0u) return 0.0;
+    return max(texLinear, 0.0) * max(brightness, 0.0);
+}
 float3 AutoLumEmission(uint flags, float4 diffuse, float specPower, float3 texLinear) {
     if ((flags & MAT_AUTO_LUMINOUS) == 0u || gAutoLumParams.x < 0.5) return 0.0;
     float strength = clamp((specPower - 100.0) * 0.1, 0.0, 20.0);   // 110 -> 1.0 (documented standard), 100 -> 0

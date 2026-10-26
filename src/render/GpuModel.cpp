@@ -489,12 +489,14 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
             device->CreateShaderResourceView(builtin.white.Get(), &srv, ctx.SrvHeap().Cpu(alloc + 2));
         }
         materials_.push_back(mat);
-        // Background AVI: remember the material whose diffuse texture file name is screen.bmp and its own texture
+        // The material's own diffuse texture (background AVI / S5 screen bindings restore it).
+        materialOrigTex_.push_back(texRes);
+        materialOrigHasTex_.push_back((char)((consts[mIdx].flags & MatFlag_HasTexture) != 0));
+        materialOrigReflect_.push_back(consts[mIdx].reflectivity);
+        // Background AVI: remember the material whose diffuse texture file name is screen.bmp
         if (m.textureIndex >= 0 && (size_t)m.textureIndex < pmx.textures.size() &&
             IsScreenTextureName(pmx.textures[(size_t)m.textureIndex])) {
             screenMaterials_.push_back((uint32_t)mIdx);
-            screenOrigTex_.push_back(texRes);
-            screenOrigHasTex_.push_back((char)((consts[mIdx].flags & MatFlag_HasTexture) != 0));
         }
     }
 
@@ -1009,26 +1011,55 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
 
 void GpuModel::BindScreenTexture(Dx12Context& ctx, ID3D12Resource* tex) {
     if (!ctx_ || screenMaterials_.empty()) return;
+    for (uint32_t mi : screenMaterials_) BindMaterialTexture(ctx, mi, tex);
+}
+
+void GpuModel::BindMaterialTexture(Dx12Context& ctx, size_t materialIndex, ID3D12Resource* tex) {
+    if (!ctx_ || materialIndex >= materials_.size() || materialIndex >= materialOrigTex_.size()) return;
     ID3D12Device* device = ctx.Device();
+    ID3D12Resource* res = tex ? tex : materialOrigTex_[materialIndex];
+    if (!res) return;   // no own texture and no bound one: the white fallback stays
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = tex ? 1 : UINT(-1);
-    for (size_t s = 0; s < screenMaterials_.size(); ++s) {
-        const uint32_t mi = screenMaterials_[s];
-        if (mi >= materials_.size()) continue;
-        ID3D12Resource* res = tex ? tex : screenOrigTex_[s].Get();
-        if (!res) continue;   // no own texture and no video: the white fallback stays
-        device->CreateShaderResourceView(res, &srv, ctx.SrvHeap().Cpu(materials_[mi].srvTable + 0));
-        for (MaterialConstants* c : {mi < baseConsts_.size() ? &baseConsts_[mi] : nullptr,
-                                     mi < materialConsts_.size() ? &materialConsts_[mi] : nullptr}) {
-            if (!c) continue;
-            c->flags &= ~(uint32_t)MatFlag_HasTexture;
-            if (tex || screenOrigHasTex_[s]) c->flags |= MatFlag_HasTexture;
-        }
+    device->CreateShaderResourceView(res, &srv, ctx.SrvHeap().Cpu(materials_[materialIndex].srvTable + 0));
+    const bool hasTex = tex != nullptr || materialOrigHasTex_[materialIndex] != 0;
+    for (MaterialConstants* c : {materialIndex < baseConsts_.size() ? &baseConsts_[materialIndex] : nullptr,
+                                 materialIndex < materialConsts_.size() ? &materialConsts_[materialIndex] : nullptr}) {
+        if (!c) continue;
+        c->flags &= ~(uint32_t)MatFlag_HasTexture;
+        if (hasTex) c->flags |= MatFlag_HasTexture;
     }
     for (uint64_t& v : materialEntryVersion_) v = ~0ull;   // re-upload the constants on the next UpdateMaterials
+}
+
+void GpuModel::SetMaterialScreen(size_t materialIndex, bool on, float brightness) {
+    if (materialIndex >= materials_.size()) return;
+    if (materialOrigReflect_.size() < materials_.size()) return;   // the model was not created through Create
+    for (MaterialConstants* c : {materialIndex < baseConsts_.size() ? &baseConsts_[materialIndex] : nullptr,
+                                 materialIndex < materialConsts_.size() ? &materialConsts_[materialIndex] : nullptr}) {
+        if (!c) continue;
+        if (on) {
+            c->flags |= MatFlag_Screen;
+            // A screen draws only its texture: the brightness rides in the reflectivity slot (unused by a screen's
+            // shading, read as its HDR gain by ScreenEmission; the ray paths read it the same way).
+            c->reflectivity = std::max(0.0f, brightness);
+        } else {
+            c->flags &= ~(uint32_t)MatFlag_Screen;
+            c->reflectivity = materialOrigReflect_[materialIndex];
+        }
+    }
+    for (uint64_t& v : materialEntryVersion_) v = ~0ull;
+}
+
+void GpuModel::FlushMaterialConstants(uint64_t frame) {
+    if (!materialMapped_ || materials_.empty()) return;
+    const size_t stride = materials_.size() * sizeof(MaterialConstants);
+    const uint32_t r = (uint32_t)(frame % kRing);
+    memcpy(materialMapped_ + (size_t)r * stride, materialConsts_.data(), stride);
+    materialEntryVersion_[r] = materialVersion_;
 }
 
 void GpuModel::SetMmeEffects(std::vector<std::filesystem::path> perMaterial) {
@@ -1150,8 +1181,9 @@ void GpuModel::Destroy() {
     textures_.clear();
     materials_.clear();
     screenMaterials_.clear();
-    screenOrigTex_.clear();
-    screenOrigHasTex_.clear();
+    materialOrigTex_.clear();
+    materialOrigHasTex_.clear();
+    materialOrigReflect_.clear();
     ctx_ = nullptr;
 }
 

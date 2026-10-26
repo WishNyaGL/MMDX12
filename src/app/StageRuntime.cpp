@@ -1,7 +1,9 @@
 #include "app/StageRuntime.h"
 #include "asset/StageLights.h"
+#include "render/RenderTypes.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <set>
 
@@ -115,6 +117,7 @@ void StageRuntime::Init(std::shared_ptr<const StageManifest> manifest, std::stri
     parts_ = std::move(parts);
     appliedFrame_ = ~0ull;
     lights_.clear();
+    screens_.clear();
 }
 
 const std::vector<studio::SceneLight>& StageRuntime::Apply(double timeSeconds, uint64_t frame) {
@@ -154,6 +157,8 @@ const std::vector<studio::SceneLight>& StageRuntime::Apply(double timeSeconds, u
     // frame % 3 and skips it when that entry already holds this version, so the GPU is still touched only on changes,
     // and every ring entry catches up (gating here on a changed hash left the other entries stale / in flight).
     ApplyMaterials(ResolvedStageMaterialRules(*manifest_, eval), frame);
+    // S5: the screens (their sources / brightness / enabled targets). Cheap: a few strings per frame.
+    screens_ = ResolveStageScreens(*manifest_, eval);
     return lights_;
 }
 
@@ -179,6 +184,112 @@ std::string ResolveStageVariant(const std::string& manifestDefault, const std::s
     if (!cliVariant.empty()) return cliVariant;
     if (!saved.empty()) return saved;
     return manifestDefault;
+}
+
+std::vector<StageScreenState> ResolveStageScreens(const StageManifest& manifest, const StageEvalResult& eval,
+                                                  const std::function<void(StageScreenState&)>& edit) {
+    std::vector<StageScreenState> out;
+    out.reserve(manifest.screens.size());
+    for (const StageScreen& s : manifest.screens) {
+        StageScreenState st;
+        st.id = s.id;
+        st.source = s.source;
+        st.file = s.file;
+        st.camera = s.camera;
+        st.width = s.width;
+        st.height = s.height;
+        st.brightness = s.brightness;
+        st.enabled = true;
+        if (edit) edit(st);
+        out.push_back(std::move(st));
+    }
+    // the evaluator's screen targets (in assignment order): the last one per field wins
+    for (const StageAssignment& a : eval.targets) {
+        const StageTargetSpec spec = ResolveStageTarget(manifest, a.target);
+        if (!spec.ok || spec.kind != StageTargetSpec::Kind::Screens) continue;
+        for (StageScreenState& st : out) {
+            if (st.id != spec.owner) continue;
+            if (spec.field == "brightness") st.brightness = a.value.AsNumber();
+            else if (spec.field == "enabled") st.enabled = a.value.AsNumber() > 0.5f;
+            else if (spec.field == "width") st.width = (uint32_t)std::max(1.0f, std::round(a.value.AsNumber()));
+            else if (spec.field == "height") st.height = (uint32_t)std::max(1.0f, std::round(a.value.AsNumber()));
+            else if (spec.field == "source") {
+                StageScreenSource src = StageScreenSource::None;
+                if (ParseStageScreenSource(a.value.text, src)) st.source = src;
+            } else if (spec.field == "file") st.file = a.value.text;
+            else if (spec.field == "camera") st.camera = a.value.text;
+            break;
+        }
+    }
+    return out;
+}
+
+CameraParams StageCameraView(const StageCamera& camera, float nearZ, float farZ) {
+    CameraParams out;
+    const DirectX::XMVECTOR eye = DirectX::XMLoadFloat3(&camera.position);
+    const DirectX::XMVECTOR target = DirectX::XMLoadFloat3(&camera.target);
+    DirectX::XMVECTOR up = DirectX::XMVectorSet(0, 1, 0, 0);
+    if (DirectX::XMVectorGetX(DirectX::XMVector3Length(DirectX::XMVectorSubtract(
+            DirectX::XMVector3Normalize(DirectX::XMVectorSubtract(target, eye)), up))) < 1e-4f)
+        up = DirectX::XMVectorSet(0, 0, 1, 0);
+    DirectX::XMStoreFloat4x4(&out.view, DirectX::XMMatrixLookAtLH(eye, target, up));
+    DirectX::XMStoreFloat3(&out.eye, eye);
+    out.fovYRadians = DirectX::XMConvertToRadians(std::clamp(camera.fov, 1.0f, 170.0f));
+    out.nearZ = nearZ;
+    out.farZ = farZ;
+    return out;
+}
+
+std::vector<ScreenView> BuildStageScreenViews(
+    const StageManifest& manifest, const std::vector<StageScreenState>& screens,
+    const std::vector<StageRuntimePart>& parts,
+    const std::function<std::filesystem::path(const std::string&)>& resolveFile,
+    const std::function<bool(const std::string&, CameraParams&)>& resolveCamera) {
+    std::vector<ScreenView> out;
+    for (const StageScreenState& st : screens) {
+        const StageScreen* src = manifest.FindScreen(st.id);
+        if (!src) continue;
+        // the materials this screen draws on: its own globs, plus every rule whose `screen` names it
+        std::vector<std::string> patterns = src->materials;
+        for (const StageMaterialRule& r : manifest.materials)
+            if (r.screen && *r.screen == st.id) patterns.push_back(r.match);
+        if (patterns.empty()) continue;
+        // the camera resolves once per screen (all of its parts share it)
+        CameraParams camera;
+        bool haveCamera = false;
+        if (st.source == StageScreenSource::Camera && !st.camera.empty() && resolveCamera)
+            haveCamera = resolveCamera(st.camera, camera);
+        for (const StageRuntimePart& part : parts) {
+            if (!part.gpu) continue;
+            ScreenView sv;
+            sv.modelUid = part.gpu->Uid();
+            const size_t count = part.gpu->Materials().size();
+            for (size_t m = 0; m < count; ++m) {
+                const std::string& name = part.gpu->MaterialName(m);
+                const std::string& nameEn = part.gpu->MaterialNameEn(m);
+                bool hit = false;
+                for (const std::string& p : patterns)
+                    if (StageGlobMatch(p, name) || (!nameEn.empty() && StageGlobMatch(p, nameEn))) {
+                        hit = true;
+                        break;
+                    }
+                if (hit) sv.materials.push_back((uint32_t)m);
+            }
+            if (sv.materials.empty()) continue;
+            sv.key = st.id + "#" + std::to_string(part.part);
+            sv.source = st.source;
+            sv.width = st.width;
+            sv.height = st.height;
+            sv.brightness = st.brightness;
+            sv.enabled = st.enabled;
+            sv.camera = camera;
+            if (st.source == StageScreenSource::Camera && !haveCamera) sv.source = StageScreenSource::None;
+            if ((st.source == StageScreenSource::Image || st.source == StageScreenSource::Video) && resolveFile)
+                sv.path = resolveFile(st.file);
+            out.push_back(std::move(sv));
+        }
+    }
+    return out;
 }
 
 } // namespace mmdx

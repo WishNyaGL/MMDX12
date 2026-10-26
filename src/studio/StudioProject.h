@@ -14,7 +14,9 @@
 #include <DirectXMath.h>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -31,7 +33,8 @@ namespace mmdx::studio {
 // Version 5: camera entities ("cameras": uid, name, visible, stageUid, motion) and the active-camera switch track
 // ("cameraSwitch"). The main camera stays the top-level "camera" (its light / self-shadow / focus tracks). Older builds
 // reject version 5; a version <= 4 file has the main camera only.
-inline constexpr int kProjectFormatVersion = 5;
+// Version 6: a stage entity's screen overrides ("screens": id -> {source, file, camera, brightness}).
+inline constexpr int kProjectFormatVersion = 6;
 inline constexpr const char* kProjectFormatName = "mmdx12-studio-project";
 inline constexpr const wchar_t* kProjectExtension = L".mmdxproj";
 
@@ -71,6 +74,17 @@ struct StudioWorld {
 // One MMDX stage in the studio (docs/stage_format.md "Studio"): one entity per loaded stage, whose parts stay models
 // (StudioModel::stageManifest / stagePart / stageUid). The installed stage is never written: the variant, the param base
 // values and the keyed params are this project's overrides. Pure data, saved in the .mmdxproj ("stages").
+// S5: one screen's per-project override ("screens": {id: {...}}). An absent member keeps the manifest's value.
+struct StageScreenOverride {
+    std::optional<std::string> source;      // "none" | "image" | "video" | "camera"
+    std::optional<std::string> file;        // image / video file (relative to the project folder in the file)
+    std::optional<std::string> camera;      // stage camera name, or "uid:<n>" for a studio camera
+    std::optional<float> brightness;
+    bool operator==(const StageScreenOverride& o) const {
+        return source == o.source && file == o.file && camera == o.camera && brightness == o.brightness;
+    }
+};
+
 struct StudioStage {
     uint32_t uid = 0;                          // StudioDoc::nextStageUid, saved (part models / lights refer to it)
     std::shared_ptr<const StageManifest> manifest;   // the parsed stage.json (null when it could not be read)
@@ -80,6 +94,8 @@ struct StudioStage {
     StageParamValues base;                     // the user's base values (absent key = the variant / default)
     std::vector<EffectParamTrack> tracks;      // one track per keyed param component ("key" / "key#0..3" for a colour)
     std::set<std::string> cuesOff;             // params whose manifest cue the user replaced (imported / keyed)
+    // S5: the project's screen overrides by screen id (not keyable). Absent id = the manifest's values.
+    std::map<std::string, StageScreenOverride> screens;
     size_t ApproxBytes() const;
     bool operator==(const StudioStage& o) const;   // ignores uid
 };

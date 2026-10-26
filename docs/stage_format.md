@@ -274,6 +274,30 @@ twice gets a numbered copy ("wide", "wide 2"). S5 shows them on LED screens (the
 Only parsed and validated in S1a; S5 / S8 render them. A `program` pack is validated structurally (the folder exists
 and holds `pack.json`).
 
+**Rendered since S5 (2026-10-26).** A screen is one GPU texture (RGBA8 sRGB, at most 2048 px per side) shown on every
+material of the stage's parts that matches the screen's `materials` globs or a `material` rule whose `"screen"` names
+it. The texture is the material's *emission* (`MatFlag_Screen`: HDR radiance x `brightness`; the material itself is
+black, no diffuse / specular / AO) in raster, RT, PT and the offline GI, and `source: "none"` is black (an off LED).
+
+| `source` | what it shows |
+|---|---|
+| `none` | black |
+| `image` | `file`, decoded once (downscaled to <= 2048 when larger) |
+| `video` | `file`, one decoder per video screen, looped by the clip's duration; an offline render decodes the exact frame |
+| `camera` | a live feed: the scene re-rendered from the `camera` (see below) |
+| `program` | not implemented yet (S6): black with one `[W]` per load |
+
+A **camera feed** is the scene rendered from that camera into the screen texture *before* the main scene: raster and
+lit, with the user's shading and shadow maps but without TAA, upscaler, DoF, volumetrics, effects or MME post, and at
+most 960x540 (min(screen size, 960x540)). Screens shown *inside* a feed keep their previous frame's texture (no
+recursion), and at most two feeds re-render per frame (round robin beyond that). Every render path shows the feeds.
+`camera` names a `cameras` entry in play mode and in the studio; in the studio `uid:<n>` also names an S4 studio camera
+(its evaluated pose at the timeline time).
+
+`screens.<id>.brightness` / `.enabled` / `.source` / `.file` / `.camera` binding targets override the manifest per
+frame (play mode and the studio), and the studio's stage panel writes per-screen overrides into the project
+(`"screens": {id: {source, file, camera, brightness}}`, project version 6).
+
 ## `environment`
 
 ```json

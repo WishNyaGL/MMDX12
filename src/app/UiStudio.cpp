@@ -844,6 +844,105 @@ void App::StudioApplyStageTargets() {
     }
 }
 
+// S5: one screen override edit (one StagesCommand step). An override equal to the manifest's value is still saved as
+// given: the panel writes what the user picked, and "없음" means the project turns the source off.
+void App::StudioSetScreenOverride(uint32_t stageUid, const std::string& screenId,
+                                  const studio::StageScreenOverride& ov, const char* name) {
+    StudioDoc& d = *studio_;
+    StudioStage* stage = d.FindStage(stageUid);
+    if (!stage || screenId.empty()) return;
+    std::vector<studio::StudioStage> before = d.stages;
+    stage->screens[screenId] = ov;
+    d.history.Push(std::make_unique<studio::StagesCommand>(d, name, std::move(before), d.stages));
+    ++d.projectVersion;
+    d.rowsKey = ~0ull;
+}
+
+// S5: a stage entity's screens at the timeline time: the manifest's values, the evaluator's screen targets, then the
+// project's per-screen overrides (the stage panel, `studioscreen` and `studiostate` all read this).
+std::vector<StageScreenState> App::StudioStageScreenStates(const studio::StudioStage& stage,
+                                                           const StageEvalResult& eval) const {
+    if (!stage.manifest) return {};
+    return ResolveStageScreens(*stage.manifest, eval, [&](StageScreenState& st) {
+        const auto it = stage.screens.find(st.id);
+        if (it == stage.screens.end()) return;
+        const studio::StageScreenOverride& so = it->second;
+        if (so.source) {
+            StageScreenSource src = StageScreenSource::None;
+            if (ParseStageScreenSource(*so.source, src)) st.source = src;
+        }
+        if (so.file) st.file = *so.file;
+        if (so.camera) st.camera = *so.camera;
+        if (so.brightness) st.brightness = *so.brightness;
+    });
+}
+
+// S5: the studio's stage screens. Each stage entity's screens are evaluated at the timeline time (its param overrides
+// and cue replacement as the material targets do), the project's per-screen overrides are applied on top, then the
+// ScreenViews are built from the stage's parts.
+void App::StudioStageScreens(FrameView& view) {
+    StudioDoc& d = *studio_;
+    if (d.stages.empty()) return;
+    // the studio's own cameras (S4) are targets of "uid:<n>"
+    const auto resolveCamera = [&](const std::string& name, CameraParams& out) {
+        if (name.rfind("uid:", 0) == 0) {
+            const uint32_t uid = (uint32_t)std::max(0, std::atoi(name.c_str() + 4));
+            if (uid == 0) return false;
+            const float frame = (float)(d.time * kMmdFps);
+            // the camera's evaluator (StudioDoc::RefreshCameraEvals built one per camera with keys)
+            for (size_t i = 0; i < d.cameras.size(); ++i) {
+                if (d.cameras[i].uid != uid) continue;
+                if (i >= d.cameraEvals.size() || !d.cameraEvals[i]) return false;
+                const CameraPose pose = d.cameraEvals[i]->Evaluate(frame);
+                CameraMotion::ToView(pose, &out.view, &out.eye);
+                out.fovYRadians = DirectX::XMConvertToRadians(pose.fovDeg);
+                return true;
+            }
+            return false;
+        }
+        return false;
+    };
+    for (const studio::StudioStage& stage : d.stages) {
+        if (!stage.manifest) continue;
+        const StudioStageOverrides ov = StageOverridesAt(stage, (float)(d.time * kMmdFps));
+        const StageEvalResult eval = EvaluateStage(*stage.manifest, stage.variant, ov.values, d.time, ov.skipCues);
+        const std::vector<StageScreenState> screens = StudioStageScreenStates(stage, eval);
+        if (screens.empty()) continue;
+        // the stage's parts in the document (its material targets use the same set)
+        std::vector<StageRuntimePart> parts;
+        for (const auto& mp : d.models) {
+            const studio::StudioModel& m = *mp;
+            if (m.stageUid != stage.uid || !m.gpu) continue;
+            StageRuntimePart p;
+            p.part = m.stagePart;
+            p.gpu = m.gpu.get();
+            parts.push_back(std::move(p));
+        }
+        if (parts.empty()) continue;
+        const std::filesystem::path dir = stage.manifest->dir;
+        std::vector<ScreenView> list = BuildStageScreenViews(
+            *stage.manifest, screens, parts,
+            [&](const std::string& file) {
+                if (file.empty()) return std::filesystem::path{};
+                std::filesystem::path p = Utf8ToPath(file);
+                return p.is_absolute() ? p : dir / p;
+            },
+            [&](const std::string& name, CameraParams& out) {
+                if (resolveCamera(name, out)) return true;
+                for (const StageCamera& sc : stage.manifest->cameras)
+                    if (sc.name == name) {
+                        out = StageCameraView(sc);
+                        return true;
+                    }
+                return false;
+            });
+        for (ScreenView& sv : list) {
+            sv.key = std::to_string(stage.uid) + ":" + sv.key;   // two stages may have the same screen id
+            view.screens.push_back(std::move(sv));
+        }
+    }
+}
+
 void App::StudioConsolidateStages(StudioDoc& d, const std::map<uint32_t, std::string>& legacyVariants) {
     // S3: the parts that share a manifest belong to one stage entity. A project brings its entities (and the parts'
     // stageUid); a library scene / a specifically added stage gets one here, keeping the variant the package carried
@@ -970,6 +1069,138 @@ void App::StudioEndStageEdit(const char* name) {
     d.history.Push(std::make_unique<StagesCommand>(d, name, std::move(studioStageBefore_), d.stages));
     studioStageBefore_.clear();
     ++d.projectVersion;
+}
+
+// S5: the stage panel's screen rows. Per screen: a source combo, a file picker (image / video), a camera combo (the
+// stage's cameras + the studio's own) and a brightness slider. Every change is one undoable step and lands in the
+// project's stage entry ("screens"), never in the installed stage.
+void App::DrawStudioStageScreens(float w, uint32_t stageUid) {
+    using namespace ui;
+    const Palette& p = P();
+    StudioDoc& d = *studio_;
+    ImDrawList* cdl = ImGui::GetWindowDrawList();
+    const StudioStage* stage = d.FindStage(stageUid);
+    if (!stage || !stage->manifest) return;
+    const std::shared_ptr<const StageManifest> manifest = stage->manifest;
+    const StageManifest& man = *manifest;
+    if (man.screens.empty()) return;
+    ImGui::Dummy(ImVec2(w, Dp(8.0f)));
+    const ImVec2 c = ImGui::GetCursorScreenPos();
+    Text(cdl, Font::Semibold, size::Caption, c, p.ink3, Tr("스크린"));
+    ImGui::Dummy(ImVec2(w, Dp(20.0f)));
+
+    // The screen's values now: the manifest's with the project's override on top (an edit re-reads this every call, as
+    // a StagesCommand replaces the stage list).
+    for (const StageScreen& man_screen : man.screens) {
+        const std::string id = man_screen.id;
+        ImGui::PushID(id.c_str());
+        const auto current = [&]() {
+            studio::StageScreenOverride ov;
+            if (const StudioStage* st = d.FindStage(stageUid)) {
+                const auto it = st->screens.find(id);
+                if (it != st->screens.end()) ov = it->second;
+            }
+            return ov;
+        };
+        const studio::StageScreenOverride ov = current();
+        StageScreenSource src = man_screen.source;
+        if (ov.source && !ParseStageScreenSource(*ov.source, src)) src = StageScreenSource::None;
+        const std::string file = ov.file ? *ov.file : man_screen.file;
+        const std::string camera = ov.camera ? *ov.camera : man_screen.camera;
+        const float brightness = ov.brightness ? *ov.brightness : man_screen.brightness;
+
+        const ImVec2 rowTop = ImGui::GetCursorScreenPos();
+        TextEllipsis(cdl, Font::Regular, size::Small, rowTop, rowTop.x + w, p.ink, id.c_str());
+        ImGui::Dummy(ImVec2(w, Dp(22.0f)));
+        // source combo: 없음 / 이미지 / 영상 / 카메라 (program stays unimplemented = 없음)
+        static const char* const kSourceLabels[] = {"없음", "이미지", "영상", "카메라"};
+        static const StageScreenSource kSources[] = {StageScreenSource::None, StageScreenSource::Image,
+                                                     StageScreenSource::Video, StageScreenSource::Camera};
+        int sel = 0;
+        for (int i = 0; i < 4; ++i)
+            if (kSources[i] == src) sel = i;
+        const char* srcLabel = Tr(kSourceLabels[sel]);
+        const std::string srcId = "##stagescreensource";
+        const ImVec2 spos = ImGui::GetCursorScreenPos();
+        const float rowW = ImGui::GetContentRegionAvail().x;
+        TextEllipsis(cdl, Font::Regular, size::Small, ImVec2(spos.x, spos.y + Dp(4.0f)), spos.x + rowW * 0.4f, p.ink2,
+                     Tr("소스"));
+        ImGui::SetCursorScreenPos(ImVec2(spos.x + rowW * 0.4f, spos.y));
+        ImGui::SetNextItemWidth(rowW - rowW * 0.4f);
+        if (ImGui::BeginCombo(srcId.c_str(), srcLabel)) {
+            for (int i = 0; i < 4; ++i) {
+                if (ImGui::Selectable(Tr(kSourceLabels[i]), i == sel)) {
+                    studio::StageScreenOverride next = ov;
+                    next.source = std::string(StageScreenSourceName(kSources[i]));
+                    if (kSources[i] != StageScreenSource::None && file.empty()) next.file = std::string();
+                    StudioSetScreenOverride(stageUid, id, next, Tr("스크린 소스"));
+                    ImGui::EndCombo();
+                    ImGui::PopID();
+                    return;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        // file (image / video) with a picker
+        if (src == StageScreenSource::Image || src == StageScreenSource::Video) {
+            const std::string shown = file.empty() ? Tr("(파일 없음)") : PathToUtf8(std::filesystem::path(file).filename());
+            if (Button("##stagescreenfile", shown.c_str(), icon::FolderOpen, ButtonKind::Secondary, ImVec2(w / Dpi(), 30.0f))) {
+                const wchar_t* pattern = src == StageScreenSource::Image ? L"*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.gif"
+                                                                         : L"*.avi;*.mp4;*.mkv;*.mov;*.wmv";
+                const std::vector<studio::FileFilter> filters = {
+                    {src == StageScreenSource::Image ? L"이미지" : L"영상", pattern}};
+                const std::filesystem::path picked = studio::OpenFileDialog(GetActiveWindow(), filters, man.dir);
+                if (!picked.empty()) {
+                    studio::StageScreenOverride next = ov;
+                    next.file = PathToUtf8(picked);
+                    StudioSetScreenOverride(stageUid, id, next, Tr("스크린 파일"));
+                    ImGui::PopID();
+                    return;
+                }
+            }
+        }
+        // camera (stage cameras + the studio's own cameras, addressed as "uid:<n>")
+        if (src == StageScreenSource::Camera) {
+            std::vector<std::string> names;
+            for (const StageCamera& sc : man.cameras) names.push_back(sc.name);
+            for (const studio::StudioCamera& sc : d.cameras) names.push_back("uid:" + std::to_string(sc.uid));
+            std::string label = camera.empty() ? Tr("(카메라 없음)") : camera;
+            const ImVec2 cpos = ImGui::GetCursorScreenPos();
+            TextEllipsis(cdl, Font::Regular, size::Small, ImVec2(cpos.x, cpos.y + Dp(4.0f)), cpos.x + rowW * 0.4f, p.ink2,
+                         Tr("카메라"));
+            ImGui::SetCursorScreenPos(ImVec2(cpos.x + rowW * 0.4f, cpos.y));
+            ImGui::SetNextItemWidth(rowW - rowW * 0.4f);
+            if (ImGui::BeginCombo("##stagescreencam", label.c_str())) {
+                for (const std::string& n : names) {
+                    std::string shown2 = n;
+                    if (n.rfind("uid:", 0) == 0) {
+                        for (const studio::StudioCamera& sc : d.cameras)
+                            if ("uid:" + std::to_string(sc.uid) == n) shown2 = sc.name;
+                    }
+                    if (ImGui::Selectable(shown2.c_str(), n == camera)) {
+                        studio::StageScreenOverride next = ov;
+                        next.camera = n;
+                        StudioSetScreenOverride(stageUid, id, next, Tr("스크린 카메라"));
+                        ImGui::EndCombo();
+                        ImGui::PopID();
+                        return;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        // brightness
+        float b = brightness;
+        const bool changed = SliderRow("##stagescreenbright", Tr("밝기"), &b, 0.0f, 8.0f, "%.2f");
+        if (ImGui::IsItemActivated()) StudioBeginStageEdit();
+        if (changed) {
+            studio::StageScreenOverride next = ov;
+            next.brightness = b;
+            StudioSetScreenOverride(stageUid, id, next, Tr("스크린 밝기"));
+        }
+        if (ImGui::IsItemDeactivated()) StudioEndStageEdit(Tr("스크린 밝기"));
+        ImGui::PopID();
+    }
 }
 
 // The stage's param surface: one row per param (float slider / int / bool / colour / enum combo), grouped by the
@@ -1186,6 +1417,9 @@ void App::DrawStudioStagePanel(float w) {
         }
     }
 
+    // S5: the stage's LED / video surfaces (source, file, camera, brightness; one undo step per change).
+    if (!man->screens.empty()) DrawStudioStageScreens(w, stageUid);
+
     // variant combo (the stage's own; the parts share it). Applying one replaces the stages list: leave this frame.
     if (man->variants.size() >= 2) {
         std::string current = stage->variant;
@@ -1335,6 +1569,8 @@ void App::BuildStudioFrameView(FrameView& view) {
     view.sceneElapsed = lastRenderedTime_ < 0 ? 0.0f : (float)std::fabs(d.time - lastRenderedTime_);
     view.timelinePlaying = d.playing;
     view.mmeEditMode = true;
+    // S5: the MMDX stages' screens (image / video / camera feed sources; the project's per-screen overrides applied).
+    StudioStageScreens(view);
     view.cameraCut = lastRenderedTime_ < 0 || std::fabs(d.time - lastRenderedTime_) > 0.25;
     lastRenderedTime_ = d.time;
     if (options_.quitAfterFrames > 0 || !options_.uiScript.empty() || options_.mcp == 1 || HeadlessRun()) {

@@ -22,6 +22,10 @@ constexpr uint32_t kCbSlots = Dx12Context::kFramesInFlight + 1;  // + RenderToIm
 constexpr uint32_t kOffscreenSlot = Dx12Context::kFramesInFlight;
 constexpr uint32_t kLightBytes = Renderer::kMaxPunctualLights * sizeof(GpuLight);
 constexpr uint32_t kFogBytes = Renderer::kMaxFogVolumes * sizeof(GpuFogVolume);
+// S5: the camera feeds get their own constant-buffer / light slots, after the on-screen + offscreen + extra-view slots
+// (never RenderToImage's kOffscreenSlot, which a feed would overwrite while the main scene still reads it).
+constexpr uint32_t kFeedCbBase = kCbSlots * (1 + kMaxExtraViews);
+constexpr uint32_t kTotalCbSlots = kFeedCbBase + kCbSlots * StageScreens::kMaxFeedsPerFrame;
 
 // post.hlsl's interleaved gradient noise (float2 unjitter(pos.xy)). Mirrored here to invert the per-pixel
 // dither when a transparent export is read back, so a flat background decodes to alpha 0 exactly.
@@ -157,6 +161,8 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     if (!rtSupported_) rt_.reset();
     else rt_->SetPackTextures(packTextures_.get());
     screenVideo_ = std::make_unique<ScreenVideo>();
+    stageScreens_ = std::make_unique<StageScreens>();
+    stageScreens_->Init(shaderDir);
     if (rtSupported_) {
         offline_ = std::make_unique<OfflineRenderer>();
         if (!offline_->Initialize(ctx, shaderDir)) {
@@ -167,6 +173,7 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
 
     CreateBuiltinTextures();
     if (!transient_.Create(ctx, kCbSlots)) return false;
+    if (!feedTransient_.Create(ctx, kCbSlots * StageScreens::kMaxFeedsPerFrame)) return false;
 
     passes_.clear();
     passes_.push_back(std::make_unique<ShadowPass>());
@@ -174,7 +181,9 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     // renders. Both skip entirely when no effect needs them (byte-identical frame).
     passes_.push_back(std::make_unique<MmeShadowPass>());
     passes_.push_back(std::make_unique<MmeOffscreenPass>());
-    passes_.push_back(std::make_unique<ScenePass>());
+    auto* scenePass = new ScenePass();
+    scenePass_ = scenePass;   // S5: the stage screen camera feeds draw through it (owned by passes_)
+    passes_.push_back(std::unique_ptr<ScenePass>(scenePass));
     auto* worldPass = new WorldPass();   // also owned by passes_; WorldParticlesPass holds a non-owning pointer
     passes_.push_back(std::unique_ptr<WorldPass>(worldPass));
     passes_.push_back(std::make_unique<ResolvePass>());
@@ -235,9 +244,9 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
         progress->SetStatus(Tr("초기화 완료 중"));
     }
 
-    sceneCb_ = CreateMappedUpload(ctx.Device(), (uint64_t)kSceneCbSize * kCbSlots * (1 + kMaxExtraViews), &sceneCbMapped_, L"scene.cb");
-    lightBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kLightBytes * kCbSlots, &lightBufMapped_, L"scene.lights");
-    fogBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kFogBytes * kCbSlots, &fogBufMapped_, L"scene.fogvolumes");
+    sceneCb_ = CreateMappedUpload(ctx.Device(), (uint64_t)kSceneCbSize * kTotalCbSlots, &sceneCbMapped_, L"scene.cb");
+    lightBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kLightBytes * kTotalCbSlots, &lightBufMapped_, L"scene.lights");
+    fogBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kFogBytes * kTotalCbSlots, &fogBufMapped_, L"scene.fogvolumes");
     if (!sceneCb_ || !lightBuf_ || !fogBuf_) return false;
 
     backdropSrv_ = ctx.SrvHeap().Allocate(1);
@@ -277,6 +286,7 @@ std::unique_ptr<GpuModel> Renderer::CreateModel(UploadBatch& batch, const PmxMod
 void Renderer::ForgetModel(uint64_t modelUid) {
     if (modelUid == 0 || !ctx_) return;
     if (screenVideo_) screenVideo_->ForgetModel(modelUid);
+    if (stageScreens_) stageScreens_->ForgetModel(modelUid);
     // Frees the model's MME resources (object SRV tables + skinned buffer). Keyed by uid, they may live in
     // in-flight command lists, so the free is deferred by the number of frames in flight plus one (matching the
     // GpuModel ring logic). DrainMmeForget runs it once those frames are done.
@@ -297,6 +307,132 @@ void Renderer::DrainMmeForget() {
                            return true;
                        }),
         pendingMmeForget_.end());
+}
+
+// S5: the HDR targets one camera feed draws into. The feed size is the screen's own texture size (already capped at
+// 960x540 by StageScreens), so the targets follow the screen's size.
+bool Renderer::EnsureFeedTargets(uint32_t feedIndex, uint32_t width, uint32_t height) {
+    if (feedIndex >= kFeedSlots) return false;
+    FeedTargets& f = feeds_[feedIndex];
+    width = std::max(1u, width);
+    height = std::max(1u, height);
+    if (f.color && f.width == width && f.height == height) return true;
+    ctx_->WaitForGpu();   // targets still referenced by frames in flight
+    f.color.Release(*ctx_);
+    f.normal.Release(*ctx_);
+    f.velocity.Release(*ctx_);
+    f.depth.Release(*ctx_);
+    const D3D12_RESOURCE_STATES srvState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (!f.color.Create(*ctx_, width, height, RenderTargets::kColorFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                        srvState, L"feed.color") ||
+        !f.normal.Create(*ctx_, width, height, RenderTargets::kNormalFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                         srvState, L"feed.normal") ||
+        !f.velocity.Create(*ctx_, width, height, RenderTargets::kVelocityFormat,
+                           D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, srvState, L"feed.velocity") ||
+        !f.depth.Create(*ctx_, width, height, RenderTargets::kDepthFormat, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+                        D3D12_RESOURCE_STATE_DEPTH_WRITE, L"feed.depth")) {
+        f.color.Release(*ctx_);
+        f.normal.Release(*ctx_);
+        f.velocity.Release(*ctx_);
+        f.depth.Release(*ctx_);
+        LOG_WARN("stage screen feed: target creation failed (%ux%u)", width, height);
+        return false;
+    }
+    f.width = width;
+    f.height = height;
+    return true;
+}
+
+bool Renderer::RenderScreenFeed(ID3D12GraphicsCommandList* cmd, const FrameView& view, const ScreenView& screen,
+                                Texture& target, uint32_t feedIndex, const SceneConstants& base) {
+    if (!cmd || !scenePass_ || !target || feedIndex >= kFeedSlots) return false;
+    const uint32_t w = target.width, h = target.height;
+    if (!EnsureFeedTargets(feedIndex, w, h)) return false;
+    FeedTargets& f = feeds_[feedIndex];
+    if (!feedResolveTried_) {
+        feedResolveTried_ = true;
+        if (!feedResolve_.Create(*ctx_, shaderDir_ / L"screenfeed.hlsl", "PSFeed",
+                                 {DXGI_FORMAT_R8G8B8A8_UNORM}))
+            LOG_WARN("stage screen feed: screenfeed.hlsl unavailable, the feeds stay black");
+    }
+
+    // The feed's own descriptor window (the scene passes keep their own; a feed runs before them), rewound for this
+    // frame slot / feed index.
+    feedTransient_.Begin(feedIndex * kCbSlots + ctx_->FrameSlot());
+    // The feed's own constant-buffer / light slots (never RenderToImage's kOffscreenSlot: the main scene still reads
+    // the frame's slots while this runs). The camera comes from the screen; everything else is the frame's.
+    const uint32_t cbSlot = kFeedCbBase + feedIndex * kCbSlots + ctx_->FrameSlot();
+    SceneConstants sc = base;
+    const CameraParams& cam = screen.camera;
+    const XMMATRIX viewM = XMLoadFloat4x4(&cam.view);
+    const XMMATRIX proj = XMMatrixPerspectiveFovLH(cam.fovYRadians, (float)w / (float)h, cam.nearZ, cam.farZ);
+    const XMMATRIX vp = viewM * proj;
+    XMStoreFloat4x4(&sc.view, viewM);
+    XMStoreFloat4x4(&sc.proj, proj);
+    XMStoreFloat4x4(&sc.viewProj, vp);
+    XMStoreFloat4x4(&sc.viewProjNoJitter, vp);
+    XMStoreFloat4x4(&sc.prevViewProjNoJitter, vp);   // a feed has no temporal history
+    XMStoreFloat4x4(&sc.invProj, XMMatrixInverse(nullptr, proj));
+    const XMMATRIX invView = XMMatrixInverse(nullptr, viewM);
+    XMStoreFloat4x4(&sc.invView, invView);
+    XMStoreFloat3(&sc.eyePos, invView.r[3]);
+    sc.jitterUv = {0, 0};
+    sc.nearZ = cam.nearZ;
+    sc.farZ = cam.farZ;
+    sc.viewportSize = {(float)w, (float)h};
+    sc.invViewportSize = {1.0f / (float)w, 1.0f / (float)h};
+    sc.edgeScale = (float)h / 1080.0f;
+    sc.shading = 0.0f;   // always lit
+    memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
+
+    // The feed reads the frame's lights + shadow maps: its own slot in the light buffer is a copy of the frame's.
+    memcpy(lightBufMapped_ + (size_t)cbSlot * kLightBytes,
+           lightBufMapped_ + (size_t)ctx_->FrameSlot() * kLightBytes, kLightBytes);
+
+    bool drew = false;
+    RenderSettings feedSettings = settings_;
+    feedSettings.renderPath = RenderPath::Raster;
+    feedSettings.taa = false;
+    feedSettings.dof = false;
+    feedSettings.volumetric = false;
+    feedSettings.ssr = false;   // the feed is a display image: no screen-space reflection recursion
+    feedSettings.packEffects.clear();
+    feedSettings.mmeEffects.clear();
+    // The feed's own draw calls must not distort the frame's stats.
+    const RenderStats savedStats = stats_;
+    PassContext pc{*ctx_, cmd, view, feedSettings, targets_, stats_, feedTransient_,
+                   sceneCb_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kSceneCbSize,
+                   lightBuf_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kLightBytes,
+                   ctx_->FrameNumber(), false, false, &builtin_, RenderPath::Raster, nullptr, nullptr,
+                   0.0f, 0.0f, frameTimeMs_};
+    pc.fogVolumes = 0;   // a feed draws no local fog volumes
+    stats_.drawCalls = 0;
+    stats_.triangles = 0;
+    // The screens inside a feed show their PREVIOUS frame's texture: StageScreens binds after the feeds ran, so the
+    // materials of this feed draw already carry the previous binding (no recursion into another feed).
+    if (scenePass_->DrawFeed(pc, f.color, f.normal, f.velocity, f.depth) && feedResolve_) {
+        // tonemap + sRGB into the screen's own RGBA8 texture (the LED image every path samples)
+        target.Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const D3D12_GPU_DESCRIPTOR_HANDLE table = feedTransient_.SrvTable(*ctx_, {&f.color});
+        feedResolve_.Draw(pc, {&target}, table, nullptr, 0);
+        target.Transition(cmd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        drew = true;
+    }
+    stats_ = savedStats;
+    return drew;
+}
+
+void Renderer::UpdateStageScreens(ID3D12GraphicsCommandList* cmd, const FrameView& view, const SceneConstants& baseSc) {
+    if (!stageScreens_) return;
+    if (view.screens.empty()) {
+        // no screens this frame: whatever was bound must go back to the models' own textures
+        stageScreens_->Render(*ctx_, cmd, view, {});
+        return;
+    }
+    const auto renderFeed = [&](uint32_t feedIndex, const ScreenView& screen, Texture& target) {
+        return RenderScreenFeed(cmd, view, screen, target, feedIndex, baseSc);
+    };
+    stageScreens_->Render(*ctx_, cmd, view, renderFeed);
 }
 
 void Renderer::ReadGpuTimer() {
@@ -619,6 +755,10 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     const uint32_t fogCount = FillGpuFogVolumes(view.light, fog);
     memcpy(fogBufMapped_ + (size_t)cbSlot * kFogBytes, fog, sizeof(fog));
 
+    // S5: the stage screens' sources + camera feeds, then their texture bindings on the stage materials. Runs before
+    // the acceleration structures are built so a ray-traced frame sees this frame's screen material flags.
+    UpdateStageScreens(cmd, view, sc);
+
     // Temporal history survives only consecutive on-screen frames without a camera cut.
     bool historyValid = !offscreen && havePrev_ && prevTaa_ && settings_.taa && !view.cameraCut;
     if (historyValid && XMVectorGetX(XMVector3Length(XMVectorSubtract(XMLoadFloat3(&view.camera.eye),
@@ -841,6 +981,11 @@ void Renderer::ReleaseVideoLayers() {
     for (auto& pass : passes_)
         if (VideoPass* vp = dynamic_cast<VideoPass*>(pass.get())) vp->Clear(*ctx_);
     if (screenVideo_) screenVideo_->Clear(*ctx_);
+    if (stageScreens_) stageScreens_->Clear(*ctx_);
+    if (feedResolve_) {
+        ctx_->WaitForGpu();   // no command list in flight may still reference the feed PSO
+        feedResolve_ = FullscreenPipeline{};
+    }
 }
 
 void Renderer::ClearBackBuffer(ID3D12GraphicsCommandList* cmd) {
@@ -1440,10 +1585,19 @@ void Renderer::Shutdown() {
     // M8b: release the video layers (decode threads, staging buffers, textures) with the renderer.
     for (auto& pass : passes_)
         if (VideoPass* vp = dynamic_cast<VideoPass*>(pass.get())) vp->Clear(*ctx_);
-    if (screenVideo_) {
-        screenVideo_->Clear(*ctx_);
-        screenVideo_.reset();
+    if (screenVideo_) screenVideo_->Clear(*ctx_);
+    if (stageScreens_) {
+        stageScreens_->Clear(*ctx_);
+        stageScreens_.reset();
     }
+    if (feedResolve_) ctx_->WaitForGpu();   // no command list in flight may still reference the feed PSO
+    for (FeedTargets& f : feeds_) {
+        f.color.Release(*ctx_);
+        f.normal.Release(*ctx_);
+        f.velocity.Release(*ctx_);
+        f.depth.Release(*ctx_);
+    }
+    feedResolve_ = FullscreenPipeline{};
     targets_.shadowMap.Release(*ctx_);
     targets_.spotShadowMap.Release(*ctx_);
     targets_.pointShadowMap.Release(*ctx_);
@@ -1452,6 +1606,7 @@ void Renderer::Shutdown() {
     passes_.clear();
     pipelineMsaa_ = 0;
     transient_.Release(*ctx_);
+    feedTransient_.Release(*ctx_);
     if (backdropSrv_ != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(backdropSrv_, 1);
     backdropSrv_ = DescriptorHeap::kInvalid;
     for (auto& t : builtin_.toon) t.Reset();

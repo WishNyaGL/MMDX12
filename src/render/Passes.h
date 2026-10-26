@@ -83,10 +83,21 @@ public:
     void ReleaseTargets(Dx12Context& ctx) override;
     void Execute(PassContext& pc) override;
 
+    // S5: draws the scene into `color` (3 MRTs: `color`, `normal`, `velocity`) for a stage screen's camera feed:
+    // raster, lit, no packs / MME / ID / other views. `pc.sceneConstants` / `pc.lights` are the feed's own slots.
+    // False when the pass has no PSOs (nothing is drawn).
+    bool DrawFeed(PassContext& pc, Texture& color, Texture& normal, Texture& velocity, Texture& depth);
+
 private:
     // DLSS-RR guides on the RayTraced path: a second geometry pass with the default material data (packs / MME
     // keep their own colour shading). Created on the first RR frame only; absent with RR off.
     void DrawGuides(PassContext& pc);
+    // S5: single-sample variants of the lit PSOs for a stage screen's camera feed (the feed targets are 1x whatever
+    // the frame's MSAA is). Built on the first feed only; the feed draws the plain lit shading.
+    bool EnsureFeedPipelines(Dx12Context& ctx);
+    bool feedTried_ = false;
+    ComPtr<ID3D12PipelineState> psoFeedBack_, psoFeedNoCull_, psoFeedAddBack_, psoFeedAddNoCull_,
+        psoFeedNdBack_, psoFeedNdNoCull_;
     ComPtr<ID3D12PipelineState> psoGuideBack_, psoGuideNoCull_;
     Texture guideDiffuse_, guideSpecular_, guideNormal_;
     ComPtr<ID3D12PipelineState> psoCullBack_, psoNoCull_, psoEdge_, psoSky_, psoFloor_;
@@ -146,7 +157,7 @@ private:
     uint32_t packGeneration_ = 0;
     std::filesystem::path shaderDir_;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC litDesc_{}, litDescId_{}; // the lit PSO descs (3 MRTs and 4 MRTs)
-    ComPtr<ID3DBlob> vs_, vsRt_, vsDxc_;             // kept alive for litDesc_ / the pack PSOs
+    ComPtr<ID3DBlob> vs_, vsRt_, vsDxc_, psLit_;             // kept alive for litDesc_ / the pack PSOs
 };
 
 class ResolvePass final : public IRenderPass {

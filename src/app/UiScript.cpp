@@ -138,6 +138,19 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                          std::clamp(settings_.studioRenderer, 0, 3), (int)StudioGiActive(), (int)gi.phase,
                          gi.samples, gi.width, gi.height);
             }
+            // S5: one STUDIOSCREEN line per stage screen (stage uid, id, source, file / camera, w, h, brightness)
+            for (const studio::StudioStage& st : d.stages) {
+                if (!st.manifest) continue;
+                const studio::StudioStageOverrides ov = studio::StageOverridesAt(st, (float)d.Frame());
+                const StageEvalResult eval =
+                    EvaluateStage(*st.manifest, st.variant, ov.values, d.time, ov.skipCues);
+                for (const StageScreenState& s : StudioStageScreenStates(st, eval)) {
+                    const char* detail = s.source == StageScreenSource::Camera ? s.camera.c_str() : s.file.c_str();
+                    LOG_INFO("STUDIOSCREEN stage=%u id=%s source=%s detail=%s w=%u h=%u brightness=%.3f",
+                             st.uid, s.id.c_str(), StageScreenSourceName(s.source), detail, s.width, s.height,
+                             s.brightness);
+                }
+            }
         }
         if (studio_) {
             const studio::StudioDoc& d = *studio_;
@@ -445,6 +458,27 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 return false;
             }
         }
+    } else if (cmd == "studioscreen") {  // studioscreen <stage index> <screen id> <none|image|video|camera> [file|camera]
+        const studio::StudioStage* st = nullptr;
+        if (studio_ && args.size() >= 3) {
+            const int idx = std::atoi(args[0].c_str());
+            if (idx >= 0 && idx < (int)studio_->stages.size()) st = &studio_->stages[(size_t)idx];
+        }
+        StageScreenSource src = StageScreenSource::None;
+        if (!st || !ParseStageScreenSource(ToLowerAscii(args[2]), src)) {
+            LOG_WARN("ui script: studioscreen needs a stage index and a known source");
+            if (outError) *outError = "studioscreen: unknown stage or source";
+            return false;
+        }
+        studio::StageScreenOverride ov;
+        ov.source = std::string(StageScreenSourceName(src));
+        if (args.size() >= 4 && !args[3].empty()) {
+            if (src == StageScreenSource::Camera) ov.camera = args[3];
+            else ov.file = PathToUtf8(std::filesystem::path(Utf8ToPath(args[3])).is_absolute()
+                                          ? Utf8ToPath(args[3])
+                                          : (st->manifest ? st->manifest->dir / Utf8ToPath(args[3]) : Utf8ToPath(args[3])));
+        }
+        StudioSetScreenOverride(st->uid, args[1], ov, Tr("스크린 소스"));
     } else if (cmd == "studiolightdel") {  // studiolightdel <index>
         if (studio_ && !args.empty()) {
             const int idx = std::atoi(args[0].c_str());

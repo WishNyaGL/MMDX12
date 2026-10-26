@@ -241,7 +241,14 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 rough = clamp(sqrt(2.0 / (g.specularPower + 2.0)), 0.03, 0.6);
                 receive = (g.flags & MAT_RECEIVE) != 0;
                 pos = sf.pos; prevPos = sf.prevPos; n = sf.normal; faceN = sf.faceNormal;
-                bool canPbr = (g.pbrIndex != 0xFFFFFFFFu);
+                // S5: a stage screen surface shows its texture as emission, black behind it (no diffuse / specular / AO).
+                const bool screenMat = (g.flags & MAT_SCREEN) != 0;
+                if (screenMat) {
+                    radiance += throughput * ScreenEmission(g.flags, SrgbToLinear(saturate(tex.rgb)), g.reflectivity);
+                    albedo = 0.0;
+                    refl = 0.0;
+                }
+                bool canPbr = !screenMat && (g.pbrIndex != 0xFFFFFFFFu);
 #ifdef MMDX_PT_PACK
                 // a PT pack wins over the record (raster rule): keep the plain surface the pack expects
                 if (canPbr && (g.flags & RTG_PT_PACK) && LoadPtPackRecord(g.packSrv).materialClass != PACK_CLASS_OFF)
@@ -256,8 +263,10 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                     isPbrHit = true;
                 }
                 if (g.flags & MAT_STAGE) {
-                    radiance += throughput * SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
-                    radiance += throughput * AutoLumEmission(g.flags, g.diffuse, g.specularPower, SrgbToLinear(saturate(tex.rgb)));
+                    if (!screenMat) {
+                        radiance += throughput * SrgbToLinear(saturate(g.ambient * tex.rgb)) * gSunIntensity * kAmbientEmission;
+                        radiance += throughput * AutoLumEmission(g.flags, g.diffuse, g.specularPower, SrgbToLinear(saturate(tex.rgb)));
+                    }
                     // S2a: a stage material's PBR emissive (KHR_materials_emissive_strength, HDR) is visible to a
                     // camera hit here too, like offline GI's CameraDirect; a stage's PBR sun term stays out (the
                     // stage path below is ambient-only).

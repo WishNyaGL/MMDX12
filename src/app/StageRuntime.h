@@ -13,9 +13,12 @@
 #include "asset/StageManifest.h"
 #include "asset/StageMaterials.h"
 #include "render/GpuModel.h"
+#include "render/RenderTypes.h"
 #include "studio/SceneLight.h"
 
 #include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <set>
 #include <string>
@@ -28,6 +31,18 @@ struct StageRuntimePart {
     int part = 0;                    // the part's index in StageManifest::models order
     GpuModel* gpu = nullptr;         // not owned (the scene / the studio document owns it)
     StageMaterialBinding binding;    // parallel to the manifest's `materials`; empty = no override for this part
+};
+
+// S5: one screen after the evaluator's `screens.<id>.<field>` targets (and the studio project's overrides) are
+// applied.
+struct StageScreenState {
+    std::string id;
+    StageScreenSource source = StageScreenSource::None;
+    std::string file;      // image / video file as the manifest / target writes it (resolved by the caller)
+    std::string camera;    // stage camera name, or "uid:<n>" for a studio camera
+    uint32_t width = 1920, height = 1080;
+    float brightness = 1.0f;
+    bool enabled = true;
 };
 
 class StageRuntime {
@@ -60,6 +75,9 @@ public:
     // empty when the stage has none).
     const std::vector<studio::SceneLight>& Lights() const { return lights_; }
 
+    // S5: the stage's screens at the last Apply (screens.<id>.<field> targets applied). Empty when it has none.
+    const std::vector<StageScreenState>& Screens() const { return screens_; }
+
 private:
     void ApplyMaterials(const std::vector<StageMaterialRule>& rules, uint64_t frame);
 
@@ -68,6 +86,7 @@ private:
     std::vector<StageRuntimePart> parts_;
     std::vector<studio::SceneLight> lights_;
     std::vector<studio::SceneLight> gltfLights_;   // S2a KHR_lights_punctual of the parts (manifest.gltfLights)
+    std::vector<StageScreenState> screens_;        // S5: the screens at the last Apply
     uint64_t appliedFrame_ = ~0ull;   // the frame `lights_` / the material targets were last applied for
 };
 
@@ -83,6 +102,26 @@ std::set<std::string> StageDrivenLightFields(const StageManifest& manifest, cons
 // studio and play mode share it; a manifest's rules come from `ResolvedStageMaterialRules(manifest, eval)`.
 void ApplyStageMaterialList(GpuModel& gpu, int part, const StageMaterialBinding& binding,
                             const std::vector<StageMaterialRule>& rules, uint64_t frame);
+
+// ---- S5 screens ---------------------------------------------------------------------------------------------------
+// The manifest's screens with `eval`'s screen targets replayed in assignment order (brightness / enabled / source /
+// file / camera). `edit` (optional) may replace a screen's values first (the studio's project overrides by id).
+std::vector<StageScreenState> ResolveStageScreens(const StageManifest& manifest, const StageEvalResult& eval,
+                                                  const std::function<void(StageScreenState&)>& edit = {});
+
+// A stage camera as a render camera: looks at `target` from `position`, vertical fov in degrees.
+CameraParams StageCameraView(const StageCamera& camera, float nearZ = 0.5f, float farZ = 4000.0f);
+
+// S5: the ScreenViews of one stage's screens: each screen's materials are resolved on the stage's parts (the screen's
+// own `materials` globs plus every material rule whose `screen` names it). One ScreenView per (screen, part): a screen
+// whose globs hit two parts shows the same source twice (each part keeps its own texture).
+// `resolveFile` turns a manifest-relative file into an absolute path ("" = not resolved); `resolveCamera` resolves a
+// camera name (stage cameras are resolved by the caller, so the studio can answer "uid:<n>").
+std::vector<ScreenView> BuildStageScreenViews(
+    const StageManifest& manifest, const std::vector<StageScreenState>& screens,
+    const std::vector<StageRuntimePart>& parts,
+    const std::function<std::filesystem::path(const std::string&)>& resolveFile,
+    const std::function<bool(const std::string&, CameraParams&)>& resolveCamera);
 
 // Studio: one stage part in the per-frame material pass (the studio's light rig is copied into the scene lights when
 // the stage is added, so only the material targets run there).

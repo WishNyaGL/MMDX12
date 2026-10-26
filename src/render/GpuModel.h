@@ -130,6 +130,18 @@ public:
     // texture. Waits for the GPU at the caller (descriptor rewrite).
     bool HasScreenMaterials() const { return !screenMaterials_.empty(); }
     void BindScreenTexture(Dx12Context& ctx, ID3D12Resource* tex);
+    // S5: the per-material form of the above (render/StageScreens.h). Rewrites material `materialIndex`'s diffuse
+    // descriptor (srvTable + 0) to `tex` and sets MatFlag_HasTexture, or restores the model's own texture / flag
+    // when `tex` is null. A material without its own texture and no `tex` keeps the white fallback. The caller must
+    // wait for the GPU (a descriptor read by frames in flight is rewritten).
+    void BindMaterialTexture(Dx12Context& ctx, size_t materialIndex, ID3D12Resource* tex);
+    // S5: marks a material as a stage screen surface (MatFlag_Screen: the bound texture is the emission). The flag
+    // and the brightness (kept in the reflectivity slot, which a screen's shading reads as its exposure) live in the
+    // material constants, so call it before the frame's UpdateMaterials; `on` false restores the shading.
+    void SetMaterialScreen(size_t materialIndex, bool on, float brightness);
+    // S5: writes the current material constants into ring entry `frame % kRing` now (the screen bindings change the
+    // constants after the frame's UpdateMaterials ran, before the passes draw).
+    void FlushMaterialConstants(uint64_t frame);
 
     // The model's default pack texture folder: where its face SDF / light maps live (found through the model's own MME
     // files by asset/MmeHints), used when a ShaderChoice has no explicit textureFolder. Empty when none was found.
@@ -177,6 +189,16 @@ public:
     void SetProp(bool prop) { prop_ = prop; }
     bool IsProp() const { return prop_; }
     uint32_t BoneCount() const { return boneCount_; }
+    // The material's PMX name (display name; nameEn only when the PMX has no display name is not merged: this is
+    // the name material globs match, as StageGlobMatch does for `materials`).
+    const std::string& MaterialName(size_t index) const {
+        static const std::string kEmpty;
+        return index < materialNames_.size() ? materialNames_[index].first : kEmpty;
+    }
+    const std::string& MaterialNameEn(size_t index) const {
+        static const std::string kEmpty;
+        return index < materialNames_.size() ? materialNames_[index].second : kEmpty;
+    }
     uint32_t VertexCount() const { return vertexCount_; }
     uint32_t IndexCount() const { return indexCount_; }
     const std::vector<Material>& Materials() const { return materials_; }
@@ -344,11 +366,13 @@ private:
     bool mmeEffectMesh_ = false;
     std::vector<std::filesystem::path> mmeEffects_;   // per material (empty path = native shading)
     std::vector<DirectX::XMFLOAT3> mmeToonColor_;   // per material: bottom-left toon texel (white when none)
-    // Background AVI: per-material original diffuse SRV resource (video feeds these), and the material indices
-    // whose diffuse texture file name is screen.bmp (case-insensitive).
-    std::vector<ComPtr<ID3D12Resource>> screenOrigTex_;
-    std::vector<char> screenOrigHasTex_;   // the material's MatFlag_HasTexture before a video was bound
+    // Background AVI: the material indices whose diffuse texture file name is screen.bmp (case-insensitive).
     std::vector<uint32_t> screenMaterials_;
+    // S5 / background AVI: per-material original diffuse SRV resource, its MatFlag_HasTexture and the original
+    // reflectivity (BindMaterialTexture / SetMaterialScreen restore them; parallel to Materials()).
+    std::vector<ID3D12Resource*> materialOrigTex_;
+    std::vector<char> materialOrigHasTex_;   // the material's MatFlag_HasTexture before a texture was bound over it
+    std::vector<float> materialOrigReflect_;
     ComPtr<ID3D12Resource> packParamsExtCb_;
     uint8_t* packParamsExtMapped_ = nullptr;
     std::vector<DirectX::XMFLOAT4> packParamsExtSlots_;

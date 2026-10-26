@@ -12,6 +12,7 @@
 #include "render/MmeRuntime.h"
 #include "render/MmeSkin.h"
 #include "render/ScreenVideo.h"
+#include "render/StageScreens.h"
 #include <atomic>
 #include <filesystem>
 #include <functional>
@@ -24,6 +25,7 @@ namespace mmdx {
 
 class MmeRuntime;
 class MmeSkin;
+class ScenePass;
 
 struct PmxModel;
 struct ImageRGBA8;
@@ -169,7 +171,17 @@ private:
     // Schedules the per-model MME resource release for a model that left the drawn set (uids only, never pointers:
     // a freed address may be reused). Deduped against the pending list.
     void ForgetModel(uint64_t modelUid);
-    void RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t w, uint32_t h,
+    // S5: renders one stage screen's camera feed into `target` (raster, own constant-buffer / light slots). Runs
+    // before the scene passes; the screens inside the feed keep their previous texture (no recursion). `target` is
+    // the screen's own RGBA8 texture; `base` is the frame's SceneConstants (the feed overrides the camera). False when
+    // nothing was drawn (the screen keeps its content).
+    bool RenderScreenFeed(ID3D12GraphicsCommandList* cmd, const FrameView& view, const ScreenView& screen,
+                          Texture& target, uint32_t feedIndex, const SceneConstants& base);    // S5: the HDR targets a camera feed draws into (one set per feed slot, recreated when the feed size changes).
+    bool EnsureFeedTargets(uint32_t feedIndex, uint32_t width, uint32_t height);
+    // S5: reconciles the stage screens of `view` / renders their camera feeds / binds the textures (before the
+    // scene passes, so the ray-traced geometry sees the screen material flags). `baseSc` is the frame's
+    // SceneConstants.
+    void UpdateStageScreens(ID3D12GraphicsCommandList* cmd, const FrameView& view, const SceneConstants& baseSc);    void RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t w, uint32_t h,
                      uint32_t cbSlot, uint64_t frame, bool offscreen);
     // Fills jitterPx_ (render pixels, FSR convention) for this frame and the constants.
     void FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h, bool offscreen, SceneConstants& sc);
@@ -226,6 +238,7 @@ private:
     std::unique_ptr<MmeSkin> mmeSkin_;
     std::unique_ptr<OfflineRenderer> offline_;   // null without ray tracing / offline pipelines
     std::unique_ptr<ScreenVideo> screenVideo_;   // background AVI (背景AVI) feeding screen.bmp materials
+    std::unique_ptr<StageScreens> stageScreens_;  // S5: MMDX stage screens (image / video / camera feed)
     bool offlinePresent_ = true;
     bool rtSupported_ = false;
     float jitterPx_[2] = {};
@@ -233,14 +246,30 @@ private:
     float frameTimeMs_ = 16.7f;
     std::vector<std::unique_ptr<IRenderPass>> passes_;
     uint32_t pipelineMsaa_ = 0;
-    // per-frame scene constants + punctual lights (UPLOAD heap, persistently mapped);
-    // kFramesInFlight slots for on-screen frames + 1 for RenderToImage
+    // per-frame scene constants + punctual lights (UPLOAD heap, persistently mapped):
+    // kCbSlots slots (on-screen frames + RenderToImage), the extra views of a quad view, then the S5 camera feeds
+    // (StageScreens::kMaxFeedsPerFrame x kCbSlots; see kFeedCbBase in Renderer.cpp).
+    static constexpr uint32_t kFeedSlots = StageScreens::kMaxFeedsPerFrame;
     ComPtr<ID3D12Resource> sceneCb_, lightBuf_;
     uint8_t* sceneCbMapped_ = nullptr;
     uint8_t* lightBufMapped_ = nullptr;
     // S9: local fog volumes of the frame (StructuredBuffer<GpuFogVolume>, same slot layout as the lights)
     ComPtr<ID3D12Resource> fogBuf_;
     uint8_t* fogBufMapped_ = nullptr;
+    // S5: a camera feed draws into its own HDR targets (colour / normal / velocity / depth) at the feed size; the
+    // tonemapped copy goes into the screen's RGBA8 texture (shaders/screenfeed.hlsl). The feed's SceneConstants /
+    // lights live in the kFeedCbBase slots, after every other slot.
+    struct FeedTargets {
+        Texture color, normal, velocity, depth;
+        uint32_t width = 0, height = 0;
+    };
+    FeedTargets feeds_[StageScreens::kMaxFeedsPerFrame];
+    // The feeds' own descriptor windows (the main window belongs to the scene passes; a feed runs before them and
+    // must not consume their per-frame budget). kFramesInFlight x kMaxFeedsPerFrame windows.
+    TransientDescriptors feedTransient_;
+    FullscreenPipeline feedResolve_;
+    bool feedResolveTried_ = false;
+    ScenePass* scenePass_ = nullptr;   // the scene pass (owned by passes_): the S5 camera feeds draw with it
     // temporal state
     DirectX::XMFLOAT4X4 prevViewProj_{};
     DirectX::XMFLOAT3 prevEye_{};
