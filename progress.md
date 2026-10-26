@@ -2438,3 +2438,38 @@ implemented by an opencode/deepseek worker from Claude's contract spec, reviewed
 ### Notes
 - Old `build*/bin` dirs may still hold `onnxruntime.dll` and `bin/mocap/` from earlier builds; `package_release.ps1` copies `bin/*.dll`, so package from a clean bin (`build/bin` was cleaned).
 - A reset build dir needs `build.ninja` deleted too: build.cmd only configures when `build.ninja` is missing.
+
+## 2026-10-27 - Stage ecosystem: S7b, S6b, S8b, S9b-1..4 (spot gobos, stage packs in PT/GI, screen lights, physical sky, sky lighting, image skies, clouds)
+
+Every S row of docs/stage_ecosystem.md is now done; S13 (website stage gallery) is built but waits for the owner's
+word to deploy. Workers: opencode deepseek 4.1 1017 #low; Claude designed, reviewed, fixed and did the visual QA
+(captures/stages_qa/<milestone>/, raster / RT / PT / GI from one camera + the canonical `--stage none` A/B each time).
+
+### Done
+- S7b spot gobos (`shaders/gobo.hlsli`, every path + froxel / offline haze). Found on the way: imported glTF materials
+  without an occlusion map had AO = 0 (raster diffuse and hemisphere zeroed) - fixed in `BuildImportedPbrModelData`.
+- S6b stage surface packs in PT / offline GI (`TakesPtPack` for stage parts).
+- S8b screens as raster / RT area lights (`screen_light.hlsli`, GPU average colour `screen_light_avg.hlsl`). Review
+  fixes: Store4 value-cast (average was 0), polygon-irradiance winding sign, reflection uv orientation.
+- S9b-1 Physical Sky light (Preetham; `render/PhysicalSky`, `shaders/physical_sky.hlsli`). Review fixes: chromaticity
+  y + 0.012 (mauve noon horizon), sky-owned sun capped at MMD's 0.6.
+- S9b-2 the sky as a light: SH ambient (raster / RT), environment NEE + MIS (PT / GI) from a 128x64 CDF
+  (`render/SkyEnv`). Verified unbiased: PT / GI means with the sky sample on vs off agree.
+- S9b-3 image skies: .hdr / png / jpg / RGBA8 dds incl. Ray-MMD RGBT domes and cube maps (`render/SkyMap`,
+  `SkyMapRadiance` prototype per bindless table). Review fixes: `UploadBatch::CreateTextureRaw` copied from a
+  moved-from staging buffer (device removed), a dark sky-owned sun cast a ghost shadow.
+- S9b-4 procedural clouds (keyable coverage / opacity / softness / height / size / wind). Review fix: cloud lighting
+  recalibrated (clouds drew dark and bluish; the self-shadow step re-sampled the same point under a high sun).
+- GitHub issue #5 answered; its suggestions are rows U1..U8 in the milestone table (not part of this run's goal).
+- Delegate skills (opencode + antigravity, published to digital8150/claude-delegate-skills): no over-exploration
+  guard, Claude inspects workers every 15 minutes and intervenes at the first sign of wandering; 60-min timeout;
+  antigravity auto-picks the Gemini flash family first (gemini-3.8-flash-high).
+
+### Open / not verified
+- A short `--screen select --frames 3000` run (~9 s) ended before the library scan was saved (`SaveLibraryScanResult`
+  is skipped when the scan is cancelled at exit), and `build/bin/cache/library_result.json` had disappeared at that
+  point; why the old file vanished is not understood yet. A longer run (`--frames 30000`) writes it again.
+- A worker reported `[E] TransientDescriptors: window exhausted` on a PT run with an upscaler on; it did not appear in
+  the `--upscaler none` QA captures. Not investigated.
+- S8b: one average colour per screen (a two-colour image lights the floor with the mix); raster / RT get no
+  directional shadow from an image sky's own sun; clouds cast no ground shadows (the sun only dims with coverage).
