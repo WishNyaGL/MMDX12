@@ -1106,6 +1106,8 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             studio_->useMotionCamera = std::atoi(args[0].c_str()) != 0 && studio_->HasCameraKeys();
             if (studio_->useMotionCamera) StudioPossess(false);
         }
+    } else if (cmd == "studiopossess") {  // studiopossess <0|1>: possess the selected camera (viewport edits its keys)
+        if (studio_ && !args.empty()) StudioPossess(std::atoi(args[0].c_str()) != 0);
     } else if (cmd == "studiocamflatten") {  // studiocamflatten <0|1>: camera VMD export flattens the switch track
         if (!args.empty()) studioVmdFlatten_ = std::atoi(args[0].c_str()) != 0;
     } else if (cmd == "look") {  // look <id>: applies a look pack and saves the settings like a UI change

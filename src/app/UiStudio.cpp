@@ -759,8 +759,12 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
 void App::StudioCamera(CameraParams& camera) const {
     const StudioDoc& d = *studio_;
     const float frame = (float)(d.time * kMmdFps);
-    // S4: the active camera at this frame (the switch track; a project without switch keys = the main camera)
-    const std::shared_ptr<CameraMotion>& eval = d.ActiveCameraEval((int)frame);
+    // S4: the active camera at this frame (the switch track; a project without switch keys = the main camera). While
+    // possessing, the camera being edited (the selected one): possession writes the selected camera's keys, and showing
+    // the switch track's camera instead made an extra camera impossible to possess (the view never moved).
+    const std::shared_ptr<CameraMotion>& selectedEval = d.SelectedCameraEval();
+    const std::shared_ptr<CameraMotion>& eval =
+        d.possessCamera && selectedEval ? selectedEval : d.ActiveCameraEval((int)frame);
     if (d.useMotionCamera && eval) {
         CameraPose pose = eval->Evaluate(frame);
         if (!StudioCameraPerspective(frame)) {
