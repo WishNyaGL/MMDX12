@@ -353,7 +353,7 @@ PSOs, no render targets.
 
 | role | what it does |
 |---|---|
-| `surface` | the FIRST entry whose `materials` globs match a material of a stage part shades that part's materials with the pack (`surface.hlsl`); the part's other materials keep the default shading. The pack's class comes from its own class rules, else its first rule's class (a stage material rarely matches a character pack's rules), else `body` |
+| `surface` | the FIRST entry whose `materials` globs match a material of a stage part shades that part's materials with the pack (`surface.hlsl`); the part's other materials keep the default shading. The pack's class comes from its own class rules, else its first rule's class (a stage material rarely matches a character pack's rules), else `body`. Raster and RT draw the pack; PT / offline GI keep their character-only `pt_surface.hlsl` hook (`render/PtPackVariants.*`), so a stage part's PT / GI shading stays the engine's even with a surface pack |
 | `world` | a `WorldInstance` at the `socket`'s transform (the socket node's world matrix x the socket's explicit offset, resolved after the parts are posed), appended after the user's world stack in play mode and after the project's world entities in the studio. Not an editable outliner entity |
 | `screen` | the content of the `screen` with that id, drawn by the pack's `screen.hlsl` (docs/shader_screen_api.md); wins over the screen's own `source: "program"` / `file` |
 
