@@ -228,6 +228,7 @@ struct AppOptions {
     float bloomThreshold = -1.0f;  // --bloom-threshold (0.2..4; < 0 = settings)
     float bloomRadius = -1.0f;     // --bloom-radius (0..1; < 0 = settings)
     int autoLuminous = -1;     // --auto-luminous <0|1>: override for this run (-1 = settings)
+    int screenLights = -1;     // --screen-lights <0|1>: S8b stage screens as area lights, this run (-1 = settings)
     bool classic = false;      // --classic: vanilla-MMD look for this run (SSAO/SSR/bloom/volumetric/DoF/LUT/effects/soft shadows off)
     int motionLighting = -1;   // --motion-lighting <0|1>: camera VMD light/self-shadow tracks in play mode, this run
     float volumetricDensity = -1.0f;                 // --volumetric-density (< 0 = settings)

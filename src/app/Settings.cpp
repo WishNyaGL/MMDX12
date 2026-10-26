@@ -164,6 +164,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "ssr" && ParseBool(value, b)) ssr = b;
         else if (key == "bloom" && ParseBool(value, b)) bloom = b;
         else if (key == "autoLuminous" && ParseBool(value, b)) autoLuminous = b;
+        else if (key == "screenLights" && ParseBool(value, b)) screenLights = b;
         else if (key == "mmeEnabled" && ParseBool(value, b)) mmeEnabled = b;
         else if (key == "rayMmdEnabled" && ParseBool(value, b)) rayMmdEnabled = b;
         else if (key == "mmeWorkflow") {
@@ -629,6 +630,7 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     std::fprintf(f, "shadows=%d\nssao=%d\nssr=%d\nbloom=%d\ntaa=%d\n", shadows ? 1 : 0, ssao ? 1 : 0, ssr ? 1 : 0,
                  bloom ? 1 : 0, taa ? 1 : 0);
     std::fprintf(f, "autoLuminous=%d\n", autoLuminous ? 1 : 0);
+    std::fprintf(f, "screenLights=%d\n", screenLights ? 1 : 0);
     std::fprintf(f, "mmeEnabled=%d\n", mmeEnabled ? 1 : 0);
     std::fprintf(f, "rayMmdEnabled=%d\n", rayMmdEnabled ? 1 : 0);
     std::fprintf(f, "mmeWorkflow=%s\n", mmeWorkflow == 1 ? "auto" : "manual");

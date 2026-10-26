@@ -305,6 +305,66 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     goboSrvCount_ = kTotalCbSlots;
     goboTable_.resize(kMaxPunctualLights);
 
+    // S8b: the frame's screen-light table (one GpuScreenLight per screen light, raw SRV per slot through the bindless
+    // buffer table, exactly like the gobo table) and the average-colour buffer the compute pass writes. A frame without
+    // a screen light leaves SceneConstants::screenLightParams.x = -1 and every screen term is skipped.
+    screenLightBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)(kMaxScreenLights * sizeof(GpuScreenLight)) * kTotalCbSlots,
+                                         &screenLightBufMapped_, L"scene.screenlights");
+    if (!screenLightBuf_) return false;
+    if (kTotalCbSlots > (uint32_t)std::size(screenLightSrv_)) {
+        LOG_ERROR("screen light table SRV table too small for %u slots", kTotalCbSlots);
+        return false;
+    }
+    for (uint32_t slot = 0; slot < kTotalCbSlots; ++slot) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;   // raw ByteAddressBuffer (the shaders' bindless buffer table)
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.NumElements = kMaxScreenLights * (uint32_t)(sizeof(GpuScreenLight) / sizeof(uint32_t));
+        srv.Buffer.FirstElement = (UINT)slot * kMaxScreenLights * (uint32_t)(sizeof(GpuScreenLight) / sizeof(uint32_t));
+        srv.Buffer.StructureByteStride = 0;
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        const uint32_t idx = ctx.SrvHeap().Allocate(1);
+        if (idx == DescriptorHeap::kInvalid) return false;
+        ctx.Device()->CreateShaderResourceView(screenLightBuf_.Get(), &srv, ctx.SrvHeap().Cpu(idx));
+        screenLightSrv_[slot] = idx;
+    }
+    screenLightSrvCount_ = kTotalCbSlots;
+    screenLightTable_.resize(kMaxScreenLights);
+    // The screen lights' average colours: a DEFAULT-heap raw buffer of kMaxScreenLights float4 (the screen-light compute
+    // pass writes it as a UAV, the scene shaders read it as a raw SRV through the bindless buffer table). A buffer is
+    // created in COMMON whatever the requested initial state, so screenAverageState_ tracks the real state.
+    {
+        const CD3DX12_RESOURCE_DESC avgDesc = CD3DX12_RESOURCE_DESC::Buffer(
+            kMaxScreenLights * 16u, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        CD3DX12_HEAP_PROPERTIES avgHeap{D3D12_HEAP_TYPE_DEFAULT};
+        if (!CheckHr(ctx.Device()->CreateCommittedResource(&avgHeap, D3D12_HEAP_FLAG_NONE, &avgDesc,
+                                                           D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                           IID_PPV_ARGS(&screenAverageBuf_)),
+                     "CreateCommittedResource(screen average colours)"))
+            return false;
+        screenAverageBuf_->SetName(L"scene.screenaverage");
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;   // raw ByteAddressBuffer (the shaders' bindless buffer table)
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.NumElements = kMaxScreenLights * 4u;
+        srv.Buffer.StructureByteStride = 0;
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        screenAverageSrv_ = ctx.SrvHeap().Allocate(1);
+        if (screenAverageSrv_ == DescriptorHeap::kInvalid) return false;
+        ctx.Device()->CreateShaderResourceView(screenAverageBuf_.Get(), &srv, ctx.SrvHeap().Cpu(screenAverageSrv_));
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R32_TYPELESS;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uav.Buffer.NumElements = kMaxScreenLights * 4u;
+        uav.Buffer.StructureByteStride = 0;
+        uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        screenAverageUav_ = ctx.SrvHeap().Allocate(1);
+        if (screenAverageUav_ == DescriptorHeap::kInvalid) return false;
+        ctx.Device()->CreateUnorderedAccessView(screenAverageBuf_.Get(), nullptr, &uav,
+                                                ctx.SrvHeap().Cpu(screenAverageUav_));
+    }
     // S8a: the emissive-triangle pick table (one raw SRV each for the triangle list, its CDF and the per-geometry base
     // table; same slot layout as the light CDF). A frame without emitters leaves SceneConstants::emissiveParams.x = -1
     // and the path tracers skip every NEE / MIS branch.
@@ -520,6 +580,9 @@ bool Renderer::RenderScreenFeed(ID3D12GraphicsCommandList* cmd, const FrameView&
     sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};   // S7c: the feed's camera is not the frame's cluster grid
     sc.emissiveParams = emissiveParams_;   // S8a: the frame's emissive-triangle pick table (raster feed: unused)
     sc.goboParams = {goboActive_ ? (float)goboSrv_[cbSlot] : -1.0f, 0.0f, 0.0f, 0.0f};   // S7b: the frame's gobos
+    // S8b: the feed's own slot copies the frame's screen-light table (an LED wall inside a feed is a rare recursion the
+    // screen itself does not render; the table is the frame's, the same as the gobos)
+    sc.screenLightParams = {-1.0f, 0.0f, -1.0f, 0.0f};
     memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
 
     // The feed reads the frame's lights + shadow maps: its own slot in the light buffer is a copy of the frame's.
@@ -575,6 +638,145 @@ void Renderer::UpdateStageScreens(ID3D12GraphicsCommandList* cmd, const FrameVie
         return RenderScreenFeed(cmd, view, screen, target, feedIndex, baseSc);
     };
     stageScreens_->Render(*ctx_, cmd, view, renderFeed);
+}
+
+// S8b: this frame's screen lights. A screen light is the rectangle a stage screen's material fits (GpuModel::ScreenRect,
+// model space, made world by the same root transform the mirrors use), its emissive strength (the material's
+// reflectivity slot, the scale ScreenEmission uses) and the screen texture the material shows right now. A small compute
+// pass (shaders/screen_light_avg.hlsl) reduces each texture to one average linear colour into the frame's average
+// buffer, which the scene shaders use as the light's radiance (so the light follows the video / camera feed / program
+// content with no CPU readback); the specular reflection reads the texture itself at the representative point.
+//
+// Switch off (RenderSettings::screenLights) or no screen in the frame: screenLightParams.x = -1, no table, no work at
+// all, and the frame is the one without the feature byte for byte. At most kMaxScreenLights (16) lights per frame: the
+// largest emitted extent (area x strength) first, since the content colour is not known on the CPU. The cap is a shader
+// constant (ShaderInterop.h kMaxScreenLights).
+void Renderer::UpdateScreenLights(ID3D12GraphicsCommandList* cmd, const FrameView& view, SceneConstants& sc,
+                                  uint32_t cbSlot) {
+    screenReady_ = false;
+    screenLightCount_ = 0;
+    sc.screenLightParams = {-1.0f, 0.0f, -1.0f, 0.0f};
+    if (!settings_.screenLights || view.screens.empty() || !screenLightBuf_ || cbSlot >= screenLightSrvCount_)
+        return;
+    // the screen texture each screen material shows right now (StageScreens bound it already this frame)
+    const auto modelOf = [&](uint64_t uid) -> const GpuModel* {
+        for (const GpuModel* m : view.models)
+            if (m && m->Uid() == uid) return m;
+        return nullptr;
+    };
+    struct Candidate {
+        DirectX::XMFLOAT4 center;   // xyz world centre, w strength
+        DirectX::XMFLOAT4 normal;   // xyz unit world normal, w area
+        DirectX::XMFLOAT4 axisA;    // xyz world half axis A, w the screen texture's SrvHeap index
+        DirectX::XMFLOAT4 axisB;    // xyz world half axis B
+        float score = 0.0f;         // area x strength (the CPU's power ranking)
+    };
+    static thread_local std::vector<Candidate> candidates;
+    candidates.clear();
+    for (const ScreenView& sv : view.screens) {
+        if (!sv.enabled) continue;   // source none: the surface is black, no light
+        const GpuModel* model = modelOf(sv.modelUid);
+        if (!model) continue;
+        // the root transform (a stage part root is identity unless the part moves)
+        XMMATRIX root = XMMatrixIdentity();
+        for (const MmeSceneObject& o : view.mmeObjects) {
+            if (o.gpu != model) continue;
+            root = XMLoadFloat4x4(&o.rootWorld);
+            break;
+        }
+        const XMMATRIX normalMat = XMMatrixTranspose(XMMatrixInverse(nullptr, root));
+        const float det = XMVectorGetX(XMMatrixDeterminant(root));
+        const float scale = std::cbrt(std::fabs(det));   // the root's uniform scale (1 for a PMX stage)
+        // The texture the screen shows: image / video / feed / program, black when it failed to load. StageScreens owns
+        // it; the model's material SRV table is the CPU handle StageScreens re-pointed, so +0 is the screen's texture.
+        uint32_t textureSrv = DescriptorHeap::kInvalid;
+        const std::vector<GpuModel::Material>& mats = model->Materials();
+        for (uint32_t mi : sv.materials) {
+            if (mi < mats.size() && mats[mi].srvTable != DescriptorHeap::kInvalid) {
+                textureSrv = mats[mi].srvTable;
+                break;
+            }
+        }
+        if (textureSrv == DescriptorHeap::kInvalid) continue;
+        const std::vector<MaterialConstants>& consts = model->MaterialConstantsCpu();
+        for (const ScreenRect& r : model->ScreenRects()) {
+            // only the materials this screen claims (MatFlag_Screen is set on exactly those this frame)
+            if (std::find(sv.materials.begin(), sv.materials.end(), (uint32_t)r.material) == sv.materials.end())
+                continue;
+            if (r.material >= consts.size()) continue;
+            const float strength = std::max(consts[r.material].reflectivity, 0.0f);
+            if (!(strength > 0.0f)) continue;
+            Candidate c;
+            const XMVECTOR center = XMVector3TransformCoord(XMLoadFloat3(&r.center), root);
+            const XMVECTOR normal = XMVector3Normalize(XMVector3TransformNormal(XMLoadFloat3(&r.normal), normalMat));
+            const XMVECTOR a = XMVector3TransformNormal(XMLoadFloat3(&r.axisA), root);
+            const XMVECTOR b = XMVector3TransformNormal(XMLoadFloat3(&r.axisB), root);
+            XMStoreFloat4(&c.center, center);
+            c.center.w = strength;
+            XMStoreFloat4(&c.normal, normal);
+            // the world area: the rectangle's model area scaled by the root's uniform scale squared
+            c.normal.w = 4.0f * r.halfA * r.halfB * scale * scale;
+            XMStoreFloat4(&c.axisA, a * (r.halfA * scale));
+            c.axisA.w = (float)textureSrv;
+            XMStoreFloat4(&c.axisB, b * (r.halfB * scale));
+            // largest emitted extent first (area x strength): the content colour is not known on the CPU
+            c.score = c.normal.w * strength;
+            if (c.score > 1e-6f) candidates.push_back(c);
+        }
+    }
+    if (candidates.empty()) return;
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
+    if (candidates.size() > kMaxScreenLights) candidates.resize(kMaxScreenLights);
+    const uint32_t count = (uint32_t)candidates.size();
+
+    // The frame's screen-light table (the per-slot raw upload the shaders and the average-colour pass read through the
+    // bindless buffer table).
+    std::vector<GpuScreenLight>& table = screenLightTable_;
+    for (GpuScreenLight& l : table) l = GpuScreenLight{{0, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    for (uint32_t i = 0; i < count; ++i) {
+        table[i].center = candidates[i].center;
+        table[i].normal = candidates[i].normal;
+        table[i].axisA = candidates[i].axisA;
+        table[i].axisB = candidates[i].axisB;
+    }
+    memcpy(screenLightBufMapped_ + (size_t)cbSlot * kMaxScreenLights * sizeof(GpuScreenLight), table.data(),
+           kMaxScreenLights * sizeof(GpuScreenLight));
+
+    // The average-colour pass (shaders/screen_light_avg.hlsl): one 16x16 group per screen light reduces its texture
+    // to one linear colour. The buffer goes UAV -> SSV around the dispatch, which is how the scene shaders read it.
+    if (!screenAvgTried_) {
+        screenAvgTried_ = true;
+        if (!screenAvgPipe_.Create(*ctx_, shaderDir_ / L"screen_light_avg.hlsl", "CSScreenAvg"))
+            LOG_WARN("screen lights: screen_light_avg.hlsl unavailable, the screens' colour stays black");
+    }
+    if (screenAvgPipe_) {
+        const D3D12_RESOURCE_BARRIER toUav = CD3DX12_RESOURCE_BARRIER::Transition(
+            screenAverageBuf_.Get(), screenAverageState_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmd->ResourceBarrier(1, &toUav);
+        PassContext pc{*ctx_, cmd, view, settings_, targets_, stats_, transient_,
+                       sceneCb_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kSceneCbSize,
+                       lightBuf_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kLightBytes,
+                       ctx_->FrameNumber(), false, false, &builtin_, RenderPath::Raster, nullptr, nullptr,
+                       0.0f, 0.0f, frameTimeMs_};
+        const float constants[16] = {(float)count, (float)screenLightSrv_[cbSlot], 0.0f, 0.0f,
+                                     0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                     0.0f, 0.0f, 0.0f, 0.0f};
+        screenAvgPipe_.Dispatch(pc, {}, ctx_->SrvHeap().Gpu(screenAverageUav_), constants, 16, count, 1);
+        const D3D12_RESOURCE_BARRIER toSrv = CD3DX12_RESOURCE_BARRIER::Transition(
+            screenAverageBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        cmd->ResourceBarrier(1, &toSrv);
+        screenAverageState_ = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+    }
+
+    sc.screenLightParams = {(float)screenLightSrv_[cbSlot], (float)count, (float)screenAverageSrv_, 0.0f};
+    screenReady_ = true;
+    screenLightCount_ = count;
+    if (!loggedScreenLights_) {
+        loggedScreenLights_ = true;
+        LOG_INFO("SCREENLIGHTS count=%u (cap %u)", count, kMaxScreenLights);
+    }
 }
 
 // S10 planar mirrors: the reflection targets one slot draws into (half the render resolution, RGBA16F colour like the
@@ -662,6 +864,9 @@ bool Renderer::RenderMirror(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     sc.clipPlane = plane;                                // drop everything behind the mirror plane
     // S7b: the reflection shows the frame's gobos (same light list, its own cb slot); copy the table into this slot
     sc.goboParams = {goboActive_ ? (float)goboSrv_[cbSlot] : -1.0f, 0.0f, 0.0f, 0.0f};
+    // S8b: the reflection sees the frame's screen lights too (the same table, a copy in this slot), so a floor mirror
+    // shows the LED wall's light in its reflection
+    sc.screenLightParams = screenReady_ ? sc.screenLightParams : DirectX::XMFLOAT4{-1.0f, 0.0f, -1.0f, 0.0f};
     memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
     memcpy(lightBufMapped_ + (size_t)cbSlot * kLightBytes,
            lightBufMapped_ + (size_t)ctx_->FrameSlot() * kLightBytes, kLightBytes);
@@ -669,6 +874,10 @@ bool Renderer::RenderMirror(ID3D12GraphicsCommandList* cmd, const FrameView& vie
         memcpy(goboBufMapped_ + (size_t)cbSlot * kMaxPunctualLights * sizeof(GpuGobo),
                goboBufMapped_ + (size_t)ctx_->FrameSlot() * kMaxPunctualLights * sizeof(GpuGobo),
                kMaxPunctualLights * sizeof(GpuGobo));
+    if (screenReady_)
+        memcpy(screenLightBufMapped_ + (size_t)cbSlot * kMaxScreenLights * sizeof(GpuScreenLight),
+               screenLightBufMapped_ + (size_t)ctx_->FrameSlot() * kMaxScreenLights * sizeof(GpuScreenLight),
+               kMaxScreenLights * sizeof(GpuScreenLight));
 
     RenderSettings mirrorSettings = settings_;
     mirrorSettings.renderPath = RenderPath::Raster;
@@ -1095,6 +1304,8 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
     sc.lightClusterParams = {-1.0f, 0.0f, 0.0f, 0.0f};
     sc.emissiveParams = {-1.0f, -1.0f, 0.0f, -1.0f};   // S8a: RecordScene sets it after the RtScene build
     sc.goboParams = {-1.0f, 0.0f, 0.0f, 0.0f};         // S7b: no gobos unless RecordScene filled the table
+    // S8b: no screen lights unless RecordScene filled the table (a feed / extra view / RenderToImage keeps -1)
+    sc.screenLightParams = {-1.0f, 0.0f, -1.0f, 0.0f};
 }
 
 uint32_t Renderer::FillGpuLights(const LightParams& light, GpuLight* out, const std::vector<int>* spotSlices,
@@ -1538,6 +1749,12 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     // the acceleration structures are built so a ray-traced frame sees this frame's screen material flags.
     UpdateStageScreens(cmd, view, sc);
 
+    // S8b: the stage screens as rectangular area lights (raster / RT only; PT / offline GI keep S8a's emissive NEE).
+    // Fills sc.screenLightParams and the frame's screen-light table. Runs after the screens bound their textures (the
+    // average-colour pass samples them) and before the scene passes read the table; the constants go up again here.
+    UpdateScreenLights(cmd, view, sc, cbSlot);
+    memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
+
     // S10: the frame's planar mirrors (raster main views only; the ray paths reflect at the hit instead, and a quad /
     // ortho view, a camera feed or RenderToImage shows the tint). Rendered after the screens bound their textures so a
     // mirror sees this frame's LED walls, and before the scene passes that sample the reflection textures. Fills the
@@ -1727,6 +1944,9 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
             esc.emissiveParams = {-1.0f, -1.0f, 0.0f, -1.0f};    // S8a: the ortho views draw raster
             // S7b: the frame's gobo table is per light, so the extra view points at the frame's own table slot
             esc.goboParams = sc.goboParams;
+            // S8b: an extra view draws flat (Unlit), so the screen area lights are not used; the table stays off there
+            // (the orthogonal view's own camera would make the same rectangles but the flat shading ignores them)
+            esc.screenLightParams = {-1.0f, 0.0f, -1.0f, 0.0f};
             const size_t slot = (size_t)kCbSlots + (size_t)cbSlot * kMaxExtraViews + e;
             memcpy(sceneCbMapped_ + slot * kSceneCbSize, &esc, sizeof(esc));
             pc.extraSceneConstants[e] = sceneCb_->GetGPUVirtualAddress() + (uint64_t)slot * kSceneCbSize;
@@ -2484,6 +2704,29 @@ void Renderer::Shutdown() {
     goboBuf_.Reset();
     gobos_.clear();
     goboTable_.clear();
+    // S8b: the screen-light table's SRVs and its upload buffer
+    if (screenLightBuf_ && screenLightBufMapped_) screenLightBuf_->Unmap(0, nullptr);
+    if (ctx_) {
+        for (uint32_t i = 0; i < screenLightSrvCount_; ++i)
+            if (screenLightSrv_[i] != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(screenLightSrv_[i], 1);
+    }
+    std::fill(std::begin(screenLightSrv_), std::end(screenLightSrv_), DescriptorHeap::kInvalid);
+    screenLightSrvCount_ = 0;
+    screenLightBufMapped_ = nullptr;
+    screenLightBuf_.Reset();
+    screenLightTable_.clear();
+    if (ctx_) {
+        if (screenAverageSrv_ != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(screenAverageSrv_, 1);
+        if (screenAverageUav_ != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(screenAverageUav_, 1);
+    }
+    screenAverageSrv_ = DescriptorHeap::kInvalid;
+    screenAverageUav_ = DescriptorHeap::kInvalid;
+    screenAverageBuf_.Reset();
+    screenAverageState_ = D3D12_RESOURCE_STATE_COMMON;
+    screenAvgPipe_ = ComputePipeline{};
+    screenAvgTried_ = false;
+    screenReady_ = false;
+    screenLightCount_ = 0;
     sceneCbMapped_ = lightBufMapped_ = fogBufMapped_ = nullptr;
     lightCdfMapped_ = nullptr;
     sceneCb_.Reset();

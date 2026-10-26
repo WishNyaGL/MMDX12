@@ -157,6 +157,10 @@ struct RenderSettings {
     bool taa = false;                // temporal AA (camera jitter + history), works with MSAA
     bool bloom = true;
     bool autoLuminous = true;       // そぼろ AutoLuminous convention: materials marked black-specular/power>=100 glow
+    // S8b: stage screens (LED walls / video surfaces) light the raster / RT scene as rectangular area lights whose
+    // colour follows the screen's current content. Off, or no screen in the frame = the old image byte for byte.
+    // PT / offline GI are unaffected (they already have S8a's emissive NEE).
+    bool screenLights = true;
     float bloomIntensity = 0.35f;
     float bloomThreshold = 1.1f;    // linear HDR luminance where bloom starts
     bool bloomConvolution = false;  // FFT convolution bloom with a starburst kernel (falls back to the mip chain)

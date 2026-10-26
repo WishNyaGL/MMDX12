@@ -1050,12 +1050,99 @@ def build_gobo_test(out_dir):
     return stage_dir
 
 
+def build_screen_light_test(out_dir):
+    """S8b fixture: a bright image screen behind the performer over a floor, so the screen's own average colour shows on
+    the floor and the character in raster / RT exactly where PT puts it.
+
+    Geometry is in metres (the importer scales by 12.5); `lights` / `cameras` are in MMD units like every other stage.
+    The screen is a 6 x 3.5 m panel 4 m behind the performer, facing MMD +z (toward the performer and the default
+    camera), the floor is 16 x 16 m, and the screen's image is a saturated colour split (amber / cyan) so its light is
+    unmistakable against the neutral key.
+    """
+    stage_id = "screen_light_test"
+    gltf = Gltf(stage_id)
+    floor = gltf.material("floor_light", base_color=(0.62, 0.62, 0.63, 1.0), roughness=0.55, metallic=0.0)
+    screen = gltf.material("led_test", base_color=(0.02, 0.02, 0.03, 1.0), roughness=0.35, metallic=0.0,
+                           emissive=(0.5, 0.4, 0.2), double_sided=True)
+
+    # The floor only: no wall, so nothing but the floor and the performer is lit (the QA capture reads the screen's
+    # light on the floor and the character without a wall in between).
+    w, d = 16.0, 16.0
+    gltf.add(grid_part("Floor", floor, ((-w / 2, 0.0, -d / 2), (-w / 2, 0.0, d / 2), (w / 2, 0.0, -d / 2)),
+                       8, 8, uv_scale=(8.0, 8.0)))
+    # The screen: 6 x 3.5 m, 4 m behind the performer, facing MMD +z (toward the performer and the default camera).
+    # The importer mirrors glTF z (z -> -z) and flips the vertex normals with it, so the panel's glTF z = -4 lands at
+    # MMD z = +4 (behind the performer) and the corner order below (glTF normal -z) becomes MMD +z.
+    sy, sz = 3.5, 4.0
+    gltf.add(grid_part("Screen_Test", screen, ((3.0, 0.4, sz), (-3.0, 0.4, sz), (3.0, 0.4 + sy, sz)), 6, 4,
+                       uv_scale=(1.0, 1.0)))
+
+    stage_dir = os.path.join(out_dir, stage_id)
+    os.makedirs(stage_dir, exist_ok=True)
+    with open(os.path.join(stage_dir, stage_id + ".glb"), "wb") as f:
+        f.write(gltf.build())
+
+    # the screen's image: amber on the left, cyan on the right, with a soft gradient (a big, bright, unmistakable panel)
+    def split(x, y, width=64, height=36):
+        fx = x / (width - 1)
+        fy = y / (height - 1)
+        if fx < 0.5:
+            return (int(235 - 40 * fy), int(150 + 60 * fy), int(40 + 30 * fy))
+        return (int(30 + 40 * fy), int(190 + 50 * fy), int(230 - 20 * fy))
+
+    write_png(os.path.join(stage_dir, "textures", "led_test.png"), 64, 36, split)
+
+    manifest = {
+        "format": "mmdx-stage",
+        "formatVersion": 1,
+        "id": stage_id,
+        "version": "1.0.0",
+        "name": {"ko": "스크린 조명 테스트", "en": "Screen light test", "ja": "スクリーンライトテスト"},
+        "description": {"ko": "S8b: 캐릭터 옆의 밝은 이미지 스크린이 바닥과 캐릭터를 비춘다 (래스터 / RT / PT 비교).",
+                        "en": "S8b: a bright image screen beside the performer lights the floor and the character "
+                              "(raster / RT / PT comparison)."},
+        "authors": [{"name": "MMDX stagegen", "role": "procedural"}],
+        "license": "CC0-1.0",
+        "tags": ["screen", "led", "light", "test"],
+        "models": [{"file": stage_id + ".glb", "name": "Room", "role": "floor"}],
+        "materials": [
+            {"match": "floor_light", "baseColor": [0.62, 0.62, 0.63, 1.0], "roughness": 0.55},
+            {"match": "led_test", "screen": "main", "castShadow": False},
+        ],
+        "lights": [
+            # a dim neutral key + ambient only: the screen's own light must read
+            light("sun", "key", intensity=0.08, color=(0.65, 0.68, 0.80), direction=(0.2, -1.0, 0.35)),
+            light("ambient", "ambient", intensity=0.05, color=(1.0, 1.0, 1.0)),
+        ],
+        "sockets": [
+            {"name": "world", "position": [0.0, 30.0, -140.0]},
+            {"name": "stage_center", "position": [0.0, 15.0, 0.0]},
+        ],
+        "cameras": [
+            {"name": "wide", "position": [0.0, 22.0, 150.0], "target": [-10.0, 24.0, -40.0], "fov": 40.0},
+            {"name": "screen", "position": [-30.0, 20.0, 90.0], "target": [-25.0, 22.0, -40.0], "fov": 42.0},
+        ],
+        "screens": [
+            {"id": "main", "materials": ["led_test"], "source": "image", "file": "textures/led_test.png",
+             "width": 2048, "height": 1024, "brightness": 2.0, "emitLight": True},
+        ],
+        "environment": {
+            "fog": {"density": 0.0008, "color": [0.55, 0.60, 0.72], "anisotropy": 0.5, "heightFalloff": 0.006},
+            "ambient": {"intensity": 0.05, "skyZenith": [0.03, 0.04, 0.08], "ground": [0.05, 0.05, 0.06]},
+        },
+    }
+    with open(os.path.join(stage_dir, "stage.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return stage_dir
+
+
 STAGES = {
     "cyclorama": build_cyclorama,
     "mirror_room": build_mirror_room,
     "led_stage": build_led_stage,
     "pack_test": build_pack_test,
     "gobo_test": build_gobo_test,
+    "screen_light_test": build_screen_light_test,
 }
 
 

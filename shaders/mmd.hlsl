@@ -11,6 +11,7 @@
 #include "pbr_common.hlsli"   // includes dielectric.hlsli (S2b FresnelDielectric)
 #include "light_cluster.hlsli"   // S7c: the fragment's froxel light list (after pbr_common: gPbrBuf)
 #include "gobo.hlsli"            // S7b: spot gobos (the light loops below)
+#include "screen_light.hlsli"    // S8b: stage screens as rectangular area lights (raster / RT)
 
 cbuffer MaterialCB : register(b1) {
     float4 gDiffuse; float3 gSpecular; float gSpecularPower; float3 gAmbient; float gEdgeSize;
@@ -490,12 +491,16 @@ PSOut MmdShade(VSOut i, bool front, float3 n, float3 L, float3 V, float4 tex, fl
     float3 hemi = lerp(Hemisphere(n), lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity, flat * 0.85);
     color += albedoLin * hemi * gHemiStrength;
     color += albedoLin * PunctualDiffuse(i.worldPos, n, 1.0, flat);
+    // S8b: the stage screens' area-light term (LED walls / video surfaces light the performer and the floor). Zero cost
+    // without a screen light in the frame.
+    color += albedoLin * ScreenLightsDiffuse(i.worldPos, n);
 
     float reflectivity = gReflectivity;
     if (gFlags & MAT_STAGE) {
         float floorMask = smoothstep(0.82, 0.97, n.y);
         reflectivity = saturate(reflectivity + gFloorGloss * floorMask);
         color += PunctualSpecular(i.worldPos, n, V, 48.0) * reflectivity;
+        color += ScreenLightsSpecularBlinn(i.worldPos, n, V, 48.0) * reflectivity;
     } else {
         // anime rim light: grazing angles on the side the key light comes from
         float rim = pow(1.0 - saturate(dot(n, V)), 4.0);
@@ -627,6 +632,8 @@ PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, 
     float3 hemi = lerp(Hemisphere(n), lerp(gGroundColor, gSkyZenith, 0.65) * gSunIntensity, flat * 0.85);
     color += diffLin * hemi * gHemiStrength * ao;
     color += diffLin * PunctualDiffuse(i.worldPos, n, 1.0, flat) * ao;
+    // S8b: the screen area lights (one-sided, unshadowed; the same average-colour scale as the screen's emission)
+    color += diffLin * ScreenLightsDiffuse(i.worldPos, n) * ao;
 
     // Environment specular: the sky the path tracer reflects (SkyColor at full radiance, not the hemiStrength fill),
     // seen along the GGX dominant direction and pre-blurred toward the normal's sky for rough lobes, weighted by the
@@ -662,6 +669,8 @@ PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, 
         }
         color += spec * sh * sunLin * nl * specScale;
         color += PunctualSpecularGGX(i.worldPos, n, V, rough, f0) * specScale;
+        // S8b: the screen area lights' GGX lobe (the representative point, widened by the screen's angular radius)
+        color += ScreenLightsSpecularGGX(i.worldPos, n, V, rough, f0) * specScale;
     }
     // S2a KHR_materials_clearcoat: a second, smoother GGX lobe over the base layer with F0 0.04 (glTF's coat
     // reflectance). Zero cost when the factor is 0 (Ray-MMD / plain glTF materials never enter).
@@ -683,6 +692,7 @@ PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, 
                                  : saturate(dot(f0, float3(0.2126, 0.7152, 0.0722)) * (1.0 - rough));
     if (gFlags & MAT_STAGE) {
         color += PunctualSpecular(i.worldPos, n, V, 48.0) * reflectivity;
+        color += ScreenLightsSpecularBlinn(i.worldPos, n, V, 48.0) * reflectivity;
     } else {
         // Rim stays; metals tint it by F0 (lerp toward F0's luminance).
         float rim = pow(1.0 - saturate(dot(n, V)), 4.0);
@@ -994,8 +1004,10 @@ PSOut PSFloor(VSOut i) {
     float ndl = saturate(dot(n, L));
     float3 color = albedo * (sunLin * ndl * lerp(0.42, 1.0, sh) + Hemisphere(n) * 0.55) * gSunIntensity;
     color += albedo * PunctualDiffuse(i.worldPos, n, 0.0, 0.0);
+    color += albedo * ScreenLightsDiffuse(i.worldPos, n);   // S8b: the stage screens light the studio floor
     float3 V = normalize(gEyePos - i.worldPos);
     color += PunctualSpecular(i.worldPos, n, V, 64.0) * 0.35;
+    color += ScreenLightsSpecularBlinn(i.worldPos, n, V, 64.0) * 0.35;
     float reflectivity = 0.42 * (1.0 - smoothstep(120.0, 600.0, r));
     // dissolve into the sky toward the edge so there is no visible horizon seam
     float3 viewDir = normalize(i.worldPos - gEyePos);

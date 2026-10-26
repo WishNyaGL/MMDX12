@@ -185,6 +185,11 @@ private:
     // scene passes, so the ray-traced geometry sees the screen material flags). `baseSc` is the frame's
     // SceneConstants.
     void UpdateStageScreens(ID3D12GraphicsCommandList* cmd, const FrameView& view, const SceneConstants& baseSc);
+    // S8b: this frame's screen lights (one rectangle per screen material, largest emitted power first, at most
+    // kMaxScreenLights) + the compute pass that averages every screen texture into their colour. Fills
+    // `sc.screenLightParams` (x = -1 with no screen light: the shaders skip every screen term). Runs after
+    // UpdateStageScreens (the screen textures are bound then) and before the scene passes.
+    void UpdateScreenLights(ID3D12GraphicsCommandList* cmd, const FrameView& view, SceneConstants& sc, uint32_t cbSlot);
     // S10 planar mirrors: picks the frame's mirror planes (at most kMaxMirrorPlanes: the largest on-screen ones
     // facing the eye), renders each one's reflection into its slot's target and fills `sc`'s mirror fields. Raster
     // main views only: RT / PT / offline GI reflect at the hit, quad / ortho / feeds / RenderToImage show the tint.
@@ -351,6 +356,27 @@ private:
     // S7b: the gobo paths that produced the texture cache (a path that disappears from the frame frees its texture).
     std::vector<std::wstring> goboUsed_;
     bool goboActive_ = false;   // this frame's scene has a gobo (RecordScene fills the table of its slot)
+    // S8b: the frame's screen-light table (kMaxScreenLights GpuScreenLight entries, a raw SRV per constant-buffer slot
+    // through the bindless table, exactly like the gobo table). The lights' colour follows the screen's content: the
+    // scene shaders read the screen texture the material shows (the table's axisA.w = its SrvHeap index), so there is
+    // no per-frame reduction buffer and no CPU readback.
+    std::vector<GpuScreenLight> screenLightTable_;
+    ComPtr<ID3D12Resource> screenLightBuf_;
+    uint8_t* screenLightBufMapped_ = nullptr;
+    uint32_t screenLightSrv_[64] = {};   // >= kTotalCbSlots (Renderer.cpp)
+    uint32_t screenLightSrvCount_ = 0;
+    // S8b: the screen lights' average colour (shaders/screen_light_avg.hlsl, one 16x16 group per light). A DEFAULT-heap
+    // raw buffer of kMaxScreenLights float4: a UAV for the compute pass, a raw SRV for the scene shaders
+    // (SceneConstants::screenLightParams.z). A buffer is created in COMMON, so the state is tracked explicitly.
+    ComPtr<ID3D12Resource> screenAverageBuf_;
+    uint32_t screenAverageSrv_ = DescriptorHeap::kInvalid;
+    uint32_t screenAverageUav_ = DescriptorHeap::kInvalid;
+    D3D12_RESOURCE_STATES screenAverageState_ = D3D12_RESOURCE_STATE_COMMON;
+    ComputePipeline screenAvgPipe_;
+    bool screenAvgTried_ = false;       // the average pass compiled (or failed: one [W], the screens stay black)
+    bool screenReady_ = false;          // this frame's scene has screen lights (RecordScene filled the table)
+    bool loggedScreenLights_ = false;   // one SCREENLIGHTS log line per run (not per frame)
+    uint32_t screenLightCount_ = 0;     // entries of screenLightTable_ this frame (for the mirror slot copies)
     // S7c: the LIGHTS line's cluster fields of the last log (the packed grid, 0 = no clusters): one line per change.
     uint32_t loggedClusterGrid_ = UINT32_MAX;
     std::vector<int> prevSpotPick_;

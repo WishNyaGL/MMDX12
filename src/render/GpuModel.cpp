@@ -615,6 +615,123 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         }
     }
 
+    // S8b: the light rectangle of every stage material that has rest-pose triangles, fitted once: the area-weighted
+    // centroid and normal (from the vertex normals, like the S10 mirror plane below), then the two in-plane axes from
+    // the principal axis of the vertices' in-plane scatter, and the half extents of the vertices on them. A screen
+    // claims a material only at frame time (StageScreens::SetMaterialScreen sets MatFlag_Screen), so every stage material
+    // is fitted here and the renderer filters the list by the current flags. A non-planar screen (a curved LED wall)
+    // keeps this one rectangle: the area light is an approximation there, close to the emitter's own extent. A character
+    // never carries a screen, so character models skip the fit (an extra per-material pass over their triangles).
+    for (size_t mIdx = 0; role == ModelRole::Stage && mIdx < pmx.materials.size() && mIdx < consts.size(); ++mIdx) {
+        const uint32_t first = materials_[mIdx].indexStart;
+        const uint32_t count = std::min(materials_[mIdx].indexCount, (uint32_t)(pmx.indices.size() - first));
+        double cx = 0, cy = 0, cz = 0;
+        // area-weighted normal and centroid (the same fit as the S10 mirror plane below)
+        double nx = 0, ny = 0, nz = 0, area = 0;
+        for (uint32_t t = 0; t + 2 < count; t += 3) {
+            const DirectX::XMFLOAT3& a = pmx.vertices[pmx.indices[first + t + 0]].position;
+            const DirectX::XMFLOAT3& b = pmx.vertices[pmx.indices[first + t + 1]].position;
+            const DirectX::XMFLOAT3& c = pmx.vertices[pmx.indices[first + t + 2]].position;
+            const double p[3][3] = {{a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}};
+            const double e1[3] = {p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]};
+            const double e2[3] = {p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+            const double cr[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                                  e1[0] * e2[1] - e1[1] * e2[0]};
+            const double tri = 0.5 * std::sqrt(cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]);
+            if (!(tri > 0.0)) continue;
+            nx += tri * (pmx.vertices[pmx.indices[first + t + 0]].normal.x +
+                         pmx.vertices[pmx.indices[first + t + 1]].normal.x +
+                         pmx.vertices[pmx.indices[first + t + 2]].normal.x) / 3.0;
+            ny += tri * (pmx.vertices[pmx.indices[first + t + 0]].normal.y +
+                         pmx.vertices[pmx.indices[first + t + 1]].normal.y +
+                         pmx.vertices[pmx.indices[first + t + 2]].normal.y) / 3.0;
+            nz += tri * (pmx.vertices[pmx.indices[first + t + 0]].normal.z +
+                         pmx.vertices[pmx.indices[first + t + 1]].normal.z +
+                         pmx.vertices[pmx.indices[first + t + 2]].normal.z) / 3.0;
+            cx += tri * (a.x + b.x + c.x) / 3.0;
+            cy += tri * (a.y + b.y + c.y) / 3.0;
+            cz += tri * (a.z + b.z + c.z) / 3.0;
+            area += tri;
+        }
+        const double nl = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (!(area > 0.0) || !(nl > 1e-12)) continue;
+        ScreenRect rect;
+        rect.material = mIdx;
+        rect.area = (float)area;
+        rect.center = {(float)(cx / area), (float)(cy / area), (float)(cz / area)};
+        rect.normal = {(float)(nx / nl), (float)(ny / nl), (float)(nz / nl)};
+        // The two in-plane axes: the principal axis of the vertices' in-plane scatter (PCA of a rectangle's corners
+        // is exactly its axes, whatever the tessellation), the second axis = normal x A. A world axis that is not the
+        // normal starts the basis, so a degenerate / single-point material still gets an orthonormal frame.
+        const double n[3] = {rect.normal.x, rect.normal.y, rect.normal.z};
+        double a0[3] = {std::abs(n[0]) < 0.9 ? 1.0 : 0.0, std::abs(n[0]) < 0.9 ? 0.0 : 1.0, 0.0};
+        const double a0d = a0[0] * n[0] + a0[1] * n[1] + a0[2] * n[2];
+        for (int k = 0; k < 3; ++k) a0[k] -= a0d * n[k];
+        const double a0l = std::sqrt(a0[0] * a0[0] + a0[1] * a0[1] + a0[2] * a0[2]);
+        if (!(a0l > 1e-9)) continue;
+        for (int k = 0; k < 3; ++k) a0[k] /= a0l;
+        const double b0[3] = {n[1] * a0[2] - n[2] * a0[1], n[2] * a0[0] - n[0] * a0[2], n[0] * a0[1] - n[1] * a0[0]};
+        double saa = 0, sbb = 0, sab = 0;
+        for (uint32_t t = 0; t + 2 < count; t += 3) {
+            for (int v = 0; v < 3; ++v) {
+                const DirectX::XMFLOAT3& p = pmx.vertices[pmx.indices[first + t + (uint32_t)v]].position;
+                const double d[3] = {p.x - rect.center.x, p.y - rect.center.y, p.z - rect.center.z};
+                const double da = d[0] * a0[0] + d[1] * a0[1] + d[2] * a0[2];
+                const double db = d[0] * b0[0] + d[1] * b0[1] + d[2] * b0[2];
+                saa += da * da;
+                sbb += db * db;
+                sab += da * db;
+            }
+        }
+        // the principal angle of the 2 x 2 scatter matrix (0 when it is isotropic)
+        const double theta = 0.5 * std::atan2(2.0 * sab, saa - sbb);
+        const double cs = std::cos(theta), sn = std::sin(theta);
+        double a[3], b[3];
+        for (int k = 0; k < 3; ++k) {
+            a[k] = a0[k] * cs + b0[k] * sn;
+            b[k] = b0[k] * cs - a0[k] * sn;
+        }
+        rect.axisA = {(float)a[0], (float)a[1], (float)a[2]};
+        rect.axisB = {(float)b[0], (float)b[1], (float)b[2]};
+        // Orient the axes by the texture: A along +u and B along +v (the rectangle's uv in screen_light.hlsli is
+        // 0.5 + 0.5 x the axis projections), so the specular reflection shows the image the right way round.
+        {
+            double au = 0, av = 0, bu = 0, bv = 0;
+            for (uint32_t t = 0; t + 2 < count; t += 3) {
+                for (int v = 0; v < 3; ++v) {
+                    const PmxVertex& pv = pmx.vertices[pmx.indices[first + t + (uint32_t)v]];
+                    const double d[3] = {pv.position.x - rect.center.x, pv.position.y - rect.center.y,
+                                         pv.position.z - rect.center.z};
+                    const double da = d[0] * a[0] + d[1] * a[1] + d[2] * a[2];
+                    const double db = d[0] * b[0] + d[1] * b[1] + d[2] * b[2];
+                    au += da * pv.uv.x; av += da * pv.uv.y;
+                    bu += db * pv.uv.x; bv += db * pv.uv.y;
+                }
+            }
+            if (std::abs(bu) > std::abs(au)) {   // u runs along B: swap the axes
+                std::swap(rect.axisA, rect.axisB);
+                std::swap(au, bu);
+                std::swap(av, bv);
+            }
+            if (au < 0) rect.axisA = {-rect.axisA.x, -rect.axisA.y, -rect.axisA.z};
+            if (bv < 0) rect.axisB = {-rect.axisB.x, -rect.axisB.y, -rect.axisB.z};
+        }
+        // half extents: the largest vertex distance along each in-plane axis from the centroid
+        float halfA = 0.0f, halfB = 0.0f;
+        for (uint32_t t = 0; t + 2 < count; t += 3) {
+            for (int v = 0; v < 3; ++v) {
+                const DirectX::XMFLOAT3& p = pmx.vertices[pmx.indices[first + t + (uint32_t)v]].position;
+                const float dx = p.x - rect.center.x, dy = p.y - rect.center.y, dz = p.z - rect.center.z;
+                halfA = std::max(halfA, std::abs(dx * rect.axisA.x + dy * rect.axisA.y + dz * rect.axisA.z));
+                halfB = std::max(halfB, std::abs(dx * rect.axisB.x + dy * rect.axisB.y + dz * rect.axisB.z));
+            }
+        }
+        rect.halfA = halfA;
+        rect.halfB = halfB;
+        rect.valid = halfA > 1e-4f && halfB > 1e-4f;
+        if (rect.valid) screenRects_.push_back(rect);
+    }
+
     // S10: the plane of every mirror material (MatFlag_Mirror), fitted once from its rest-pose triangles. A mirror
     // material is an authored flat surface, so the area-weighted centroid and normal of its triangles are the plane;
     // a material whose vertices do not stay within 1 % of its own extent of that plane (a curved or scattered group)
@@ -1390,6 +1507,7 @@ void GpuModel::Destroy() {
     stageReceive_.clear();
     stageMirror_.clear();
     mirrorPlanes_.clear();
+    screenRects_.clear();
     if (materialCb_ && materialMapped_) materialCb_->Unmap(0, nullptr);
     materialMapped_ = nullptr;
     for (uint32_t a : srvAllocations_) ctx_->SrvHeap().Free(a, 3);

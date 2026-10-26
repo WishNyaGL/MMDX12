@@ -339,6 +339,18 @@ naming the same screen wins over it. A broken or missing pack leaves the screen 
 frame (play mode and the studio), and the studio's stage panel writes per-screen overrides into the project
 (`"screens": {id: {source, file, camera, brightness}}`, project version 6).
 
+**Screens light the scene in every path (S8).** The path tracers sample the emissive triangles directly (S8a, an
+emissive-triangle next-event-estimation table built per frame). Raster and RT get one rectangular area light per screen
+material (S8b): the rectangle the material's rest-pose triangles fit, transformed by the part's root each frame, one
+sided (the side the surface is drawn from). Its diffuse light is the screen texture's average colour this frame (a GPU
+reduction, no readback) times the screen's `brightness`, so a video / camera feed / program screen lights the performer
+and the floor with whatever it is showing; a glossy surface's reflection reads the texture itself (the image shows the
+right way round). Limits: one rectangle and one average per screen material (a curved LED wall is approximated by one
+rectangle; a two-colour image lights the floor with the mix, where the path tracers show each half), unshadowed. At
+most 16 screen lights per frame (the largest emitters win, by area x brightness).
+`RenderSettings::screenLights` (ini `screenLights=`, CLI `--screen-lights 0|1`) switches it off; a frame with no screen
+is unchanged either way.
+
 ## Planar mirrors
 
 **Rendered since S10 (2026-10-26).** A material rule with `"mirror": true` makes that material a true planar mirror in

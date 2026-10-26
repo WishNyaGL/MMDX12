@@ -155,6 +155,12 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     // w = mip bias from the focus (0 = sharp). x = SrvHeap index of the raw ByteAddressBuffer holding that table,
     // negative = no light of the frame has a gobo: the old image, zero cost.
     DirectX::XMFLOAT4 goboParams;
+    // S8b: the frame's screen lights (raster / RT only; PT / offline GI use S8a's emissive NEE instead).
+    // x = SrvHeap index of the raw ByteAddressBuffer holding kMaxScreenLights GpuScreenLight entries (-1 = no screen
+    // light this frame: every screen term is skipped and the frame is the old one), y = the screen light count
+    // (at most kMaxScreenLights), z = SrvHeap index of the average-colour buffer (Renderer::screenAverageBuf_, one
+    // float4 per screen light: xyz = that screen texture's average in linear light), w = unused.
+    DirectX::XMFLOAT4 screenLightParams;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 
@@ -166,6 +172,22 @@ struct GpuGobo {
     float mipBias;    // focus: 0 = sharp, > 0 = a blurred (higher) mip
 };
 static_assert(sizeof(GpuGobo) == 16, "GpuGobo layout");
+
+// S8b: the frame's screen lights (raster / RT only). One entry per stage screen material instance: the rectangle its
+// rest-pose triangles fit into (GpuModel::ScreenRect) transformed into world space, the emissive strength (the scale
+// ScreenEmission uses) and the heap index of the screen texture the material shows (the colour source for the average
+// reduction and for the specular reflection). Read by shaders/screen_light.hlsli through the bindless buffer / texture
+// tables (SceneConstants::screenLightParams.x = this table's SrvHeap index). 64 B, 16-aligned.
+inline constexpr uint32_t kMaxScreenLights = 16;
+
+struct GpuScreenLight {
+    DirectX::XMFLOAT4 center;   // xyz = rectangle centre (world), w = the screen's emissive strength (brightness)
+    DirectX::XMFLOAT4 normal;   // xyz = unit normal (the side the screen shines from), w = area (world^2)
+    // axisA.xyz = half axis A (world), w = the screen texture's SrvHeap index (the average + specular colour source)
+    DirectX::XMFLOAT4 axisA;
+    DirectX::XMFLOAT4 axisB;    // xyz = half axis B (world), w unused
+};
+static_assert(sizeof(GpuScreenLight) == 64, "GpuScreenLight layout");
 
 // Shader-pack alpha key (pack.json class rule "alphaKey", 0..1; 0 = off). PackClass stays in bits 0..7 of
 // MaterialConstants::packClass, the key lives in bits 8..15 as round(key * 255). The HLSL side (mmd.hlsl,

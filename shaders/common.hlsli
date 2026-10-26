@@ -87,6 +87,11 @@ cbuffer SceneCB : register(b0) {
     // ByteAddressBuffer holding one GpuGobo per punctual light (negative = no gobo in the frame: no fetch, the old
     // image). A light's entry is (gobo texture SrvHeap index or -1, rotation radians, uv scale, focus mip bias).
     float4 gGoboParams;
+    // S8b: the frame's screen lights (ShaderInterop.h GpuScreenLight / shaders/screen_light.hlsli): x = SrvHeap index
+    // of the raw ByteAddressBuffer holding one GpuScreenLight per screen light (-1 = none: every screen term is
+    // skipped), y = the count (at most kMaxScreenLights), z = SrvHeap index of the average-colour buffer (one float4
+    // per light, shaders/screen_light_avg.hlsl), w unused.
+    float4 gScreenLights;
 };
 
 static const float PI = 3.14159265;

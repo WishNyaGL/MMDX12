@@ -232,6 +232,8 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.bloomRadius = (float)_wtof(next().c_str());
         } else if (arg == L"--auto-luminous") {
             opt.autoLuminous = _wtoi(next().c_str()) != 0 ? 1 : 0;
+        } else if (arg == L"--screen-lights") {
+            opt.screenLights = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--lut") {
             opt.lut = WideToUtf8(next());
         } else if (arg == L"--classic") {
@@ -545,6 +547,7 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.bloomThreshold >= 0.0f) settings_.bloomThreshold = std::clamp(options_.bloomThreshold, 0.2f, 4.0f);
     if (options_.bloomRadius >= 0.0f) settings_.bloomLook.radius = std::clamp(options_.bloomRadius, 0.0f, 1.0f);
     if (options_.autoLuminous >= 0) settings_.autoLuminous = options_.autoLuminous != 0;
+    if (options_.screenLights >= 0) settings_.screenLights = options_.screenLights != 0;
     if (options_.motionLighting >= 0) settings_.motionLighting = options_.motionLighting != 0;
     if (options_.effectSet) settings_.effectStack = options_.effectStack;   // --effect, this run only
     if (options_.effectSet)
@@ -763,6 +766,7 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.bloomThreshold >= 0.0f) settings_.bloomThreshold = persisted.bloomThreshold;
     if (options_.bloomRadius >= 0.0f) settings_.bloomLook.radius = persisted.bloomLook.radius;
     if (options_.autoLuminous >= 0) settings_.autoLuminous = persisted.autoLuminous;
+    if (options_.screenLights >= 0) settings_.screenLights = persisted.screenLights;
     if (options_.motionLighting >= 0) settings_.motionLighting = persisted.motionLighting;
     if (!options_.lut.empty()) settings_.colorLut = persisted.colorLut;
     if (options_.effectSet) settings_.effectStack = persisted.effectStack;   // --effect, that run only
@@ -1714,6 +1718,7 @@ void App::ApplyRenderSettings() {
     rs.ssr = settings_.ssr;
     rs.bloom = settings_.bloom;
     rs.autoLuminous = settings_.autoLuminous;
+    rs.screenLights = settings_.screenLights;
     rs.taa = settings_.taa;
     rs.exposure = settings_.exposure;
     rs.renderPath = (RenderPath)settings_.renderPath;

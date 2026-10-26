@@ -31,6 +31,8 @@ struct AppSettings {
     bool shadows = true, ssao = true, ssr = true, bloom = true, taa = false;
     // そぼろ AutoLuminous convention: PMX materials the author marked (black specular, power >= 100) glow. Default on.
     bool autoLuminous = true;
+    // S8b: stage screens light the raster / RT scene as area lights (ini screenLights=0|1, CLI --screen-lights).
+    bool screenLights = true;
     bool readOnly = false;     // runtime only, never saved: Save() is a no-op (--classic runs)
     // Global MME switch (ini mmeEnabled=0|1, CLI --mme-global). Off = no MME object effect, no MME post stack, no
     // MME effect objects, everywhere (play / lobby / studio / offline). Does not cover the Ray-MMD PBR material

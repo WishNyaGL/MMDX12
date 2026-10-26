@@ -59,6 +59,21 @@ struct MirrorPlane {
     bool valid = false;
 };
 
+// S8b raster / RT screen lights: the rectangle an S5 screen material's rest-pose triangles fit into (model space),
+// fitted once at load and transformed by the part's root each frame (Renderer::FillScreenLights). A screen whose
+// triangles are not planar (a curved LED wall) keeps the single fitted rectangle: the area-light term is an
+// approximation there, and the plan caps a screen at one rectangle.
+struct ScreenRect {
+    size_t material = 0;                  // index into GpuModel::Materials()
+    DirectX::XMFLOAT3 center{0, 0, 0};    // area-weighted centroid
+    DirectX::XMFLOAT3 normal{0, 0, 1};    // unit, model space: the side the screen shines from
+    DirectX::XMFLOAT3 axisA{1, 0, 0};     // unit in-plane axes (model space)
+    DirectX::XMFLOAT3 axisB{0, 1, 0};
+    float halfA = 0.0f, halfB = 0.0f;     // half extents along axisA / axisB
+    float area = 0.0f;                    // rest-pose triangle area (model space): ranks the frame's screen lights
+    bool valid = false;                   // false = degenerate (no lit rectangle)
+};
+
 // Per-material PBR source (MaterialSource) and the PBR debug channel (PbrDebug) live in render/RenderTypes.h
 // (with the rest of the render settings); GpuModel reads them through RenderSettings.
 
@@ -256,6 +271,10 @@ public:
     // triangles (model space; the caller applies the model's root transform). A material whose triangles are not
     // coplanar within 1 % of the material's extent is listed with valid = false (it shows its tint only).
     const std::vector<MirrorPlane>& MirrorPlanes() const { return mirrorPlanes_; }
+    // S8b: the fitted rectangles of the model's materials (stage parts only; model space - the caller applies the root
+    // transform). A screen claims a material at frame time (StageScreens::SetMaterialScreen sets MatFlag_Screen), so the
+    // renderer filters this list by the material's current flags (Renderer::UpdateScreenLights).
+    const std::vector<ScreenRect>& ScreenRects() const { return screenRects_; }
     // Runtime PBR overrides (MMDX stage material targets): applies `list` for ring entry `frame % 3` and only when
     // `version` differs from the one that entry was written with (same contract as UpdateMaterials). The FIRST call
     // with a non-empty list moves the PBR records into a 3-entry UPLOAD-heap ring with one SRV each (a model that
@@ -377,6 +396,9 @@ private:
     // stageReceive_, plus the mirror planes fitted once at Create.
     std::vector<int8_t> stageMirror_;
     std::vector<MirrorPlane> mirrorPlanes_;
+    // S8b: the fitted rectangles of every stage material that has rest-pose triangles (see ScreenRect). A screen claims
+    // a material at frame time, so the renderer filters this list by the material's MatFlag_Screen.
+    std::vector<ScreenRect> screenRects_;
     uint64_t stageFlagsGen_ = 0;         // bumped when a shadow flag override changes (UpdateMaterials version)
     ModelRole role_ = ModelRole::Character;
     bool dynamic_ = false;   // M8a: an animated stage rebuilds its BLAS

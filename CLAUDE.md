@@ -76,7 +76,12 @@ progress.md is the session log. Read its latest entry first.
   part) from `app/StageRuntime` (play) / `StudioStageScreens` (studio, `camera` may be `uid:<n>` = an S4 studio camera);
   the studio's stage panel writes per-screen overrides into the project (`"screens"`, version 6) and the ui-script
   command `studioscreen <stage index> <screen id> <none|image|video|camera> [file|camera]` sets one (`studiostate` logs
-  one `STUDIOSCREEN` line per screen).
+  one `STUDIOSCREEN` line per screen). S8b makes each screen an area light in raster / RT (`Renderer::UpdateScreenLights`,
+  `shaders/screen_light.hlsli`: one rectangle per screen material fitted at load, axes oriented by the material's uv;
+  diffuse colour = the screen texture's average from `shaders/screen_light_avg.hlsl` (one 16x16 group per light into a
+  raw buffer, `screenLightParams.z`), one-sided polygon irradiance (sign oriented by the axes' handedness) + a
+  representative-point specular that samples the texture, at most 16 per frame; off with
+  `RenderSettings::screenLights` / ini `screenLights=0` / `--screen-lights 0`; PT / offline GI keep S8a's NEE).
 - Planar mirrors (S10, docs/stage_format.md "Planar mirrors"): a stage material rule's `"mirror": true` sets
   `MatFlag_Mirror` (`render/ShaderInterop.h`, `shaders/common.hlsli` / `rt_common.hlsli`). `GpuModel::Create` fits one
   plane per mirror material once from its rest-pose vertices (area-weighted centroid + area-weighted vertex normals,
