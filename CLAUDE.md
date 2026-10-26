@@ -321,6 +321,24 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     is the pre-S9c one, no tracking loop entered). Full skips the single-scatter pass (no double counting); raster / RT / PT
     keep it. A pixel whose first interaction is in the medium writes the medium albedo and the view direction as its guides.
     Defaults (no volumes, share 1, g unset, eye within 220 of the origin) reproduce the pre-S9 image.
+    Real-time haze modes (S9d): `RenderSettings::volumetricMode` 0 (default) = a froxel grid, 1 = the per-pixel march
+    above (ini `volumetricMode=`, CLI `--volumetric-mode froxel|march`, kept for A/B). The grid is 160 x 90 screen tiles
+    x 64 exponential view-depth slices between nearZ and the march's own `VolumetricMaxDistance` (RGBA16F `Texture3D`s,
+    created on the first froxel frame in `VolumetricPass::EnsureFroxelTargets`, one `FROXEL grid=... MB=` line; nothing
+    is allocated while volumetrics are off). `volumetric_froxel.hlsl` runs three compute passes: `CSFroxelLight` (one
+    thread per froxel, centre jittered along z by an R2 sequence; medium = `VolMediumAt` of `volumetric_common.hlsli`
+    so the march and the grid share sigma / tint / fog volumes; in-scattering = the isotropic sky term, the sun
+    (raster: cascaded shadow map, RT / PT: `TraceShadowRay` against the TLAS -- `VOL_RT_SHADOWS`) and the froxel's S7c
+    cluster list from `light_cluster.hlsli` (all lights, capped at `kVolMaxLights`, when clustering is off), each scaled
+    by the light's `volumetric` share with HG phase; writes sigma_s x L, extinction), `CSFroxelTemporal` (blend with last
+    frame's grid reprojected through `prevViewProjNoJitter`, current weight 0.1, rejected outside the previous frustum /
+    on a camera cut or a frame gap, ping-pong), `CSFroxelIntegrate` (one thread per x,y column: front-to-back
+    `L += T S (1 - exp(-sigma dz)) / sigma`, `T *= exp(-sigma dz)`, storing the prefix of every slice).
+    `volumetric_froxel_apply.hlsl` samples that grid trilinearly at the pixel's own view depth and blends
+    `lit * T + L` (Blend::Transmittance), so the O(1) per-pixel cost does not follow the march length.
+    `RenderSettings::volumetricMultiScatter` (default on, ini `volumetricMultiScatter=`, CLI `--volumetric-ms 0|1`) adds
+    the three Wrenninge 2015 octaves in the injector (a = b = c = 0.5: energy a^n, phase g c^n; the stored extinction
+    stays the medium's own, since a and b coincide); off = single scattering exactly.
     AutoLuminous (そぼろ convention, native): `GpuModel::Create` flags a non-PBR material with black specular and
     specular power >= 100 as `MatFlag_AutoLuminous` (cleared for pack-shaded materials); `AutoLumEmission`
     (common.hlsli) adds diffuse x texture x (power - 100) / 10 x 4 as HDR after lighting in the raster / RT PS, PT and

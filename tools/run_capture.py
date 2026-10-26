@@ -39,7 +39,7 @@ VALUE_FLAGS = {
     "--seek", "--benchmark", "--bench-frames", "--bench-spp", "--frames", "--capture", "--capture-scene",
     "--ui-script", "--width", "--height", "--screen", "--gallery-index", "--ui-scale", "--project", "--theme", "--lang",
     "--lighting", "--quality", "--render", "--shading", "--upscaler", "--upscale-quality", "--dlss-model",
-    "--dlss-rr", "--frame-gen", "--dof", "--volumetric", "--volumetric-density", "--bloom-conv",
+    "--dlss-rr", "--frame-gen", "--dof", "--volumetric", "--volumetric-density", "--volumetric-mode", "--volumetric-ms", "--bloom-conv",
     "--bloom-kernel", "--bloom-blend", "--bloom-depth-mask", "--bloom-intensity", "--bloom-threshold",
     "--bloom-radius", "--auto-luminous", "--lut", "--motion-lighting", "--pack-index", "--shader-pack",
     "--material-source", "--pbr-debug", "--effect", "--world", "--look", "--mme", "--mme-model",

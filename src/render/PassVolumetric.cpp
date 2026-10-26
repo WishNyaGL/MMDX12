@@ -1,10 +1,15 @@
-// VolumetricPass (volumetric.hlsl, volumetric_apply.hlsl): half-res in-scattering march (sun and
-// spot light shadows), temporal accumulation, depth-aware separable blur, depth-aware upsample
-// into lit as lit * transmittance + in-scattered light.
+// VolumetricPass (volumetric.hlsl, volumetric_apply.hlsl; S9d volumetric_froxel.hlsl): the frame's participating medium.
+//   mode 0 (RenderSettings::volumetricMode, the default): a froxel grid (kFroxelX x kFroxelY screen tiles x kFroxelZ
+//         exponential view-depth slices) injected and lit from the S7c cluster lists, temporally reprojected, integrated
+//         front to back and sampled per pixel -- volumetric_froxel.hlsl / volumetric_froxel_apply.hlsl
+//   mode 1: the half-res in-scattering march (sun and spot light shadows), temporal accumulation, depth-aware separable
+//         blur, depth-aware upsample into lit as lit * transmittance + in-scattered light (volumetric.hlsl)
+// Both modes share the medium (volumetric_common.hlsli) and composite the same way: lit * T + L.
 #include "render/Passes.h"
 #include "render/PassCommon.h"
 #include "render/Renderer.h"
 #include "core/Log.h"
+#include <cstring>
 
 namespace mmdx {
 
@@ -25,6 +30,25 @@ bool VolumetricPass::CreatePipelines(Dx12Context& ctx, const std::filesystem::pa
         blur_ = {};
         apply_ = {};
     }
+    // S9d: the froxel passes; the light pass has a raster (shadow maps) and a ray-traced (TLAS) variant, so a frame
+    // picks one without a pipeline rebuild.
+    const std::filesystem::path froxelFile = shaderDir / L"volumetric_froxel.hlsl";
+    const ShaderDefines rtDefines = {{"VOL_RT_SHADOWS", "1"}};
+    const bool froxelOk =
+        froxelLight_[0].Create(ctx, froxelFile, "CSFroxelLight") &&
+        froxelLight_[1].Create(ctx, froxelFile, "CSFroxelLight", rtDefines) &&
+        froxelTemporal_.Create(ctx, froxelFile, "CSFroxelTemporal") &&
+        froxelIntegrate_.Create(ctx, froxelFile, "CSFroxelIntegrate") &&
+        froxelApply_.Create(ctx, shaderDir / L"volumetric_froxel_apply.hlsl", "PSApplyFroxel",
+                            {RenderTargets::kColorFormat}, {}, FullscreenPipeline::Blend::Transmittance);
+    if (!froxelOk) {
+        LOG_WARN("Volumetric: froxel pipelines unavailable, the march stays in use");
+        froxelLight_[0] = {};
+        froxelLight_[1] = {};
+        froxelTemporal_ = {};
+        froxelIntegrate_ = {};
+        froxelApply_ = {};
+    }
     return true;
 }
 
@@ -36,6 +60,7 @@ void VolumetricPass::OnResize(Dx12Context& ctx, RenderTargets& targets) {
     history_[0].Create(ctx, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrv, L"volumetric.history0");
     history_[1].Create(ctx, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrv, L"volumetric.history1");
     historyReady_ = false;
+    // S9d: the froxel grid does not follow the render resolution, so a resize keeps it (it is created on demand).
 }
 
 void VolumetricPass::ReleaseTargets(Dx12Context& ctx) {
@@ -44,15 +69,69 @@ void VolumetricPass::ReleaseTargets(Dx12Context& ctx) {
     history_[0].Release(ctx);
     history_[1].Release(ctx);
     historyReady_ = false;
+    froxelRaw_.Release(ctx);
+    froxelHistory_[0].Release(ctx);
+    froxelHistory_[1].Release(ctx);
+    froxelLit_.Release(ctx);
+    froxelReady_ = false;
+    froxelHistoryValid_ = false;
+}
+
+// S9d: the froxel grids (RGBA16F Texture3D, kFroxelX x kFroxelY x kFroxelZ = 5.6 MB each). Nothing is allocated until a
+// frame actually runs the froxel mode, so volumetrics off (and the march) cost no memory.
+bool VolumetricPass::EnsureFroxelTargets(Dx12Context& ctx) {
+    if (froxelReady_) return true;
+    const auto uav = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    const auto srv = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const bool ok = froxelRaw_.Create3D(ctx, kFroxelX, kFroxelY, kFroxelZ, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, srv,
+                                       L"volumetric.froxelRaw") &&
+                    froxelHistory_[0].Create3D(ctx, kFroxelX, kFroxelY, kFroxelZ, DXGI_FORMAT_R16G16B16A16_FLOAT, uav,
+                                               srv, L"volumetric.froxelHistory0") &&
+                    froxelHistory_[1].Create3D(ctx, kFroxelX, kFroxelY, kFroxelZ, DXGI_FORMAT_R16G16B16A16_FLOAT, uav,
+                                               srv, L"volumetric.froxelHistory1") &&
+                    froxelLit_.Create3D(ctx, kFroxelX, kFroxelY, kFroxelZ, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, srv,
+                                        L"volumetric.froxelLit");
+    if (!ok) {
+        LOG_WARN("Volumetric: froxel grid allocation failed, the march stays in use");
+        froxelRaw_.Release(ctx);
+        froxelHistory_[0].Release(ctx);
+        froxelHistory_[1].Release(ctx);
+        froxelLit_.Release(ctx);
+        return false;
+    }
+    froxelReady_ = true;
+    froxelHistoryIndex_ = 0;
+    froxelHistoryValid_ = false;   // the fresh textures hold nothing: the first frame must not blend them
+    const double mb = 4.0 * (double)kFroxelX * kFroxelY * kFroxelZ * 8.0 / (1024.0 * 1024.0);
+    LOG_INFO("FROXEL grid=%ux%ux%u format=RGBA16F textures=4 MB=%.1f", kFroxelX, kFroxelY, kFroxelZ, mb);
+    return true;
 }
 
 void VolumetricPass::Execute(PassContext& pc) {
-    RenderTargets& t = pc.targets;
-    ID3D12GraphicsCommandList* cmd = pc.cmd;
-    if (!pc.settings.volumetric || pc.offscreen || !march_ || !apply_ || !raw_) {
+    if (!pc.settings.volumetric || pc.offscreen || !apply_ || !raw_) {
         historyReady_ = false;
         return;
     }
+    // S9d: the froxel mode (default); the march is the ini / CLI fallback and keeps its own history chain. The light
+    // pass of a non-raster frame needs the TLAS it traces, so a frame without one falls back to the raster variant's
+    // shadow maps (the shadow pass renders those for RT / PT frames too) and only a device without either goes back to
+    // the march.
+    if (pc.settings.volumetricMode == 0 && froxelApply_ && froxelTemporal_ && froxelIntegrate_ &&
+        froxelLight_[pc.path != RenderPath::Raster && pc.rt ? 1 : 0] && EnsureFroxelTargets(pc.ctx)) {
+        historyReady_ = false;   // the march's history does not follow these frames: no blending after a mode switch
+        ExecuteFroxel(pc);
+        return;
+    }
+    if (!march_) {
+        historyReady_ = false;
+        return;
+    }
+    ExecuteMarch(pc);
+}
+
+void VolumetricPass::ExecuteMarch(PassContext& pc) {
+    RenderTargets& t = pc.targets;
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
     // S9: the haze sphere (a stage's radius, grown to hold its fog volumes) and a march long enough to cross it from
     // the eye (400 as before while the eye is within 220 of the origin)
     const float mediumRadius = VolumetricMediumRadius(pc.view.light);
@@ -122,6 +201,102 @@ void VolumetricPass::Execute(PassContext& pc) {
     t.lit.Transition(cmd, kRt);
     apply_.Draw(pc, {&t.lit}, pc.transient.SrvTable(pc.ctx, {&raw_, &t.depth}), ca, 4);
     t.lit.Transition(cmd, kSrv);
+}
+
+// S9d: the froxel mode. Inject + light (one thread per froxel, jittered along z), temporal reprojection through the
+// previous view projection, front-to-back integration per column, then the per-pixel apply of lit * T + L.
+void VolumetricPass::ExecuteFroxel(PassContext& pc) {
+    RenderTargets& t = pc.targets;
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+    const float mediumRadius = VolumetricMediumRadius(pc.view.light);
+    const float maxDistance = VolumetricMaxDistance(pc.view.camera.eye, mediumRadius);
+    const float fogG = pc.view.light.volumetricAnisotropy > -0.99f ? pc.view.light.volumetricAnisotropy
+                                                                 : pc.settings.volumetricAnisotropy;
+    const float sunG = pc.view.light.sunVolumetricG > -0.99f
+                           ? pc.view.light.sunVolumetricG
+                           : (fogG > -0.99f ? fogG : 0.55f);
+    const float punctualG = fogG > -0.99f ? fogG : 0.3f;
+    const uint32_t fogCount = (uint32_t)std::min<size_t>(pc.view.light.fogVolumes.size(), Renderer::kMaxFogVolumes);
+    const float sigma0 = (pc.view.light.volumetricSigma0 >= 0.0f ? pc.view.light.volumetricSigma0 : 0.005f) *
+                         pc.settings.volumetricDensity;
+    const float falloff = pc.view.light.volumetricFalloff >= 0.0f ? pc.view.light.volumetricFalloff : 0.012f;
+    const DirectX::XMFLOAT3& tint = pc.view.light.volumetricColor;
+    // the march's constants (ambient scale 0.25, the medium radius, the sun's haze share), so both modes share a look
+    const float p0[4] = {sigma0, falloff, maxDistance, sunG};
+    const float p1[4] = {punctualG, (float)fogCount, pc.view.light.sunVolumetric, mediumRadius};
+    const float p2[4] = {tint.x, tint.y, tint.z, 0.25f};
+    const float p3[4] = {pc.settings.volumetricMultiScatter ? 1.0f : 0.0f, (float)kFroxelX, (float)kFroxelY,
+                         (float)kFroxelZ};
+    const uint32_t groupsX = (kFroxelX + 7) / 8;
+    const uint32_t groupsY = ((kFroxelY * kFroxelZ) + 7) / 8;
+    float params[16];
+    std::memcpy(params, p0, sizeof(p0));
+    std::memcpy(params + 4, p1, sizeof(p1));
+    std::memcpy(params + 8, p2, sizeof(p2));
+    std::memcpy(params + 12, p3, sizeof(p3));
+
+    // 1. inject + light this frame's fresh grid
+    froxelRaw_.Transition(cmd, kUav);
+    // the raster variant's cascades are rendered for RT / PT frames too (ShadowPass), so it is also the fallback when a
+    // ray-traced frame has no TLAS this frame
+    if (pc.path == RenderPath::Raster || !pc.rt) {
+        t.shadowMap.Transition(cmd, kSrvAll);
+        t.spotShadowMap.Transition(cmd, kSrvAll);
+        froxelLight_[0].Dispatch(pc, pc.transient.SrvTable(pc.ctx, {nullptr, nullptr, &t.shadowMap, &t.spotShadowMap}),
+                                 pc.transient.UavTable(pc.ctx, {&froxelRaw_}), params, 16, groupsX, groupsY);
+    } else {
+        // RT / PT: the light pass traces its shadows against the TLAS
+        froxelLight_[1].Dispatch(pc, pc.transient.SrvTable(pc.ctx, {}),
+                                 pc.transient.UavTable(pc.ctx, {&froxelRaw_}), params, 16, groupsX, groupsY);
+    }
+
+    // 2. temporal: blend with the last frame's grid reprojected through prevViewProjNoJitter (ping-pong)
+    const bool valid = froxelHistoryValid_ && pc.frame == froxelLastFrame_ + 1 && !pc.view.cameraCut;
+    const uint32_t prev = froxelHistoryIndex_, next = froxelHistoryIndex_ ^ 1u;
+    froxelRaw_.Transition(cmd, kSrvAll);
+    froxelHistory_[prev].Transition(cmd, kSrvAll);
+    froxelHistory_[next].Transition(cmd, kUav);
+    const float tp0[4] = {valid ? 1.0f : 0.0f, 0.1f, froxelLastNearZ_, froxelLastMaxDistance_};
+    float tparams[16];
+    std::memcpy(tparams, tp0, sizeof(tp0));
+    tparams[4] = maxDistance;   // gP1.x: this frame's grid (the froxel centre the reprojection starts from)
+    tparams[5] = (float)fogCount;
+    tparams[6] = pc.view.light.sunVolumetric;
+    tparams[7] = mediumRadius;
+    std::memcpy(tparams + 8, p2, sizeof(p2));
+    std::memcpy(tparams + 12, p3, sizeof(p3));
+    froxelTemporal_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&froxelRaw_, &froxelHistory_[prev]}),
+                             pc.transient.UavTable(pc.ctx, {&froxelHistory_[next]}), tparams, 16, groupsX, groupsY);
+    froxelHistoryIndex_ = next;
+
+    // 3. integrate every column front to back into the grid the apply pass reads
+    froxelHistory_[next].Transition(cmd, kSrvAll);
+    froxelLit_.Transition(cmd, kUav);
+    const float ip0[4] = {maxDistance, 0, 0, 0};
+    float iparams[16];
+    std::memcpy(iparams, ip0, sizeof(ip0));
+    std::memcpy(iparams + 4, p1, sizeof(p1));
+    std::memcpy(iparams + 8, p2, sizeof(p2));
+    std::memcpy(iparams + 12, p3, sizeof(p3));
+    froxelIntegrate_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&froxelHistory_[next]}),
+                              pc.transient.UavTable(pc.ctx, {&froxelLit_}), iparams, 16,
+                              (kFroxelX + 7) / 8, (kFroxelY + 7) / 8);
+
+    // 4. lit = lit * T + L
+    froxelLit_.Transition(cmd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    t.depth.Transition(cmd, kSrv);
+    t.shadowMap.Transition(cmd, kSrv);
+    t.spotShadowMap.Transition(cmd, kSrv);
+    froxelRaw_.Transition(cmd, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    const float ca[4] = {(float)kFroxelX, (float)kFroxelY, (float)kFroxelZ, maxDistance};
+    t.lit.Transition(cmd, kRt);
+    froxelApply_.Draw(pc, {&t.lit}, pc.transient.SrvTable(pc.ctx, {&froxelLit_, &t.depth}), ca, 4);
+    t.lit.Transition(cmd, kSrv);
+
+    froxelLastFrame_ = pc.frame;
+    froxelHistoryValid_ = true;
+    froxelLastNearZ_ = std::max(pc.view.camera.nearZ, 0.01f);
+    froxelLastMaxDistance_ = maxDistance;
 }
 
 } // namespace mmdx

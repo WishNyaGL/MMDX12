@@ -194,6 +194,9 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "dofAperture" && ParseFloat(value, f)) dofAperture = f;
         else if (key == "volumetric" && ParseBool(value, b)) volumetric = b;
         else if (key == "volumetricDensity" && ParseFloat(value, f)) volumetricDensity = f;
+        // S9d: 0 = froxel (default), 1 = march; volumetricMultiScatter=1|0 (froxel only)
+        else if (key == "volumetricMode" && ParseInt(value, i)) volumetricMode = i;
+        else if (key == "volumetricMultiScatter" && ParseBool(value, b)) volumetricMultiScatter = b;
         else if (key == "volumetricFull" && ParseBool(value, b)) volumetricFull = b;
         else if (key == "bloomConvolution" && ParseBool(value, b)) bloomConvolution = b;
         else if (key == "bloomIntensity" && ParseFloat(value, f)) bloomIntensity = std::clamp(f, 0.0f, 1.5f);
@@ -552,6 +555,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
     ptBounces = std::clamp(ptBounces, 1, 6);
     dofAperture = std::clamp(dofAperture, 0.2f, 3.0f);
     volumetricDensity = std::clamp(volumetricDensity, 0.25f, 4.0f);
+    volumetricMode = std::clamp(volumetricMode, 0, 1);
     lutIntensity = std::clamp(lutIntensity, 0.0f, 1.0f);
     volume = std::clamp(volume, 0.0f, 1.0f);
     video.Clamp();
@@ -644,6 +648,7 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     std::fprintf(f, "dof=%d\ndofAperture=%.3f\n", dof ? 1 : 0, dofAperture);
     std::fprintf(f, "volumetric=%d\nvolumetricDensity=%.3f\nvolumetricFull=%d\n", volumetric ? 1 : 0, volumetricDensity,
                  volumetricFull ? 1 : 0);
+    std::fprintf(f, "volumetricMode=%d\nvolumetricMultiScatter=%d\n", volumetricMode, volumetricMultiScatter ? 1 : 0);
     std::fprintf(f, "bloomConvolution=%d\n", bloomConvolution ? 1 : 0);
     std::fprintf(f, "bloomIntensity=%.3f\nbloomThreshold=%.3f\n", bloomIntensity, bloomThreshold);
     std::fprintf(f, "bloomRadius=%.3f\nbloomBlend=%d\nbloomDepthMask=%.3f\n", bloomLook.radius, bloomLook.blend,

@@ -60,6 +60,10 @@ struct AppSettings {
     float dofAperture = 1.0f;        // 0.2 .. 3.0
     bool volumetric = false;
     float volumetricDensity = 1.0f;  // 0.25 .. 4.0
+    // S9d: the real-time volumetric mode: 0 = froxel grid (default), 1 = the per-pixel march (A/B, fallback) and the
+    // multiple-scatter approximation switch (froxel injector).
+    int volumetricMode = 0;
+    bool volumetricMultiScatter = true;
     // S9c: offline GI computes the medium inside the paths (full) instead of the single-scatter pass (fast).
     bool volumetricFull = true;
     // S9: the fog's Henyey-Greenstein anisotropy (a stage "environment.fog.anisotropy" sets it); -1 = the built-in

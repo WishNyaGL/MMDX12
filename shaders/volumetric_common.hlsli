@@ -185,6 +185,22 @@ float VolPunctualAtten(VolLight l, float3 wp, out float3 ld) {
     return atten;
 }
 
+// S9d: the medium at one point (the froxel injector, and the march's own light samples via the same functions):
+// `sigmaS` = the tinted scattering coefficient the in-scattered light is weighted by (the height fog plus the local
+// volumes' colours), `sigmaT` = the scalar extinction of the transmittance (the height fog plus the volumes'
+// densities, the density VolFogOpticalDepth integrates; the shape's soft border band is left out there as well).
+void VolMediumAt(float3 wp, VolParams p, out float3 sigmaS, out float sigmaT) {
+    const float base = VolSigma(wp, p);
+    sigmaS = base + VolFogSigma(wp, p);
+    float extra = 0.0;
+    for (uint i = 0; i < p.numFog; ++i) {
+        VolFog f = gVolFog[i];
+        if (f.density <= 0.0) continue;
+        extra += f.density * VolFogShape(f, wp);
+    }
+    sigmaT = base + extra * p.sigma0;
+}
+
 // In-scattered radiance (rgb) and transmittance (a) along eye + dir t, t in [0, dist].
 float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float3 sunDir, float3 sunCol,
                        VolParams p) {

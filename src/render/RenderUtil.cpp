@@ -38,6 +38,7 @@ bool Texture::Create(Dx12Context& ctx, uint32_t w, uint32_t h, DXGI_FORMAT fmt, 
     srvFormat = isDepth ? DXGI_FORMAT_R32_FLOAT : fmt;
     width = w;
     height = h;
+    depth = 1;
     samples = sampleCount;
     arraySize = arrayCount;
     mipLevels = mips > 0 ? mips : (1 + (uint32_t)std::floor(std::log2((double)std::max(std::max(w, h), 1u))));
@@ -89,13 +90,36 @@ bool Texture::Create(Dx12Context& ctx, uint32_t w, uint32_t h, DXGI_FORMAT fmt, 
     return true;
 }
 
+bool Texture::Create3D(Dx12Context& ctx, uint32_t w, uint32_t h, uint32_t d, DXGI_FORMAT fmt,
+                       D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initial, const wchar_t* name) {
+    Release(ctx);
+    ID3D12Device* device = ctx.Device();
+    D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex3D(fmt, w, h, (UINT16)std::max(d, 1u), 1, flags);
+    D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+    if (!CheckHr(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, initial, nullptr,
+                                                 IID_PPV_ARGS(&res)),
+                 "Texture::Create3D"))
+        return false;
+    if (name) res->SetName(name);
+    state = initial;
+    format = fmt;
+    srvFormat = fmt;
+    width = w;
+    height = h;
+    depth = std::max(d, 1u);
+    samples = 1;
+    arraySize = 1;
+    mipLevels = 1;
+    return true;
+}
+
 void Texture::Release(Dx12Context& ctx) {
     if (rtv != DescriptorHeap::kInvalid) ctx.RtvHeap().Free(rtv, arraySize);
     if (dsv != DescriptorHeap::kInvalid) ctx.DsvHeap().Free(dsv, arraySize);
     rtv = dsv = DescriptorHeap::kInvalid;
     if (res) ctx.DeferRelease(res);
     res.Reset();
-    width = height = 0;
+    width = height = depth = 0;
 }
 
 void Texture::Transition(ID3D12GraphicsCommandList* cmd, D3D12_RESOURCE_STATES to) {
@@ -109,7 +133,10 @@ void Texture::WriteSrv(ID3D12Device* device, D3D12_CPU_DESCRIPTOR_HANDLE cpu) co
     D3D12_SHADER_RESOURCE_VIEW_DESC d{};
     d.Format = srvFormat;
     d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    if (arraySize > 1) {
+    if (depth > 1) {
+        d.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        d.Texture3D.MipLevels = 1;
+    } else if (arraySize > 1) {
         d.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
         d.Texture2DArray.MipLevels = mipLevels > 0 ? mipLevels : 1;
         d.Texture2DArray.ArraySize = arraySize;
@@ -191,7 +218,13 @@ D3D12_GPU_DESCRIPTOR_HANDLE TransientDescriptors::SrvTable(Dx12Context& ctx,
 void Texture::WriteUav(ID3D12Device* device, D3D12_CPU_DESCRIPTOR_HANDLE cpu) const {
     D3D12_UNORDERED_ACCESS_VIEW_DESC d{};
     d.Format = srvFormat;
-    d.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    if (depth > 1) {
+        d.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+        d.Texture3D.MipSlice = 0;
+        d.Texture3D.WSize = depth;
+    } else {
+        d.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    }
     device->CreateUnorderedAccessView(res.Get(), nullptr, &d, cpu);
 }
 

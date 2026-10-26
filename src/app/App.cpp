@@ -200,6 +200,14 @@ AppOptions ParseCommandLine(int argc, wchar_t** argv) {
             opt.volumetric = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--volumetric-density") {
             opt.volumetricDensity = (float)_wtof(next().c_str());
+        } else if (arg == L"--volumetric-mode") {
+            // S9d: froxel (the default) or march (the S9 per-pixel march, kept for A/B)
+            const std::string v = ToLowerAscii(WideToUtf8(next()));
+            if (v == "froxel" || v == "0") opt.volumetricMode = 0;
+            else if (v == "march" || v == "1") opt.volumetricMode = 1;
+            else LOG_WARN("unknown --volumetric-mode value: %s (want froxel|march)", v.c_str());
+        } else if (arg == L"--volumetric-ms") {
+            opt.volumetricMs = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--bloom-conv") {
             opt.bloomConv = _wtoi(next().c_str()) != 0 ? 1 : 0;
         } else if (arg == L"--bloom-kernel") {
@@ -524,6 +532,8 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.dof >= 0) settings_.dof = options_.dof != 0;
     if (options_.volumetric >= 0) settings_.volumetric = options_.volumetric != 0;
     if (options_.volumetricDensity > 0.0f) settings_.volumetricDensity = std::clamp(options_.volumetricDensity, 0.25f, 4.0f);
+    if (options_.volumetricMode >= 0) settings_.volumetricMode = std::clamp(options_.volumetricMode, 0, 1);
+    if (options_.volumetricMs >= 0) settings_.volumetricMultiScatter = options_.volumetricMs != 0;
     if (options_.bloomConv >= 0) settings_.bloomConvolution = options_.bloomConv != 0;
     if (options_.bloomKernel >= 0) {
         settings_.bloomKernelPreset = options_.bloomKernel;
@@ -740,6 +750,8 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     if (options_.dof >= 0) settings_.dof = persisted.dof;
     if (options_.volumetric >= 0) settings_.volumetric = persisted.volumetric;
     if (options_.volumetricDensity > 0.0f) settings_.volumetricDensity = persisted.volumetricDensity;
+    if (options_.volumetricMode >= 0) settings_.volumetricMode = persisted.volumetricMode;
+    if (options_.volumetricMs >= 0) settings_.volumetricMultiScatter = persisted.volumetricMultiScatter;
     if (options_.bloomConv >= 0) settings_.bloomConvolution = persisted.bloomConvolution;
     if (options_.bloomKernel >= 0) {
         settings_.bloomKernelPreset = persisted.bloomKernelPreset;
@@ -1718,6 +1730,8 @@ void App::ApplyRenderSettings() {
     rs.dofAperture = settings_.dofAperture;
     rs.volumetric = settings_.volumetric || stageFogVolumetric_;
     rs.volumetricDensity = settings_.volumetricDensity;
+    rs.volumetricMode = settings_.volumetricMode;
+    rs.volumetricMultiScatter = settings_.volumetricMultiScatter;
     rs.volumetricAnisotropy = settings_.volumetricAnisotropy;
     rs.bloomConvolution = settings_.bloomConvolution;
     rs.bloomIntensity = settings_.bloomIntensity;

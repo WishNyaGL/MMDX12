@@ -313,6 +313,9 @@ private:
 // (shadowed through the cascaded shadow map) and the spot lights (shadowed through the spot shadow
 // maps), so occluders cut light shafts out of the beams. Jittered per frame and accumulated
 // temporally; composited as lit * transmittance + in-scattered light.
+// S9d: the default mode is the froxel grid (volumetric_froxel.hlsl: 160 x 90 x 64, inject + light from the S7c cluster
+// lists, temporal reuse, front-to-back integration, sampled per pixel); RenderSettings::volumetricMode 1 keeps this
+// march as the A/B and fallback path.
 // Needs the compute path (cs_6_5); does nothing without it, offscreen, or when settings.volumetric is off.
 class VolumetricPass final : public IRenderPass {
 public:
@@ -323,6 +326,10 @@ public:
     void Execute(PassContext& pc) override;
 
 private:
+    void ExecuteMarch(PassContext& pc);
+    void ExecuteFroxel(PassContext& pc);
+    bool EnsureFroxelTargets(Dx12Context& ctx);
+
     ComputePipeline march_;       // volumetric.hlsl CSMarch -> raw_ (UAV)
     ComputePipeline temporal_;    // volumetric.hlsl CSTemporal raw_ + history_[prev] -> history_[cur]
     ComputePipeline blur_;        // volumetric.hlsl CSBlur  -> depth-aware separable blur history_[cur] -> temp_ -> raw_
@@ -332,7 +339,27 @@ private:
     uint32_t historyIndex_ = 0;   // history_[historyIndex_] holds the last frame's result
     uint64_t lastFrame_ = 0;      // pc.frame of the last executed frame (history validity)
     bool historyReady_ = false;
+    // S9d froxel grid (its textures are created on the first enabled frame, so volumetrics off cost nothing)
+    ComputePipeline froxelLight_[2];   // volumetric_froxel.hlsl CSFroxelLight: 0 raster (shadow maps), 1 RT (TLAS)
+    ComputePipeline froxelTemporal_;
+    ComputePipeline froxelIntegrate_;
+    FullscreenPipeline froxelApply_;   // volumetric_froxel_apply.hlsl PSApplyFroxel
+    Texture froxelRaw_;                // this frame's injected grid (scattered light + extinction, RGBA16F 3D)
+    Texture froxelHistory_[2];         // temporal ping-pong of the blended grid
+    Texture froxelLit_;                // integrated (L, T) grid the apply pass reads
+    uint32_t froxelHistoryIndex_ = 0;  // froxelHistory_[froxelHistoryIndex_] holds last frame's blended grid
+    uint64_t froxelLastFrame_ = 0;     // pc.frame of the last froxel frame (history validity)
+    float froxelLastNearZ_ = 0.5f;     // the previous frame's grid mapping (history reprojection)
+    float froxelLastMaxDistance_ = 400.0f;
+    bool froxelReady_ = false;
+    bool froxelHistoryValid_ = false;  // a blended grid exists (else the first frame keeps its own injection)
 };
+
+// S9d: the froxel grid's dimensions (screen tiles x exponential view-depth slices): the light / integrate passes and the
+// apply shader agree through these constants (volumetric_froxel.hlsl, volumetric_froxel_apply.hlsl).
+inline constexpr uint32_t kFroxelX = 160;
+inline constexpr uint32_t kFroxelY = 90;
+inline constexpr uint32_t kFroxelZ = 64;
 
 // M8b: video layers of the MV packages (docs/mme/mme_design.md §5b). One instance draws the background (behind the
 // scene, where the depth is far), a second the overlay (over the final image, after the post stack). Each instance

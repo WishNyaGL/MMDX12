@@ -166,6 +166,11 @@ struct RenderSettings {
     float dofMaxRadius = 14.0f;     // max CoC radius in output pixels at 1080p (scaled with output height)
     bool volumetric = false;        // ray-marched sun shafts + spotlight cones (height fog medium)
     float volumetricDensity = 1.0f; // 0..4, scales the medium density
+    // S9d: 0 = the froxel grid (inject + light, temporal reuse, front-to-back integration, sampled per pixel), the
+    // default; 1 = the per-pixel march of S9 (volumetric.hlsl), kept for A/B and as the fallback.
+    int volumetricMode = 0;
+    // S9d: the 3-octave multiple-scatter approximation of the froxel injector (Wrenninge 2015); off = single scattering.
+    bool volumetricMultiScatter = true;
     // S9: the haze. volumetricAnisotropy is the Henyey-Greenstein g of the medium itself (the sun and punctual terms use
     // it unless a light has its own volumetricG); -1 = the built-in constants (sun 0.55, punctual 0.3) as before.
     float volumetricAnisotropy = -1.0f;

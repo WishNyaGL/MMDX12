@@ -22,7 +22,7 @@ struct Texture {
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;     // resource format (may be typeless)
     DXGI_FORMAT srvFormat = DXGI_FORMAT_UNKNOWN;  // view format for SRVs
-    uint32_t width = 0, height = 0, samples = 1, arraySize = 1, mipLevels = 1;
+    uint32_t width = 0, height = 0, depth = 1, samples = 1, arraySize = 1, mipLevels = 1;
     uint32_t rtv = DescriptorHeap::kInvalid;      // ctx.RtvHeap(), arraySize entries for arrays
     uint32_t dsv = DescriptorHeap::kInvalid;      // ctx.DsvHeap(), arraySize entries for arrays
 
@@ -33,6 +33,10 @@ struct Texture {
     bool Create(Dx12Context& ctx, uint32_t w, uint32_t h, DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS flags,
                 D3D12_RESOURCE_STATES initial, const wchar_t* name, uint32_t samples = 1,
                 uint32_t arraySize = 1, const float* clearColor = nullptr, uint16_t mips = 1);
+    // Creates a 3D texture (S9d froxel grids): no RTV / DSV, SRV / UAV views are 3D. 3D textures have one mip here
+    // (the froxel shaders read / write mip 0).
+    bool Create3D(Dx12Context& ctx, uint32_t w, uint32_t h, uint32_t d, DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS flags,
+                  D3D12_RESOURCE_STATES initial, const wchar_t* name);
     void Release(Dx12Context& ctx);  // frees views; the resource is released via DeferRelease
     // Records a transition barrier if the state differs.
     void Transition(ID3D12GraphicsCommandList* cmd, D3D12_RESOURCE_STATES to);
