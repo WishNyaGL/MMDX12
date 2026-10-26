@@ -1,6 +1,7 @@
 #include "app/StageRuntime.h"
 #include "asset/StageLights.h"
 #include "render/RenderTypes.h"
+#include "render/ShaderPack.h"
 
 #include <algorithm>
 #include <cmath>
@@ -203,6 +204,35 @@ std::vector<StageScreenState> ResolveStageScreens(const StageManifest& manifest,
         if (edit) edit(st);
         out.push_back(std::move(st));
     }
+    // S6: the program pack of each screen. A `packs[]` entry of role "screen" naming it wins over the screen's own
+    // `file` (the same pack folder can be named by either).
+    const std::vector<StagePackState> packs = ResolveStagePacks(manifest, eval);
+    for (StageScreenState& st : out) {
+        for (const StagePackState& p : packs) {
+            if (p.role != StagePackRole::Screen || manifest.packs[(size_t)p.index].screen != st.id) continue;
+            st.pack = p.id;
+            st.params = p.params;
+        }
+    }
+    // the manifest's `screens[].source == "program"` + `file` = the pack folder: same id, unless a packs[] entry won
+    for (StageScreenState& st : out) {
+        if (!st.pack.empty()) continue;
+        const StageScreen* src = manifest.FindScreen(st.id);
+        if (!src || src->source != StageScreenSource::Program || src->file.empty()) continue;
+        st.pack = StagePackId(manifest.id, src->file);
+        // the folder's parameters, when a packs[] entry names that same folder (any role)
+        for (size_t i = 0; i < manifest.packs.size(); ++i)
+            if (manifest.packs[i].folder == src->file) {
+                for (const StagePackState& p : packs)
+                    if (p.index == (int)i) st.params = p.params;
+                break;
+            }
+    }
+    // a screen that shows a program pack but whose pack is not a registered "screen" pack draws black: the runtime has
+    // nothing to sample. Not an error here: the loader warned once per broken pack.
+    for (StageScreenState& st : out) {
+        if (st.source == StageScreenSource::Program && st.pack.empty()) st.pack.clear();
+    }
     // the evaluator's screen targets (in assignment order): the last one per field wins
     for (const StageAssignment& a : eval.targets) {
         const StageTargetSpec spec = ResolveStageTarget(manifest, a.target);
@@ -222,6 +252,149 @@ std::vector<StageScreenState> ResolveStageScreens(const StageManifest& manifest,
         }
     }
     return out;
+}
+
+// ---- S6 bundled packs ---------------------------------------------------------------------------------------------
+
+std::vector<StagePackState> ResolveStagePacks(const StageManifest& manifest, const StageEvalResult& eval) {
+    std::vector<StagePackState> out;
+    if (manifest.packs.empty()) return out;   // zero cost: no packs, no state
+    out.reserve(manifest.packs.size());
+    for (size_t i = 0; i < manifest.packs.size(); ++i) {
+        StagePackState st;
+        st.index = (int)i;
+        st.id = StagePackId(manifest.id, manifest.packs[i].folder);
+        st.role = manifest.packs[i].role;
+        st.params = manifest.packs[i].params;
+        out.push_back(std::move(st));
+    }
+    for (const StageAssignment& a : eval.targets) {
+        const StageTargetSpec spec = ResolveStageTarget(manifest, a.target);
+        if (!spec.ok || spec.kind != StageTargetSpec::Kind::PackParams) continue;
+        for (StagePackState& p : out) {
+            if (p.index != spec.packIndex) continue;
+            p.params[spec.field] = a.value.AsNumber();
+            break;
+        }
+    }
+    return out;
+}
+
+void RegisterStagePacks(const StageManifest& manifest) {
+    for (const StagePackRef& ref : manifest.packs) {
+        const std::string id = StagePackId(manifest.id, ref.folder);
+        // the folder is relative to the stage folder and SafeRelativeFile rejected ".." at parse time
+        ShaderPacks().RegisterStagePack(id, manifest.dir / Utf8ToPath(ref.folder));
+    }
+}
+
+StageSurfacePack ResolveStageSurfacePack(const StageManifest& manifest, const GpuModel& part) {
+    StageSurfacePack out;
+    if (manifest.packs.empty()) return out;
+    // the first surface pack with a glob that hits one of this part's materials
+    const StagePackRef* chosen = nullptr;
+    for (const StagePackRef& ref : manifest.packs) {
+        if (ref.role != StagePackRole::Surface) continue;
+        for (size_t m = 0; m < part.Materials().size() && !chosen; ++m) {
+            const std::string& name = part.MaterialName(m);
+            const std::string& nameEn = part.MaterialNameEn(m);
+            for (const std::string& pattern : ref.materials)
+                if (StageGlobMatch(pattern, name) || (!nameEn.empty() && StageGlobMatch(pattern, nameEn))) {
+                    chosen = &ref;
+                    break;
+                }
+        }
+        if (chosen) break;
+    }
+    if (!chosen) return out;
+    out.id = StagePackId(manifest.id, chosen->folder);
+    // every material the pack's globs do not claim keeps the default shading (kPackClassOff); the claimed ones get the
+    // pack's own class rules (ShaderPack::ClassifyStage)
+    for (size_t m = 0; m < part.Materials().size(); ++m) {
+        const std::string& name = part.MaterialName(m);
+        const std::string& nameEn = part.MaterialNameEn(m);
+        bool hit = false;
+        for (const std::string& pattern : chosen->materials)
+            if (StageGlobMatch(pattern, name) || (!nameEn.empty() && StageGlobMatch(pattern, nameEn))) {
+                hit = true;
+                break;
+            }
+        if (!hit) out.materials[name] = kMaterialPackOff;
+    }
+    return out;
+}
+
+void ApplyStageSurfacePacks(const std::vector<StagePackState>& packs, const std::vector<StageRuntimePart>& parts,
+                            const std::function<StageSurfacePack(int part)>& surfaceOf) {
+    if (parts.empty()) return;
+    const ShaderPack* chosen = nullptr;
+    const StagePackState* state = nullptr;
+    for (const StagePackState& p : packs) {
+        if (p.role != StagePackRole::Surface) continue;
+        const ShaderPack* pack = ShaderPacks().Find(p.id);
+        if (!pack || pack->type != PackType::Surface || !pack->Selectable()) continue;
+        chosen = pack;
+        state = &p;
+        break;
+    }
+    if (!chosen) return;   // no (usable) surface pack: every part keeps the default shading
+    for (const StageRuntimePart& part : parts) {
+        if (!part.gpu) continue;
+        const StageSurfacePack sp = surfaceOf(part.part);
+        if (sp.id != chosen->id) continue;
+        part.gpu->SetShaderPack(chosen, state->params, {}, sp.materials, state->params);
+    }
+}
+
+namespace {
+
+// The socket's placement: its node bone's world matrix (when it names one) times the explicit offset below. Row-vector
+// convention, like the rest of the engine.
+DirectX::XMFLOAT4X4 StageSocketMatrix(const StageSocket& socket, const DirectX::XMFLOAT4X4* nodeWorld) {
+    constexpr float kRad = 0.01745329252f;
+    const DirectX::XMMATRIX offset =
+        DirectX::XMMatrixScaling(socket.scale.x, socket.scale.y, socket.scale.z) *
+        DirectX::XMMatrixRotationRollPitchYaw(socket.rotationDeg.x * kRad, socket.rotationDeg.y * kRad,
+                                              socket.rotationDeg.z * kRad) *
+        DirectX::XMMatrixTranslation(socket.position.x, socket.position.y, socket.position.z);
+    const DirectX::XMMATRIX world =
+        nodeWorld ? DirectX::XMLoadFloat4x4(nodeWorld) * offset : offset;
+    DirectX::XMFLOAT4X4 out;
+    DirectX::XMStoreFloat4x4(&out, world);
+    return out;
+}
+
+} // namespace
+
+void AppendStageWorldPacks(const StageManifest& manifest, const std::vector<StagePackState>& packs, double time,
+                           bool exact, const std::shared_ptr<const WorldColliderTrack>& colliders, uint32_t uidBase,
+                           const std::function<bool(const std::string& node, DirectX::XMFLOAT4X4& out)>& resolveNode,
+                           std::vector<WorldInstance>& out) {
+    if (manifest.packs.empty()) return;   // zero cost
+    for (const StagePackState& p : packs) {
+        if (p.role != StagePackRole::World) continue;
+        const StagePackRef& ref = manifest.packs[(size_t)p.index];
+        const StageSocket* socket = nullptr;
+        for (const StageSocket& s : manifest.sockets)
+            if (s.name == ref.socket) {
+                socket = &s;
+                break;
+            }
+        if (!socket) continue;   // validation reports it; nothing to place
+        const ShaderPack* pack = ShaderPacks().Find(p.id);
+        if (!pack || pack->type != PackType::World || !pack->Selectable()) continue;   // one [W] at registration
+        DirectX::XMFLOAT4X4 nodeWorld{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        const bool haveNode = !socket->node.empty() && resolveNode && resolveNode(socket->node, nodeWorld);
+        WorldInstance w;
+        w.uid = uidBase + (uint32_t)p.index;
+        w.pack = p.id;
+        w.transform = StageSocketMatrix(*socket, haveNode ? &nodeWorld : nullptr);
+        w.params = p.params;
+        w.time = time;
+        w.exact = exact;
+        w.colliders = colliders;
+        out.push_back(std::move(w));
+    }
 }
 
 CameraParams StageCameraView(const StageCamera& camera, float nearZ, float farZ) {
@@ -283,6 +456,8 @@ std::vector<ScreenView> BuildStageScreenViews(
             sv.brightness = st.brightness;
             sv.enabled = st.enabled;
             sv.camera = camera;
+            sv.pack = st.pack;
+            sv.params = st.params;
             if (st.source == StageScreenSource::Camera && !haveCamera) sv.source = StageScreenSource::None;
             if ((st.source == StageScreenSource::Image || st.source == StageScreenSource::Video) && resolveFile)
                 sv.path = resolveFile(st.file);

@@ -34,9 +34,10 @@ inline constexpr uint32_t kPackMaxTextureSize = 4096;   // per-texture width / h
 inline constexpr uint32_t kPackMaxPasses = 8;           // effect packs: pack.json "passes" (API v5)
 using PackParamValues = std::array<float, kPackMaxParams>;
 
-// What a pack does: replace the character material shading (surface.hlsl, default; every v1/v2 pack) or a whole-screen
-// effect (effect.hlsl, PackEffect in effect_api.hlsli, one entry of the user's effect stack).
-enum class PackType : uint8_t { Surface = 0, Effect, Look, World };
+// What a pack does: replace the character / stage material shading (surface.hlsl, default; every v1/v2 pack), a
+// whole-screen effect (effect.hlsl, PackEffect in effect_api.hlsli, one entry of the user's effect stack) or the content
+// of an MMDX stage screen (screen.hlsl, PackScreen in screen_api.hlsli; docs/shader_screen_api.md).
+enum class PackType : uint8_t { Surface = 0, Effect, Look, World, Screen };
 
 inline constexpr uint32_t kPackMaxTexturesWorld = 32;
 inline constexpr uint32_t kPackWorldMaxParticles = 8;
@@ -265,7 +266,15 @@ struct PackTexture {
     Origin origin = Origin::Bundled;   // "origin": bundled (ships with the pack) or user (user-supplied)
 };
 
-enum class PackSource : uint8_t { BuiltIn, User, Online };
+enum class PackSource : uint8_t {
+    BuiltIn,
+    User,
+    Online,
+    // S6: a pack bundled in an MMDX stage folder ("bundles": a stage's packs are registered as
+    // "stage:<stage id>/<folder>"). Never installed, never listed in the manager / pickers / gallery and never hot
+    // reloaded; the stage owns its lifetime.
+    Stage
+};
 enum class PackStatus : uint8_t {
     Ready,            // manifest fine; not compiled yet or compiled fine
     Compiled,         // its PSOs were built in this run
@@ -357,6 +366,11 @@ struct ShaderPack {
     bool Selectable() const { return status == PackStatus::Ready || status == PackStatus::Compiled; }
     // `texture` = the material's diffuse texture path as stored in the PMX (empty without one).
     PackClass Classify(const std::string& name, const std::string& nameEn, const std::string& texture) const;
+    // S6: the class a STAGE material gets (docs/stage_format.md `packs`): the first class rule that matches, else the
+    // pack's first class rule's class (character packs rarely name stage materials, and the class would otherwise fall
+    // back to Body for every stage surface), else Body. The stage's material is always shaded by the pack, never
+    // switched off: the pack owns it the way it owns a character's materials.
+    PackClass ClassifyStage(const std::string& name, const std::string& nameEn, const std::string& texture) const;
     // Parameter values in manifest order: `values` (key -> value) over the defaults, clamped to the ranges.
     PackParamValues Resolve(const std::map<std::string, float>& values) const;
     void ResolveSlots(const std::map<std::string, float>& values, std::vector<DirectX::XMFLOAT4>& slots) const;
@@ -391,8 +405,17 @@ public:
     bool PollChanges(double nowSeconds);
 
     const std::vector<ShaderPack>& Packs() const { return packs_; }
-    const ShaderPack* Find(const std::string& id) const;      // any status
+    const ShaderPack* Find(const std::string& id) const;      // any status, installed or stage-bundled
     uint32_t Generation() const { return generation_; }
+
+    // S6: registers a pack bundled in an MMDX stage folder under `id` (StagePackId), parsed exactly like an installed
+    // pack and reachable through Find(), but never listed in the manager / pickers / gallery and never hot reloaded.
+    // Idempotent: an already registered pack with the same id and folder is returned as is. A broken pack.json is one
+    // [W] (logged here, once) and returns null: the stage keeps loading. Bumps Generation() on change.
+    const ShaderPack* RegisterStagePack(const std::string& id, const std::filesystem::path& dir);
+    // The stage-bundled packs (PackSource::Stage), e.g. for the studio's cleanup on stage removal.
+    const std::vector<ShaderPack>& StagePacks() const { return stagePacks_; }
+    void UnregisterStagePacks(const std::string& stageId);   // drops "stage:<stageId>/..." entries
 
     // Installed packs whose zip SHA-256 is listed get PackStatus::Revoked (never selectable). Bumps Generation().
     void ApplyRevocations(const std::vector<std::string>& hashes);
@@ -437,6 +460,9 @@ public:
 
 private:
     std::vector<ShaderPack> packs_;
+    // S6: stage-bundled packs ("stage:<stage id>/<folder>"), kept apart so Scan() / PollChanges / the manager never
+    // see them. Find() searches both lists.
+    std::vector<ShaderPack> stagePacks_;
     uint32_t generation_ = 0;
     uint32_t errorCount_ = 0;
     std::string lastErrorPack_;
@@ -460,5 +486,10 @@ ShaderPackRegistry& ShaderPacks();
 
 // Valid pack id: [a-z0-9_-]{1,64}.
 bool ValidShaderPackId(const std::string& id);
+
+// S6: the registry id of a pack bundled in a stage folder: "stage:<stage id>/<pack folder as given in stage.json>".
+// Not a [a-z0-9_-] id (it carries ':' and '/'), which is exactly why it can never collide with an installed pack id
+// and is never written into a ShaderChoice / the project: only a manifest's `packs[]` entry names one.
+std::string StagePackId(const std::string& stageId, const std::string& folder);
 
 } // namespace mmdx

@@ -1045,7 +1045,7 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
                              const std::filesystem::path& textureFolder,
                              const MaterialClassOverrides& materials,
                              const std::map<std::string, float>& rawParams) {
-    if (role_ == ModelRole::Stage) pack = nullptr;   // packs shade characters only
+    if (role_ == ModelRole::Stage && pack && pack->type != PackType::Surface) pack = nullptr;   // S6: stages take surface packs only
     const std::string id = pack ? pack->id : std::string();
     const uint32_t generation = ShaderPacks().Generation();
     // params.ext packs: one float4 per declared param (typed values); uploaded per frame slot in UpdateMaterials
@@ -1099,7 +1099,8 @@ void GpuModel::SetShaderPack(const ShaderPack* pack, const PackParamValues& para
                 clsVal = static_cast<uint32_t>(pack->Classify(names.first, names.second, materialTextures_[i]));
             }
         } else {
-            clsVal = static_cast<uint32_t>(pack->Classify(names.first, names.second, materialTextures_[i]));
+            clsVal = static_cast<uint32_t>(role_ == ModelRole::Stage ? pack->ClassifyStage(names.first, names.second, materialTextures_[i])
+                                                                    : pack->Classify(names.first, names.second, materialTextures_[i]));
         }
         // The alpha key follows the material's FINAL class (per-material override included); kPackClassOff = no key.
         const float key = isOff ? 0.0f : PackAlphaKeyForClass(pack->alphaKey, clsVal);

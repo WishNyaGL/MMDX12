@@ -14,6 +14,7 @@
 #include "asset/StageMaterials.h"
 #include "render/GpuModel.h"
 #include "render/RenderTypes.h"
+#include "render/WorldTypes.h"
 #include "studio/SceneLight.h"
 
 #include <cstdint>
@@ -31,6 +32,9 @@ struct StageRuntimePart {
     int part = 0;                    // the part's index in StageManifest::models order
     GpuModel* gpu = nullptr;         // not owned (the scene / the studio document owns it)
     StageMaterialBinding binding;    // parallel to the manifest's `materials`; empty = no override for this part
+    // S6: the surface pack this part was assigned at load (id + per-material class overrides). Empty = the part keeps
+    // the default shading; resolved once (ResolveStageSurfacePack), the parameters follow the frame.
+    StageSurfacePack surfacePack;
 };
 
 // S5: one screen after the evaluator's `screens.<id>.<field>` targets (and the studio project's overrides) are
@@ -40,6 +44,10 @@ struct StageScreenState {
     StageScreenSource source = StageScreenSource::None;
     std::string file;      // image / video file as the manifest / target writes it (resolved by the caller)
     std::string camera;    // stage camera name, or "uid:<n>" for a studio camera
+    // S6: the screen's program pack (a bundled stage pack id, StagePackId) and its parameter values this frame. Empty
+    // pack = no program content (the screen is black).
+    std::string pack;
+    std::map<std::string, float> params;
     uint32_t width = 1920, height = 1080;
     float brightness = 1.0f;
     bool enabled = true;
@@ -105,9 +113,54 @@ void ApplyStageMaterialList(GpuModel& gpu, int part, const StageMaterialBinding&
 
 // ---- S5 screens ---------------------------------------------------------------------------------------------------
 // The manifest's screens with `eval`'s screen targets replayed in assignment order (brightness / enabled / source /
-// file / camera). `edit` (optional) may replace a screen's values first (the studio's project overrides by id).
+// file / camera) plus (S6) the program pack they draw with and that pack's parameters for this frame. `edit` (optional)
+// may replace a screen's values first (the studio's project overrides by id).
 std::vector<StageScreenState> ResolveStageScreens(const StageManifest& manifest, const StageEvalResult& eval,
                                                   const std::function<void(StageScreenState&)>& edit = {});
+
+// ---- S6 bundled packs ---------------------------------------------------------------------------------------------
+// One `packs[]` entry of a stage at one frame: the registry id its folder is registered under (StagePackId) and its
+// parameter values (the manifest's initial values with the `packs.<index>.params.<key>` targets replayed in assignment
+// order). `index` is the entry's position in manifest.packs (the binding index).
+struct StagePackState {
+    int index = 0;
+    std::string id;                        // "stage:<stage id>/<folder>"
+    StagePackRole role = StagePackRole::Surface;
+    std::map<std::string, float> params;
+};
+// Every `packs[]` entry with this frame's parameters. Empty when the stage bundles no packs (zero cost).
+std::vector<StagePackState> ResolveStagePacks(const StageManifest& manifest, const StageEvalResult& eval);
+
+// Registers every `packs[]` entry with the pack registry as "stage:<stage id>/<folder>" (once per stage folder: the
+// registry returns an already registered pack as is). A broken pack is one [W] and the stage keeps loading. Call once
+// per loaded stage (play mode: the scene load, studio: adding / opening a stage), before the parts' packs are applied.
+void RegisterStagePacks(const StageManifest& manifest);
+
+// S6 surface packs: the pack a stage part's materials are shaded with at load (the FIRST `packs[]` entry of role
+// "surface" whose `materials` globs match one of the part's materials), plus the per-material class overrides the pack
+// needs: the materials the pack claims are left out (the pack's own class rules, ShaderPack::ClassifyStage), every other
+// material of the part is `kMaterialPackOff` (the default shading). `pack` empty = the part keeps its own shading.
+struct StageSurfacePack {
+    std::string id;                        // registry id, empty = no surface pack
+    MaterialClassOverrides materials;      // GpuModel::SetShaderPack's per-material map
+};
+StageSurfacePack ResolveStageSurfacePack(const StageManifest& manifest, const GpuModel& part);
+// Applies every surface pack of a stage at this frame (the pack's parameters follow `packs.<index>.params.<key>`) to the
+// stage's parts. Called once per frame by play mode and the studio: GpuModel::SetShaderPack is a no-op when nothing
+// changed. Zero packs = zero work.
+void ApplyStageSurfacePacks(const std::vector<StagePackState>& packs, const std::vector<StageRuntimePart>& parts,
+                            const std::function<StageSurfacePack(int part)>& surfaceOf);
+
+// S6 world packs: one WorldInstance per `packs[]` entry of role "world", placed at its socket (the socket's node bone's
+// world matrix, times the socket's explicit offset; resolved after the parts are posed) and evaluated at `time`.
+// `resolveNode` answers a node / bone world matrix (empty name = not resolvable, the socket's explicit transform is used
+// on its own). `uidBase` keeps the instances apart from the host's own worlds: each gets uidBase + pack index.
+void AppendStageWorldPacks(const StageManifest& manifest, const std::vector<StagePackState>& packs, double time,
+                           bool exact, const std::shared_ptr<const WorldColliderTrack>& colliders, uint32_t uidBase,
+                           const std::function<bool(const std::string& node, DirectX::XMFLOAT4X4& out)>& resolveNode,
+                           std::vector<WorldInstance>& out);
+// The uid base play mode / the studio use for a stage's world packs (the host's own worlds keep their low uids).
+inline constexpr uint32_t kStageWorldUidBase = 0x40000000u;
 
 // A stage camera as a render camera: looks at `target` from `position`, vertical fov in degrees.
 CameraParams StageCameraView(const StageCamera& camera, float nearZ = 0.5f, float farZ = 4000.0f);
