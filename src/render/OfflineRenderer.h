@@ -129,10 +129,18 @@ public:
     // view.motionBlur the models' previous ring entry (frame - 1) must hold the shutter-open pose. `sc` was filled for
     // job.width x job.height without jitter; `lights` holds `lightCount` entries. `frame` is
     // ctx.FrameNumber() (bone/morph ring entry for the outline pass).
+    // S7a: `lightCdf` (lightCdfCount floats, the normalised inclusive pick CDF) is the image's light distribution
+    // (Renderer::FillLightCdf); SceneConstants::lightCdfParams must already point at LightCdfSrv().
     void Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, const BuiltinTextures* builtin,
                RtScene& rt, const FrameView& view, const SceneConstants& sc, const GpuLight* lights,
-               uint32_t lightCount, const GpuFogVolume* fogVolumes, uint32_t fogVolumeCount, const OfflineJobDesc& job,
-               uint64_t frame, MmeRuntime* mme = nullptr, MmeSkin* mmeSkin = nullptr);
+               uint32_t lightCount, const float* lightCdf, uint32_t lightCdfCount, const GpuFogVolume* fogVolumes,
+               uint32_t fogVolumeCount, const OfflineJobDesc& job, uint64_t frame, MmeRuntime* mme = nullptr,
+               MmeSkin* mmeSkin = nullptr);
+    // S7a: the heap index of the raw ByteAddressBuffer SRV holding this renderer's light CDF (for
+    // SceneConstants::lightCdfParams.x): the shaders read it through the bindless buffer table. DescriptorHeap::kInvalid
+    // before Initialize.
+    uint32_t LightCdfSrv() const;
+
     // Records this frame's share of work (no-op when Idle or Done).
     void Render(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient, const BuiltinTextures* builtin,
                 RtScene& rt);

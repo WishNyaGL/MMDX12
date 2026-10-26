@@ -353,7 +353,8 @@ static void TestSampling() {
 static void TestLightLimit() {
     LightAnchors anchors;
     std::vector<SceneLight> lights;
-    for (uint32_t i = 0; i < 17; ++i) {
+    const uint32_t n = Renderer::kMaxPunctualLights + 1;   // S7a: 257 point lights, one past the cap
+    for (uint32_t i = 0; i < n; ++i) {
         SceneLight p;
         p.uid = i + 1;
         p.kind = LightKind::Point;
@@ -364,16 +365,17 @@ static void TestLightLimit() {
     BuildSceneLighting(lights, {}, 0.0, anchors, out);
     bool order = out.punctual.size() == Renderer::kMaxPunctualLights;
     for (size_t i = 0; order && i < out.punctual.size(); ++i) order = out.punctual[i].position.x == (float)i;
-    Check(Renderer::kMaxPunctualLights == 16 && out.punctual.size() == 16 && order,
-          "17 enabled point lights give 16 PunctualLights, the first 16 in list order", "size=%zu", out.punctual.size());
+    Check(out.punctual.size() == Renderer::kMaxPunctualLights && order,
+          "kMaxPunctualLights + 1 enabled point lights give kMaxPunctualLights PunctualLights in list order",
+          "size=%zu", out.punctual.size());
 
     // disabled lights do not count; spots and points share the limit; a point light has no cone
     lights[0].enabled = false;
     lights[1].kind = LightKind::Spot;
     LightParams out2;
     BuildSceneLighting(lights, {}, 0.0, anchors, out2);
-    Check(out2.punctual.size() == 16 && out2.punctual[0].position.x == 1.0f && out2.punctual[0].spotCosOuter > -1.0f &&
-              out2.punctual[1].spotCosOuter <= -1.0f,
+    Check(out2.punctual.size() == Renderer::kMaxPunctualLights && out2.punctual[0].position.x == 1.0f &&
+              out2.punctual[0].spotCosOuter > -1.0f && out2.punctual[1].spotCosOuter <= -1.0f,
           "disabled lights are skipped; a spot has a cone, a point light none");
 
     // a second sun / ambient light is not used; neither is a sun among the punctual lights

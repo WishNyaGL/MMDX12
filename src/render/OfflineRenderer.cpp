@@ -30,6 +30,7 @@ constexpr uint32_t kSlots = Dx12Context::kFramesInFlight;
 constexpr uint32_t kLightBytes = Renderer::kMaxPunctualLights * sizeof(GpuLight);
 constexpr uint32_t kFogBytes = Renderer::kMaxFogVolumes * sizeof(GpuFogVolume);
 constexpr uint32_t kMediumBytes = sizeof(GpuMedium);   // S9c: one element, the frame's in-path medium
+constexpr uint32_t kLightCdfBytes = kLightCdfMax * sizeof(float);   // S7a: the image's light pick CDF (one slot)
 constexpr uint32_t kEdgeIterations = 64;   // outline layers averaged for DoF / motion blur
 constexpr float kConvolutionBloomGain = 6.0f;        // as the real-time convolution bloom output
 constexpr float kConvolutionBloomIntensity = 0.12f;  // CSFinalize multiplier of the convolved bloom  // outline layers averaged for motion blur / depth of field
@@ -169,11 +170,13 @@ struct OfflineRenderer::Impl {
     Texture icFinal;                   // smoothed finest level: the irradiance cache CSRender reads
     bool icValid = false;              // icFinal holds this image's cache
     // per-image constants (UPLOAD heap, persistently mapped, written only in Begin while the GPU is idle)
-    ComPtr<ID3D12Resource> sceneCb, lightBuf, fogBuf, mediumBuf;
+    ComPtr<ID3D12Resource> sceneCb, lightBuf, fogBuf, mediumBuf, lightCdfBuf;
     uint8_t* sceneCbMapped = nullptr;
     uint8_t* lightMapped = nullptr;
     uint8_t* fogMapped = nullptr;
     uint8_t* mediumMapped = nullptr;
+    uint8_t* lightCdfMapped = nullptr;
+    uint32_t lightCdfSrv = DescriptorHeap::kInvalid;   // S7a: raw ByteAddressBuffer SRV (bindless buffer table)
     // readbacks, one entry per frame slot
     ComPtr<ID3D12Resource> counterReadback;       // kFramesInFlight * 512 bytes
     ComPtr<ID3D12QueryHeap> timestampHeap;        // 2 * kFramesInFlight
@@ -1305,7 +1308,20 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
     m.fogBuf = CreateMappedUpload(device, kFogBytes, &m.fogMapped, L"offline.fogvolumes");
     // S9c: the frame's in-path medium (one GpuMedium; mode 0 = the GI paths ignore it)
     m.mediumBuf = CreateMappedUpload(device, kMediumBytes, &m.mediumMapped, L"offline.medium");
-    if (!m.sceneCb || !m.lightBuf || !m.fogBuf || !m.mediumBuf) return false;
+    // S7a: the image's light pick CDF (kLightCdfMax floats, read through the bindless buffer table)
+    m.lightCdfBuf = CreateMappedUpload(device, kLightCdfBytes, &m.lightCdfMapped, L"offline.lightcdf");
+    if (!m.sceneCb || !m.lightBuf || !m.fogBuf || !m.mediumBuf || !m.lightCdfBuf) return false;
+    m.lightCdfSrv = ctx.SrvHeap().Allocate(1);
+    if (m.lightCdfSrv == DescriptorHeap::kInvalid) return false;
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;   // raw ByteAddressBuffer (the shaders' bindless buffer table)
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.NumElements = kLightCdfMax;
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        device->CreateShaderResourceView(m.lightCdfBuf.Get(), &srv, ctx.SrvHeap().Cpu(m.lightCdfSrv));
+    }
 
     // Readbacks, one entry per frame slot.
     D3D12_HEAP_PROPERTIES readback{D3D12_HEAP_TYPE_READBACK};
@@ -1357,11 +1373,16 @@ void OfflineRenderer::Shutdown() {
     if (m.lightBuf && m.lightMapped) m.lightBuf->Unmap(0, nullptr);
     if (m.fogBuf && m.fogMapped) m.fogBuf->Unmap(0, nullptr);
     if (m.mediumBuf && m.mediumMapped) m.mediumBuf->Unmap(0, nullptr);
+    if (m.lightCdfBuf && m.lightCdfMapped) m.lightCdfBuf->Unmap(0, nullptr);
+    if (m.lightCdfSrv != DescriptorHeap::kInvalid) ctx.SrvHeap().Free(m.lightCdfSrv, 1);
+    m.lightCdfSrv = DescriptorHeap::kInvalid;
     m.sceneCbMapped = m.lightMapped = m.fogMapped = m.mediumMapped = nullptr;
+    m.lightCdfMapped = nullptr;
     m.sceneCb.Reset();
     m.lightBuf.Reset();
     m.fogBuf.Reset();
     m.mediumBuf.Reset();
+    m.lightCdfBuf.Reset();
     m.counterReadback.Reset();
     m.timestampReadback.Reset();
     m.timestampHeap.Reset();
@@ -1386,8 +1407,9 @@ void OfflineRenderer::Shutdown() {
 void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors& transient,
                             const BuiltinTextures* builtin, RtScene& rt, const FrameView& view,
                             const SceneConstants& sc, const GpuLight* lights, uint32_t lightCount,
-                            const GpuFogVolume* fogVolumes, uint32_t fogVolumeCount, const OfflineJobDesc& job,
-                            uint64_t frame, MmeRuntime* mme, MmeSkin* mmeSkin) {
+                            const float* lightCdf, uint32_t lightCdfCount, const GpuFogVolume* fogVolumes,
+                            uint32_t fogVolumeCount, const OfflineJobDesc& job, uint64_t frame, MmeRuntime* mme,
+                            MmeSkin* mmeSkin) {
     if (!impl_) return;
     Impl& m = *impl_;
 
@@ -1433,6 +1455,10 @@ void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors
     memcpy(m.sceneCbMapped, &sc, sizeof(sc));
     memset(m.lightMapped, 0, kLightBytes);
     memcpy(m.lightMapped, lights, (size_t)std::min(lightCount, Renderer::kMaxPunctualLights) * sizeof(GpuLight));
+    // S7a: the image's light pick CDF (zeroed past the count, so no stale weights linger)
+    memset(m.lightCdfMapped, 0, kLightCdfBytes);
+    if (lightCdf && lightCdfCount)
+        memcpy(m.lightCdfMapped, lightCdf, (size_t)std::min(lightCdfCount, kLightCdfMax) * sizeof(float));
     // S9: the local fog volumes (zeroed past the count; an empty list leaves every entry zero = no medium)
     memset(m.fogMapped, 0, kFogBytes);
     if (fogVolumes && fogVolumeCount)
@@ -1526,6 +1552,11 @@ void OfflineRenderer::Present(ID3D12GraphicsCommandList* cmd, TransientDescripto
 }
 
 void OfflineRenderer::Cancel() { progress_ = {}; }
+
+// S7a: the raw CDF buffer SRV the GI shaders index through the bindless buffer table.
+uint32_t OfflineRenderer::LightCdfSrv() const {
+    return impl_ ? impl_->lightCdfSrv : DescriptorHeap::kInvalid;
+}
 
 bool OfflineRenderer::ReadImage(ImageRGBA8& out, bool preserveAlpha) {
     if (!impl_ || progress_.phase != OfflinePhase::Done || !impl_->ldr) return false;

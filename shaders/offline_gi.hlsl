@@ -37,6 +37,7 @@
 //   gP1 = (imageWidth, imageHeight, 0, error threshold)
 //   gP2 = (shutter time 0..1, focus distance (view z, <= 0: pinhole), lens radius, 0)
 #include "rt_common.hlsli"   // includes common.hlsli
+#include "light_pick.hlsli"   // S7a: the punctual-light CDF pick
 #include "offline_common.hlsli"
 #include "dielectric.hlsli"
 #include "offline_glass.hlsli"
@@ -468,6 +469,8 @@ float3 MediumNee(float3 p, float3 d, inout uint rng) {
 // The scattering albedo is part of sigma_s here (unlike the collision event's NEE, which the path's albedo roulette
 // weights), so the single-scatter energy matches the single pass's march.
 static const uint kMediumAllLights = 8u;
+// S7a: above this many lights the segment pick stops scoring every light and samples the frame's power CDF instead.
+static const uint kMediumScoredLights = 64u;
 
 // The part of the segment [0, tEnd] where light `l` can reach the medium: the haze sphere (MediumRange), the light's
 // range sphere and, for a spot, its cone. Empty when x >= y.
@@ -553,6 +556,16 @@ float3 MediumPunctualSegment(float3 o, float3 d, float tEnd, inout uint rng) {
     // one light by its unshadowed contribution (the pick MediumNee's punctual part used): each light is scored at the
     // middle of the stretch of this segment it lights, and total / w makes the one-sample mean the all-light sum.
     if (MediumRange(o, d, tEnd).x >= MediumRange(o, d, tEnd).y) return 0;
+    // S7a: with more than kMediumScoredLights lights two scoring passes per segment cost too much: one sample of the
+    // frame's power CDF instead (weight 1 / pdf; position-blind, so noisier per sample, but O(log lights)).
+    if (nl > kMediumScoredLights && (int)gLightCdf.x >= 0) {
+        float pdf = 0.0;
+        const uint li = LightCdfPick(Rand(rng), nl, pdf);
+        if (pdf <= 0.0) return 0;
+        PtLight l = gPtLights[li];
+        if (l.volumetric <= 0.0) return 0;
+        return MediumPunctualLight(l, o, d, tEnd, 1.0 / pdf, rng);
+    }
     float total = 0.0;
     [loop] for (uint i = 0; i < nl; ++i) {
         PtLight l = gPtLights[i];
@@ -640,9 +653,78 @@ float3 PunctualUnshadowed(Surf s, uint li, bool toon, out float3 ld, out float d
     return PI * l.color * atten * diff;
 }
 
-// Punctual light direct lighting: diffuse irradiance with a single picked shadow ray, plus specular NEE
-// for the specular lobe around reflect(-V, s.n) with half-angle rough * 0.5. Shadow rays are reused
-// when diffuse and specular evaluate the same light.
+// S7a: how the punctual lights are sampled at one shading point. Up to kGiAllLights lights keep the exact estimator
+// of earlier builds (every light evaluated, the diffuse NEE one importance-picked light), so small scenes keep their
+// image; with more lights K = kGiCdfSamples samples come from the frame's power CDF (value / pdf), which is
+// O(log lights) per sample instead of two passes over all of them.
+static const uint kGiAllLights = 4u;
+static const uint kGiCdfSamples = 4u;
+
+// One punctual light's direct contribution at s: its unshadowed irradiance (PI * colour * atten * diff) and its
+// specular NEE radiance, both through the light's shadow ray (and the medium between). None of the picking weights:
+// the caller applies them.
+void PunctualOne(Surf s, PtLight l, float3 V, bool toon, float pSpec, float3 R, float cosHalfAngle, float omega,
+                 bool wantDiff, inout uint rng, out float3 diffIrradiance, out float3 specRadiance) {
+    diffIrradiance = 0;
+    specRadiance = 0;
+    int shadowType = (int)l.shadowType;
+    float3 ld;
+    float dist;
+    float atten;
+    float diff;
+    if (l.isArea > 0.5) {
+        float3 norm = l.dir;
+        float3 c = cross(float3(0, 1, 0), norm);
+        float cLen = length(c);
+        float3 right = (cLen > 1e-4) ? (c / cLen) : float3(1, 0, 0);
+        float3 up = cross(norm, right);
+        float uA = (Rand(rng) - 0.5) * l.areaWidth;
+        float vA = (Rand(rng) - 0.5) * l.areaHeight;
+        float3 samplePos = l.pos + right * uA + up * vA;
+        float3 d = samplePos - s.pos;
+        dist = length(d);
+        ld = d / max(dist, 1e-4);
+        atten = PunctualFalloff(dist, l.invRange, (int)l.falloff) * max(0.0, dot(norm, -ld));
+    } else {
+        float3 d = l.pos - s.pos;
+        dist = length(d);
+        ld = d / max(dist, 1e-4);
+        atten = PunctualFalloff(dist, l.invRange, (int)l.falloff);
+        if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
+    }
+    float ndl = dot(s.n, ld);
+    float flat = s.flat ? 1.0 : 0.0;
+    diff = toon ? lerp(smoothstep(-0.05, 0.25, ndl), saturate(ndl * 0.3 + 0.7), flat) : ndl;
+
+    bool evalDiff = wantDiff && (atten > 0.0) && (diff > 0.0) && (l.affectDiffuse > 0.5);
+    bool evalSpec = (pSpec > 0.0) && (l.affectSpecular > 0.5) && (atten > 0.0) &&
+                    ((s.pbr ? dot(s.pb.N, ld) > 0.0 : dot(R, ld) >= cosHalfAngle)) && (dot(s.faceN, ld) > 0.0);
+    if (!(evalDiff || evalSpec)) return;
+
+    float3 vis = 1.0;
+    if (shadowType != 0) {
+        float3 po = OffsetRayOrigin(s.pos, s.faceN);
+        float3 dir = ld;
+        if (l.isArea <= 0.5 && shadowType == 2 && l.shadowSoftness > 0.0) {
+            float cosTheta = PunctualShadowConeCos(1.0, l.shadowSoftness);
+            dir = SampleCone(float2(Rand(rng), Rand(rng)), ld, cosTheta);
+        }
+        float3 meshTrans = TraceShadowRayTinted(po, dir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
+        float hitVis = Luminance(meshTrans);
+        float3 shadowTrans = ShadowTransmission(hitVis, l.shadowDensity, l.shadowColor);
+        vis = shadowTrans * (hitVis > 0.0 ? meshTrans * GlassShadow(po, dir, max(dist - 0.05, 0.0)) : float3(1, 1, 1));
+    }
+    // S9c: the medium between the surface and the light dims / tints it as well (mode 0: 1, no random numbers)
+    vis *= MediumShadowT(OffsetRayOrigin(s.pos, s.faceN), ld, max(dist - 0.05, 0.0), rng);
+
+    if (evalDiff) diffIrradiance = PI * l.color * atten * diff * vis;
+    if (evalSpec)
+        specRadiance = pSpec * l.color * atten * vis * (s.pbr ? PtPbrEvalSpecular(s.pb, V, ld) : (1.0 / omega));
+}
+
+// Punctual light direct lighting: diffuse irradiance plus specular NEE for the specular lobe around
+// reflect(-V, s.n) with half-angle rough * 0.5. Shadow rays are shared by both lobes.
+// S7a: <= kGiAllLights lights keep the exact estimator; above it kGiCdfSamples CDF picks (weight / pdf).
 void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, out float3 diffE, out float3 specR) {
     diffE = 0;
     specR = 0;
@@ -654,170 +736,56 @@ void PunctualLighting(Surf s, float3 V, bool toon, float pSpec, inout uint rng, 
     float omega = max(2.0 * PI * (1.0 - cosHalfAngle), 1e-6);
     bool canSpec = (pSpec > 0.0);
 
-    float total = 0.0;
-    for (uint i = 0; i < nl; ++i) {
-        float3 ld;
-        float dist;
-        total += Luminance(PunctualUnshadowed(s, i, toon, ld, dist));
-    }
-
-    int pickedJ = -1;
-    float pickedW = 0.0;
-    if (total > 0.0) {
-        float u = Rand(rng) * total;
-        for (uint j = 0; j < nl; ++j) {
+    if (nl <= kGiAllLights) {
+        // the exact estimator: one light picked by its unshadowed contribution carries the diffuse NEE (weighted by
+        // total / picked), every other light still contributes its specular lobe
+        float total = 0.0;
+        for (uint i = 0; i < nl; ++i) {
             float3 ld;
             float dist;
-            float3 e = PunctualUnshadowed(s, j, toon, ld, dist);
-            float w = Luminance(e);
-            if (w <= 0.0) continue;
-            u -= w;
-            if (u <= 0.0 || j == nl - 1u) {
-                pickedJ = (int)j;
-                pickedW = w;
-                break;
+            total += Luminance(PunctualUnshadowed(s, i, toon, ld, dist));
+        }
+        int pickedJ = -1;
+        if (total > 0.0) {
+            float u = Rand(rng) * total;
+            for (uint j = 0; j < nl; ++j) {
+                float3 ld;
+                float dist;
+                float3 e = PunctualUnshadowed(s, j, toon, ld, dist);
+                float w = Luminance(e);
+                if (w <= 0.0) continue;
+                u -= w;
+                if (u <= 0.0 || j == nl - 1u) {
+                    float3 de, sp;
+                    PunctualOne(s, gPtLights[j], V, toon, pSpec, R, cosHalfAngle, omega, true, rng, de, sp);
+                    diffE = de * (total / w);
+                    specR += sp;
+                    pickedJ = (int)j;
+                    break;
+                }
             }
         }
+        if (canSpec) {
+            for (uint k = 0; k < nl; ++k) {
+                if ((int)k == pickedJ) continue;
+                float3 de, sp;
+                PunctualOne(s, gPtLights[k], V, toon, pSpec, R, cosHalfAngle, omega, false, rng, de, sp);
+                specR += sp;
+            }
+        }
+        return;
     }
 
-    if (pickedJ >= 0) {
-        PtLight l = gPtLights[(uint)pickedJ];
-        int shadowType = (int)l.shadowType;
-        float3 ld;
-        float dist;
-        float atten;
-        float diff;
-        if (l.isArea > 0.5) {
-            float3 norm = l.dir;
-            float3 c = cross(float3(0, 1, 0), norm);
-            float cLen = length(c);
-            float3 right = (cLen > 1e-4) ? (c / cLen) : float3(1, 0, 0);
-            float3 up = cross(norm, right);
-            float uA = (Rand(rng) - 0.5) * l.areaWidth;
-            float vA = (Rand(rng) - 0.5) * l.areaHeight;
-            float3 samplePos = l.pos + right * uA + up * vA;
-            float3 d = samplePos - s.pos;
-            dist = length(d);
-            ld = d / max(dist, 1e-4);
-            atten = PunctualFalloff(dist, l.invRange, (int)l.falloff) * max(0.0, dot(norm, -ld));
-            float ndl = dot(s.n, ld);
-            float flat = s.flat ? 1.0 : 0.0;
-            diff = toon ? lerp(smoothstep(-0.05, 0.25, ndl), saturate(ndl * 0.3 + 0.7), flat) : ndl;
-        } else {
-            float3 d = l.pos - s.pos;
-            dist = length(d);
-            ld = d / max(dist, 1e-4);
-            atten = PunctualFalloff(dist, l.invRange, (int)l.falloff);
-            if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
-            float ndl = dot(s.n, ld);
-            float flat = s.flat ? 1.0 : 0.0;
-            diff = toon ? lerp(smoothstep(-0.05, 0.25, ndl), saturate(ndl * 0.3 + 0.7), flat) : ndl;
-        }
-
-        bool evalDiff = (atten > 0.0) && (diff > 0.0) && (l.affectDiffuse > 0.5);
-        bool evalSpecForPicked = canSpec && (l.affectSpecular > 0.5) && (atten > 0.0) &&
-                                 ((s.pbr ? dot(s.pb.N, ld) > 0.0 : dot(R, ld) >= cosHalfAngle)) && (dot(s.faceN, ld) > 0.0);
-
-        if (evalDiff || evalSpecForPicked) {
-            float3 vis = 1.0;
-            if (l.isArea > 0.5) {
-                if (shadowType != 0) {
-                    float3 po = OffsetRayOrigin(s.pos, s.faceN);
-                    float3 meshTrans = TraceShadowRayTinted(po, ld, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
-                    float hitVis = Luminance(meshTrans);
-                    float3 shadowTrans = ShadowTransmission(hitVis, l.shadowDensity, l.shadowColor);
-                    vis = shadowTrans * (hitVis > 0.0 ? meshTrans * GlassShadow(po, ld, max(dist - 0.05, 0.0))
-                                                      : float3(1, 1, 1));
-                }
-            } else if (shadowType != 0) {
-                float3 po = OffsetRayOrigin(s.pos, s.faceN);
-                float3 dir = ld;
-                if (shadowType == 2 && l.shadowSoftness > 0.0) {
-                    float cosTheta = PunctualShadowConeCos(1.0, l.shadowSoftness);
-                    dir = SampleCone(float2(Rand(rng), Rand(rng)), ld, cosTheta);
-                }
-                float3 meshTrans = TraceShadowRayTinted(po, dir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
-                float hitVis = Luminance(meshTrans);
-                float3 shadowTrans = ShadowTransmission(hitVis, l.shadowDensity, l.shadowColor);
-                vis = shadowTrans * (hitVis > 0.0 ? meshTrans * GlassShadow(po, dir, max(dist - 0.05, 0.0))
-                                                  : float3(1, 1, 1));
-            }
-
-            // S9c: the medium between the surface and the light dims / tints it as well (mode 0: 1, no random numbers)
-            if (MediumOn())
-                vis *= MediumShadowT(OffsetRayOrigin(s.pos, s.faceN), ld, max(dist - 0.05, 0.0), rng);
-
-            if (evalDiff) {
-                float3 e = PI * l.color * atten * diff;
-                diffE = e * (total / pickedW) * vis;
-            }
-            if (evalSpecForPicked) {
-                if (s.pbr)
-                    specR += pSpec * l.color * atten * vis * PtPbrEvalSpecular(s.pb, V, ld);
-                else
-                    specR += pSpec * l.color * atten * vis / omega;
-            }
-        }
-    }
-
-    if (canSpec) {
-        for (uint k = 0; k < nl; ++k) {
-            if ((int)k == pickedJ) continue;
-            PtLight lk = gPtLights[k];
-            if (lk.affectSpecular <= 0.5) continue;
-            float3 ld;
-            float dist;
-            float atten;
-            if (lk.isArea > 0.5) {
-                float3 norm = lk.dir;
-                float3 c = cross(float3(0, 1, 0), norm);
-                float cLen = length(c);
-                float3 right = (cLen > 1e-4) ? (c / cLen) : float3(1, 0, 0);
-                float3 up = cross(norm, right);
-                float uA = (Rand(rng) - 0.5) * lk.areaWidth;
-                float vA = (Rand(rng) - 0.5) * lk.areaHeight;
-                float3 samplePos = lk.pos + right * uA + up * vA;
-                float3 d = samplePos - s.pos;
-                dist = length(d);
-                ld = d / max(dist, 1e-4);
-                atten = PunctualFalloff(dist, lk.invRange, (int)lk.falloff) * max(0.0, dot(norm, -ld));
-            } else {
-                float3 d = lk.pos - s.pos;
-                dist = length(d);
-                ld = d / max(dist, 1e-4);
-                atten = PunctualFalloff(dist, lk.invRange, (int)lk.falloff);
-                if (lk.cosOuter > -1.0) atten *= smoothstep(lk.cosOuter, lk.cosInner, dot(-ld, lk.dir));
-            }
-
-            if (atten > 0.0 && (s.pbr ? dot(s.pb.N, ld) > 0.0 : dot(R, ld) >= cosHalfAngle) && dot(s.faceN, ld) > 0.0) {
-                int shadowType = (int)lk.shadowType;
-                float3 vis = 1.0;
-                if (lk.isArea > 0.5) {
-                    if (shadowType != 0) {
-                        float3 po = OffsetRayOrigin(s.pos, s.faceN);
-                        float3 meshTrans = TraceShadowRayTinted(po, ld, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
-                        float hitVis = Luminance(meshTrans);
-                        float3 shadowTrans = ShadowTransmission(hitVis, lk.shadowDensity, lk.shadowColor);
-                        vis = shadowTrans * (hitVis > 0.0 ? meshTrans * GlassShadow(po, ld, max(dist - 0.05, 0.0))
-                                                          : float3(1, 1, 1));
-                    }
-                } else if (shadowType != 0) {
-                    float3 po = OffsetRayOrigin(s.pos, s.faceN);
-                    float3 dir = ld;
-                    if (shadowType == 2 && lk.shadowSoftness > 0.0) {
-                        float cosTheta = PunctualShadowConeCos(1.0, lk.shadowSoftness);
-                        dir = SampleCone(float2(Rand(rng), Rand(rng)), ld, cosTheta);
-                    }
-                    float3 meshTrans = TraceShadowRayTinted(po, dir, max(dist - 0.05, 0.0), RT_MASK_CHARACTER);
-                    float hitVis = Luminance(meshTrans);
-                    float3 shadowTrans = ShadowTransmission(hitVis, lk.shadowDensity, lk.shadowColor);
-                    vis = shadowTrans * (hitVis > 0.0 ? meshTrans * GlassShadow(po, dir, max(dist - 0.05, 0.0))
-                                                      : float3(1, 1, 1));
-                }
-                const float medT = MediumShadowT(OffsetRayOrigin(s.pos, s.faceN), ld, max(dist - 0.05, 0.0), rng);
-                specR += pSpec * lk.color * atten * vis * medT * (s.pbr ? PtPbrEvalSpecular(s.pb, V, ld) : (1.0 / omega));
-            }
-        }
+    // S7a: K CDF samples of the frame's light distribution (the sample's weight is 1 / (K * pdf))
+    [loop] for (uint k = 0; k < kGiCdfSamples; ++k) {
+        float pdf = 0.0;
+        uint li = LightCdfPick(Rand(rng), nl, pdf);
+        if (pdf <= 0.0) continue;
+        float3 de, sp;
+        PunctualOne(s, gPtLights[li], V, toon, pSpec, R, cosHalfAngle, omega, true, rng, de, sp);
+        const float w = 1.0 / (pdf * (float)kGiCdfSamples);
+        diffE += de * w;
+        specR += sp * w;
     }
 }
 
@@ -942,7 +910,14 @@ float3 SkinTranslucency(Surf s, float skin, inout uint rng) {
     }
     if (gNumLights >= 1.0) {
         uint nl = (uint)gNumLights;
+        // S7a: one light, the frame's CDF when it has one (weight 1 / pdf), else uniform (weight nl)
+        float pickPdf = 1.0 / (float)nl;
         uint li = min((uint)(Rand(rng) * (float)nl), nl - 1u);
+        if ((int)gLightCdf.x >= 0) {
+            float pdf = 0.0;
+            uint pick = LightCdfPick(Rand(rng), nl, pdf);
+            if (pdf > 0.0) { li = pick; pickPdf = pdf; }
+        }
         PtLight l = gPtLights[li];
         float3 d = l.pos - s.pos;
         float dist = length(d);
@@ -951,7 +926,7 @@ float3 SkinTranslucency(Surf s, float skin, inout uint rng) {
         if (l.cosOuter > -1.0) atten *= smoothstep(l.cosOuter, l.cosInner, dot(-ld, l.dir));
         else if (l.isArea > 0.5) atten *= max(0.0, dot(l.dir, -ld));
         if (atten > 0.0 && dot(s.faceN, ld) < 0.2 && l.affectDiffuse > 0.5)
-            c += PI * l.color * atten * (float)nl * SkinTransmittance(s, ld, dist, rng);
+            c += PI * l.color * atten * (1.0 / pickPdf) * SkinTransmittance(s, ld, dist, rng);
     }
     return s.albedo / PI * c * kSkinTranslucency * skin;
 }
@@ -1069,7 +1044,17 @@ float3 GlassGlint(Surf s, float3 V, inout uint rng) {
         }
     }
     uint nl = (uint)gNumLights;
-    for (uint i = 0; i < nl; ++i) {
+    // S7a: above kGiAllLights lights, kGiCdfSamples CDF picks instead of every light (weight 1 / (K * pdf))
+    const uint glintSamples = nl > kGiAllLights ? kGiCdfSamples : nl;
+    [loop] for (uint si = 0; si < glintSamples; ++si) {
+        float glintW = 1.0;
+        uint i = si;
+        if (nl > kGiAllLights) {
+            float pdf = 0.0;
+            i = LightCdfPick(Rand(rng), nl, pdf);
+            if (pdf <= 0.0) continue;
+            glintW = 1.0 / (pdf * (float)kGiCdfSamples);
+        }
         PtLight l = gPtLights[i];
         if (l.affectSpecular <= 0.5) continue;
         float3 dl = l.pos - s.pos;
@@ -1081,7 +1066,7 @@ float3 GlassGlint(Surf s, float3 V, inout uint rng) {
         float nl2 = dot(s.n, ld);
         if (atten <= 0.0 || nl2 <= 0.0) continue;
         float3 hh = normalize(ld + V);
-        c += norm * pow(saturate(dot(s.n, hh)), e) * FresnelDielectric(saturate(dot(hh, V)), gGlassParams.z) *
+        c += glintW * norm * pow(saturate(dot(s.n, hh)), e) * FresnelDielectric(saturate(dot(hh, V)), gGlassParams.z) *
              PI * l.color * atten * nl2 * MediumShadowT(s.pos, ld, max(dist - 0.05, 0.0), rng);
     }
     return c;
@@ -1106,7 +1091,17 @@ float3 FresnelGlint(Surf s, float3 V, inout uint rng) {
         }
     }
     uint nl = (uint)gNumLights;
-    for (uint i = 0; i < nl; ++i) {
+    // S7a: above kGiAllLights lights, kGiCdfSamples CDF picks instead of every light (weight 1 / (K * pdf))
+    const uint glintSamples = nl > kGiAllLights ? kGiCdfSamples : nl;
+    [loop] for (uint si = 0; si < glintSamples; ++si) {
+        float glintW = 1.0;
+        uint i = si;
+        if (nl > kGiAllLights) {
+            float pdf = 0.0;
+            i = LightCdfPick(Rand(rng), nl, pdf);
+            if (pdf <= 0.0) continue;
+            glintW = 1.0 / (pdf * (float)kGiCdfSamples);
+        }
         PtLight l = gPtLights[i];
         if (l.affectSpecular <= 0.5) continue;
         float3 dl = l.pos - s.pos;
@@ -1118,7 +1113,7 @@ float3 FresnelGlint(Surf s, float3 V, inout uint rng) {
         float nl2 = dot(s.n, ld);
         if (atten <= 0.0 || nl2 <= 0.0) continue;
         float3 hh = normalize(ld + V);
-        c += norm * pow(saturate(dot(s.n, hh)), e) * FresnelDielectric(saturate(dot(hh, V)), ior) * PI * l.color *
+        c += glintW * norm * pow(saturate(dot(s.n, hh)), e) * FresnelDielectric(saturate(dot(hh, V)), ior) * PI * l.color *
              atten * nl2 * MediumShadowT(s.pos, ld, max(dist - 0.05, 0.0), rng);
     }
     return c;

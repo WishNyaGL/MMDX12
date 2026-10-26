@@ -43,7 +43,7 @@ struct RenderInitProgress {
 // only clears the back buffer, so the UI can draw on a clean surface.
 class Renderer {
 public:
-    static constexpr uint32_t kMaxPunctualLights = 16;
+    static constexpr uint32_t kMaxPunctualLights = 256;  // S7a: GpuLight upload size / LightParams cap
     static constexpr uint32_t kMaxFogVolumes = 16;   // S9: local fog volumes bound to the volumetric passes
     Renderer() = default;
     ~Renderer();
@@ -189,8 +189,21 @@ private:
     IUpscaler* EffectiveUpscaler() const;      // null for None or an unavailable upscaler
     // Punctual lights -> GpuLight (premultiplied colour, normalized direction); returns the count
     // written (<= kMaxPunctualLights).
+    // S7a: spotSlices (per punctual light: the spot shadow slice or -1) decides which spot lights are shadowed;
+    // null = the first kSpotShadowSlices spots, as before.
     // pointCap: point lights that get a shadow slice (raster: the map's capacity; ray-traced paths: no cap).
-    static uint32_t FillGpuLights(const LightParams& light, GpuLight* out, uint32_t pointCap = kMaxPunctualLights);
+    static uint32_t FillGpuLights(const LightParams& light, GpuLight* out, const std::vector<int>* spotSlices = nullptr,
+                                  uint32_t pointCap = kMaxPunctualLights);
+    // S7a: the shadow budget over the spot lights: per punctual light index the shadow slice (0..kSpotShadowSlices-1)
+    // or -1. Candidates are spots with cast shadows; score = intensity * luminance(colour) * range / distance to the
+    // eye. The best kSpotShadowSlices win, but a light picked last frame keeps its slice unless a newcomer scores
+    // kSpotPickHysteresis times more (stable across frames).
+    std::vector<int> PickSpotShadowSlices(const LightParams& light, const CameraParams& camera);
+    // S7a: the light pick CDF of the frame (normalised inclusive running sum of the pick weight, one float per light);
+    // returns the light count written (<= capacity). Read by the path tracer / offline GI through the bindless buffer
+    // table. Zero weights fall back to a uniform CDF.
+    static uint32_t FillLightCdf(const LightParams& light, float* out, uint32_t capacity);
+
     // S9: the same for the local fog volumes (<= kMaxFogVolumes); returns the count written.
     static uint32_t FillGpuFogVolumes(const LightParams& light, GpuFogVolume* out);
 
@@ -256,6 +269,19 @@ private:
     // S9: local fog volumes of the frame (StructuredBuffer<GpuFogVolume>, same slot layout as the lights)
     ComPtr<ID3D12Resource> fogBuf_;
     uint8_t* fogBufMapped_ = nullptr;
+    // S7a: the frame's punctual-light CDF (kLightCdfMax floats per slot, same slot layout as the lights) and one raw
+    // SRV per slot in the bindless buffer table (SceneConstants::lightCdfParams.x = the slot's heap index).
+    ComPtr<ID3D12Resource> lightCdfBuf_;
+    float* lightCdfMapped_ = nullptr;
+    uint32_t lightCdfSrv_[64] = {};   // >= kTotalCbSlots (Renderer.cpp)
+    uint32_t lightCdfSrvCount_ = 0;   // entries of lightCdfSrv_ that are allocated
+    // S7a: the spot shadow slice choice of the last frame (per punctual light: slice or -1), for the pick hysteresis.
+    std::vector<int> prevSpotPick_;
+    // S7a: this frame's spot shadow slices (per punctual light), filled by FillSceneConstants and read by
+    // FillGpuLights / ShadowPass (PassContext::spotSlices).
+    std::vector<int> spotSlices_;
+    // S7a: the last logged LIGHTS line (count, shadowed spots, shadowed points): one line per scene, not per frame.
+    uint32_t loggedLights_[3] = {UINT32_MAX, UINT32_MAX, UINT32_MAX};
     // S5: a camera feed draws into its own HDR targets (colour / normal / velocity / depth) at the feed size; the
     // tonemapped copy goes into the screen's RGBA8 texture (shaders/screenfeed.hlsl). The feed's SceneConstants /
     // lights live in the kFeedCbBase slots, after every other slot.

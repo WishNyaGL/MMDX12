@@ -141,6 +141,9 @@ struct PassContext {
     // S9c: StructuredBuffer<GpuMedium> (one element, t5 space1) of the offline GI renderer's in-path medium; 0 = the
     // shaders must not read it (they only do when GpuMedium::mode is 1).
     D3D12_GPU_VIRTUAL_ADDRESS medium = 0;
+    // S7a: the frame's spot shadow choice (per punctual light: shadow slice or -1), set by the renderer; the shadow
+    // pass draws exactly these slices. Null = the first kSpotShadowSlices casting spots (old behaviour).
+    const std::vector<int>* spotSlices = nullptr;
 };
 
 class IRenderPass {

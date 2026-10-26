@@ -44,8 +44,16 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
                                                            p.floorReflectivity}
                                        : DirectX::XMFLOAT4{0.0f, 0.0f, 0.0f, -1.0f};
     }
-    GpuLight lights[kMaxPunctualLights] = {};
-    const uint32_t count = FillGpuLights(view.light, lights);
+    // S7a: 256 lights x 112 B does not belong on the stack
+    static thread_local std::vector<GpuLight> lights(Renderer::kMaxPunctualLights);
+    std::fill(lights.begin(), lights.end(), GpuLight{});
+    const uint32_t count = FillGpuLights(view.light, lights.data());
+    // S7a: the lights' pick CDF (offline GI's K = 4 light samples per shading point); the offline renderer uploads it
+    // and points SceneConstants::lightCdfParams at its own raw SRV.
+    static thread_local std::vector<float> lightCdf(Renderer::kMaxPunctualLights);
+    const uint32_t cdfCount = FillLightCdf(view.light, lightCdf.data(), (uint32_t)lightCdf.size());
+    // negative when the offline renderer has no CDF buffer (the shaders then keep the uniform pick)
+    sc.lightCdfParams = {(float)(int32_t)offline_->LightCdfSrv(), (float)cdfCount, 0.0f, 0.0f};
     // S9: the frame's local fog volumes (GpuFogVolume, zeroed past the count)
     GpuFogVolume fogVolumes[kMaxFogVolumes] = {};
     const uint32_t fogCount = FillGpuFogVolumes(view.light, fogVolumes);
@@ -59,8 +67,8 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
     // fallback for callers that did not (the renderer's current MME list).
     OfflineJobDesc jobWithMme = job;
     if (jobWithMme.mmeEffects.empty()) jobWithMme.mmeEffects = settings_.mmeEffects;
-    offline_->Begin(cmd, transient_, &builtin_, *rt_, view, sc, lights, count, fogVolumes, fogCount, jobWithMme,
-                    ctx_->FrameNumber(), mme_.get(), mmeSkin_.get());
+    offline_->Begin(cmd, transient_, &builtin_, *rt_, view, sc, lights.data(), count, lightCdf.data(), cdfCount,
+                    fogVolumes, fogCount, jobWithMme, ctx_->FrameNumber(), mme_.get(), mmeSkin_.get());
     float area[4];
     ViewportArea(settings_, (float)ctx_->Width(), (float)ctx_->Height(), area);
     if (offlinePresent_) offline_->Present(cmd, transient_, presentRect_, area);

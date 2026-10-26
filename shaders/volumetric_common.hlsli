@@ -32,6 +32,10 @@ struct VolLight {
 };
 StructuredBuffer<VolLight> gVolLights : register(t2, space1);
 
+// S7a: the march considers at most this many punctual lights (the first ones in the light list), so a 48-spot stage
+// stays affordable per step.
+static const uint kVolMaxLights = 64u;
+
 // S9: local participating-medium volumes (GpuFogVolume in ShaderInterop.h; the shape lives in fog_shapes.hlsli):
 // density is added to the global height fog inside the shape (density = a multiple of the base sigma0; box, or
 // ellipsoid with sphere != 0) and color tints the medium there. edge is the soft border band.
@@ -217,6 +221,9 @@ float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float
     }
 
     // ---- spot cones / point spheres: samples only where the light reaches
+    // S7a: the march sees at most kVolMaxLights lights (the first ones in the light list); a scene with fewer lights
+    // keeps the exact image (same order, same samples).
+    numLights = min(numLights, kVolMaxLights);
     for (uint li = 0; li < numLights; ++li) {
         VolLight l = gVolLights[li];
         // S9: the light's own haze share (0 = invisible in the medium) and scattering anisotropy (-1 = the fog's)

@@ -55,7 +55,8 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S4 | Camera entities: N cameras with own tracks, an active-camera switch track, VMD export flattens cuts | done 2026-10-26 |
 | S5 | Screens: N screen surfaces, sources none / image / video / camera feed, multi-video decode, feed render pass | done 2026-10-26 |
 | S6 | Stage-bundled packs: screen packs (new type), surface packs on stage materials, world packs on sockets | |
-| S7 | Many lights: punctual cap 16 -> 256, clustered forward lighting (Forward+ with depth slices; no deferred: shader packs, MSAA, translucent hair and MME object effects need forward), shadow budget, PT / GI light sampling, volumetric over all lights | |
+| S7a | Many lights, part 1: punctual cap 16 -> 256, the 16 most important spots get shadow slices (importance + hysteresis), PT / GI light sampling by a power CDF, volumetric march over (up to 64) lights | done 2026-10-26 |
+| S7c | Many lights, part 2: clustered forward lighting (Forward+ with depth slices; no deferred: shader packs, MSAA, translucent hair and MME object effects need forward), the three Punctual* loops iterate a froxel's light list | |
 | S7b | Spot cookies / gobos: a projected texture per spot (stage-bundled PNGs, rotatable, keyable) in raster / RT / PT / GI and the volumetric beams | |
 | S8 | Emissive lights: emissive-triangle NEE in PT / GI (screens and LED walls light the scene), raster screen lights | |
 | S9 | Haze without heavy fog: per-light volumetric scattering + anisotropy, local fog volumes, stage `environment.fog` / `environment.fogVolumes` | done 2026-10-26 |

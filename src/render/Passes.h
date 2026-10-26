@@ -50,9 +50,6 @@ class MmeConstantWriter;  // MmeSemantics.h: one stage's $Globals staging buffer
 inline bool SpotShadowsWanted(const RenderSettings& s, RenderPath path, bool offscreen) {
     return s.shadows && (path != RenderPath::PathTraced || (s.volumetric && !offscreen));
 }
-// Number of spot shadow slices for these lights (slice i = the i-th spot among the first maxLights).
-uint32_t SpotShadowCount(const LightParams& light, uint32_t maxLights);
-
 // Point shadow maps are rendered for the raster path when shadows are on (RT uses ray queries).
 inline bool PointShadowsWanted(const RenderSettings& s, RenderPath path, bool offscreen) {
     return s.shadows && (path == RenderPath::Raster);

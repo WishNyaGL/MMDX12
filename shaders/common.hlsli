@@ -62,6 +62,9 @@ cbuffer SceneCB : register(b0) {
     GpuPackInputRoleHLSL gPackRoles[8];
     float4 gPackAudio0;          // x: beat, y: downbeat, z: onset, w: energy
     float4 gPackAudio1;          // x: section, y: bpm, z: valid, w: unused
+    // S7a: the punctual-light CDF (Renderer::FillLightCdf): x = SrvHeap index of the raw ByteAddressBuffer of floats
+    // (negative = none, use the uniform pick), y = light count.
+    float4 gLightCdf;
 };
 
 static const float PI = 3.14159265;

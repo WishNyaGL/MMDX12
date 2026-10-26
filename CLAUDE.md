@@ -251,6 +251,19 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     Measure pass effects with a seed pair (same settings, different `pc.frame` seed) on a static region; a "converged" reference
     carries bias. Scratch runs must not copy the user's `mmdx12.ini` (its effect stack changes brightness per pass).
     Pass implementations live in `Passes.cpp` and `Pass*.cpp` (shared helpers in `PassCommon.h`). Volumetric and the FFT bloom are `ComputePipeline` (cs_6_5) and silently disable themselves without DXR-class hardware.
+    Punctual lights (S7a): `Renderer::kMaxPunctualLights` = 256 lights in the upload (`LightParams::punctual`, one
+    `GpuLight` of 112 B per light per constant-buffer slot), `SceneConstants::numLights` stays the count every shader
+    loops over. Spot shadow maps keep `kSpotShadowSlices` = 16 slices: `Renderer::PickSpotShadowSlices` scores the
+    casting spots by `intensity x luminance(colour) x range / distance to the eye` and keeps last frame's pick unless
+    a newcomer scores 1.5x more (hysteresis, slice kept while the light stays), so the 16 most important spots cast and
+    the rest are unshadowed in raster / RT. The vector is uploaded into `SceneConstants::spotViewProj` and through
+    `PassContext::spotSlices` to `ShadowPass` / `FillGpuLights`. Point shadows keep their budget (`PointShadowCount`,
+    face size halves when the map no longer fits). The PT / offline GI light pick uses a power CDF
+    (`Renderer::FillLightCdf`: intensity x luminance(colour) x range^2, x the spot cone proxy) uploaded as raw floats and
+    bound through the bindless buffer table (`SceneConstants::lightCdfParams` = heap index + count); `shaders/light_pick.hlsli`
+    (`LightCdfPick`) samples it. Offline GI keeps its exact all-lights estimator up to 4 lights and takes 4 CDF samples
+    per shading point above that (`PunctualLighting`, the glints, skin translucency). The volumetric march considers at
+    most `kVolMaxLights` = 64 lights. Clustered culling (Forward+) is S7c.
     Volumetric haze (S9, `shaders/volumetric_common.hlsli` shared by `volumetric.hlsl` and `offline_volumetric.hlsl`):
     every light scales its own in-scattering by `LightValues::volumetric` (`GpuLight::_pad` / `VolLight::volumetric`) and
     uses `SceneLight::volumetricG` as its Henyey-Greenstein `g` (`_pad2` / `VolLight::aniso`; absent = the fog's own).

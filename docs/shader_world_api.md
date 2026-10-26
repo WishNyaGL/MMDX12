@@ -431,7 +431,8 @@ struct PackLightSample {
 
 - `PackSunLight(posWorld)` returns the scene's sun, or radiance 0 when the scene has no sun. `L` is `PackSunDir()`.
 - `PackPunctualCount()` / `PackPunctualLight(i, posWorld)` return the scene's spots and points (the same lights, range
-  falloff and area / spot terms the stage floor uses). The index order is the scene's light order, up to 16 lights.
+  falloff and area / spot terms the stage floor uses). The index order is the scene's light order, up to 256 lights
+  (`Renderer::kMaxPunctualLights`; S7a).
 - `PackDirectDiffuse(pos, n)` sums `radiance * saturate(dot(n, L))` over the sun and every punctual light.
 - `PackDirectThin(pos, n, viewDir, transmission)` is for two-sided sheets (leaves, petals, paper, fabric). It flips
   `n` to face the viewer, then adds each light's front term plus diffuse transmission from behind:

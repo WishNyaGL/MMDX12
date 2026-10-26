@@ -156,14 +156,6 @@ bool ShadowPass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& 
     return CheckHr(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&psoAlpha_)), "ShadowPass: PSO alpha");
 }
 
-uint32_t SpotShadowCount(const LightParams& light, uint32_t maxLights) {
-    uint32_t n = 0;
-    const size_t count = std::min<size_t>(light.punctual.size(), maxLights);
-    for (size_t i = 0; i < count && n < kSpotShadowSlices; ++i)
-        if (light.punctual[i].spotCosOuter > -1.0f && light.punctual[i].shadow != LightShadowType::NoCast) ++n;
-    return n;
-}
-
 uint32_t PointShadowCount(const LightParams& light, uint32_t maxLights) {
     uint32_t n = 0;
     const size_t count = std::min<size_t>(light.punctual.size(), maxLights);
@@ -222,9 +214,24 @@ void ShadowPass::Execute(PassContext& pc) {
     const bool cascades = pc.settings.shadows && !pc.view.shadowsOff && (pc.view.light.sunShadow != LightShadowType::NoCast) &&
                           !pc.view.models.empty() && (pc.path == RenderPath::Raster || (pc.settings.volumetric && !pc.offscreen));
     // must match Renderer::FillSceneConstants (spotShadowParams.x / pointShadowParams.x)
-    const uint32_t spots = (spot && SpotShadowsWanted(pc.settings, pc.path, pc.offscreen))
-                               ? SpotShadowCount(pc.view.light, Renderer::kMaxPunctualLights)
-                               : 0;
+    // S7a: the spots whose slice the renderer picked (PassContext::spotSlices), else the first casting spots.
+    std::vector<int> spotPick;
+    if (spot && SpotShadowsWanted(pc.settings, pc.path, pc.offscreen)) {
+        if (pc.spotSlices) {
+            spotPick = *pc.spotSlices;
+        } else {
+            const size_t count = std::min<size_t>(pc.view.light.punctual.size(), Renderer::kMaxPunctualLights);
+            spotPick.assign(count, -1);
+            uint32_t slice = 0;
+            for (size_t i = 0; i < count && slice < kSpotShadowSlices; ++i) {
+                const PunctualLight& p = pc.view.light.punctual[i];
+                if (p.spotCosOuter <= -1.0f || p.shadow == LightShadowType::NoCast) continue;
+                spotPick[i] = (int)slice++;
+            }
+        }
+    }
+    uint32_t spots = 0;
+    for (int s : spotPick) spots = std::max(spots, s < 0 ? 0u : (uint32_t)s + 1);
     const uint32_t points = (point && PointShadowsWanted(pc.settings, pc.path, pc.offscreen))
                                 ? PointShadowCount(pc.view.light, Renderer::kMaxPunctualLights)
                                 : 0;
@@ -241,7 +248,8 @@ void ShadowPass::Execute(PassContext& pc) {
     if (spot) {
         if (spots) {
             spot.Transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            for (uint32_t s = 0; s < spots; ++s) DrawSlice(pc, spot, s, kShadowCascades + s, true);
+            for (size_t i = 0; i < spotPick.size(); ++i)
+                if (spotPick[i] >= 0) DrawSlice(pc, spot, (uint32_t)spotPick[i], kShadowCascades + (uint32_t)spotPick[i], true);
         }
         spot.Transition(cmd, kSrv);
     }

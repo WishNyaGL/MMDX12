@@ -10,7 +10,11 @@
 namespace mmdx {
 
 inline constexpr uint32_t kShadowCascades = 3;
-inline constexpr uint32_t kSpotShadowSlices = 16; // one slice per possible light (Renderer::kMaxPunctualLights): no spot cap
+// S7a: the 16 most important spot lights get a shadow slice (Renderer::PickSpotShadowSlices); the rest are unshadowed.
+inline constexpr uint32_t kSpotShadowSlices = 16;
+// S7a: a light CDF lives in a raw ByteAddressBuffer SRV (bindless buffer table): one float per light, the normalised
+// inclusive running sum of the pick weight (Renderer::FillLightCdf). At most one per Renderer::kMaxPunctualLights.
+inline constexpr uint32_t kLightCdfMax = 256;
 // Raster point shadows: every shadowed point light gets 6 slices (no light cap). Faces stay at
 // kPointShadowMapSize while the map fits the memory of kPointShadowFullResLights lights (twice that
 // at shadow quality 4096); more lights halve the face size, down to kPointShadowMinSize.
@@ -78,6 +82,10 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     DirectX::XMFLOAT4 bgOverride;
     // Shader pack typed inputs (requires "inputs.scene" / "inputs.audio")
     GpuPackInputs packInputs;
+    // S7a: the frame's punctual-light CDF (Renderer::FillLightCdf), read by the path tracer through the bindless
+    // buffer table. x = SrvHeap index of the raw ByteAddressBuffer holding the float CDF (negative = none, use the
+    // uniform pick), y = light count, zw = unused.
+    DirectX::XMFLOAT4 lightCdfParams;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 

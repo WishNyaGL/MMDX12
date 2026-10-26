@@ -22,6 +22,8 @@ constexpr uint32_t kCbSlots = Dx12Context::kFramesInFlight + 1;  // + RenderToIm
 constexpr uint32_t kOffscreenSlot = Dx12Context::kFramesInFlight;
 constexpr uint32_t kLightBytes = Renderer::kMaxPunctualLights * sizeof(GpuLight);
 constexpr uint32_t kFogBytes = Renderer::kMaxFogVolumes * sizeof(GpuFogVolume);
+// S7a: one float per light slot (the normalised inclusive CDF).
+constexpr uint32_t kLightCdfBytes = kLightCdfMax * sizeof(float);
 // S5: the camera feeds get their own constant-buffer / light slots, after the on-screen + offscreen + extra-view slots
 // (never RenderToImage's kOffscreenSlot, which a feed would overwrite while the main scene still reads it).
 constexpr uint32_t kFeedCbBase = kCbSlots * (1 + kMaxExtraViews);
@@ -247,7 +249,29 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     sceneCb_ = CreateMappedUpload(ctx.Device(), (uint64_t)kSceneCbSize * kTotalCbSlots, &sceneCbMapped_, L"scene.cb");
     lightBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kLightBytes * kTotalCbSlots, &lightBufMapped_, L"scene.lights");
     fogBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kFogBytes * kTotalCbSlots, &fogBufMapped_, L"scene.fogvolumes");
-    if (!sceneCb_ || !lightBuf_ || !fogBuf_) return false;
+    // S7a: the light CDF (raw ByteAddressBuffer SRV per slot, in the bindless buffer table the shaders index).
+    lightCdfBuf_ = CreateMappedUpload(ctx.Device(), (uint64_t)kLightCdfBytes * kTotalCbSlots,
+                                      (uint8_t**)&lightCdfMapped_, L"scene.lightcdf");
+    if (!sceneCb_ || !lightBuf_ || !fogBuf_ || !lightCdfBuf_) return false;
+    if (kTotalCbSlots > (uint32_t)std::size(lightCdfSrv_)) {
+        LOG_ERROR("light CDF SRV table too small for %u slots", kTotalCbSlots);
+        return false;
+    }
+    for (uint32_t slot = 0; slot < kTotalCbSlots; ++slot) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_TYPELESS;   // raw ByteAddressBuffer (the shaders' bindless buffer table)
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.NumElements = kLightCdfMax;
+        srv.Buffer.FirstElement = (UINT)slot * kLightCdfMax;   // this slot's CDF (kLightCdfMax floats per slot)
+        srv.Buffer.StructureByteStride = 0;
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        const uint32_t idx = ctx.SrvHeap().Allocate(1);
+        if (idx == DescriptorHeap::kInvalid) return false;
+        ctx.Device()->CreateShaderResourceView(lightCdfBuf_.Get(), &srv, ctx.SrvHeap().Cpu(idx));
+        lightCdfSrv_[slot] = idx;
+    }
+    lightCdfSrvCount_ = kTotalCbSlots;
 
     backdropSrv_ = ctx.SrvHeap().Allocate(1);
 
@@ -612,14 +636,18 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
         XMStoreFloat4x4(&sc.shadowViewProj[c], lightView * ortho);
         texel[c] = 2.0f * radius / mapSize;
     }
-    // spot shadow maps: a perspective frustum per spot cone (slice order = FillGpuLights)
+    // spot shadow maps: a perspective frustum per spot cone (S7a: the 16 most important spots by
+    // PickSpotShadowSlices; slice = the light's entry in that choice)
     uint32_t spotSlices = 0;
+    std::vector<int> pick;
     if (targets_.spotShadowMap && SpotShadowsWanted(settings_, EffectivePath(), offscreen)) {
-        uint32_t slice = 0;
-        const size_t count = std::min<size_t>(view.light.punctual.size(), kMaxPunctualLights);
-        for (size_t i = 0; i < count && slice < kSpotShadowSlices; ++i) {
+        // Offscreen renders (thumbnails, offline) must not move the on-screen choice's hysteresis state.
+        const std::vector<int> keepPrev = offscreen ? prevSpotPick_ : std::vector<int>{};
+        pick = PickSpotShadowSlices(view.light, cam);
+        if (offscreen) prevSpotPick_ = keepPrev;
+        for (size_t i = 0; i < pick.size(); ++i) {
+            if (pick[i] < 0) continue;
             const PunctualLight& p = view.light.punctual[i];
-            if (p.spotCosOuter <= -1.0f || p.shadow == LightShadowType::NoCast) continue;
             const XMVECTOR pos = XMLoadFloat3(&p.position);
             const XMVECTOR dir = XMVector3Normalize(XMLoadFloat3(&p.direction));
             const XMVECTOR upV = std::fabs(XMVectorGetY(dir)) > 0.99f ? XMVectorSet(0, 0, 1, 0) : XMVectorSet(0, 1, 0, 0);
@@ -627,11 +655,11 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
             const float fov = std::min(2.0f * halfAngle * 1.08f + 0.02f, XMConvertToRadians(170.0f));
             const XMMATRIX lv = XMMatrixLookToLH(pos, dir, upV);
             const XMMATRIX lp = XMMatrixPerspectiveFovLH(fov, 1.0f, std::max(0.05f, p.range * 0.004f), std::max(p.range, 1.0f));
-            XMStoreFloat4x4(&sc.spotViewProj[slice], lv * lp);
-            ++slice;
+            XMStoreFloat4x4(&sc.spotViewProj[pick[i]], lv * lp);
+            spotSlices = std::max(spotSlices, (uint32_t)pick[i] + 1);
         }
-        spotSlices = slice;
     }
+    spotSlices_ = std::move(pick);
     sc.spotShadowParams = {(float)spotSlices, 1.0f / (float)std::max(targets_.spotShadowMap.width, 1u), 0, 0};
     const bool sunShadowsOff = view.shadowsOff || (view.light.sunShadow == LightShadowType::NoCast);
     sc.cascadeSplits = {splits[1], splits[2], splits[3], settings_.shadows && !sunShadowsOff ? 1.0f : 0.0f};
@@ -681,7 +709,8 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
     sc.packInputs = view.packInputs;
 }
 
-uint32_t Renderer::FillGpuLights(const LightParams& light, GpuLight* out, uint32_t pointCap) {
+uint32_t Renderer::FillGpuLights(const LightParams& light, GpuLight* out, const std::vector<int>* spotSlices,
+                                uint32_t pointCap) {
     const size_t count = std::min<size_t>(light.punctual.size(), kMaxPunctualLights);
     uint32_t spot = 0;
     uint32_t pointIndex = 0;
@@ -694,8 +723,14 @@ uint32_t Renderer::FillGpuLights(const LightParams& light, GpuLight* out, uint32
         g.spotCosOuter = p.spotCosOuter;
         XMStoreFloat3(&g.direction, XMVector3Normalize(XMLoadFloat3(&p.direction)));
         g.spotCosInner = std::max(p.spotCosInner, p.spotCosOuter + 1e-3f);
-        g.shadowSlice = (p.spotCosOuter > -1.0f && p.shadow != LightShadowType::NoCast && spot < kSpotShadowSlices) ? (float)spot : -1.0f;
-        if (p.spotCosOuter > -1.0f && p.shadow != LightShadowType::NoCast) ++spot;
+        // S7a: the renderer's importance choice decides the slice; without it, the first kSpotShadowSlices spots.
+        if (spotSlices) {
+            g.shadowSlice = (i < spotSlices->size() && (*spotSlices)[i] >= 0) ? (float)(*spotSlices)[i] : -1.0f;
+        } else {
+            g.shadowSlice = (p.spotCosOuter > -1.0f && p.shadow != LightShadowType::NoCast && spot < kSpotShadowSlices)
+                                ? (float)spot : -1.0f;
+            if (p.spotCosOuter > -1.0f && p.shadow != LightShadowType::NoCast) ++spot;
+        }
         g.shadowType = (float)(uint8_t)p.shadow;
         g.shadowSoftness = std::clamp(p.shadowSoftness, 0.0f, 1.0f);
         g.shadowDensity = std::clamp(p.shadowDensity, 0.0f, 1.0f);
@@ -737,19 +772,121 @@ uint32_t Renderer::FillGpuFogVolumes(const LightParams& light, GpuFogVolume* out
     return (uint32_t)count;
 }
 
+// S7a: the spot shadow budget. At most kSpotShadowSlices spots cast shadows (the map has one slice per light); the
+// rest are unshadowed in raster. Score = intensity * luminance(colour) * range / distance to the eye (a bright, close
+// light matters most). A light keeps last frame's slice unless a newcomer scores kSpotPickHysteresis times more, so
+// the choice does not flicker between similar lights.
+std::vector<int> Renderer::PickSpotShadowSlices(const LightParams& light, const CameraParams& camera) {
+    constexpr float kSpotPickHysteresis = 1.5f;
+    const size_t count = std::min<size_t>(light.punctual.size(), kMaxPunctualLights);
+    std::vector<int> pick(count, -1);
+    std::vector<float> score(count, -1.0f);
+    for (size_t i = 0; i < count; ++i) {
+        const PunctualLight& p = light.punctual[i];
+        if (p.spotCosOuter <= -1.0f || p.shadow == LightShadowType::NoCast) continue;
+        const float dx = p.position.x - camera.eye.x, dy = p.position.y - camera.eye.y, dz = p.position.z - camera.eye.z;
+        const float dist = std::max(std::sqrt(dx * dx + dy * dy + dz * dz), 1.0f);
+        const float lum = 0.2126f * p.color.x + 0.7152f * p.color.y + 0.0722f * p.color.z;
+        score[i] = p.intensity * lum * std::max(p.range, 0.0f) / dist;
+    }
+    // 1. last frame's choice stays (same slice) while the light still qualifies
+    bool sliceUsed[kSpotShadowSlices] = {};
+    for (size_t i = 0; i < count && i < prevSpotPick_.size(); ++i) {
+        const int s = prevSpotPick_[i];
+        if (s < 0 || s >= (int)kSpotShadowSlices || score[i] <= 0.0f || sliceUsed[s]) continue;
+        pick[i] = s;
+        sliceUsed[s] = true;
+    }
+    // 2. newcomers in score order fill the free slices, or replace the weakest pick when they score clearly higher
+    std::vector<size_t> newcomers;
+    for (size_t i = 0; i < count; ++i)
+        if (score[i] > 0.0f && pick[i] < 0) newcomers.push_back(i);
+    std::stable_sort(newcomers.begin(), newcomers.end(), [&](size_t a, size_t b) { return score[a] > score[b]; });
+    for (size_t i : newcomers) {
+        int free = -1;
+        for (uint32_t s = 0; s < kSpotShadowSlices; ++s)
+            if (!sliceUsed[s]) { free = (int)s; break; }
+        if (free >= 0) {
+            pick[i] = free;
+            sliceUsed[free] = true;
+            continue;
+        }
+        // full: replace the weakest pick only when the newcomer scores kSpotPickHysteresis times more
+        int weakest = -1;
+        float weakestScore = 0.0f;
+        for (size_t j = 0; j < count; ++j) {
+            if (pick[j] < 0 || score[j] <= 0.0f) continue;
+            if (weakest < 0 || score[j] < weakestScore) { weakest = (int)j; weakestScore = score[j]; }
+        }
+        if (weakest < 0 || score[i] < weakestScore * kSpotPickHysteresis) continue;
+        const int freedSlice = pick[(size_t)weakest];
+        pick[(size_t)weakest] = -1;
+        pick[i] = freedSlice;   // the newcomer takes the replaced light's slice
+    }
+    prevSpotPick_ = pick;
+    return pick;
+}
+
+// S7a: the light pick CDF of the frame (see ShaderInterop.h): weight = intensity * luminance(colour) * range^2 and,
+// for a spot, the cone solid-angle proxy (1 - cosOuter) * 2 + 0.05. Inclusive running sum normalised to 1; a frame
+// without any weight gets a uniform CDF, so the sample is still defined.
+uint32_t Renderer::FillLightCdf(const LightParams& light, float* out, uint32_t capacity) {
+    const size_t count = std::min<size_t>(light.punctual.size(), std::min<size_t>(kMaxPunctualLights, capacity));
+    double total = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        const PunctualLight& p = light.punctual[i];
+        const float lum = 0.2126f * p.color.x + 0.7152f * p.color.y + 0.0722f * p.color.z;
+        float w = p.intensity * lum * std::max(p.range, 0.0f) * std::max(p.range, 0.0f);
+        if (p.spotCosOuter > -1.0f) w *= (1.0f - std::clamp(p.spotCosOuter, -1.0f, 1.0f)) * 2.0f + 0.05f;
+        if (!(w > 0.0f)) w = 0.0f;
+        out[i] = w;
+        total += w;
+    }
+    if (count == 0) return 0;
+    if (!(total > 0.0)) {
+        for (size_t i = 0; i < count; ++i) out[i] = (float)(i + 1) / (float)count;
+        return (uint32_t)count;
+    }
+    double acc = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        acc += out[i];
+        out[i] = (float)(acc / total);
+    }
+    out[count - 1] = 1.0f;
+    return (uint32_t)count;
+}
+
 void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view, uint32_t w, uint32_t h,
                            uint32_t cbSlot, uint64_t frame, bool offscreen) {
     EnsurePointShadowMap(view.light, offscreen);
     DrainMmeForget();
     SceneConstants sc{};
     FillSceneConstants(view, w, h, offscreen, sc);
+    // S7a: the frame's light CDF (the PT / GI pick) lives in a raw SRV buffer of this slot
+    const uint32_t cdfCount = FillLightCdf(view.light, lightCdfMapped_ + (size_t)cbSlot * kLightCdfMax, kLightCdfMax);
+    sc.lightCdfParams = {(float)lightCdfSrv_[cbSlot], (float)cdfCount, 0.0f, 0.0f};
     memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
-    GpuLight lights[kMaxPunctualLights] = {};
+    // S7a: 256 lights x 112 B does not belong on the stack
+    static thread_local std::vector<GpuLight> lights(kMaxPunctualLights);
+    std::fill(lights.begin(), lights.end(), GpuLight{});
     const uint32_t pointCap = EffectivePath() == RenderPath::Raster
                                   ? (targets_.pointShadowMap ? targets_.pointShadowMap.arraySize / kPointShadowFaces : 0u)
                                   : kMaxPunctualLights;
-    FillGpuLights(view.light, lights, pointCap);
-    memcpy(lightBufMapped_ + (size_t)cbSlot * kLightBytes, lights, sizeof(lights));
+    FillGpuLights(view.light, lights.data(), &spotSlices_, pointCap);
+    memcpy(lightBufMapped_ + (size_t)cbSlot * kLightBytes, lights.data(), lights.size() * sizeof(GpuLight));
+    // S7a: one LIGHTS line per scene (the punctual setup changed): count, shadowed spots and shadowed points.
+    {
+        uint32_t spotCount = 0;
+        for (int s : spotSlices_) spotCount += s >= 0 ? 1u : 0u;
+        const uint32_t pointCount = PointShadowCount(view.light, kMaxPunctualLights);
+        const uint32_t lightCount = (uint32_t)std::min<size_t>(view.light.punctual.size(), kMaxPunctualLights);
+        if (lightCount != loggedLights_[0] || spotCount != loggedLights_[1] || pointCount != loggedLights_[2]) {
+            loggedLights_[0] = lightCount;
+            loggedLights_[1] = spotCount;
+            loggedLights_[2] = pointCount;
+            LOG_INFO("LIGHTS count=%u spots=%u points=%u", lightCount, spotCount, pointCount);
+        }
+    }
     // S9: the frame's local fog volumes (zeroed beyond the count, so a stale slot never lingers)
     GpuFogVolume fog[kMaxFogVolumes] = {};
     const uint32_t fogCount = FillGpuFogVolumes(view.light, fog);
@@ -852,6 +989,7 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     pc.mme = mme_.get();
     pc.mmeSkin = mmeSkin_.get();
     pc.sceneConstantsCpu = &sc;
+    pc.spotSlices = &spotSlices_;
     // DLSS Ray Reconstruction needs the noisy ray-traced signals and their guides; it replaces the PT
     // temporal / a-trous denoiser, the RT AO / reflection filtering and the upscaler for the frame.
     pc.dlssRr = frameSettings.dlssRayReconstruction &&
@@ -1614,10 +1752,19 @@ void Renderer::Shutdown() {
     if (sceneCb_ && sceneCbMapped_) sceneCb_->Unmap(0, nullptr);
     if (lightBuf_ && lightBufMapped_) lightBuf_->Unmap(0, nullptr);
     if (fogBuf_ && fogBufMapped_) fogBuf_->Unmap(0, nullptr);
+    if (lightCdfBuf_ && lightCdfMapped_) lightCdfBuf_->Unmap(0, nullptr);
+    if (lightCdfBuf_ && ctx_) {
+        for (uint32_t i = 0; i < lightCdfSrvCount_; ++i)
+            if (lightCdfSrv_[i] != DescriptorHeap::kInvalid) ctx_->SrvHeap().Free(lightCdfSrv_[i], 1);
+    }
+    std::fill(std::begin(lightCdfSrv_), std::end(lightCdfSrv_), DescriptorHeap::kInvalid);
+    lightCdfSrvCount_ = 0;
     sceneCbMapped_ = lightBufMapped_ = fogBufMapped_ = nullptr;
+    lightCdfMapped_ = nullptr;
     sceneCb_.Reset();
     lightBuf_.Reset();
     fogBuf_.Reset();
+    lightCdfBuf_.Reset();
     offList_.Reset();
     offAlloc_.Reset();
     if (readbackFence_) {

@@ -32,7 +32,7 @@ Texture2DArray<float> gWorldPointShadowMap : register(t18, space0);
 
 static uint WorldPunctualCount() {
     if ((gWorldLightFlags & 1u) == 0u) return 0u;
-    return min((uint)gNumLights, 16u);
+    return (uint)gNumLights;   // S7a: every uploaded light (the cap is the upload's)
 }
 
 // One scene punctual light at a world point (the general lighting API, docs/shader_world_api.md "world.lights"):
@@ -45,7 +45,7 @@ static WorldLightSample WorldPunctualLight(uint i, float3 wp, float3 biasNormal)
     s.L = float3(0.0, 1.0, 0.0);
     s.radiance = 0.0;
     if ((gWorldLightFlags & 1u) == 0u) return s;
-    uint count = min((uint)gNumLights, 16u);
+    uint count = (uint)gNumLights;   // S7a: every uploaded light
     if (i >= count) return s;
     Light l = gWorldLights[i];
     if (l.affectDiffuse <= 0.0) return s;

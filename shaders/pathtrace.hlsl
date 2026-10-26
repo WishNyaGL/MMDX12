@@ -2,6 +2,7 @@
 // punctual-light NEE, analytic studio floor, stochastic alpha-tested transparency.
 // u0 light (divided by albedo on surfaces), u1/u2/u3/u4 primary G-buffer for denoising.
 #include "rt_common.hlsli"   // includes common.hlsli
+#include "light_pick.hlsli"   // S7a: the punctual-light CDF pick
 #define PBR_SAMPLE_LEVEL0     // compute: no screen-space gradients
 #include "pt_pbr.hlsli"
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
@@ -482,9 +483,20 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                 radiance += throughput * (1.0 - pSpec) * (isPbrHit ? pbr.diffuse : albedo) / PI * SunIrradiance() * ndl * visFactor;
             }
 
-            // punctual-light NEE (one uniform light per bounce)
+            // punctual-light NEE (one light per bounce: S7a power CDF when the frame has one, else uniform)
             if (gNumLights >= 1.0) {
-                uint li = min((uint)(Rand(rng) * (float)nl), nl - 1u);
+                float pickPdf = 0.0;
+                uint li = 0u;
+                bool cdfPick = (int)gLightCdf.x >= 0;
+                if (cdfPick) {
+                    li = LightCdfPick(Rand(rng), nl, pickPdf);
+                    cdfPick = pickPdf > 0.0;
+                }
+                if (!cdfPick) {
+                    li = min((uint)(Rand(rng) * (float)nl), nl - 1u);
+                    pickPdf = 1.0 / (float)nl;
+                }
+                const float pickWeight = 1.0 / pickPdf;   // <-> the old (float)nl for the uniform pick
                 PtLight l = gPtLights[li];
                 float dist;
                 float3 ld;
@@ -539,14 +551,14 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                         }
                         float3 shadowFactor = ShadowTransmission(rawVis, l.shadowDensity, l.shadowColor);
                         if (evalDiff) {
-                            radiance += throughput * (1.0 - pSpec) * (isPbrHit ? pbr.diffuse : albedo) * l.color * shadowFactor * atten * diff * (float)nl;
+                            radiance += throughput * (1.0 - pSpec) * (isPbrHit ? pbr.diffuse : albedo) * l.color * shadowFactor * atten * diff * pickWeight;
                         }
                         if (evalSpec) {
                             if (isPbrHit)   // GGX (the lobe already carries N.L)
                                 radiance += throughput * pSpec * l.color * shadowFactor * atten *
-                                            PtPbrEvalSpecular(pbr, -dir, ld) * (float)nl;
+                                            PtPbrEvalSpecular(pbr, -dir, ld) * pickWeight;
                             else
-                                radiance += throughput * pSpec * l.color * shadowFactor * atten * ((float)nl / omega);
+                                radiance += throughput * pSpec * l.color * shadowFactor * atten * (pickWeight / omega);
                         }
                     }
                 }
