@@ -46,6 +46,7 @@
 #define PBR_SAMPLE_LEVEL0     // compute: no screen-space gradients
 #include "pt_pbr.hlsli"
 #include "emissive_nee.hlsli"   // S8a: emissive-triangle NEE + MIS (needs the PBR record decode)
+#include "sky_env.hlsli"        // S9b-2: the sky as an importance-sampled light
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
 SamplerState gPoint : register(s0);
 SamplerState gLinear : register(s1);
@@ -806,6 +807,43 @@ float3 EmissiveLighting(Surf s, float3 V, float pSpec, bool toonDiffuse, int mod
     return f * Le * vis / es.pdf;
 }
 
+// S9b-2: the Physical Sky as a light at a shading point: a copy of EmissiveLighting with one importance-sampled sky
+// direction instead of a point on an emissive triangle (no one-sided emitter test, no distance: the sky is at
+// infinity and every direction the surface's normal side reaches is a candidate). Everything else is the same: the
+// same modes, the same BSDF the path's own continuation applies, the same MIS formulas.
+float3 SkyLighting(Surf s, float3 V, float pSpec, bool toonDiffuse, int mode, inout uint rng) {
+    if (!SkyEnvOn()) return 0.0;
+    if (mode == 0 && s.character && s.flat) return 0.0;
+    float3 wi;
+    float pdfSky;
+    if (!SkyEnvSample(float2(Rand(rng), Rand(rng)), wi, pdfSky)) return 0.0;
+    const float cosS = dot(s.n, wi);
+    if (cosS <= 0.0 || dot(s.faceN, wi) <= 0.0) return 0.0;
+    const float3 Le = Background(wi);
+    if (!any(Le > 0.0)) return 0.0;
+    const float3 po = OffsetRayOrigin(s.pos, s.faceN);
+    const float vis = EmissiveVisible(po, wi, 1e7, max(Rand(rng), 0.004)) * MediumShadowT(po, wi, 1e4, rng);
+    const float3 baseDiffuse = (s.pbr ? s.pb.diffuse * s.pb.ao : s.albedo) * (toonDiffuse ? kToonIndirect : 1.0);
+    const bool flatFill = mode == 1 && s.character && s.flat;
+    const float diffuseShare = flatFill ? 1.0 : ((s.pbr && mode != 1) ? 1.0 : 1.0 - pSpec);
+    const float3 fd = diffuseShare * baseDiffuse / PI * cosS;
+    float3 fs = 0.0;
+    if (flatFill) {
+        // the face's cache fill ends the path: no specular lobe is traced there
+    } else if (s.pbr) {
+        if (pSpec > 0.0) fs = PbrSpecCosine(s.pb, V, wi);
+    } else if (pSpec > 0.0) {
+        const float cosHalfAngle = cos(s.rough * 0.5);
+        if (dot(reflect(-V, s.n), wi) >= cosHalfAngle)
+            fs = pSpec / max(2.0 * PI * (1.0 - cosHalfAngle), 1e-6);
+    }
+    float3 f;
+    if (mode == 2) f = fd + fs;
+    else if (mode == 1) f = fd + MisWeightLight(pdfSky, PathSpecPdf(s.pbr, s.pb, s.rough, pSpec, s.n, V, wi)) * fs;
+    else f = MisWeightLight(pdfSky, PathBsdfPdf(s.pbr, s.pb, s.rough, pSpec, s.n, V, wi)) * (fd + fs);
+    return f * Le * vis / pdfSky;
+}
+
 // Punctual light direct lighting: diffuse irradiance plus specular NEE for the specular lobe around
 // reflect(-V, s.n) with half-angle rough * 0.5. Shadow rays are shared by both lobes.
 // S7a: <= kGiAllLights lights keep the exact estimator; above it kGiCdfSamples CDF picks (weight / pdf).
@@ -1304,7 +1342,15 @@ float3 GatherPath(float3 o, float3 d, float tMin, inout uint rng) {
         }
         if (ended) break;
         if (!hit) {
-            L += T * Background(d);
+            // S9b-2: the sky also light-samples the gather vertices (and the camera vertex that reads this cache), so
+            // an escaped gather ray is weighted exactly as a table emitter hit below: left out on the first segment (the
+            // camera vertex light-samples the sky itself, diffuse weight 1) and BSDF-weighted afterwards. Without a sky
+            // environment the line is the original one.
+            if (SkyEnvOn())
+                L += T * (firstSeg ? 0.0 : (prevValid ? Background(d) * MisWeightBsdf(prevPdf, SkyEnvPdf(d))
+                                                      : Background(d)));
+            else
+                L += T * Background(d);
             break;
         }
         if (y.emitter) {
@@ -1345,6 +1391,25 @@ float3 GatherPath(float3 o, float3 d, float tMin, inout uint rng) {
                         // the last gather vertex has no continuation: the light sample carries everything
                         const float w = depth + 1u >= kGatherDepth ? 1.0 : MisWeightLight(es.pdf, cosS / PI);
                         L += T * w * (y.pbr ? y.pb.diffuse : y.albedo) / PI * cosS * Le * vis / es.pdf;
+                    }
+                }
+            }
+        }
+        // S9b-2: the sky's direct light at the gather vertex too (the same cosine BSDF MIS; the last vertex has no
+        // continuation and keeps weight 1)
+        if (SkyEnvOn()) {
+            float3 wi;
+            float pdfSky;
+            if (SkyEnvSample(float2(Rand(rng), Rand(rng)), wi, pdfSky)) {
+                const float cosS = dot(y.n, wi);
+                if (cosS > 0.0 && dot(y.faceN, wi) > 0.0) {
+                    const float3 Le = Background(wi);
+                    if (any(Le > 0.0)) {
+                        const float3 po = OffsetRayOrigin(y.pos, y.faceN);
+                        const float vis = EmissiveVisible(po, wi, 1e7, max(Rand(rng), 0.004)) *
+                                          MediumShadowT(po, wi, 1e4, rng);
+                        const float w = depth + 1u >= kGatherDepth ? 1.0 : MisWeightLight(pdfSky, cosS / PI);
+                        L += T * w * (y.pbr ? y.pb.diffuse : y.albedo) / PI * cosS * Le * vis / pdfSky;
                     }
                 }
             }
@@ -1698,7 +1763,14 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
         if (!hit) {
             // transparent export: a primary camera ray (still before its first opaque hit, glass included) that
             // leaves the scene outputs the background override; indirect / bounce misses keep the real sky.
-            radiance += T * ((gBgOverride.w > 0.5 && specChain) ? gBgOverride.xyz : Background(d));
+            // S9b-2: the sky is light-sampled at the vertices below, so a sky radiance a BSDF-sampled ray finds takes
+            // the BSDF weight, exactly as the emitter hits above do (the primary miss keeps weight 1). The original
+            // expression stays verbatim in the else branch, so a frame without a sky environment is byte for byte old.
+            const float3 bg = (gBgOverride.w > 0.5 && specChain) ? gBgOverride.xyz : Background(d);
+            if (SkyEnvOn() && prevBsdfValid)
+                radiance += T * bg * MisWeightBsdf(prevPdfBsdf, SkyEnvPdf(d));
+            else
+                radiance += T * ((gBgOverride.w > 0.5 && specChain) ? gBgOverride.xyz : Background(d));
             break;
         }
         if (s.emitter) {   // softboxes are seen by rays only (no light sampling), so every hit counts
@@ -1877,12 +1949,15 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
                     sunDirect += (1.0 - pSpec) * s.albedo / PI * PunctualIrradiance(s, toonSurf, rng);
                 radiance += T * (hitEmission + sunDirect);
                 if (EmissiveOn()) radiance += T * EmissiveLighting(s, V, pSpec, toonSurf, emisMode, rng);
+                if (SkyEnvOn()) radiance += T * SkyLighting(s, V, pSpec, toonSurf, emisMode, rng);
             } else
 #endif
             {
                 radiance += T * CameraDirect(s, V, pSpec, rng);
                 // S8a: the emissive triangles' direct light (screens / AutoLuminous / PBR emitters), one sample
                 if (EmissiveOn()) radiance += T * EmissiveLighting(s, V, pSpec, s.character, emisMode, rng);
+                // S9b-2: the sky's direct light, one sample (the same modes / MIS as the emissive one)
+                if (SkyEnvOn()) radiance += T * SkyLighting(s, V, pSpec, s.character, emisMode, rng);
             }
         } else {
             float3 sunE = 0;
@@ -1895,6 +1970,7 @@ void CSRender(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid
             radiance += T * (hitEmission + (1.0 - pSpec) * (isPbrHit ? s.pb.diffuse : s.albedo) / PI * (sunE + diffE) + specR);
             // S8a: the emissive triangles' direct light at the bounce vertex too (the same additive scheme as PT)
             if (EmissiveOn()) radiance += T * EmissiveLighting(s, V, pSpec, false, emisMode, rng);
+            if (SkyEnvOn()) radiance += T * SkyLighting(s, V, pSpec, false, emisMode, rng);
         }
         if (depth == maxDepth) break;
 

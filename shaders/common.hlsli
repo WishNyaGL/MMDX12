@@ -103,6 +103,10 @@ cbuffer SceneCB : register(b0) {
     float4 gSkyZenithOverF;  // zenith Y, x, y, each divided by its F(0, sun)
     float4 gSkySunToward;    // xyz = unit vector toward the sun
     float4 gSkyNight;        // xyz = the night floor's linear rgb
+    // S9b-2: the sky environment buffer (ShaderInterop.h skyEnvParams / shaders/sky_env.hlsli): x = SrvHeap index of
+    // the raw ByteAddressBuffer holding the sky's luminance CDF and SH irradiance (negative = none: the ambient stays
+    // the hemisphere fill and the path tracers skip every sky light sample), y = W, z = H, w unused.
+    float4 gSkyEnvParams;
 };
 
 static const float PI = 3.14159265;

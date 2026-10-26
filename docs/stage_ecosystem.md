@@ -64,7 +64,7 @@ zero cost when unused, failures stay local, no library-layout dependence.
 | S9c-2 | Less noise in path-traced haze: equiangular sampling of punctual / spot lights at medium events (MIS with distance sampling), all-light NEE when few lights | done 2026-10-26 |
 | S9d | Real-time froxel volumetric fog (after S7): a camera-aligned 3D grid (froxels, the S7 cluster layout) injects medium density (height fog + fog volumes) and lighting from every light via the S7 cluster lists (shadow maps / ray-query shadows), temporal reprojection over frames, front-to-back integration; an approximate multiple-scattering term; replaces the per-pixel ray march in raster / RT / PT, same medium parameters as S9 / S9c (done 2026-10-26) | |
 | S9b-1 | Physical Sky light (C4D-like): `LightKind::Sky`, procedural sky (sun position / time of day, turbidity, horizon haze, ground) as the background, the fog colour and the sun colour, every render path | done 2026-10-27 |
-| S9b-2 | Sky lighting: the sky as image-based light (raster / RT ambient + specular from a filtered sky cubemap, PT / GI importance-sampled environment) | |
+| S9b-2 | Sky lighting: the sky as a light (SH irradiance for the raster / RT ambient, importance-sampled with MIS in PT / GI) | done 2026-10-27 |
 | S9b-3 | Image skies: HDRI (.hdr / .exr equirect) and MME / Ray-MMD sky domes (DDS cubemap) as the sky light's map, rotation + intensity | |
 | S9b-4 | Clouds: procedural cloud layer on the physical sky (coverage, height, wind; keyable), lit by the sun | |
 | S10 | Planar mirrors in raster (RT / PT / GI reflect natively) | done 2026-10-26 |

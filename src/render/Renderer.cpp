@@ -365,6 +365,8 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
         ctx.Device()->CreateUnorderedAccessView(screenAverageBuf_.Get(), nullptr, &uav,
                                                 ctx.SrvHeap().Cpu(screenAverageUav_));
     }
+    // S9b-2: the sky environment buffer (the Physical Sky's CDFs and SH irradiance, shaders/sky_env.hlsl)
+    if (!skyEnv_.Create(ctx, shaderDir_)) return false;
     // S8a: the emissive-triangle pick table (one raw SRV each for the triangle list, its CDF and the per-geometry base
     // table; same slot layout as the light CDF). A frame without emitters leaves SceneConstants::emissiveParams.x = -1
     // and the path tracers skip every NEE / MIS branch.
@@ -1288,6 +1290,8 @@ void Renderer::FillSceneConstants(const FrameView& view, uint32_t w, uint32_t h,
     sc.skyZenithOverF = lp.physicalSky ? lp.sky.zenithOverF : DirectX::XMFLOAT4{0, 0, 0, 0};
     sc.skySunToward = lp.physicalSky ? lp.sky.sunToward : DirectX::XMFLOAT4{0, 1, 0, 0};
     sc.skyNight = lp.physicalSky ? lp.sky.night : DirectX::XMFLOAT4{0, 0, 0, 0};
+    // S9b-2: no sky environment until RecordScene (or the offline image) builds one for this frame
+    sc.skyEnvParams = {(float)(int32_t)DescriptorHeap::kInvalid, (float)kSkyEnvW, (float)kSkyEnvH, 0.0f};
     sc.floorGloss = (settings_.ssr || EffectivePath() == RenderPath::PathTraced) ? settings_.floorGloss : 0.0f;
     sc.rimColor = lp.rimColor;
     sc.fog = settings_.fog;
@@ -1763,6 +1767,18 @@ void Renderer::RecordScene(ID3D12GraphicsCommandList* cmd, const FrameView& view
     // Fills sc.screenLightParams and the frame's screen-light table. Runs after the screens bound their textures (the
     // average-colour pass samples them) and before the scene passes read the table; the constants go up again here.
     UpdateScreenLights(cmd, view, sc, cbSlot);
+    memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
+
+    // S9b-2: the sky environment (the Physical Sky's CDFs and SH irradiance) for the scene shaders and the path
+    // tracers. Built after this slot's constants hold this frame's sky (the passes read b0) and before the mirror
+    // views draw (they shade with the same slot's constants), then the constants go up once more.
+    {
+        PassContext skyPc{*ctx_, cmd, view, settings_, targets_, stats_, transient_,
+                          sceneCb_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kSceneCbSize,
+                          lightBuf_->GetGPUVirtualAddress() + (uint64_t)cbSlot * kLightBytes, frame, false, offscreen,
+                          &builtin_, RenderPath::Raster, nullptr, nullptr, 0.0f, 0.0f, frameTimeMs_};
+        skyEnv_.Build(skyPc, sc);
+    }
     memcpy(sceneCbMapped_ + (size_t)cbSlot * kSceneCbSize, &sc, sizeof(sc));
 
     // S10: the frame's planar mirrors (raster main views only; the ray paths reflect at the hit instead, and a quad /
@@ -2737,6 +2753,8 @@ void Renderer::Shutdown() {
     screenAvgTried_ = false;
     screenReady_ = false;
     screenLightCount_ = 0;
+    // S9b-2: the sky environment buffer and its build passes
+    if (ctx_) skyEnv_.Release(*ctx_);
     sceneCbMapped_ = lightBufMapped_ = fogBufMapped_ = nullptr;
     lightCdfMapped_ = nullptr;
     sceneCb_.Reset();

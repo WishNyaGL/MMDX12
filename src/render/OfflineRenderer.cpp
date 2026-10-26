@@ -173,6 +173,9 @@ struct OfflineRenderer::Impl {
     bool icValid = false;              // icFinal holds this image's cache
     // per-image constants (UPLOAD heap, persistently mapped, written only in Begin while the GPU is idle)
     ComPtr<ID3D12Resource> sceneCb, lightBuf, fogBuf, mediumBuf, lightCdfBuf;
+    // S9b-2: the image's sky environment (render/SkyEnv.h): the offline renderer's own buffer, built once per image
+    // before the first iteration, so a real-time frame's rebuild never touches the map the image reads.
+    SkyEnvBuilder skyEnv;
     uint8_t* sceneCbMapped = nullptr;
     uint8_t* lightMapped = nullptr;
     uint8_t* fogMapped = nullptr;
@@ -1409,6 +1412,8 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
                           L"offline.counter"))
         return false;
     m.worldPass.CreatePipelines(ctx, shaderDir, 4);
+    // S9b-2: the offline renderer's own sky environment buffer (built once per image in Begin)
+    m.skyEnv.Create(ctx, shaderDir);
     return true;
 }
 
@@ -1463,6 +1468,7 @@ void OfflineRenderer::Shutdown() {
     m.timestampReadback.Reset();
     m.timestampHeap.Reset();
     m.timestampFrequency = 0;
+    m.skyEnv.Release(ctx);
     m.edgeRootSig.Reset();
     m.depthCullBack.Reset();
     m.depthNoCull.Reset();
@@ -1573,6 +1579,16 @@ void OfflineRenderer::Begin(ID3D12GraphicsCommandList* cmd, TransientDescriptors
     PassContext pc = m.Pc(cmd, transient, builtin, rt);
     D3D12_GPU_DESCRIPTOR_HANDLE table = m.GiTable(cmd, transient);
     const float studioFloor = m.view.studioFloor ? 1.0f : 0.0f;
+    // S9b-2: the image's sky environment, once per image before the first iteration (the prepass gather paths and
+    // every render vertex light-sample it). Fills SceneConstants::skyEnvParams, so the image's constants go up again.
+    {
+        SceneConstants skySc = m.sceneCpu;
+        m.skyEnv.Build(pc, skySc);
+        if (skySc.skyEnvParams.x != m.sceneCpu.skyEnvParams.x) {
+            m.sceneCpu = skySc;
+            memcpy(m.sceneCbMapped, &m.sceneCpu, sizeof(m.sceneCpu));
+        }
+    }
     {
         const float c[8] = {m.NextSeed(), studioFloor, 0.0f, (float)m.job.minSamples, (float)m.job.width,
                             (float)m.job.height, 0.0f, m.job.errorThreshold};

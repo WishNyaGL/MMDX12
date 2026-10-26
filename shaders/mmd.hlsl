@@ -12,6 +12,7 @@
 #include "light_cluster.hlsli"   // S7c: the fragment's froxel light list (after pbr_common: gPbrBuf)
 #include "gobo.hlsli"            // S7b: spot gobos (the light loops below)
 #include "screen_light.hlsli"    // S8b: stage screens as rectangular area lights (raster / RT)
+#include "sky_env.hlsli"         // S9b-2: the Physical Sky's SH irradiance (the ambient fill below)
 
 cbuffer MaterialCB : register(b1) {
     float4 gDiffuse; float3 gSpecular; float gSpecularPower; float3 gAmbient; float gEdgeSize;
@@ -315,6 +316,9 @@ float3 PunctualSpecular(float3 wp, float3 n, float3 V, float power) {
 }
 
 float3 Hemisphere(float3 n) {
+    // S9b-2: with a Physical Sky the ambient is the sky's real irradiance (order-2 SH, shaders/sky_env.hlsli). SkyColor
+    // already carries gSunIntensity, so the coefficient sum does too: do not scale it again.
+    if (SkyEnvOn()) return SkyShIrradiance(n) / PI;
     return lerp(gGroundColor, gSkyZenith, saturate(n.y * 0.5 + 0.5)) * gSunIntensity;
 }
 

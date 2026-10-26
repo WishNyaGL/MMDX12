@@ -93,6 +93,9 @@ bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& vie
         sc.emissiveParams = {-1.0f, -1.0f, 0.0f, -1.0f};
     }
     memcpy(sceneCbMapped_ + (size_t)ctx_->FrameSlot() * kSceneCbSize, &sc, sizeof(sc));
+    // S9b-2: the image's sky environment (the Physical Sky) is built by the offline renderer's own SkyEnvBuilder in
+    // OfflineRenderer::Begin, once per image and before its first iteration, so it never shares a buffer with the
+    // real-time frames.
     // M5b: the offline job's post-effect list is filled by the caller (app) from the same list; this is only a
     // fallback for callers that did not (the renderer's current MME list).
     OfflineJobDesc jobWithMme = job;

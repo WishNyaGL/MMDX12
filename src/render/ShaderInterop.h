@@ -178,6 +178,12 @@ struct SceneConstants {               // b0, kSceneCbSize-byte slot per frame
     DirectX::XMFLOAT4 skyZenithOverF;
     DirectX::XMFLOAT4 skySunToward;
     DirectX::XMFLOAT4 skyNight;
+    // S9b-2: the sky environment buffer (render/SkyEnv.h, shaders/sky_env.hlsl, read by shaders/sky_env.hlsli through
+    // the bindless buffer table). x = SrvHeap index of the raw ByteAddressBuffer (render/SkyEnv.h layout:
+    // the row CDF, the marginal CDF, the total and the 9 SH coefficients) or -1 = no sky environment this frame (no
+    // Physical Sky, the build failed, or the offline background override: the ambient stays the two-colour hemisphere
+    // and the path tracers add no sky light sample), y = W, z = H, w = unused.
+    DirectX::XMFLOAT4 skyEnvParams;
 };
 static_assert(sizeof(SceneConstants) <= kSceneCbSize, "SceneConstants layout");
 
@@ -196,6 +202,17 @@ static_assert(sizeof(GpuGobo) == 16, "GpuGobo layout");
 // reduction and for the specular reflection). Read by shaders/screen_light.hlsli through the bindless buffer / texture
 // tables (SceneConstants::screenLightParams.x = this table's SrvHeap index). 64 B, 16-aligned.
 inline constexpr uint32_t kMaxScreenLights = 16;
+
+// S9b-2: the sky environment buffer (render/SkyEnv.h, shaders/sky_env.hlsl / sky_env.hlsli). One raw buffer of
+// kSkyEnvFloats floats, W x H texels of an equirectangular sky grid plus the marginal CDF, the total and the 9 SH
+// radiance coefficients. Texel (i, j): v = (i + 0.5) / H, u = (j + 0.5) / W, theta = PI v from +Y, phi = 2 PI u,
+// f = (luminance(SkyColor(dir)) + 1e-4) sin(theta).
+inline constexpr uint32_t kSkyEnvW = 128;
+inline constexpr uint32_t kSkyEnvH = 64;
+inline constexpr uint32_t kSkyEnvMargOffset = kSkyEnvW * kSkyEnvH;   // 8192: the row CDF, one float per row
+inline constexpr uint32_t kSkyEnvTotalOffset = kSkyEnvMargOffset + kSkyEnvH;   // 8256: the sum of every f
+inline constexpr uint32_t kSkyEnvShOffset = kSkyEnvTotalOffset + 1;            // 8260: 9 float4 SH coefficients
+inline constexpr uint32_t kSkyEnvFloats = kSkyEnvShOffset + 9 * 4;             // 8296
 
 struct GpuScreenLight {
     DirectX::XMFLOAT4 center;   // xyz = rectangle centre (world), w = the screen's emissive strength (brightness)

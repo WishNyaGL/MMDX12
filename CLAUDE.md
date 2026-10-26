@@ -409,6 +409,21 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     `skyGround` (a ground albedo, 0.35 grey), `skyIntensity` (1), `skySunIntensity` (1), `skyMaxElevationDeg` (60). Their
     binding targets are `lights.<name>.sky.timeOfDay|northDeg|turbidity|haze|ground|intensity|sunIntensity` (the same
     nested one-level split as the S7b gobo's). Cloudless sky only: image skies / IBL are S9b-2..S9b-4.
+    Sky as a light (S9b-2): `render/SkyEnv.h`'s `SkyEnvBuilder` turns the Physical Sky into a `shaders/sky_env.hlsl`
+    environment buffer (one per renderer, one for the offline renderer; `kSkyEnvFloats` = 8296 floats): an
+    equirectangular 128x64 grid of `f = (luminance(SkyColor(dir)) + 1e-4) sin(theta)` with its row / marginal CDFs and
+    total, plus the 9 order-2 SH radiance coefficients. Four compute passes (lum, row prefix, marginal prefix, SH
+    integration) run every frame a sky is on, in `RecordScene` right after `UpdateScreenLights` (and once per offline
+    image, in `OfflineRenderer::Begin`), with `UAV` barriers between them; `SceneConstants::skyEnvParams.x` is the SRV
+    heap index (-1 = no sky environment: nothing built, bound or evaluated, the frame is byte for byte the old one).
+    * Raster / RT: `Hemisphere(n)` (mmd.hlsl) returns `SkyShIrradiance(n) / PI` while `SkyEnvOn()`: the sky's real
+      Lambertian irradiance instead of the two-colour hemisphere (no `gSunIntensity` factor, `SkyColor` already has it).
+    * PT / offline GI: `shaders/sky_env.hlsli` samples the CDF (`SkyEnvSample` / `SkyEnvPdf`) for one sky light sample
+      per shading point exactly like S8a's emissive NEE (same MIS: `MisWeightLight` against `PathBsdfPdf`, weight 1 at the
+      last vertex), and a BSDF-sampled ray that escapes is weighted by `MisWeightBsdf(prevPdfBsdf, SkyEnvPdf(dir))`.
+      Offline GI mirrors each side in `SkyLighting` (the `EmissiveLighting` copy), in the prepass gather paths and at
+      the camera path's escape; its first gather segment is left out, as the emissive table hits are there.
+    The offline background override (`gBgOverride.w > 0.5`) disables the build, since that escaped radiance is not sky.
     AutoLuminous (そぼろ convention, native): `GpuModel::Create` flags a non-PBR material with black specular and
     specular power >= 100 as `MatFlag_AutoLuminous` (cleared for pack-shaded materials); `AutoLumEmission`
     (common.hlsli) adds diffuse x texture x (power - 100) / 10 x 4 as HDR after lighting in the raster / RT PS, PT and

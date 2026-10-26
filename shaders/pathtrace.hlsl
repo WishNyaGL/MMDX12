@@ -7,6 +7,7 @@
 #define PBR_SAMPLE_LEVEL0     // compute: no screen-space gradients
 #include "pt_pbr.hlsli"
 #include "emissive_nee.hlsli"   // S8a: emissive-triangle NEE + MIS (needs the PBR record decode)
+#include "sky_env.hlsli"        // S9b-2: the sky as an importance-sampled light
 cbuffer PassCB : register(b1) { float4 gP0; float4 gP1; float4 gP2; float4 gP3; };
 SamplerState gPoint : register(s0);
 SamplerState gLinear : register(s1);
@@ -213,7 +214,15 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
             RtHit hit;
             bool hitMesh = TraceClosest(origin, dir, tMin, tMax, alphaThr, hit);
             if (!hitMesh && !floorHit) {
-                radiance += throughput * SkyColor(dir) * ((bounce == 0) ? 1.0 : kSkyScale);
+                // S9b-2: the sky is also light-sampled below, so a BSDF-sampled ray that escapes takes the BSDF weight
+                // (camera escapes and delta events keep weight 1, as for the emissive triangles: SkyEnvPdf is the solid
+                // angle pdf of the sky NEE's sample). The original expression stays verbatim in the else branch, so a
+                // frame without a sky environment is byte for byte the old one.
+                if (SkyEnvOn() && bounce > 0 && prevBsdfValid)
+                    radiance += throughput * SkyColor(dir) * ((bounce == 0) ? 1.0 : kSkyScale) *
+                                MisWeightBsdf(prevPdfBsdf, SkyEnvPdf(dir));
+                else
+                    radiance += throughput * SkyColor(dir) * ((bounce == 0) ? 1.0 : kSkyScale);
                 if (bounce == 0 && s == 0) { primarySky = true; primRd = rd; }
                 break;
             }
@@ -676,6 +685,40 @@ void CSPathTrace(uint3 id : SV_DispatchThreadID) {
                             }
                             radiance += throughput * wMis * f * Le * visFactor / es.pdf;
                         }
+                    }
+                }
+            }
+
+            // S9b-2: the Physical Sky as an importance-sampled light, the same one-sample-per-shading-point scheme and
+            // MIS as the emissive NEE above (SkyEnvSample follows the sky's luminance distribution). The sky is not
+            // one-sided: only the surface's own normal side gates it.
+            if (SkyEnvOn() && !(isPbrHit && PtPbrIsTransmissive(pbr))) {
+                float3 wi;
+                float pdfSky;
+                if (SkyEnvSample(float2(Rand(rng), Rand(rng)), wi, pdfSky)) {
+                    const float cosS = dot(n, wi);
+                    if (cosS > 0.0 && dot(faceN, wi) > 0.0) {
+                        // the escape path above scales an indirect sky by kSkyScale: both halves estimate one integral
+                        const float3 Le = SkyColor(wi) * kSkyScale;
+                        const float visFactor =
+                            EmissiveVisible(OffsetRayOrigin(pos, faceN), wi, 1e7, max(Rand(rng), 0.004));
+#ifdef PT_PACK_HAS_LIGHTING
+                        const bool lastVertex = bounce == bounces || flatIndirect > 0.5;
+#else
+                        const bool lastVertex = bounce == bounces || flat > 0.5;
+#endif
+                        const float pdfBsdf = PathBsdfPdf(isPbrHit, pbr, rough, pSpec, n, -dir, wi);
+                        const float wMis = lastVertex ? 1.0 : MisWeightLight(pdfSky, pdfBsdf);
+                        float3 f;
+                        if (isPbrHit) {
+                            f = pbr.diffuse * pbr.ao / PI * cosS;
+                            if (pSpec > 0.0) f += PbrSpecCosine(pbr, -dir, wi);
+                        } else {
+                            f = (1.0 - pSpec) * albedo / PI * cosS;
+                            if (pSpec > 0.0 && dot(reflect(dir, n), wi) >= cos(rough * 0.5))
+                                f += pSpec / ConeLobeOmega(rough);
+                        }
+                        radiance += throughput * wMis * f * Le * visFactor / pdfSky;
                     }
                 }
             }

@@ -12,6 +12,7 @@
 #include "render/MmeRuntime.h"
 #include "render/MmeSkin.h"
 #include "render/ScreenVideo.h"
+#include "render/SkyEnv.h"
 #include "render/StageScreens.h"
 #include <atomic>
 #include <filesystem>
@@ -377,6 +378,9 @@ private:
     bool screenReady_ = false;          // this frame's scene has screen lights (RecordScene filled the table)
     bool loggedScreenLights_ = false;   // one SCREENLIGHTS log line per run (not per frame)
     uint32_t screenLightCount_ = 0;     // entries of screenLightTable_ this frame (for the mirror slot copies)
+    // S9b-2: this renderer's sky environment (the Physical Sky's luminance CDFs + SH irradiance, render/SkyEnv.h). Built
+    // every frame a Physical Sky is on; SceneConstants::skyEnvParams.x = -1 otherwise, which skips every sky term.
+    SkyEnvBuilder skyEnv_;
     // S7c: the LIGHTS line's cluster fields of the last log (the packed grid, 0 = no clusters): one line per change.
     uint32_t loggedClusterGrid_ = UINT32_MAX;
     std::vector<int> prevSpotPick_;
