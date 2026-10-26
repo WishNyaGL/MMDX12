@@ -23,6 +23,7 @@ namespace mmdx {
 void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBegin, float fracEnd,
                          const char* label, const MaterialChoice& choice) {
     m.textures.resize(m.pmx->textures.size());
+    m.compressedTextures.assign(m.pmx->textures.size(), CompressedImage{});
 
     // Referenced texture indices; only indices within range.
     std::set<int32_t> referenced;
@@ -40,7 +41,9 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
 
     std::atomic<int> done{0};
     const int total = (int)referenced.size();
-    // Imported textures of opaque materials (PmxModel::opaqueTextures): alpha is not coverage.
+    // Imported textures of opaque materials (PmxModel::opaqueTextures): alpha is not coverage. The RGBA8 copy gets
+    // alpha forced to 255; a compressed DDS of the same file would still carry the file's alpha, so it is dropped and
+    // the upload takes the RGBA8 copy instead (identical pixels to before S11).
     auto forceOpaque = [&](int32_t index) {
         if ((size_t)index >= m.pmx->opaqueTextures.size() || !m.pmx->opaqueTextures[index]) return;
         ImageRGBA8& img = m.textures[index];
@@ -48,13 +51,15 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
         for (ImageRGBA8::Level& level : img.mips)
             for (size_t i = 3; i < level.pixels.size(); i += 4) level.pixels[i] = 255;
         img.hasAlpha = false;
+        if ((size_t)index < m.compressedTextures.size()) m.compressedTextures[index] = CompressedImage{};
     };
     std::for_each(std::execution::par, referenced.begin(), referenced.end(),
                   [&](int32_t index) {
                       if ((size_t)index < m.pmx->embeddedTextures.size() && !m.pmx->embeddedTextures[index].empty()) {
                           const auto& bytes = m.pmx->embeddedTextures[index];
                           std::string err;
-                          if (!LoadImageRGBA8FromMemory(bytes.data(), bytes.size(), m.textures[index], &err))
+                          if (!LoadImageWithCompressedFromMemory(bytes.data(), bytes.size(), m.textures[index],
+                                                                 m.compressedTextures[index], &err))
                               LOG_WARN("embedded texture decode failed: %s (%s): %s", m.pmx->textures[index].c_str(), label, err.c_str());
                           forceOpaque(index);
                           int d = ++done;
@@ -68,7 +73,7 @@ void DecodeModelTextures(LoadedModelCpu& m, LoadProgress* progress, float fracBe
                           LOG_WARN("texture not found: %s (%s)", m.pmx->textures[index].c_str(), label);
                       } else {
                           std::string err;
-                          if (!LoadImageRGBA8(p, m.textures[index], &err))
+                          if (!LoadImageWithCompressed(p, m.textures[index], m.compressedTextures[index], &err))
                               LOG_WARN("texture decode failed: %s: %s", PathToUtf8(p).c_str(), err.c_str());
                           forceOpaque(index);
                       }

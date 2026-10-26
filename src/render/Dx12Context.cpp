@@ -1,5 +1,6 @@
 // D3D12 device / swap chain / frame pacing, descriptor heaps and resource upload.
 #include "render/Dx12Context.h"
+#include "asset/DdsLoader.h"
 #include "asset/ImageLoader.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
@@ -764,6 +765,133 @@ ComPtr<ID3D12Resource> UploadBatch::CreateTextureChannel8(const ImageRGBA8& imag
         res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     list_->ResourceBarrier(1, &barrier);
     return res;
+}
+
+// ---- S11: block-compressed / cube uploads -----------------------------------------------------
+
+ComPtr<ID3D12Resource> UploadBatch::CreateTextureCompressed(const CompressedImage& image, DXGI_FORMAT format,
+                                                          const wchar_t* debugName) {
+    if (!ctx_.Device() || !list_ || image.Empty() || format == DXGI_FORMAT_UNKNOWN) return {};
+    const UINT mipCount = image.mipCount;
+    const UINT arraySize = image.faces > 1 ? image.faces : 1;
+    CD3DX12_RESOURCE_DESC desc = arraySize > 1
+                                     ? CD3DX12_RESOURCE_DESC::Tex2D(format, image.width, image.height, (UINT16)arraySize,
+                                                                    (UINT16)mipCount, 1, 0, D3D12_RESOURCE_FLAG_NONE)
+                                     : CD3DX12_RESOURCE_DESC::Tex2D(format, image.width, image.height, 1,
+                                                                    (UINT16)mipCount, 1, 0, D3D12_RESOURCE_FLAG_NONE);
+    D3D12_HEAP_PROPERTIES def{D3D12_HEAP_TYPE_DEFAULT};
+    ComPtr<ID3D12Resource> res;
+    if (!CheckHr(ctx_.Device()->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &desc,
+                                                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&res)),
+                 "CreateCommittedResource(bc texture)"))
+        return {};
+    if (debugName) res->SetName(debugName);
+
+    const UINT subresources = mipCount * arraySize;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subresources);
+    std::vector<UINT> rowCounts(subresources);
+    std::vector<UINT64> rowSizes(subresources);
+    UINT64 total = 0;
+    ctx_.Device()->GetCopyableFootprints(&desc, 0, subresources, 0, footprints.data(), rowCounts.data(),
+                                         rowSizes.data(), &total);
+
+    D3D12_HEAP_PROPERTIES upload{D3D12_HEAP_TYPE_UPLOAD};
+    D3D12_RESOURCE_DESC stagingDesc = CD3DX12_RESOURCE_DESC::Buffer(total);
+    ComPtr<ID3D12Resource> staging;
+    if (!CheckHr(ctx_.Device()->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &stagingDesc,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                        IID_PPV_ARGS(&staging)),
+                 "CreateCommittedResource(bc staging)"))
+        return {};
+    void* mapped = nullptr;
+    if (FAILED(staging->Map(0, nullptr, &mapped))) {
+        LOG_ERROR("failed to map compressed texture upload staging buffer");
+        return {};
+    }
+    uint8_t* base = (uint8_t*)mapped;
+    for (UINT sr = 0; sr < subresources; ++sr) {
+        // The CompressedImage lists one offset per (face, mip): face-major, so face = sr / mipCount.
+        const UINT face = sr / mipCount, mip = sr % mipCount;
+        const size_t index = (size_t)face * mipCount + mip;
+        if (index >= image.mipOffsets.size()) break;
+        const D3D12_SUBRESOURCE_FOOTPRINT& fp = footprints[sr].Footprint;
+        const uint8_t* src = image.data.data() + image.mipOffsets[index];
+        // Rows of a block-compressed mip are whole blocks: copy row by row with the copyable row pitch.
+        for (UINT y = 0; y < rowCounts[sr]; ++y)
+            memcpy(base + footprints[sr].Offset + (size_t)y * fp.RowPitch, src + (size_t)y * rowSizes[sr],
+                   (size_t)rowSizes[sr]);
+        CD3DX12_TEXTURE_COPY_LOCATION dst(res.Get(), sr);
+        CD3DX12_TEXTURE_COPY_LOCATION srcLoc(staging.Get(), footprints[sr]);
+        list_->CopyTextureRegion(&dst, 0, 0, 0, &srcLoc, nullptr);
+    }
+    staging->Unmap(0, nullptr);
+    staging_.push_back(std::move(staging));
+
+    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    list_->ResourceBarrier(1, &barrier);
+    return res;
+}
+
+ComPtr<ID3D12Resource> UploadBatch::CreateTextureCube(const std::array<ImageRGBA8, 6>& faces,
+                                                     const wchar_t* debugName) {
+    if (!ctx_.Device() || !list_ || faces[0].Empty()) return {};
+    const uint32_t w = faces[0].Width(), h = faces[0].Height();
+    for (const ImageRGBA8& f : faces)
+        if (f.Empty() || f.Width() != w || f.Height() != h) return {};
+    CD3DX12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, w, h, 6, 1, 1, 0,
+                                                              D3D12_RESOURCE_FLAG_NONE);
+    D3D12_HEAP_PROPERTIES def{D3D12_HEAP_TYPE_DEFAULT};
+    ComPtr<ID3D12Resource> res;
+    if (!CheckHr(ctx_.Device()->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &desc,
+                                                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&res)),
+                 "CreateCommittedResource(cube texture)"))
+        return {};
+    if (debugName) res->SetName(debugName);
+
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(6);
+    std::vector<UINT> rowCounts(6);
+    std::vector<UINT64> rowSizes(6);
+    UINT64 total = 0;
+    ctx_.Device()->GetCopyableFootprints(&desc, 0, 6, 0, footprints.data(), rowCounts.data(), rowSizes.data(),
+                                         &total);
+    D3D12_HEAP_PROPERTIES upload{D3D12_HEAP_TYPE_UPLOAD};
+    D3D12_RESOURCE_DESC stagingDesc = CD3DX12_RESOURCE_DESC::Buffer(total);
+    ComPtr<ID3D12Resource> staging;
+    if (!CheckHr(ctx_.Device()->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &stagingDesc,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                        IID_PPV_ARGS(&staging)),
+                 "CreateCommittedResource(cube staging)"))
+        return {};
+    void* mapped = nullptr;
+    if (FAILED(staging->Map(0, nullptr, &mapped))) {
+        LOG_ERROR("failed to map cube texture upload staging buffer");
+        return {};
+    }
+    uint8_t* base = (uint8_t*)mapped;
+    for (UINT face = 0; face < 6; ++face) {
+        const D3D12_SUBRESOURCE_FOOTPRINT& fp = footprints[face].Footprint;
+        const size_t srcPitch = (size_t)w * 4;
+        for (UINT y = 0; y < h; ++y)
+            memcpy(base + footprints[face].Offset + (size_t)y * fp.RowPitch,
+                   faces[face].mips[0].pixels.data() + (size_t)y * srcPitch, srcPitch);
+        CD3DX12_TEXTURE_COPY_LOCATION dst(res.Get(), face);
+        CD3DX12_TEXTURE_COPY_LOCATION src(staging.Get(), footprints[face]);
+        list_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+    staging->Unmap(0, nullptr);
+    staging_.push_back(std::move(staging));
+
+    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    list_->ResourceBarrier(1, &barrier);
+    return res;
+}
+
+ComPtr<ID3D12Resource> UploadBatch::CreateTextureCube(const CompressedImage& cube, DXGI_FORMAT format,
+                                                     const wchar_t* debugName) {
+    if (cube.faces != 6) return {};
+    return CreateTextureCompressed(cube, format, debugName);
 }
 
 void UploadBatch::Submit() {

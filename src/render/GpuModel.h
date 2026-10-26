@@ -18,6 +18,7 @@
 namespace mmdx {
 
 struct ImageRGBA8;
+struct CompressedImage;
 
 // Textures shared by all models, owned by Renderer.
 struct BuiltinTextures {
@@ -81,9 +82,16 @@ public:
                 const std::vector<ImageRGBA8>& textures, const BuiltinTextures& builtin, ModelRole role);
     // `pbr` is the model's decoded Ray PBR payload (PbrModelData, may be empty / all-invalid). Creates the
     // per-material StructuredBuffer<GpuPbrMaterial> and its SRV when at least one material has a record.
+    // `compressed` (S11) is parallel to `textures`: a non-empty entry is a block-compressed DDS the model's texture
+    // upload takes as it is (no RGBA8 copy on the GPU). The RGBA8 image supplies the CPU-side checks (alpha test /
+    // toon ramp) and is uploaded when the entry is empty or not a colour block format; a BC4/5/6H file (no RGBA8
+    // decode) counts as missing there.
     bool Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
                 const std::vector<ImageRGBA8>& textures, const BuiltinTextures& builtin, ModelRole role,
                 const PbrModelData& pbr);
+    bool Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
+                const std::vector<ImageRGBA8>& textures, const BuiltinTextures& builtin, ModelRole role,
+                const PbrModelData& pbr, const std::vector<CompressedImage>* compressed);
     // Per-material .emd blend hints (asset/MmeHints::MmeBlendHint: 0 normal, 1 no depth write, 2 additive). Call
     // after Create; sets Material::additive / Material::noDepthWrite and the MatFlag_* bits in the constants.
     // `def` applies to materials past the end of `hints` that have no own entry. Never changes ordinary models.
@@ -304,6 +312,12 @@ private:
     std::vector<MaterialBase> materialBase_;
     std::vector<uint8_t> materialBlend_;        // per material: 0 normal, 1 no-depth-write, 2 additive (MmeBlendHint)
     std::vector<ComPtr<ID3D12Resource>> textures_;  // parallel to pmx.textures (null if unused)
+    // S11: the format each texture_ was created with (the material SRV must match it) and the VRAM totals.
+    std::vector<DXGI_FORMAT> textureFormats_;
+    uint32_t textureCount_ = 0;
+    uint64_t textureRgba8Bytes_ = 0;        // bytes of the RGBA8 textures actually uploaded
+    uint64_t textureCompressedBytes_ = 0;   // bytes of the BCn blocks actually uploaded
+    uint64_t textureWouldBeRgba8Bytes_ = 0; // what the BCn textures would have taken as RGBA8
     D3D12_VERTEX_BUFFER_VIEW vbv_{};
     D3D12_INDEX_BUFFER_VIEW ibv_{};
     D3D12_VERTEX_BUFFER_VIEW sdefVbv_{};
@@ -371,6 +385,7 @@ private:
     // S5 / background AVI: per-material original diffuse SRV resource, its MatFlag_HasTexture and the original
     // reflectivity (BindMaterialTexture / SetMaterialScreen restore them; parallel to Materials()).
     std::vector<ID3D12Resource*> materialOrigTex_;
+    std::vector<DXGI_FORMAT> materialOrigTexFormat_;   // S11: format the diffuse texture resource was created with
     std::vector<char> materialOrigHasTex_;   // the material's MatFlag_HasTexture before a texture was bound over it
     std::vector<float> materialOrigReflect_;
     ComPtr<ID3D12Resource> packParamsExtCb_;

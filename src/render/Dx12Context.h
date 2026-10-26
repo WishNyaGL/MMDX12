@@ -3,6 +3,7 @@
 #include <directx/d3dx12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -13,6 +14,7 @@ namespace mmdx {
 
 using Microsoft::WRL::ComPtr;
 struct ImageRGBA8;
+struct CompressedImage;
 
 // Fixed-capacity descriptor heap with a first-fit free-list allocator of contiguous ranges.
 class DescriptorHeap {
@@ -181,6 +183,18 @@ public:
     // PIXEL_SHADER_RESOURCE. Used for the single-channel PBR maps (work unit P2).
     ComPtr<ID3D12Resource> CreateTextureChannel8(const ImageRGBA8& image, int channel,
                                                  const wchar_t* debugName = nullptr);
+    // S11: a block-compressed DDS texture uploaded as it is on disk (every mip of the CompressedImage, no CPU
+    // decode). `format` is the resource format: the BC format, or its _SRGB variant where the sampling should be
+    // gamma-decoded by the hardware (BC1/2/3/7 have one; BC4/5/6H do not). The SRV the caller creates must use the
+    // same format.
+    ComPtr<ID3D12Resource> CreateTextureCompressed(const CompressedImage& image, DXGI_FORMAT format,
+                                                   const wchar_t* debugName = nullptr);
+    // S11: a TextureCube from six RGBA8 faces (one mip each; no mips are generated) or from a compressed cube
+    // (every face and mip). Final state PIXEL_SHADER_RESOURCE; the caller's SRV must be TEXTURECUBE with the same
+    // format.
+    ComPtr<ID3D12Resource> CreateTextureCube(const std::array<ImageRGBA8, 6>& faces, const wchar_t* debugName = nullptr);
+    ComPtr<ID3D12Resource> CreateTextureCube(const CompressedImage& cube, DXGI_FORMAT format,
+                                             const wchar_t* debugName = nullptr);
     // Closes, executes on ctx.Queue(), waits for completion, frees staging buffers.
     void Submit();
 

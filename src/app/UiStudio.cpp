@@ -129,7 +129,8 @@ bool App::FinishStudioLoad() {
             sm->inst = std::make_unique<ModelInstance>(m.pmx);
             // props follow bones every frame: they need the per-frame (character) RT path, not the static stage BLAS
             sm->gpu = renderer_.CreateModel(batch, *m.pmx, m.textures,
-                                            m.kind == ModelKind::Stage ? ModelRole::Stage : ModelRole::Character, &m.pbr);
+                                            m.kind == ModelKind::Stage ? ModelRole::Stage : ModelRole::Character, &m.pbr,
+                                            &m.compressedTextures);
             if (!sm->gpu) {
                 if (m.kind != ModelKind::Character || pkg.fromProject) {
                     LOG_WARN("studio: GPU upload failed: %s", m.name.c_str());

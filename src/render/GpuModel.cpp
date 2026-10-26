@@ -1,5 +1,6 @@
 // GPU-side representation of one PMX model.
 #include "render/GpuModel.h"
+#include "asset/DdsLoader.h"
 #include "asset/PmxModel.h"
 #include "asset/ImageLoader.h"
 #include "asset/ModelTraits.h"
@@ -21,6 +22,33 @@ DirectX::XMFLOAT4X4 Identity4x4() {
     DirectX::XMFLOAT4X4 r;
     DirectX::XMStoreFloat4x4(&r, DirectX::XMMatrixIdentity());
     return r;
+}
+
+uint64_t Rgba8BytesOf(const ImageRGBA8& img) {
+    uint64_t bytes = 0;
+    for (const ImageRGBA8::Level& l : img.mips) bytes += l.pixels.size();
+    return bytes;
+}
+
+// S11: the block formats a material texture slot can sample as colour. BC4 / BC5 are one / two channel data maps and
+// BC6H is HDR; none of them has an RGBA8 decoder here either, so such a file keeps the pre-S11 behaviour (it counts as
+// missing, white is bound) rather than turning up as a red / green / clipped surface.
+bool IsMaterialBlockFormat(DXGI_FORMAT format) {
+    return format == DXGI_FORMAT_BC1_UNORM || format == DXGI_FORMAT_BC2_UNORM ||
+           format == DXGI_FORMAT_BC3_UNORM || format == DXGI_FORMAT_BC7_UNORM;
+}
+
+// Bytes of a w x h RGBA8 texture with the full halving mip chain the loader builds (what S11 replaces for a
+// block-compressed file whose level 0 has no CPU decode, e.g. BC7).
+uint64_t Rgba8ChainBytes(uint32_t w, uint32_t h) {
+    uint64_t bytes = 0;
+    while (w > 0 && h > 0) {
+        bytes += (uint64_t)w * h * 4;
+        if (w == 1 && h == 1) break;
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
+    }
+    return bytes;
 }
 
 // Face-like material names of MME game rigs (a Face.fx with an SDF face map we
@@ -72,6 +100,12 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
 bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
                       const std::vector<ImageRGBA8>& textures, const BuiltinTextures& builtin,
                       ModelRole role, const PbrModelData& pbr) {
+    return Create(ctx, batch, pmx, textures, builtin, role, pbr, nullptr);
+}
+
+bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
+                      const std::vector<ImageRGBA8>& textures, const BuiltinTextures& builtin,
+                      ModelRole role, const PbrModelData& pbr, const std::vector<CompressedImage>* compressed) {
     ctx_ = &ctx;
     role_ = role;
     name_ = pmx.name;
@@ -229,11 +263,23 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
     }
 
     // Referenced texture indices.
+    // S11: an index is "present" when it has either the RGBA8 decode or the DDS blocks (a BC4/5/6H/7 file has no
+    // CPU decode here, so only the blocks exist; the CPU-side checks below then see an empty image).
+    auto compressedAt = [&](int32_t i) -> const CompressedImage* {
+        if (!compressed || i < 0 || (size_t)i >= compressed->size()) return nullptr;
+        const CompressedImage& c = (*compressed)[(size_t)i];
+        if (c.Empty() || c.faces != 1 || !IsMaterialBlockFormat(c.format)) return nullptr;
+        // D3D12 needs level 0 of a block-compressed texture in whole blocks: other sizes keep the RGBA8 path.
+        if ((c.width & 3) != 0 || (c.height & 3) != 0) return nullptr;
+        return &c;
+    };
+    auto hasTexture = [&](int32_t i) {
+        return i >= 0 && (size_t)i < textures.size() && (!textures[(size_t)i].Empty() || compressedAt(i) != nullptr);
+    };
     // MME data layout: a toon slot holding a UV-mapped shadow colour (_S) makes the sphere slot a
     // UV-space parameter mask (_H), so the sphere texture is bound whatever its PMX sphere mode.
     auto ToonMapMaterial = [&](const PmxMaterial& m) {
-        if (m.sharedToon || m.toonIndex < 0 || (size_t)m.toonIndex >= textures.size()) return false;
-        if (textures[m.toonIndex].Empty()) return false;
+        if (m.sharedToon || !hasTexture(m.toonIndex)) return false;
         return !IsToonRampImage(textures[m.toonIndex]);
     };
     auto SphereUsed = [&](const PmxMaterial& m) {
@@ -241,8 +287,7 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         return mode || (ToonMapMaterial(m) && m.sphereTextureIndex >= 0);
     };
     auto CollectTextureIndex = [&](std::vector<int32_t>& out, int32_t i) {
-        if (i < 0 || (size_t)i >= textures.size()) return;
-        if (textures[i].Empty()) return;
+        if (!hasTexture(i)) return;
         if (std::find(out.begin(), out.end(), i) == out.end()) out.push_back(i);
     };
     std::vector<int32_t> referenced;
@@ -269,12 +314,50 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         usePbrFile(pbr.materials[mi].ext.volumeThicknessTex);
     }
     textures_.assign(textures.size(), {});
+    // S11: a block-compressed DDS is uploaded as its blocks (below), so the VRAM saving is real. The RGBA8 image is
+    // still around: it supplies the CPU-side checks (toon ramp, alpha test) and the PBR single-channel maps.
+    textureFormats_.assign(textures.size(), DXGI_FORMAT_UNKNOWN);
+    textureCount_ = 0;
+    textureCompressedBytes_ = 0;
+    textureRgba8Bytes_ = 0;
+    textureWouldBeRgba8Bytes_ = 0;
     for (int32_t i : referenced) {
-        textures_[i] = batch.CreateTexture(textures[i], L"model.texture");
+        if (const CompressedImage* c = compressedAt(i)) {
+            // DECISION: the RGBA8 model path uploads R8G8B8A8_UNORM and the shaders convert to linear themselves
+            // (SrgbToLinear), so the BC texture is uploaded UNORM too (not the _SRGB variant): the hardware gamma
+            // decode would convert twice. The data maps (toon / sphere) sample the same way.
+            const DXGI_FORMAT fmt = c->format;
+            textures_[i] = batch.CreateTextureCompressed(*c, fmt, L"model.texture.bc");
+            if (textures_[i]) {
+                textureFormats_[i] = fmt;
+                textureCompressedBytes_ += c->data.size();
+                textureWouldBeRgba8Bytes_ += textures[i].Empty() ? Rgba8ChainBytes(c->width, c->height)
+                                                                 : Rgba8BytesOf(textures[i]);
+            }
+        }
+        if (!textures_[i]) {
+            textures_[i] = batch.CreateTexture(textures[i], L"model.texture");
+            if (textures_[i]) {
+                textureFormats_[i] = DXGI_FORMAT_R8G8B8A8_UNORM;
+                textureRgba8Bytes_ += Rgba8BytesOf(textures[i]);
+            }
+        }
         if (!textures_[i]) {
             LOG_ERROR("model '%s': texture creation failed", name_.c_str());
             return false;
         }
+        ++textureCount_;
+    }
+    // S11: the VRAM saving of this model's material textures, one line per loaded model (tools/asset_probe --full
+    // prints the same totals for the whole library).
+    if (textureCount_ > 0) {
+        const uint64_t all = textureRgba8Bytes_ + textureWouldBeRgba8Bytes_;
+        const uint64_t used = textureRgba8Bytes_ + textureCompressedBytes_;
+        const uint64_t saved = all > used ? all - used : 0;
+        LOG_INFO("TEXTURES %s: n=%u rgba8=%.1f MB bcn=%.1f MB all_rgba8=%.1f MB saved=%.1f%%", name_.c_str(),
+                 textureCount_, (double)textureRgba8Bytes_ / (1024.0 * 1024.0),
+                 (double)textureCompressedBytes_ / (1024.0 * 1024.0), (double)all / (1024.0 * 1024.0),
+                 all ? 100.0 * (double)saved / (double)all : 0.0);
     }
     // PBR file map textures (R8 for single-channel slots, RGBA8 otherwise).
     pbrIndex_.assign(pmx.materials.size(), DescriptorHeap::kInvalid);
@@ -442,7 +525,8 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         mat.drawEdge = materialBase_[mIdx].edgeFlag && m.edgeSize > 0 && m.edgeColor.w > 0 && mat.visible;
         mat.castShadow = materialBase_[mIdx].castFlag && m.diffuse.w > 0.01f;
         mat.alphaTested = m.textureIndex >= 0 && (size_t)m.textureIndex < textures.size() &&
-                          textures[m.textureIndex].hasAlpha;
+                          (textures[m.textureIndex].hasAlpha ||
+                           (compressedAt(m.textureIndex) && compressedAt(m.textureIndex)->hasAlpha));
         mat.sphereMode = (uint8_t)m.sphereMode;
         mat.edgeSize = m.edgeSize;
         mat.constants = materialCb_->GetGPUVirtualAddress() + mIdx * sizeof(MaterialConstants);
@@ -461,36 +545,49 @@ bool GpuModel::Create(Dx12Context& ctx, UploadBatch& batch, const PmxModel& pmx,
         srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Texture2D.MipLevels = UINT(-1);
+        // S11: a BCn texture needs its own format in the SRV (the view format must match the resource).
+        auto srvFor = [&](int32_t index) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
+            D3D12_SHADER_RESOURCE_VIEW_DESC d = srv;
+            if (index >= 0 && (size_t)index < textureFormats_.size() && textureFormats_[(size_t)index] != DXGI_FORMAT_UNKNOWN)
+                d.Format = textureFormats_[(size_t)index];
+            return d;
+        };
+        auto hasTexAt = [&](int32_t index) {
+            return index >= 0 && (size_t)index < textures_.size() && textures_[(size_t)index];
+        };
 
         // +0 texture
         ID3D12Resource* texRes = builtin.white.Get();
-        if (m.textureIndex >= 0 && (size_t)m.textureIndex < textures_.size() && textures_[m.textureIndex])
+        D3D12_SHADER_RESOURCE_VIEW_DESC texSrv = srv;
+        if (m.textureIndex >= 0 && (size_t)m.textureIndex < textures_.size() && textures_[m.textureIndex]) {
             texRes = textures_[m.textureIndex].Get();
-        device->CreateShaderResourceView(texRes, &srv, ctx.SrvHeap().Cpu(alloc + 0));
+            texSrv = srvFor(m.textureIndex);
+        }
+        device->CreateShaderResourceView(texRes, &texSrv, ctx.SrvHeap().Cpu(alloc + 0));
         // +1 sphere
         if ((m.sphereMode == PmxSphereMode::Multiply || m.sphereMode == PmxSphereMode::Add) &&
-            m.sphereTextureIndex >= 0 && (size_t)m.sphereTextureIndex < textures_.size() &&
-            textures_[m.sphereTextureIndex])
-            device->CreateShaderResourceView(textures_[m.sphereTextureIndex].Get(), &srv,
-                                             ctx.SrvHeap().Cpu(alloc + 1));
-        else if ((consts[mIdx].flags & MatFlag_HasSphereTex) && m.sphereTextureIndex >= 0 &&
-                 (size_t)m.sphereTextureIndex < textures_.size() && textures_[m.sphereTextureIndex])
-            device->CreateShaderResourceView(textures_[m.sphereTextureIndex].Get(), &srv,
-                                             ctx.SrvHeap().Cpu(alloc + 1));
-        else
+            hasTexAt(m.sphereTextureIndex)) {
+            const D3D12_SHADER_RESOURCE_VIEW_DESC d = srvFor(m.sphereTextureIndex);
+            device->CreateShaderResourceView(textures_[m.sphereTextureIndex].Get(), &d, ctx.SrvHeap().Cpu(alloc + 1));
+        } else if ((consts[mIdx].flags & MatFlag_HasSphereTex) && hasTexAt(m.sphereTextureIndex)) {
+            const D3D12_SHADER_RESOURCE_VIEW_DESC d = srvFor(m.sphereTextureIndex);
+            device->CreateShaderResourceView(textures_[m.sphereTextureIndex].Get(), &d, ctx.SrvHeap().Cpu(alloc + 1));
+        } else
             device->CreateShaderResourceView(builtin.white.Get(), &srv, ctx.SrvHeap().Cpu(alloc + 1));
         // +2 toon
         if (m.sharedToon) {
             int32_t t = m.toonIndex < 0 ? 0 : (m.toonIndex > 9 ? 9 : m.toonIndex);
             device->CreateShaderResourceView(builtin.toon[t].Get(), &srv, ctx.SrvHeap().Cpu(alloc + 2));
-        } else if (m.toonIndex >= 0 && (size_t)m.toonIndex < textures_.size() && textures_[m.toonIndex]) {
-            device->CreateShaderResourceView(textures_[m.toonIndex].Get(), &srv, ctx.SrvHeap().Cpu(alloc + 2));
+        } else if (hasTexAt(m.toonIndex)) {
+            const D3D12_SHADER_RESOURCE_VIEW_DESC d = srvFor(m.toonIndex);
+            device->CreateShaderResourceView(textures_[m.toonIndex].Get(), &d, ctx.SrvHeap().Cpu(alloc + 2));
         } else {
             device->CreateShaderResourceView(builtin.white.Get(), &srv, ctx.SrvHeap().Cpu(alloc + 2));
         }
         materials_.push_back(mat);
         // The material's own diffuse texture (background AVI / S5 screen bindings restore it).
         materialOrigTex_.push_back(texRes);
+        materialOrigTexFormat_.push_back(texSrv.Format);
         materialOrigHasTex_.push_back((char)((consts[mIdx].flags & MatFlag_HasTexture) != 0));
         materialOrigReflect_.push_back(consts[mIdx].reflectivity);
         // Background AVI: remember the material whose diffuse texture file name is screen.bmp
@@ -1020,7 +1117,9 @@ void GpuModel::BindMaterialTexture(Dx12Context& ctx, size_t materialIndex, ID3D1
     ID3D12Resource* res = tex ? tex : materialOrigTex_[materialIndex];
     if (!res) return;   // no own texture and no bound one: the white fallback stays
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv.Format = tex ? DXGI_FORMAT_R8G8B8A8_UNORM
+                     : (materialIndex < materialOrigTexFormat_.size() ? materialOrigTexFormat_[materialIndex]
+                                                                     : DXGI_FORMAT_R8G8B8A8_UNORM);
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = tex ? 1 : UINT(-1);
@@ -1182,8 +1281,12 @@ void GpuModel::Destroy() {
     materials_.clear();
     screenMaterials_.clear();
     materialOrigTex_.clear();
+    materialOrigTexFormat_.clear();
     materialOrigHasTex_.clear();
     materialOrigReflect_.clear();
+    textureFormats_.clear();
+    textureCount_ = 0;
+    textureRgba8Bytes_ = textureCompressedBytes_ = textureWouldBeRgba8Bytes_ = 0;
     ctx_ = nullptr;
 }
 
