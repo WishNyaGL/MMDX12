@@ -50,6 +50,10 @@ void App::DrawScreenEffectControls(float width) {
         Gap(6.0f);
         fx |= SliderRow("##volamb", Tr("환경 산란"), &settings_.volumetricAmbientGain, 0.0f, 2.0f, "%.2f");
         Gap(6.0f);
+        fx |= SliderRow("##volrange", Tr("안개 범위"), &settings_.volumetricRange, 0.0f, 1000.0f,
+                        settings_.volumetricRange < 50.0f ? Tr("자동") : "%.0f");
+        Tooltip(Tr("무대 원점에서 안개가 퍼지는 반지름이에요. 자동은 스테이지 값, 없으면 빛줄기 조명이 모두 들어가게 넓혀요."));
+        Gap(6.0f);
     }
     // DLSS Frame Generation (play scene only; the panel is only drawn in play mode).
     {

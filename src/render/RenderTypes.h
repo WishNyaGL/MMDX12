@@ -335,8 +335,17 @@ struct LightParams {
 };
 
 // S9: the haze sphere's radius for the volumetric passes: the frame's (or 180), grown to enclose every fog volume.
+// Without an explicit radius it also grows to hold every punctual light that shows in the haze (an arena's rigs
+// hang 300+ units from the origin: outside the default sphere their beams crossed no medium at all), capped at 1000.
 inline float VolumetricMediumRadius(const LightParams& light) {
     float r = light.volumetricRadius > 0.0f ? light.volumetricRadius : 180.0f;
+    if (light.volumetricRadius <= 0.0f) {
+        for (const PunctualLight& l : light.punctual) {
+            if (l.volumetric <= 0.0f) continue;   // not the intensity: a cue dimming a light must not move the haze
+            const DirectX::XMFLOAT3& p = l.position;
+            r = std::max(r, std::min(1000.0f, std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z) + 10.0f));
+        }
+    }
     for (const FogVolume& f : light.fogVolumes) {
         const DirectX::XMFLOAT3& p = f.position;
         const DirectX::XMFLOAT3& e = f.extent;

@@ -65,6 +65,10 @@ bool SphereHitsBox(float3 c, float r, float3 lo, float3 hi) {
 [numthreads(64, 1, 1)]
 void CSLightCull(uint3 gid : SV_GroupID, uint tid : SV_GroupIndex) {
     if (tid < 8u) gMask[tid] = 0u;
+    // the clear must land before any thread ORs into the mask: a 64-thread group runs as two waves on 32-wide GPUs,
+    // and the second wave (lights 32..63) could set its bits before the first wave cleared them (lights dropped at
+    // random per frame = flickering lights)
+    GroupMemoryBarrierWithGroupSync();
 
     const uint tilesX = max((uint)gP0.x, 1u);
     const uint tilesY = max((uint)gP0.y, 1u);

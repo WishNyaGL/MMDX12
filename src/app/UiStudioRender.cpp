@@ -210,6 +210,9 @@ void App::DrawStudioEffectsPanel(float x0, float y0, float x1, float y1) {
             // and the sun / sky barely do
             changed |= SliderRow("##volgain", Tr("빛줄기 강도"), &settings_.volumetricLightGain, 0.0f, 8.0f, "%.2f");
             changed |= SliderRow("##volamb", Tr("환경 산란"), &settings_.volumetricAmbientGain, 0.0f, 2.0f, "%.2f");
+            changed |= SliderRow("##volrange", Tr("안개 범위"), &settings_.volumetricRange, 0.0f, 1000.0f,
+                                 settings_.volumetricRange < 50.0f ? Tr("자동") : "%.0f");
+            Tooltip(Tr("무대 원점에서 안개가 퍼지는 반지름이에요. 자동은 스테이지 값, 없으면 빛줄기 조명이 모두 들어가게 넓혀요."));
             changed |= Switch("##volfull", Tr("정밀 안개 계산"), &settings_.volumetricFull,
                               Tr("오프라인 GI에서 안개를 경로 추적으로 계산"));
             Gap(4.0f);

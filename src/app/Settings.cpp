@@ -197,6 +197,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "volumetricDensity" && ParseFloat(value, f)) volumetricDensity = f;
         else if (key == "volumetricLightGain" && ParseFloat(value, f)) volumetricLightGain = f;
         else if (key == "volumetricAmbientGain" && ParseFloat(value, f)) volumetricAmbientGain = f;
+        else if (key == "volumetricRange" && ParseFloat(value, f)) volumetricRange = f;
         // S9d: 0 = froxel (default), 1 = march; volumetricMultiScatter=1|0 (froxel only)
         else if (key == "volumetricMode" && ParseInt(value, i)) volumetricMode = i;
         else if (key == "volumetricMultiScatter" && ParseBool(value, b)) volumetricMultiScatter = b;
@@ -560,6 +561,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
     volumetricDensity = std::clamp(volumetricDensity, 0.25f, 4.0f);
     volumetricLightGain = std::clamp(volumetricLightGain, 0.0f, 8.0f);
     volumetricAmbientGain = std::clamp(volumetricAmbientGain, 0.0f, 2.0f);
+    volumetricRange = volumetricRange < 50.0f ? 0.0f : std::min(volumetricRange, 1000.0f);
     volumetricMode = std::clamp(volumetricMode, 0, 1);
     lutIntensity = std::clamp(lutIntensity, 0.0f, 1.0f);
     volume = std::clamp(volume, 0.0f, 1.0f);
@@ -655,6 +657,7 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     std::fprintf(f, "volumetric=%d\nvolumetricDensity=%.3f\nvolumetricFull=%d\n", volumetric ? 1 : 0, volumetricDensity,
                  volumetricFull ? 1 : 0);
     std::fprintf(f, "volumetricLightGain=%.3f\nvolumetricAmbientGain=%.3f\n", volumetricLightGain, volumetricAmbientGain);
+    std::fprintf(f, "volumetricRange=%.0f\n", volumetricRange);
     std::fprintf(f, "volumetricMode=%d\nvolumetricMultiScatter=%d\n", volumetricMode, volumetricMultiScatter ? 1 : 0);
     std::fprintf(f, "bloomConvolution=%d\n", bloomConvolution ? 1 : 0);
     std::fprintf(f, "bloomIntensity=%.3f\nbloomThreshold=%.3f\n", bloomIntensity, bloomThreshold);

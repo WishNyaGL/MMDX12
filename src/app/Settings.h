@@ -67,6 +67,9 @@ struct AppSettings {
     // only when the sun / sky do not fill the whole medium: an arena wants a low ambient share and a high light gain.
     float volumetricLightGain = 1.0f;
     float volumetricAmbientGain = 1.0f;
+    // "안개 범위" (ini volumetricRange=): the haze sphere's radius around the origin, 0 = automatic (the stage's
+    // environment.fog.radius, else 180 grown to hold the lights that show in the haze), 50 .. 1000 = fixed.
+    float volumetricRange = 0.0f;
     // S9d: the real-time volumetric mode: 0 = froxel grid (default), 1 = the per-pixel march (A/B, fallback) and the
     // multiple-scatter approximation switch (froxel injector).
     int volumetricMode = 0;

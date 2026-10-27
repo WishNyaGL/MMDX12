@@ -1615,6 +1615,7 @@ void App::BuildStudioFrameView(FrameView& view) {
         view.light.volumetricAnisotropy = std::clamp(fog.anisotropy, -0.9f, 0.95f);
         view.light.volumetricRadius = fog.radius;
     }
+    if (settings_.volumetricRange >= 50.0f) view.light.volumetricRadius = settings_.volumetricRange;   // "안개 범위"
     StudioApplyLightTracks(view);
     // DoF: the focus track over the automatic focus (UiStudioFocus.cpp)
     StudioComputeFocus(view);

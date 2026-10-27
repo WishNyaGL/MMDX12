@@ -2713,6 +2713,7 @@ void App::BuildFrameView(float frame, FrameView& view) {
         BuildLighting(preset == LightingPreset::Stage ? LightingPreset::Studio : preset, playTime_, focus, view.light);
         ApplyHazeGains(view.light, settings_.volumetricLightGain, settings_.volumetricAmbientGain);
     }
+    if (settings_.volumetricRange >= 50.0f) view.light.volumetricRadius = settings_.volumetricRange;   // "안개 범위"
     // --classic: vanilla-MMD shading (plain toon key light): a hard-edged sun shadow, no rim / specular rim light
     if (classicLighting_) {
         view.light.sunShadow = LightShadowType::Hard;
