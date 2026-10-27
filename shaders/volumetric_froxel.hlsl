@@ -10,7 +10,8 @@
 // distance, sized independently of the render resolution (PassVolumetric.cpp).
 //
 // gP0 = (sigma0, heightFalloff, maxDistance, sunG)          gP1 = (punctualG, numFogVolumes, sunVolumetric, radius)
-// gP2 = (medium tint rgb, ambient scale)                    gP3 = (multiple scattering 0/1, gridX, gridY, gridZ)
+// gP2 = (medium tint rgb, ambient scale)                    gP3 = (bits: 1 = multiple scattering, 2 = spots are
+// drawn by the beam pass, gridX, gridY, gridZ)
 // Temporal: gP0 = (history valid, current weight, previous nearZ, previous maxDistance), gP1 = (this frame's
 // maxDistance, numFog, sunVolumetric, radius), same gP2 / gP3. Integrate: gP0 = (maxDistance, 0, 0, 0), same gP3.
 #include "rt_common.hlsli"
@@ -101,7 +102,7 @@ static const float kMsPhase[3] = {1.0, 0.5, 0.25};    // c^n
 
 // The octaves' Henyey-Greenstein phase sum (exactly HG of the single scattering when the switch is off).
 float VolPhaseMS(float c, float g) {
-    if (gP3.x < 0.5) return VolHG(c, g);
+    if ((((uint)gP3.x) & 1u) == 0u) return VolHG(c, g);
     float sum = 0.0;
     [unroll] for (int n = 0; n < 3; ++n) sum += kMsEnergy[n] * VolHG(c, g * kMsPhase[n]);
     return sum;
@@ -179,10 +180,12 @@ void CSFroxelLight(uint3 id : SV_DispatchThreadID) {
     for (uint k = 0; k < count; ++k) {
         const VolLight l = gVolLights[LightListAt(list, k)];
         if (l.volumetric <= 0.0) continue;   // invisible in the medium
+        const bool spot = l.cosOuter > -1.0;
+        // the per-pixel beam pass draws the spots when it is on (gP3.x bit 1)
+        if (spot && (((uint)gP3.x) & 2u) != 0u) continue;
         float3 ld;
         const float atten = VolPunctualAtten(l, wp, ld);
         if (atten <= 0.0) continue;          // out of the light's range (the falloff is exactly 0 there)
-        const bool spot = l.cosOuter > -1.0;
         const float g = l.aniso > -0.99 ? l.aniso : vp.punctualG;
         const float vis = spot ? VolSpotVisibility(l, wp) : 1.0;
         // S7b: a spot's gobo dims / tints its in-scattering at the froxel (+1 mip: the volume is noisy)

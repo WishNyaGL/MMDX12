@@ -392,6 +392,10 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     `L += T S (1 - exp(-sigma dz)) / sigma`, `T *= exp(-sigma dz)`, storing the prefix of every slice).
     `volumetric_froxel_apply.hlsl` samples that grid trilinearly at the pixel's own view depth and blends
     `lit * T + L` (Blend::Transmittance), so the O(1) per-pixel cost does not follow the march length.
+    Spot beams are NOT in the grid (its 160 x 90 tiles drew thin beams as staircases): `volumetric_beams.hlsl` marches
+    every spot's cone per pixel at the full render resolution (`IntegrateVolume` with `VOL_SPOTS_ONLY`: spot shadow maps on
+    every path, gobos, the multiple-scatter phase via `VOL_PUNCTUAL_PHASE`), temporal blend 0.15, added on top as
+    `lit + L` (`VolumetricPass::ExecuteBeams`; `gP3.x` bit 1 tells `CSFroxelLight` to skip spots). ~1 ms on arena_live.
     `RenderSettings::volumetricMultiScatter` (default on, ini `volumetricMultiScatter=`, CLI `--volumetric-ms 0|1`) adds
     the three Wrenninge 2015 octaves in the injector (a = b = c = 0.5: energy a^n, phase g c^n; the stored extinction
     stays the medium's own, since a and b coincide); off = single scattering exactly.

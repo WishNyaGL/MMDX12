@@ -5,6 +5,7 @@
 //   mode 1: the half-res in-scattering march (sun and spot light shadows), temporal accumulation, depth-aware separable
 //         blur, depth-aware upsample into lit as lit * transmittance + in-scattered light (volumetric.hlsl)
 // Both modes share the medium (volumetric_common.hlsli) and composite the same way: lit * T + L.
+// In the froxel mode the spot beams are a per-pixel pass at full render resolution (volumetric_beams.hlsl).
 #include "render/Passes.h"
 #include "render/PassCommon.h"
 #include "render/Renderer.h"
@@ -49,6 +50,18 @@ bool VolumetricPass::CreatePipelines(Dx12Context& ctx, const std::filesystem::pa
         froxelIntegrate_ = {};
         froxelApply_ = {};
     }
+    // the spot beams (full render res, on top of the froxel grid); without them the spots stay in the froxel grid
+    const std::filesystem::path beamsFile = shaderDir / L"volumetric_beams.hlsl";
+    const bool beamsOk =
+        beams_.Create(ctx, beamsFile, "CSBeams") && beamTemporal_.Create(ctx, beamsFile, "CSBeamTemporal") &&
+        beamApply_.Create(ctx, shaderDir / L"volumetric_beams_apply.hlsl", "PSApplyBeams",
+                          {RenderTargets::kColorFormat}, {}, FullscreenPipeline::Blend::Transmittance);
+    if (!beamsOk) {
+        LOG_WARN("Volumetric: beam pipelines unavailable, spots stay in the froxel grid");
+        beams_ = {};
+        beamTemporal_ = {};
+        beamApply_ = {};
+    }
     return true;
 }
 
@@ -61,6 +74,14 @@ void VolumetricPass::OnResize(Dx12Context& ctx, RenderTargets& targets) {
     history_[1].Create(ctx, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrv, L"volumetric.history1");
     historyReady_ = false;
     // S9d: the froxel grid does not follow the render resolution, so a resize keeps it (it is created on demand).
+    // The beams do follow it (one texel per pixel): full render res RGBA16F.
+    beamRaw_.Create(ctx, targets.width, targets.height, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrv,
+                    L"volumetric.beamRaw");
+    beamHistory_[0].Create(ctx, targets.width, targets.height, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrv,
+                           L"volumetric.beamHistory0");
+    beamHistory_[1].Create(ctx, targets.width, targets.height, DXGI_FORMAT_R16G16B16A16_FLOAT, uav, kSrv,
+                           L"volumetric.beamHistory1");
+    beamHistoryReady_ = false;
 }
 
 void VolumetricPass::ReleaseTargets(Dx12Context& ctx) {
@@ -75,6 +96,10 @@ void VolumetricPass::ReleaseTargets(Dx12Context& ctx) {
     froxelLit_.Release(ctx);
     froxelReady_ = false;
     froxelHistoryValid_ = false;
+    beamRaw_.Release(ctx);
+    beamHistory_[0].Release(ctx);
+    beamHistory_[1].Release(ctx);
+    beamHistoryReady_ = false;
 }
 
 // S9d: the froxel grids (RGBA16F Texture3D, kFroxelX x kFroxelY x kFroxelZ = 5.6 MB each). Nothing is allocated until a
@@ -110,6 +135,7 @@ bool VolumetricPass::EnsureFroxelTargets(Dx12Context& ctx) {
 void VolumetricPass::Execute(PassContext& pc) {
     if (!pc.settings.volumetric || pc.offscreen || !apply_ || !raw_) {
         historyReady_ = false;
+        beamHistoryReady_ = false;
         return;
     }
     // S9d: the froxel mode (default); the march is the ini / CLI fallback and keeps its own history chain. The light
@@ -122,6 +148,8 @@ void VolumetricPass::Execute(PassContext& pc) {
         ExecuteFroxel(pc);
         return;
     }
+    // the beams only run in the froxel mode: no history to blend the next time it is on
+    beamHistoryReady_ = false;
     if (!march_) {
         historyReady_ = false;
         return;
@@ -225,8 +253,10 @@ void VolumetricPass::ExecuteFroxel(PassContext& pc) {
     const float p0[4] = {sigma0, falloff, maxDistance, sunG};
     const float p1[4] = {punctualG, (float)fogCount, pc.view.light.sunVolumetric, mediumRadius};
     const float p2[4] = {tint.x, tint.y, tint.z, 0.25f};
-    const float p3[4] = {pc.settings.volumetricMultiScatter ? 1.0f : 0.0f, (float)kFroxelX, (float)kFroxelY,
-                         (float)kFroxelZ};
+    // bit 0: multiple scattering on, bit 1: the beam pass draws the spots, so the froxel grid skips them
+    const bool beams = beams_ && beamTemporal_ && beamApply_ && beamRaw_;
+    const float p3[4] = {(pc.settings.volumetricMultiScatter ? 1.0f : 0.0f) + (beams ? 2.0f : 0.0f),
+                         (float)kFroxelX, (float)kFroxelY, (float)kFroxelZ};
     const uint32_t groupsX = (kFroxelX + 7) / 8;
     const uint32_t groupsY = ((kFroxelY * kFroxelZ) + 7) / 8;
     float params[16];
@@ -293,10 +323,64 @@ void VolumetricPass::ExecuteFroxel(PassContext& pc) {
     froxelApply_.Draw(pc, {&t.lit}, pc.transient.SrvTable(pc.ctx, {&froxelLit_, &t.depth}), ca, 4);
     t.lit.Transition(cmd, kSrv);
 
+    // 5. the spot beams at full render resolution, added on top (params in volumetric_beams.hlsl's gP layout)
+    if (beams) {
+        const float bp[16] = {sigma0, falloff, maxDistance, 0.0f,
+                              punctualG, (float)fogCount, pc.settings.volumetricMultiScatter ? 1.0f : 0.0f,
+                              mediumRadius,
+                              tint.x, tint.y, tint.z, 0.0f,
+                              0.0f, 0.0f, 0.0f, 0.0f};
+        ExecuteBeams(pc, bp, maxDistance);
+    } else {
+        beamHistoryReady_ = false;
+    }
+
     froxelLastFrame_ = pc.frame;
     froxelHistoryValid_ = true;
     froxelLastNearZ_ = std::max(pc.view.camera.nearZ, 0.01f);
     froxelLastMaxDistance_ = maxDistance;
+}
+
+// The spots at full render resolution: march (jittered per frame) -> raw, temporal blend through the previous view
+// projection, then an additive full-resolution composite over lit (the froxel already applied its transmittance).
+void VolumetricPass::ExecuteBeams(PassContext& pc, const float params[16], float maxDistance) {
+    RenderTargets& t = pc.targets;
+    ID3D12GraphicsCommandList* cmd = pc.cmd;
+
+    // 1. march -> beamRaw_ (every path reads the shadow maps: the RT froxel branch may not have transitioned them)
+    beamRaw_.Transition(cmd, kUav);
+    t.depth.Transition(cmd, kSrvAll);
+    t.shadowMap.Transition(cmd, kSrvAll);
+    t.spotShadowMap.Transition(cmd, kSrvAll);
+    beams_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&t.depth, nullptr, &t.shadowMap, &t.spotShadowMap}),
+                    pc.transient.UavTable(pc.ctx, {&beamRaw_}), params, 16, Groups(beamRaw_.width),
+                    Groups(beamRaw_.height));
+
+    // 2. temporal blend -> beamHistory_[cur] (history only across consecutive frames, no cuts)
+    const bool valid = beamHistoryReady_ && pc.frame == beamLastFrame_ + 1 && !pc.view.cameraCut;
+    const uint32_t prev = beamHistoryIndex_, cur = prev ^ 1u;
+    beamRaw_.Transition(cmd, kSrvAll);
+    beamHistory_[prev].Transition(cmd, kSrvAll);
+    beamHistory_[cur].Transition(cmd, kUav);
+    const float ct[4] = {valid ? 1.0f : 0.0f, 0.15f, maxDistance, 0.0f};
+    beamTemporal_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&beamRaw_, &beamHistory_[prev], &t.depth}),
+                           pc.transient.UavTable(pc.ctx, {&beamHistory_[cur]}), ct, 4, Groups(beamRaw_.width),
+                           Groups(beamRaw_.height));
+    beamHistoryIndex_ = cur;
+    beamHistoryReady_ = true;
+    beamLastFrame_ = pc.frame;
+
+    // 3. lit = lit + L (alpha 1: additive)
+    beamHistory_[cur].Transition(cmd, kSrv);
+    beamRaw_.Transition(cmd, kSrv);
+    beamHistory_[prev].Transition(cmd, kSrv);
+    t.depth.Transition(cmd, kSrv);
+    t.shadowMap.Transition(cmd, kSrv);
+    t.spotShadowMap.Transition(cmd, kSrv);
+    t.lit.Transition(cmd, kRt);
+    const float ca[4] = {0, 0, 0, 0};
+    beamApply_.Draw(pc, {&t.lit}, pc.transient.SrvTable(pc.ctx, {&beamHistory_[cur]}), ca, 4);
+    t.lit.Transition(cmd, kSrv);
 }
 
 } // namespace mmdx

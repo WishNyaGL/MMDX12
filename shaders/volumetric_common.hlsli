@@ -201,6 +201,10 @@ void VolMediumAt(float3 wp, VolParams p, out float3 sigmaS, out float sigmaT) {
     sigmaT = base + extra * p.sigma0;
 }
 
+#ifndef VOL_PUNCTUAL_PHASE
+#define VOL_PUNCTUAL_PHASE(c, g) VolHG(c, g)
+#endif
+
 // In-scattered radiance (rgb) and transmittance (a) along eye + dir t, t in [0, dist].
 float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float3 sunDir, float3 sunCol,
                        VolParams p) {
@@ -212,8 +216,13 @@ float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float
     p.sunShadowDist -= medium.x;
 
     float Tend = exp(-VolOpticalDepth(eye, dir, dist, p));
+#ifdef VOL_SPOTS_ONLY
+    float3 L = 0.0;   // the beam pass is additive: the ambient haze stays in the froxel grid
+#else
     float3 L = p.ambient * (1.0 - Tend);
+#endif
 
+#ifndef VOL_SPOTS_ONLY
     // ---- sun: shadowed march over the shadow range, analytic (fully lit) tail beyond
     // S9: sunVolumetric scales the whole term (0 = the sun leaves no haze); sunG is the fog's anisotropy unless the
     // sun light carries its own (VolParams::sunG is already resolved by the caller).
@@ -235,6 +244,7 @@ float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float
     } else {
         L += sunScale * (1.0 - Tend);
     }
+#endif   // !VOL_SPOTS_ONLY
 
     // ---- spot cones / point spheres: samples only where the light reaches
     // S7a: the march sees at most kVolMaxLights lights (the first ones in the light list); a scene with fewer lights
@@ -248,6 +258,9 @@ float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float
         float range = 1.0 / max(l.invRange, 1e-6);
         float2 seg = VolRaySphere(eye, dir, l.pos, range, dist);
         bool spot = l.cosOuter > -1.0;
+#ifdef VOL_SPOTS_ONLY
+        if (!spot) continue;   // point lights stay in the froxel grid
+#endif
         if (spot && seg.x < seg.y) seg = VolRayCone(eye, dir, l.pos, l.dir, l.cosOuter, seg.x, seg.y);
         if (seg.x >= seg.y) continue;
         uint n = spot ? clamp((uint)ceil((seg.y - seg.x) / p.spotStepLen), 3u, max(p.spotSteps, 3u)) : p.pointSteps;
@@ -271,11 +284,16 @@ float4 IntegrateVolume(float3 eye, float3 dir, float dist, uint numLights, float
 #else
             const float3 goboTint = float3(1, 1, 1);   // the march (volumetric.hlsl) does not carry gobos
 #endif
-            acc += (atten * vis * VolHG(dot(dir, ld), g) * sigma * T) * goboTint;
+            acc += (atten * vis * VOL_PUNCTUAL_PHASE(dot(dir, ld), g) * sigma * T) * goboTint;
         }
         L += l.color * (boost * l.volumetric) * acc * stepLen;
     }
+#ifdef VOL_SPOTS_ONLY
+    // alpha 1: the beam pass is additive (the froxel already applies the transmittance to the surface)
+    return float4(L * p.tint, 1.0);
+#else
     return float4(L * p.tint, Tend);
+#endif
 }
 
 #endif

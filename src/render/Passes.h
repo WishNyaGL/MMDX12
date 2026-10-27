@@ -353,6 +353,17 @@ private:
     float froxelLastMaxDistance_ = 400.0f;
     bool froxelReady_ = false;
     bool froxelHistoryValid_ = false;  // a blended grid exists (else the first frame keeps its own injection)
+    // Spot beams: the spots' in-scattering at the full render resolution, added on top of the froxel result
+    // (volumetric_beams.hlsl; the froxel grid skips the spot lights while these run)
+    ComputePipeline beams_;        // volumetric_beams.hlsl CSBeams -> beamRaw_ (one thread per full-res pixel)
+    ComputePipeline beamTemporal_; // volumetric_beams.hlsl CSBeamTemporal beamRaw_ + beamHistory_[prev] -> [cur]
+    FullscreenPipeline beamApply_; // volumetric_beams_apply.hlsl PSApplyBeams, lit + L (additive)
+    Texture beamRaw_;              // full render res RGBA16F: this frame's beam march
+    Texture beamHistory_[2];       // temporal ping-pong of the blended beams (full render res RGBA16F)
+    uint32_t beamHistoryIndex_ = 0;   // beamHistory_[beamHistoryIndex_] holds last frame's blended beams
+    uint64_t beamLastFrame_ = 0;      // pc.frame of the last beam frame (history validity)
+    bool beamHistoryReady_ = false;
+    void ExecuteBeams(PassContext& pc, const float params[16], float maxDistance);
 };
 
 // S9d: the froxel grid's dimensions (screen tiles x exponential view-depth slices): the light / integrate passes and the
