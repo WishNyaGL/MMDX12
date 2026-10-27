@@ -193,8 +193,7 @@ struct StudioDoc {
     bool hasAudio = false;
     float audioEndFrame = 0;          // timeline frame where the audio ends (includes audioOffset)
     double audioOffset = 0;           // seconds: the audio starts at this timeline time (may be negative)
-    bool showWaveform = true;         // draw the audio waveform in the timeline ruler
-    float waveformAlpha = 0.5f;       // waveform visibility 0..1
+    bool showWaveform = true;         // show the timeline's audio lane (clip + waveform, drag = offset)
     // Background AVI (背景AVI): an absolute video path (empty = none) whose current frame feeds screen.bmp materials
     // and, with bgVideoAsBackground, is also drawn as the screen background. bgVideoOffset is seconds: the video
     // starts at this timeline time (may be negative, like audioOffset).
@@ -658,6 +657,26 @@ private:
     StudioDoc& doc_;
     int model_;
     bool before_, after_;
+};
+
+// The audio offset (the timeline's audio clip drag, the audio menu): seconds before / after. The host re-seeks the
+// sound after an undo / redo that changed it.
+class AudioOffsetCommand : public Command {
+public:
+    AudioOffsetCommand(StudioDoc& doc, double before, double after) : doc_(doc), before_(before), after_(after) {}
+    void Do() override { Apply(after_); }
+    void Undo() override { Apply(before_); }
+    std::string Name() const override { return "audio offset"; }
+    size_t Bytes() const override { return sizeof(*this); }
+
+private:
+    void Apply(double v) {
+        doc_.audioEndFrame += (float)((v - doc_.audioOffset) * 30.0);  // the end frame includes the offset
+        doc_.audioOffset = v;
+        ++doc_.projectVersion;
+    }
+    StudioDoc& doc_;
+    double before_, after_;
 };
 
 // One IK bone's enable track (VMD IK on/off keys): small, unlike MotionSwapCommand.

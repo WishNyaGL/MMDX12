@@ -72,7 +72,8 @@ struct TimelineView {
     int rangeStart = -1, rangeEnd = -1;  // frame range (inclusive), -1 = none. Shift+drag on the ruler sets it,
                                          // right click on the ruler asks for the host's menu (ev.contextOnRuler). The caller may also write it.
     // transient drag state, written/read only by the widget:
-    int dragMode = 0;           // 0 none, 1 scrub, 2 move keys, 3 box select, 4 range select, 5 horizontal scrollbar
+    int dragMode = 0;           // 0 none, 1 scrub, 2 move keys, 3 box select, 4 range select, 5 horizontal scrollbar,
+                                // 6 audio clip
     int dragDelta = 0;          // frames the dragged selection is currently offset by (move preview)
     uint64_t anchorRow = 0; int anchorFrame = 0;  // key under the mouse when a move drag started
     int rangeAnchor = 0;                 // frame where the range drag started
@@ -89,13 +90,20 @@ struct TimelineView {
     // (the caller owns the interpretation). Used only to draw the graph lanes.
     std::function<float(uint64_t row, int channel, float frame)> graphSample;
 
-    // Optional audio waveform drawn in the ruler background (behind the frame/second ticks).
-    const float* waveformPeaks = nullptr;   // normalised envelope [0,1]
-    int waveformBands = 0;                  // length of waveformPeaks
-    float waveformDurationSeconds = 0.0f;   // total audio duration
-    float waveformOffsetSeconds = 0.0f;     // audio offset on the timeline (seconds, may be negative)
-    float waveformFps = 30.0f;              // timeline frames per second
-    float waveformAlpha = 0.0f;             // 0 = hidden
+    // Optional audio lane: a fixed strip between the ruler and the rows (it does not scroll with them) showing the
+    // track as a clip from its offset to its end, with its waveform. Dragging the clip moves the offset (whole frames,
+    // snapping to the playhead and frame 0; Shift = free). The caller fills these every frame.
+    bool audioLane = false;                 // draw the lane
+    const char* audioLabel = nullptr;       // UTF-8 track name (label column)
+    const float* audioWave = nullptr;       // (peak, rms) pairs 0..1, interleaved; nullptr = not decoded (yet)
+    int audioWaveBuckets = 0;               // pair count
+    float audioWaveRate = 200.0f;           // pairs per second of audio
+    float audioDurationSeconds = 0.0f;      // track length
+    float audioOffsetSeconds = 0.0f;        // the audio starts at this timeline time (may be negative)
+    float audioFps = 30.0f;                 // timeline frames per second
+    // transient clip drag state (dragMode 6), written/read only by the widget:
+    float audioDragFromOffset = 0.0f;       // offset when the drag started
+    bool audioDragMoved = false;            // the pointer moved past the drag threshold
 };
 
 struct TimelineKeyRef { uint64_t row; int frame; };
@@ -124,6 +132,12 @@ struct TimelineEvents {
     bool graphCurve = false; uint64_t graphCurveRow = 0; int graphCurveChannel = 0; int graphCurveFrame = 0;
     uint8_t graphCurveBytes[4] = {};
     bool graphCurveEnd = false;   // the handle drag ended this frame (one undo step)
+    // audio lane: the clip is being dragged (`audioOffsetSeconds` = the live offset, sent when it changes); the drag
+    // ended after moving (`audioOffsetEnd`: one undo step from `audioOffsetFrom`); right click on the lane / click on
+    // its label asks for the host's audio menu
+    bool audioOffset = false; float audioOffsetSeconds = 0.0f;
+    bool audioOffsetEnd = false; float audioOffsetFrom = 0.0f;
+    bool audioMenu = false;
 };
 
 // Draws the timeline into the current ImGui window at the cursor, filling `size` (x or y <= 0 means "remaining space").

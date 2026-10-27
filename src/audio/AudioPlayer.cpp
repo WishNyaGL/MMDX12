@@ -5,7 +5,9 @@
 #include "core/Log.h"
 #include "core/TextUtil.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 namespace mmdx {
 
@@ -74,25 +76,28 @@ void AudioPlayer::Unload() {
     impl_->path.clear();
 }
 
-bool AudioPlayer::BuildPeaks(const std::filesystem::path& path, double durationSeconds, int bands,
-                             std::vector<float>& out) {
+bool AudioPlayer::BuildWaveform(const std::filesystem::path& path, int bucketsPerSecond, std::vector<float>& out) {
     out.clear();
-    if (path.empty() || bands <= 0) return false;
+    if (path.empty() || bucketsPerSecond <= 0) return false;
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 1, 0);  // mono f32, native rate
     ma_decoder decoder;
     if (ma_decoder_init_file_w(path.c_str(), &cfg, &decoder) != MA_SUCCESS) return false;
-    const double dur = durationSeconds;
-    if (dur <= 0.0) {
-        ma_decoder_uninit(&decoder);
-        return false;
-    }
-    const float sr = decoder.outputSampleRate > 0 ? (float)decoder.outputSampleRate : 44100.0f;
-    const double framesPerBand = dur * sr / bands;
-    out.assign((size_t)bands, 0.0f);
+    const double sr = decoder.outputSampleRate > 0 ? (double)decoder.outputSampleRate : 44100.0;
+    const double framesPerBucket = sr / bucketsPerSecond;
     std::vector<float> buf(8192);
-    size_t fi = 0;
-    int band = 0;
-    float bandMax = 0.0f;
+    uint64_t fi = 0;
+    size_t bucket = 0;
+    float peak = 0.0f;
+    double sumSq = 0.0;
+    uint64_t count = 0;
+    const auto flush = [&] {
+        out.push_back(peak);
+        out.push_back(count > 0 ? (float)std::sqrt(sumSq / (double)count) : 0.0f);
+        peak = 0.0f;
+        sumSq = 0.0;
+        count = 0;
+        ++bucket;
+    };
     bool ok = true;
     for (;;) {
         ma_uint64 got = 0;
@@ -104,30 +109,28 @@ bool AudioPlayer::BuildPeaks(const std::filesystem::path& path, double durationS
         }
         if (got == 0) break;
         for (ma_uint64 i = 0; i < got; ++i) {
-            const float v = std::fabs(buf[(size_t)i]);
-            if (v > bandMax) bandMax = v;
+            const float s = buf[(size_t)i];
+            const float v = std::fabs(s);
+            if (v > peak) peak = v;
+            sumSq += (double)s * s;
+            ++count;
             ++fi;
-            if ((double)fi >= (double)(band + 1) * framesPerBand) {
-                if (band < bands) out[(size_t)band] = bandMax;
-                bandMax = 0.0f;
-                ++band;
-            }
+            if ((double)fi >= (double)(bucket + 1) * framesPerBucket) flush();
         }
         if (got < buf.size()) break;
     }
+    ma_decoder_uninit(&decoder);
     if (!ok) {
         // never hand back a partially decoded waveform as if it were complete
         out.clear();
-        ma_decoder_uninit(&decoder);
         return false;
     }
-    if (band < bands && fi > 0) out[(size_t)band] = bandMax;
-    // normalise to the global peak
+    if (count > 0) flush();
+    // normalise both to the global peak
     float gmax = 0.0f;
-    for (float v : out) if (v > gmax) gmax = v;
+    for (size_t i = 0; i < out.size(); i += 2) gmax = std::max(gmax, out[i]);
     if (gmax > 1e-6f) for (float& v : out) v /= gmax;
-    ma_decoder_uninit(&decoder);
-    return true;
+    return !out.empty();
 }
 
 bool AudioPlayer::IsLoaded() const { return impl_->soundOk; }

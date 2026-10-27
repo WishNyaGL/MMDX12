@@ -89,7 +89,11 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     float keyAreaX = bb.Min.x + colWidth;
     float keyAreaW = std::max(0.0f, bb.Max.x - keyAreaX);
     const float originX = keyAreaX + Dp(12.0f);  // x of frame `scrollFrame` (inset keeps frame-0 keys whole)
-    float contentY = bb.Min.y + rulerHeight;
+    // the audio lane sits between the ruler and the rows and does not scroll with them
+    const float rulerBottom = bb.Min.y + rulerHeight;
+    const bool audioLane = view.audioLane && view.audioDurationSeconds > 0.0f;
+    const float audioFps = view.audioFps > 0.0f ? view.audioFps : 30.0f;
+    float contentY = rulerBottom + (audioLane ? Dp(44.0f) : 0.0f);
     float contentH = std::max(0.0f, bb.Max.y - sbH - contentY);
 
     float visibleFrames = (keyAreaW - Dp(12.0f)) / (view.pxPerFrame * Dpi());
@@ -127,6 +131,18 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
             view.scrollY -= io.MouseWheel * rowHeight;
         }
     }
+
+    // The audio clip's screen x extent (unclipped) and whether the mouse is over it.
+    const auto audioClipX = [&](float offsetSeconds, float& xs, float& xe) {
+        xs = originX + (offsetSeconds * audioFps - view.scrollFrame) * view.pxPerFrame * Dpi();
+        xe = originX + ((offsetSeconds + view.audioDurationSeconds) * audioFps - view.scrollFrame) * view.pxPerFrame * Dpi();
+    };
+    const auto mouseOnAudioClip = [&]() {
+        if (!audioLane || mousePos.y < rulerBottom || mousePos.y >= contentY || mousePos.x < keyAreaX) return false;
+        float xs, xe;
+        audioClipX(view.audioOffsetSeconds, xs, xe);
+        return mousePos.x >= xs && mousePos.x <= xe;
+    };
 
     // The key of row `rowIndex` under the mouse (7 px pick radius), or nullptr.
     const auto keyUnderMouse = [&](int rowIndex) -> const TimelineKey* {
@@ -494,7 +510,17 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                     view.hscrollGrab = tw * 0.5f;
                 }
             }
-        } else if (mousePos.y >= bb.Min.y && mousePos.y < contentY && mousePos.x >= keyAreaX) {
+        } else if (audioLane && mousePos.y >= rulerBottom && mousePos.y < contentY) {
+            if (mousePos.x < keyAreaX) {
+                ev.audioMenu = true;  // the lane's label: the host's audio menu
+                changed = true;
+            } else if (mouseOnAudioClip()) {
+                view.dragMode = 6;
+                view.audioDragFromOffset = view.audioOffsetSeconds;
+                view.audioDragMoved = false;
+                view.dragGrabFrame = view.scrollFrame + (mousePos.x - originX) / (view.pxPerFrame * Dpi());
+            }
+        } else if (mousePos.y >= bb.Min.y && mousePos.y < rulerBottom && mousePos.x >= keyAreaX) {
             if (io.KeyShift) {
                 view.dragMode = 4;
                 view.rangeAnchor = std::max(0, (int)std::round((mousePos.x - originX) / (view.pxPerFrame * Dpi()) + view.scrollFrame));
@@ -655,7 +681,10 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
         const int ctxRow = (int)((mousePos.y - contentY + view.scrollY) / rowHeight);
         const bool ctxGraphChild = ctxRow >= 0 && ctxRow < (int)rows.size() &&
                                    (laneBlockFirst(ctxRow) >= 0 || rows[(size_t)ctxRow].graphChannelIndex >= 0);
-        if (mousePos.x >= keyAreaX && mousePos.y >= contentY && mousePos.y < bb.Max.y - sbH && !ctxGraphChild) {
+        if (audioLane && mousePos.y >= rulerBottom && mousePos.y < contentY) {
+            ev.audioMenu = true;  // the audio lane: the host's audio menu
+            changed = true;
+        } else if (mousePos.x >= keyAreaX && mousePos.y >= contentY && mousePos.y < bb.Max.y - sbH && !ctxGraphChild) {
             // key area: the host's key menu; a key under the mouse that is not selected becomes the selection
             // (graph lane / channel rows are read-only: no menu)
             const int rowIndex = (int)((mousePos.y - contentY + view.scrollY) / rowHeight);
@@ -671,7 +700,7 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                     }
             }
             changed = true;
-        } else if (mousePos.y >= bb.Min.y && mousePos.y < contentY && mousePos.x >= keyAreaX) {
+        } else if (mousePos.y >= bb.Min.y && mousePos.y < rulerBottom && mousePos.x >= keyAreaX) {
             // ruler: the host's range menu (range start here / range end here / clear range); the range itself is untouched
             ev.contextMenu = true;
             ev.contextOnRuler = true;
@@ -689,7 +718,8 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     if ((held || ImGui::IsItemActive()) && leftDown) {
         // Edge auto-scroll (modes 2/3/4): scroll when the mouse is near/past the key area's edges, faster the
         // further past the edge zone it is; frame-rate independent via io.DeltaTime, up to ~2 screens/second.
-        if (view.dragMode >= 2 && view.dragMode <= 4 && keyAreaW > 0.0f && ImGui::IsMouseDragging(ImGuiMouseButton_Left, Dp(3.0f))) {
+        if (((view.dragMode >= 2 && view.dragMode <= 4) || view.dragMode == 6) && keyAreaW > 0.0f &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Left, Dp(3.0f))) {
             const float edgeZone = Dp(24.0f);
             const float mouseInArea = mousePos.x - keyAreaX;  // px from the key area's left edge
             float dir = 0.0f;   // -1 scroll left, +1 scroll right
@@ -752,6 +782,30 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
                 ev.rangeChanged = true;
                 changed = true;
             }
+        } else if (view.dragMode == 6) {
+            // the clip follows the mouse in content coordinates (also while the view auto-scrolls); whole frames,
+            // snapping its start to the playhead / frame 0 within 8 px; Shift = free (sub-frame)
+            const float mouseFrame = view.scrollFrame + (mousePos.x - originX) / (view.pxPerFrame * Dpi());
+            const float deltaFrames = mouseFrame - view.dragGrabFrame;
+            if (!view.audioDragMoved && std::abs(deltaFrames * view.pxPerFrame * Dpi()) >= Dp(3.0f)) view.audioDragMoved = true;
+            if (view.audioDragMoved) {
+                float startFrame = view.audioDragFromOffset * audioFps + deltaFrames;
+                if (!io.KeyShift) {
+                    startFrame = std::round(startFrame);
+                    const float snapFrames = Dp(8.0f) / (view.pxPerFrame * Dpi());
+                    if (std::abs(startFrame - (float)currentFrame) <= snapFrames) startFrame = (float)currentFrame;
+                    else if (std::abs(startFrame) <= snapFrames) startFrame = 0.0f;
+                }
+                // keep at least one frame of the track on the timeline
+                startFrame = std::clamp(startFrame, -(view.audioDurationSeconds * audioFps - 1.0f), 600.0f * audioFps);
+                const float offset = startFrame / audioFps;
+                if (offset != view.audioOffsetSeconds) {
+                    ev.audioOffset = true;
+                    ev.audioOffsetSeconds = offset;
+                    view.audioOffsetSeconds = offset;  // drawn at the new place this frame already
+                    changed = true;
+                }
+            }
         } else if (view.dragMode == 5) {
             int T = maxFrame + 120;
             float V = visibleFrames;
@@ -769,6 +823,14 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     if (leftReleased && view.dragMode != 0) {
         if (view.dragMode == 1) {
             // done
+        } else if (view.dragMode == 6) {
+            if (view.audioDragMoved && view.audioOffsetSeconds != view.audioDragFromOffset) {
+                ev.audioOffsetEnd = true;
+                ev.audioOffsetFrom = view.audioDragFromOffset;
+                ev.audioOffsetSeconds = view.audioOffsetSeconds;
+                changed = true;
+            }
+            view.audioDragMoved = false;
         } else if (view.dragMode == 2) {
             if (view.dragDelta != 0) {
                 ev.moveKeys = true;
@@ -829,7 +891,7 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
         view.graphDragMoved = false;
     }
     if (!leftDown) {
-        if (view.dragMode >= 1 && view.dragMode <= 5) view.dragMode = 0;
+        if (view.dragMode >= 1 && view.dragMode <= 6) view.dragMode = 0;
     }
 
     // Caller request: scroll a row into view (~1 row of margin), then clear the request (unknown id = just clear).
@@ -855,6 +917,10 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
 
     view.scrollFrame = std::clamp(view.scrollFrame, 0.0f, maxScrollFrame);
     view.scrollY = std::clamp(view.scrollY, 0.0f, maxScrollY);
+
+    // The audio clip: the horizontal resize cursor while hovered or dragged.
+    if ((hovered && view.dragMode == 0 && !leftDown && mouseOnAudioClip()) || view.dragMode == 6)
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 
     // Hover over a lane handle: the hand cursor.
     if (hovered && view.graphDrag == 0 && !leftDown) {
@@ -1171,43 +1237,121 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     }
 
     // Ruler
-    dl->AddRectFilled(bb.Min, ImVec2(bb.Max.x, contentY), p.surface);
-    dl->AddLine(ImVec2(bb.Min.x, contentY), ImVec2(bb.Max.x, contentY), p.lineStrong);
+    dl->AddRectFilled(bb.Min, ImVec2(bb.Max.x, rulerBottom), p.surface);
+    dl->AddLine(ImVec2(bb.Min.x, rulerBottom), ImVec2(bb.Max.x, rulerBottom), p.lineStrong);
 
-    // Audio waveform behind the frame/second ticks (theme soft cold-green, alpha = visibility). Bars keep a visible
-    // gap at any zoom: the step widens when zooming out and the bar width grows when zooming in.
-    if (view.waveformAlpha > 0.0f && view.waveformPeaks && view.waveformBands > 0 &&
-        view.waveformDurationSeconds > 0.0f) {
-        const float rulerH = std::max(1.0f, contentY - bb.Min.y);
-        const float yMid = (bb.Min.y + contentY) * 0.5f;
-        const float halfH = rulerH * 0.42f;
-        const ImU32 wcol = IM_COL32(120, 220, 150, (int)(200.0f * std::clamp(view.waveformAlpha, 0.0f, 1.0f)));
-        dl->PushClipRect(ImVec2(keyAreaX, bb.Min.y), ImVec2(bb.Max.x, contentY), true);
-        const float wfps = view.waveformFps > 0.0f ? view.waveformFps : 30.0f;
-        const float bandSecs = view.waveformDurationSeconds / (float)view.waveformBands;
-        const float spacingPx = bandSecs * wfps * view.pxPerFrame * Dpi();
-        // decimate so the on-screen gap stays visible when zoomed out
-        const float minStepPx = 3.0f;
-        int step = spacingPx > 0.0f ? (int)std::ceil(minStepPx / spacingPx) : 1;
-        if (step < 1) step = 1;
-        const float barW = std::clamp(spacingPx * (float)step * 0.55f, 1.0f, 6.0f);
-        const float halfW = barW * 0.5f;
-        const int bands = view.waveformBands;
-        for (int i = 0; i < bands; i += step) {
-            // local max over the decimated range (better holds transients)
-            float amp = 0.0f;
-            const int iEnd = std::min(bands, i + step);
-            for (int k = i; k < iEnd; ++k) {
-                const float v = view.waveformPeaks[k];
-                if (v > amp) amp = v;
-            }
-            const float f = (bandSecs * (float)i + view.waveformOffsetSeconds) * wfps;
-            const float x = originX + (f - view.scrollFrame) * view.pxPerFrame * Dpi();
-            if (x + halfW < keyAreaX || x - halfW > bb.Max.x) continue;
-            amp = std::clamp(amp, 0.0f, 1.0f) * halfH;
-            dl->AddRectFilled(ImVec2(x - halfW, yMid - amp), ImVec2(x + halfW, yMid + amp), wcol);
+    // Audio lane: the track as a clip (offset .. offset + duration) with its waveform, peak envelope light and RMS
+    // core strong, one column per screen pixel (max over the buckets the pixel covers, interpolated when zoomed in).
+    if (audioLane) {
+        const float y0 = rulerBottom, y1 = contentY;
+        dl->AddRectFilled(ImVec2(bb.Min.x, y0), ImVec2(bb.Max.x, y1), p.sunken);
+        dl->AddLine(ImVec2(bb.Min.x, y1), ImVec2(bb.Max.x, y1), p.lineStrong);
+        const ImU32 audioCol = Mix(p.accent, IM_COL32(96, 200, 120, 255), 0.55f);
+        const bool dragging = view.dragMode == 6 && view.audioDragMoved;
+
+        // label column: icon + track name, the offset below
+        dl->PushClipRect(ImVec2(bb.Min.x, y0), ImVec2(keyAreaX, y1), true);
+        const bool labelHovered = hovered && mousePos.x < keyAreaX && mousePos.y >= y0 && mousePos.y < y1;
+        if (labelHovered) dl->AddRectFilled(ImVec2(bb.Min.x, y0), ImVec2(keyAreaX, y1), WithAlpha(p.ink, 0.04f));
+        dl->AddRectFilled(ImVec2(bb.Min.x, y0 + Dp(6.0f)), ImVec2(bb.Min.x + Dp(3.0f), y1 - Dp(6.0f)), audioCol, Dp(1.5f));
+        Icon(dl, icon::MusicNotes, 14.0f, ImVec2(bb.Min.x + Dp(16.0f), y0 + Dp(14.0f)), p.ink2);
+        TextEllipsis(dl, Font::Semibold, size::Small, ImVec2(bb.Min.x + Dp(28.0f), y0 + Dp(5.0f)), keyAreaX - Dp(6.0f), p.ink,
+                     view.audioLabel && *view.audioLabel ? view.audioLabel : Tr("음원"));
+        {
+            char offBuf[96];
+            const float off = view.audioOffsetSeconds;
+            const float offFrames = off * audioFps;
+            if (std::abs(offFrames - std::round(offFrames)) < 0.01f)
+                std::snprintf(offBuf, sizeof(offBuf), Tr("오프셋 %+.2f초 · %+d프레임"), off, (int)std::round(offFrames));
+            else
+                std::snprintf(offBuf, sizeof(offBuf), Tr("오프셋 %+.3f초 · %+.1f프레임"), off, offFrames);
+            Text(dl, Font::Regular, size::Caption, ImVec2(bb.Min.x + Dp(28.0f), y0 + Dp(23.0f)),
+                 dragging ? p.accentInk : p.ink3, offBuf);
         }
         dl->PopClipRect();
+        if (labelHovered) Tooltip(Tr("음원 메뉴 (오프셋 · 바꾸기 · 제거)"));
+        if (uiprobe::Enabled())
+            uiprobe::Add("##tlaudiolabel", view.audioLabel ? view.audioLabel : "", ImVec2(bb.Min.x, y0), ImVec2(keyAreaX, y1));
+
+        // key area: the clip
+        dl->PushClipRect(ImVec2(keyAreaX, y0), ImVec2(bb.Max.x, y1), true);
+        const float cy0 = y0 + Dp(4.0f), cy1 = y1 - Dp(4.0f);
+        if (dragging) {  // where the clip was when the drag started
+            float gxs, gxe;
+            audioClipX(view.audioDragFromOffset, gxs, gxe);
+            dl->AddRect(ImVec2(gxs, cy0), ImVec2(gxe, cy1), WithAlpha(p.ink3, 0.5f), Dp(4.0f), 0, Dp(1.0f));
+        }
+        float xs, xe;
+        audioClipX(view.audioOffsetSeconds, xs, xe);
+        const bool clipHot = dragging || (hovered && view.dragMode == 0 && mouseOnAudioClip());
+        dl->AddRectFilled(ImVec2(xs, cy0), ImVec2(xe, cy1), WithAlpha(audioCol, clipHot ? 0.20f : 0.13f), Dp(4.0f));
+        const float vx0 = std::max(xs, keyAreaX), vx1 = std::min(xe, bb.Max.x);
+        const float mid = (cy0 + cy1) * 0.5f, halfH = (cy1 - cy0) * 0.5f - Dp(2.0f);
+        if (view.audioWave && view.audioWaveBuckets > 0 && view.audioWaveRate > 0.0f && vx1 > vx0) {
+            const float* w = view.audioWave;
+            const int n = view.audioWaveBuckets;
+            const float rate = view.audioWaveRate;
+            const float secPerPx = 1.0f / (view.pxPerFrame * Dpi() * audioFps);
+            const ImU32 peakCol = WithAlpha(audioCol, 0.45f), rmsCol = WithAlpha(audioCol, 0.95f);
+            const auto lerpAt = [&](float bucket, int ch) {  // ch 0 = peak, 1 = rms; bucket centres at i + 0.5
+                const float bf = std::clamp(bucket - 0.5f, 0.0f, (float)(n - 1));
+                const int i0 = (int)bf;
+                const int i1 = std::min(i0 + 1, n - 1);
+                const float t = bf - (float)i0;
+                return w[i0 * 2 + ch] * (1.0f - t) + w[i1 * 2 + ch] * t;
+            };
+            for (float x = std::floor(vx0); x < vx1; x += 1.0f) {
+                const float tA = ((x - originX) / (view.pxPerFrame * Dpi()) + view.scrollFrame) / audioFps - view.audioOffsetSeconds;
+                const float bA = tA * rate, bB = (tA + secPerPx) * rate;
+                if (bB <= 0.0f || bA >= (float)n) continue;
+                float peak = 0.0f, rms = 0.0f;
+                if (bB - bA < 1.0f) {
+                    const float bc = 0.5f * (bA + bB);
+                    peak = lerpAt(bc, 0);
+                    rms = lerpAt(bc, 1);
+                } else {
+                    const int i0 = std::max(0, (int)std::floor(bA));
+                    const int i1 = std::min(n, (int)std::ceil(bB));
+                    for (int i = i0; i < i1; ++i) {
+                        peak = std::max(peak, w[i * 2]);
+                        rms = std::max(rms, w[i * 2 + 1]);
+                    }
+                }
+                const float hp = std::max(Dp(0.5f), std::min(peak, 1.0f) * halfH);
+                const float hr = std::min(rms, 1.0f) * halfH;
+                dl->AddRectFilled(ImVec2(x, mid - hp), ImVec2(x + 1.0f, mid + hp), peakCol);
+                if (hr > 0.5f) dl->AddRectFilled(ImVec2(x, mid - hr), ImVec2(x + 1.0f, mid + hr), rmsCol);
+            }
+        } else if (vx1 > vx0) {
+            dl->AddLine(ImVec2(vx0, mid), ImVec2(vx1, mid), WithAlpha(audioCol, 0.5f));
+            Text(dl, Font::Regular, size::Caption, ImVec2(vx0 + Dp(8.0f), mid - Dp(size::Caption * 0.65f)), p.ink3,
+                 Tr("파형 분석 중…"));
+        }
+        dl->AddRect(ImVec2(xs, cy0), ImVec2(xe, cy1), WithAlpha(audioCol, clipHot ? 0.95f : 0.6f), Dp(4.0f), 0,
+                    clipHot ? Dp(1.5f) : Dp(1.0f));
+        // the start edge: a grip line where the audio begins
+        if (xs >= keyAreaX && xs <= bb.Max.x)
+            dl->AddLine(ImVec2(xs + Dp(1.0f), cy0 + Dp(1.0f)), ImVec2(xs + Dp(1.0f), cy1 - Dp(1.0f)), audioCol, Dp(2.0f));
+        if (dragging) {  // the offset as a bubble at the clip's start
+            char buf[64];
+            const float offFrames = view.audioOffsetSeconds * audioFps;
+            if (std::abs(offFrames - std::round(offFrames)) < 0.01f)
+                std::snprintf(buf, sizeof(buf), "%+.2fs · %+df", view.audioOffsetSeconds, (int)std::round(offFrames));
+            else
+                std::snprintf(buf, sizeof(buf), "%+.3fs · %+.1ff", view.audioOffsetSeconds, offFrames);
+            const ImVec2 ts = TextSize(Font::Semibold, size::Caption, buf);
+            const float bx = std::clamp(xs + Dp(6.0f), keyAreaX + Dp(4.0f), std::max(keyAreaX + Dp(4.0f), bb.Max.x - ts.x - Dp(14.0f)));
+            const ImVec2 b0(bx, mid - ts.y * 0.5f - Dp(3.0f)), b1(bx + ts.x + Dp(10.0f), mid + ts.y * 0.5f + Dp(3.0f));
+            dl->AddRectFilled(b0, b1, p.surface, Dp(4.0f));
+            dl->AddRect(b0, b1, audioCol, Dp(4.0f));
+            Text(dl, Font::Semibold, size::Caption, ImVec2(b0.x + Dp(5.0f), b0.y + Dp(3.0f)), p.ink, buf);
+        }
+        dl->PopClipRect();
+        if (uiprobe::Enabled())
+            uiprobe::Add("##tlaudio", view.audioLabel ? view.audioLabel : "", ImVec2(std::max(xs, keyAreaX), cy0),
+                         ImVec2(std::min(xe, bb.Max.x), cy1));
+        if (clipHot && !dragging && view.dragMode == 0)
+            Tooltip(Tr("드래그해서 음원 위치 조정 · 재생 헤드에 붙어요 · Shift = 자유 이동"));
     }
 
     if (view.rangeStart >= 0 && view.rangeEnd >= view.rangeStart) {
@@ -1216,8 +1360,8 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
         float cxa = std::max(keyAreaX, xa);
         float cxb = std::min(bb.Max.x, xb);
         if (cxa <= cxb) {
-            dl->AddRectFilled(ImVec2(cxa, bb.Min.y), ImVec2(cxb, contentY), WithAlpha(p.accent, 0.22f));
-            dl->AddRectFilled(ImVec2(cxa, contentY), ImVec2(cxb, bb.Max.y - sbH), WithAlpha(p.accent, 0.07f));
+            dl->AddRectFilled(ImVec2(cxa, bb.Min.y), ImVec2(cxb, rulerBottom), WithAlpha(p.accent, 0.22f));
+            dl->AddRectFilled(ImVec2(cxa, rulerBottom), ImVec2(cxb, bb.Max.y - sbH), WithAlpha(p.accent, 0.07f));
         }
         if (xa >= keyAreaX && xa <= bb.Max.x) {
             dl->AddLine(ImVec2(xa, bb.Min.y), ImVec2(xa, bb.Max.y - sbH), WithAlpha(p.accent, 0.6f));
@@ -1245,7 +1389,7 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
         float x = originX + (f - view.scrollFrame) * view.pxPerFrame * Dpi();
         if (x < keyAreaX || x > bb.Max.x) continue;
         
-        dl->AddLine(ImVec2(x, contentY - Dp(6.0f)), ImVec2(x, contentY), p.ink3);
+        dl->AddLine(ImVec2(x, rulerBottom - Dp(6.0f)), ImVec2(x, rulerBottom), p.ink3);
         
         char fstr[32]; snprintf(fstr, sizeof(fstr), "%d", f);
         char sstr[32]; 

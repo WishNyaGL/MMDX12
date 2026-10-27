@@ -913,6 +913,7 @@ void App::EncodeOfflineImage(ImageRGBA8&& img, double renderSeconds) {
         renderer_.SetOfflinePreviewImage(img);
     }
     const bool added = offline_.sink && offline_.sink->Push(std::move(img), index);
+    const auto acceptedAt = std::chrono::steady_clock::now();   // after the sink's back-pressure
     const double encodeSecs = offline_.sink ? offline_.sink->AverageEncodeSeconds() : 0.0;
     offline_.avgEncodeSeconds = encodeSecs;
     if (!added) {
@@ -922,11 +923,32 @@ void App::EncodeOfflineImage(ImageRGBA8&& img, double renderSeconds) {
         }
         return;
     }
-    offline_.avgImageSeconds = index == 0 ? renderSeconds : (offline_.avgImageSeconds * index + renderSeconds) / (index + 1);
+    double interval = 0.0;   // real-time renderers: wall time since the previous image was accepted
+    if (offline_.realtime) {
+        // Recording, GPU work (the next frame's BeginFrame fence wait), the readback ring and the encoder overlap,
+        // so renderSeconds (CPU record time only) says nothing about the rate. The frame period is the mean
+        // interval between accepted images over a sliding window: readback bursts (several ring slots released
+        // in one poll) average out, and the window follows the song's heavier / lighter parts.
+        constexpr size_t kPeriodWindow = 120;   // intervals
+        if (!offline_.doneClock.empty())
+            interval = std::chrono::duration<double>(acceptedAt - offline_.doneClock.back()).count();
+        offline_.doneClock.push_back(acceptedAt);
+        if (offline_.doneClock.size() > kPeriodWindow + 1) offline_.doneClock.pop_front();
+        const size_t n = offline_.doneClock.size();
+        offline_.avgImageSeconds =
+            n >= 2 ? std::chrono::duration<double>(offline_.doneClock.back() - offline_.doneClock.front()).count() /
+                         (double)(n - 1)
+                   : std::max(0.0, timeSeconds_ - offline_.startWall);   // image 0: the warm-up, conservative
+    } else {
+        offline_.avgImageSeconds =
+            index == 0 ? renderSeconds : (offline_.avgImageSeconds * index + renderSeconds) / (index + 1);
+    }
     // a sample render measures the frames after the first of the real-time renderers (the first one warms
-    // the GPU up); the GI renderer's single image is long enough that warming up does not matter
+    // the GPU up); the GI renderer's single image is long enough that warming up does not matter.
+    // Real-time: the throughput interval, at least the encode time (3 sample frames never fill the encoder's
+    // queue, so its back-pressure cannot show in the intervals yet; the slowest stage sets the rate).
     if (offline_.mode == OfflineMode::Probe && (!offline_.realtime || index >= 1)) {
-        offline_.probeSum += renderSeconds + encodeSecs;
+        offline_.probeSum += offline_.realtime ? std::max(interval, encodeSecs) : renderSeconds + encodeSecs;
         ++offline_.probeN;
     }
     LOG_INFO("offline video: frame %d/%d (%.3f s, encode %.3f s)", index + 1, offline_.frameCount, renderSeconds,
@@ -1167,8 +1189,11 @@ void App::DrawOfflineOverlay() {
             std::to_string(offline_.frameCount);
         Text(dl, Font::Semibold, size::Body, ImVec2(x0, y + Dp(102.0f)), p.ink, left.c_str());
         const double elapsed = timeSeconds_ - offline_.startWall;
-        const double eta = (offline_.avgImageSeconds + offline_.avgEncodeSeconds) *
-                           (offline_.frameCount - offline_.frame - (double)pr.fraction);
+        // real-time renderers: avgImageSeconds is the measured frame period of the overlapping stages, the encoder
+        // bounds it until its queue fills; GI: one image renders, then encodes
+        const double perImage = offline_.realtime ? std::max(offline_.avgImageSeconds, offline_.avgEncodeSeconds)
+                                                  : offline_.avgImageSeconds + offline_.avgEncodeSeconds;
+        const double eta = perImage * (offline_.frameCount - offline_.frame - (double)pr.fraction);
         const std::string right = Tr("경과 ") + Hms(elapsed) + Tr(" · 남은 시간 ") +
                                   (offline_.frame >= 1 ? Tr("약 ") + Hms(eta) : Tr("계산 중"));
         const ImVec2 ts = TextSize(Font::Regular, size::Caption, right.c_str());

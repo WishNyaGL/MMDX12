@@ -504,6 +504,11 @@ void App::UpdateStudio(double dt) {
     StudioPollBake();
     StudioAutosave(false, false);
     StudioPumpColliders();
+    // any offset change (the lane drag, the menu, undo / redo, MCP) re-aligns a playing track under the playhead
+    if (d.audioOffset != studioSeekedAudioOffset_) {
+        studioSeekedAudioOffset_ = d.audioOffset;
+        if (d.playing && d.hasAudio) StudioSeekAudio();
+    }
     if (d.playing) {
         if (d.hasAudio && audio_.IsPlaying()) {
             const double a = audio_.PositionSeconds() + d.audioOffset;
@@ -6202,31 +6207,45 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
             audioPeaksPendingPath_ = curPath;
             audioPeaksPendingDur_ = dur;
             const std::filesystem::path path = d.audioPath;
-            audioPeaksFuture_ = std::async(std::launch::async, [path, dur]() {
+            audioPeaksFuture_ = std::async(std::launch::async, [path]() {
                 std::vector<float> peaks;
-                AudioPlayer::BuildPeaks(path, dur, 1280, peaks);
+                AudioPlayer::BuildWaveform(path, kStudioWaveRate, peaks);
                 return peaks;
             });
             audioPeaksRunning_ = true;
         }
     }
-    if (d.hasAudio && !audioPeaks_.empty()) {
-        d.view.waveformPeaks = audioPeaks_.data();
-        d.view.waveformBands = (int)audioPeaks_.size();
-        d.view.waveformDurationSeconds = (float)audio_.DurationSeconds();
-        d.view.waveformOffsetSeconds = (float)d.audioOffset;
-        d.view.waveformFps = (float)kMmdFps;
-        d.view.waveformAlpha = d.showWaveform ? d.waveformAlpha : 0.0f;
-    } else {
-        d.view.waveformPeaks = nullptr;
-        d.view.waveformBands = 0;
-        d.view.waveformAlpha = 0.0f;
-    }
+    const std::string audioName = d.hasAudio ? PathToUtf8(d.audioPath.filename()) : std::string();
+    d.view.audioLane = d.hasAudio && d.showWaveform && audio_.DurationSeconds() > 0.0;
+    d.view.audioLabel = audioName.c_str();
+    d.view.audioWave = audioPeaks_.size() >= 2 ? audioPeaks_.data() : nullptr;
+    d.view.audioWaveBuckets = (int)(audioPeaks_.size() / 2);
+    d.view.audioWaveRate = (float)kStudioWaveRate;
+    d.view.audioDurationSeconds = (float)audio_.DurationSeconds();
+    d.view.audioOffsetSeconds = (float)d.audioOffset;
+    d.view.audioFps = (float)kMmdFps;
 
     TimelineEvents ev;
     Timeline("##tl", ImVec2(0, 0), d.rows, d.Frame(), d.EndFrame(), d.view, ev);
     ImGui::EndChild();
     StudioHandleTimeline(ev);
+    d.view.audioLabel = nullptr;  // `audioName` ends here
+    // the audio clip drag: the offset follows live (a playing track re-seeks so it stays under the playhead), the
+    // release is one undo step
+    if (ev.audioOffset) {
+        d.audioOffset = ev.audioOffsetSeconds;
+        d.audioEndFrame = (float)((audio_.DurationSeconds() + d.audioOffset) * kMmdFps);
+    }
+    if (ev.audioOffsetEnd) StudioCommitAudioOffset(ev.audioOffsetFrom, ev.audioOffsetSeconds);
+    if (ev.audioMenu) ImGui::OpenPopup("##audiolanemenu");
+    ImGui::SetNextWindowSize(ImVec2(Dp(260.0f), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(12.0f), Dp(12.0f)));
+    if (ImGui::BeginPopup("##audiolanemenu")) {
+        if (d.hasAudio) DrawStudioAudioMenuItems();
+        else ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
     if (ev.contextMenu) {
         studioKeyMenuFrame_ = ev.contextFrame;
         studioKeyMenuRow_ = ev.contextRow;

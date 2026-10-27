@@ -1364,6 +1364,57 @@ void App::DrawStudioAddMenu() {
     ImGui::PopStyleVar();
 }
 
+void App::StudioCommitAudioOffset(double from, double to) {
+    StudioDoc& d = *studio_;
+    if (from == to) return;
+    d.audioOffset = from;  // the command applies `to` itself (end frame included)
+    d.audioEndFrame = (float)((audio_.DurationSeconds() + from) * kMmdFps);
+    d.history.Push(std::make_unique<AudioOffsetCommand>(d, from, to));
+    StudioSeekAudio();
+}
+
+// The audio menu (the outliner's audio row, a click on the timeline's audio lane): offset, placement shortcuts, the
+// lane switch, replace / remove. Inside an open popup.
+void App::DrawStudioAudioMenuItems() {
+    using namespace ui;
+    StudioDoc& d = *studio_;
+    SectionLabel(Tr("음원 오프셋 (초)"));
+    float off = (float)d.audioOffset;
+    ImGui::SetNextItemWidth(-1.0f);
+    PushFont(Font::Regular, size::Small);
+    if (ImGui::DragFloat("##audiooffset", &off, 1.0f / (float)kMmdFps, -600.0f, 600.0f, "%+.3f")) {
+        d.audioOffset = off;
+        d.audioEndFrame = (float)((audio_.DurationSeconds() + d.audioOffset) * kMmdFps);
+        StudioSeekAudio();
+    }
+    if (ImGui::IsItemActivated()) studioAudioOffsetFrom_ = d.audioOffset;
+    if (ImGui::IsItemDeactivatedAfterEdit()) StudioCommitAudioOffset(studioAudioOffsetFrom_, d.audioOffset);
+    PopFont();
+    Tooltip(Tr("음원이 타임라인의 이 시간에 시작해요 (양수: 늦게, 음수: 앞부분을 건너뜀)"));
+    Gap(6.0f);
+    if (MenuItemChip("##audioatplayhead", Tr("재생 헤드에서 시작"), icon::CaretLineRight)) {
+        ImGui::CloseCurrentPopup();
+        StudioCommitAudioOffset(d.audioOffset, d.Frame() / (double)kMmdFps);
+    }
+    ImGui::BeginDisabled(d.audioOffset == 0.0);
+    if (MenuItemChip("##audiooffsetzero", Tr("오프셋 0으로"), icon::ArrowCcw)) {
+        ImGui::CloseCurrentPopup();
+        StudioCommitAudioOffset(d.audioOffset, 0.0);
+    }
+    ImGui::EndDisabled();
+    Gap(6.0f);
+    Switch("##showwaveform", Tr("타임라인에 음원 행 표시"), &d.showWaveform);
+    Gap(8.0f);
+    if (MenuItemChip("##audioreplace", Tr("음원 바꾸기…"), icon::FolderOpen)) {
+        ImGui::CloseCurrentPopup();
+        StudioAudioDialog();
+    }
+    if (MenuItemChip("##audioremove", Tr("음원 제거"), icon::Trash)) {
+        ImGui::CloseCurrentPopup();
+        StudioSetAudio({});
+    }
+}
+
 void App::DrawStudioModelMenu(int index) {
     using namespace ui;
     StudioDoc& d = *studio_;
@@ -1372,34 +1423,7 @@ void App::DrawStudioModelMenu(int index) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(12.0f), Dp(12.0f)));
     if (ImGui::BeginPopup("##modelmenu")) {
         if (index == -2) {
-            // audio row: offset, replace, remove
-            SectionLabel(Tr("음원 오프셋 (초)"));
-            float off = (float)d.audioOffset;
-            ImGui::SetNextItemWidth(-1.0f);
-            PushFont(Font::Regular, size::Small);
-            if (ImGui::DragFloat("##audiooffset", &off, 0.01f, -600.0f, 600.0f, "%+.2f")) {
-                d.audioOffset = off;
-                d.audioEndFrame = (float)((audio_.DurationSeconds() + d.audioOffset) * kMmdFps);
-                StudioSeekAudio();
-            }
-            if (ImGui::IsItemDeactivatedAfterEdit()) ++d.projectVersion;
-            PopFont();
-            Tooltip(Tr("음원이 타임라인의 이 시간에 시작해요 (양수: 늦게, 음수: 앞부분을 건너뜀)"));
-            Gap(10.0f);
-            Switch("##showwaveform", Tr("타임라인에 파형 표시"), &d.showWaveform);
-            if (d.showWaveform) {
-                SliderRow("##wavealpha", Tr("투명도"), &d.waveformAlpha, 0.0f, 1.0f, "%.2f");
-                d.waveformAlpha = std::clamp(d.waveformAlpha, 0.0f, 1.0f);
-            }
-            Gap(8.0f);
-            if (MenuItemChip("##audioreplace", Tr("음원 바꾸기…"), icon::FolderOpen)) {
-                ImGui::CloseCurrentPopup();
-                StudioAudioDialog();
-            }
-            if (MenuItemChip("##audioremove", Tr("음원 제거"), icon::Trash)) {
-                ImGui::CloseCurrentPopup();
-                StudioSetAudio({});
-            }
+            DrawStudioAudioMenuItems();
         } else if (index >= 0 && index < (int)d.models.size()) {
             StudioModel& m = *d.models[(size_t)index];
             TextEllipsis(ImGui::GetWindowDrawList(), Font::Semibold, size::Small, ImGui::GetCursorScreenPos(),

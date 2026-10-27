@@ -801,6 +801,8 @@ private:
     void StudioSeekAudio();                           // audio cursor <- timeline time (audio offset)
     void DrawStudioAddMenu();                         // the outliner's "+" popup (library / file)
     void DrawStudioModelMenu(int index);              // outliner row context menu
+    void DrawStudioAudioMenuItems();                  // the audio menu's items (outliner audio row, timeline audio lane)
+    void StudioCommitAudioOffset(double from, double to);  // one undo step (the offset is already `to`), re-seeks
     // --- physics bake (P2.2, UiStudioBake.cpp): turn a character's live physics into bone keys
     void StudioOpenBakeDialog();                      // model menu: open the options modal (range / step / bones / off)
     bool StudioStartBake(int start, int end, int step, bool selectedOnly, bool turnOff);  // start the worker / script
@@ -1289,7 +1291,10 @@ private:
     Dx12Context ctx_;
     Renderer renderer_;
     AudioPlayer audio_;
-    std::vector<float> audioPeaks_;   // timeline waveform envelope (0..1), decoded off the UI thread
+    static constexpr int kStudioWaveRate = 200;   // timeline waveform buckets per second of audio
+    double studioSeekedAudioOffset_ = 0.0;        // the offset the playing sound was last aligned to (UpdateStudio)
+    std::vector<float> audioPeaks_;   // timeline waveform: (peak, rms) pairs at kStudioWaveRate, decoded off the UI thread
+    double studioAudioOffsetFrom_ = 0.0;  // the audio menu's offset field: the value when its edit started
     double audioPeaksDur_ = 0.0;      // audio duration the cached envelope was decoded for
     std::string audioPeaksPath_;      // audio path the cached envelope was decoded for
     // Background waveform decode: the future plus the track it was launched for. The result is picked up when it
@@ -1397,10 +1402,13 @@ private:
         std::string alphaBase;             // frame file stem: "<alphaBase>_00000.png"
         bool background = false;       // a probe behind the select screen: screen_ stays Select, nothing is presented
         std::chrono::steady_clock::time_point imageStartClock;  // precise start of the current image
-        double probeSum = 0;           // probe: seconds per image (render + encode) of the measured images
+        double probeSum = 0;           // probe: seconds per image of the measured images (GI: render + encode,
+                                       // real-time: interval between accepted images, at least the encode time)
         int probeN = 0;
         uint64_t probeKey = 0;         // probe: VideoProbeKey of the measured combination
         double avgEncodeSeconds = 0;   // wall time of one encoded frame on the sink's worker thread (ETA)
+        // real-time renderers: when the last images were accepted by the sink (frame period over a window: ETA, probe)
+        std::deque<std::chrono::steady_clock::time_point> doneClock;
         int iter = 0, iterCount = 1;   // real-time renderers: passes done / passes accumulated for this frame
         float frameMmd = 0;            // real-time renderers: MMD frame of the image in progress
         bool realtime = false;         // frames come from the real-time renderer (Renderer::Render)
