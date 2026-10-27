@@ -454,7 +454,8 @@ void App::UpdateStudio(double dt) {
             view(ImGuiKey_Keypad7, 0.0f, ctrl ? -1.45f : 1.45f);
         }
         const auto pressed = [](ImGuiKey k, bool repeat = true) { return ImGui::IsKeyPressed(k, repeat); };
-        if (pressed(ImGuiKey_Space, false)) StudioSetPlaying(!d.playing);
+        const auto kbd2 = [&](const char* a) { return (ImGuiKey)settings_.KeyFor(a); };
+        if (pressed(kbd2("togglePlay"), false)) StudioSetPlaying(!d.playing);
         const bool redo = ctrl && (pressed(ImGuiKey_Y) || (shift && pressed(ImGuiKey_Z)));
         // the selection refers to key frames that an undo/redo may have moved: drop it
         if (redo && d.history.CanRedo()) { d.history.Redo(); d.selection.clear(); d.rowsKey = ~0ull; }
@@ -477,13 +478,21 @@ void App::UpdateStudio(double dt) {
         if (ctrl && pressed(ImGuiKey_C, false)) StudioCopySelected();
         if (ctrl && pressed(ImGuiKey_X, false)) { StudioCopySelected(); StudioDeleteSelected(Tr("키 잘라내기")); }
         if (ctrl && pressed(ImGuiKey_V, false)) StudioPaste(shift);
-        if (ctrl && pressed(ImGuiKey_A, false)) StudioSelectAll();
-        if (pressed(ImGuiKey_I, false)) StudioRegisterPose(ctrl);  // pose edits, or the picked rows (Ctrl: all bones)
+        if (ctrl && pressed(ImGuiKey_A, false)) {
+            // Ctrl+A follows the focused panel: the viewport / camera window selects every bone of the active model,
+            // the timeline selects all its keys; anywhere else, bones when a pose model exists, else the timeline rows.
+            if (studioFocusPanel_ == 1) StudioSelectAll();
+            else if (StudioPoseModel()) StudioSelectAllBones();
+            else StudioSelectAll();
+        }
+        const auto kbd = [&](const char* a) { return (ImGuiKey)settings_.KeyFor(a); };
+        if (pressed(kbd("registerPose"), false)) StudioRegisterPose(ctrl);  // pose edits, or the picked rows (Ctrl: all bones)
         if (!ctrl && pressed(ImGuiKey_T, false)) d.modelGizmo = !d.modelGizmo;
-        if (!ctrl && pressed(ImGuiKey_E, false)) d.gizmoTool = 0;
-        if (!ctrl && pressed(ImGuiKey_W, false)) d.gizmoTool = 1;
+        if (!ctrl && pressed(kbd("toolRotate"), false)) d.gizmoTool = 0;
+        if (!ctrl && pressed(kbd("toolMove"), false)) d.gizmoTool = 1;
         if (!ctrl && pressed(ImGuiKey_L, false)) d.gizmoLocal = !d.gizmoLocal;
-        if (!ctrl && pressed(ImGuiKey_K, false)) d.autoIk = !d.autoIk;
+        if (!ctrl && pressed(kbd("toolAutoIk"), false)) d.autoIk = !d.autoIk;
+        if (!ctrl && pressed(kbd("toggleBones"), false)) d.showBones = !d.showBones;
         if (pressed(ImGuiKey_Escape, false) && d.possessCamera) StudioPossess(false);
         if (pressed(ImGuiKey_Escape, false) && studioViewDrag_ != 2 && d.activeBone >= 0) StudioSelectBone(-1, false);
         if (ctrl && pressed(ImGuiKey_S, false)) StudioSave(shift);
@@ -640,7 +649,7 @@ void App::UpdateStudioScene() {
         else if (std::fabs(df) > 1e-3f) resetPhysics = df < 0.0f || df > 1.0f + 1e-3f;
         if (!resetPhysics) physicsDt = std::max(0.0f, df) / kMmdFps;
         // paused with pose edits: keep simulating so hair and skirts follow the edited pose
-        if (!resetPhysics && !d.playing && posing) physicsDt = 1.0f / 60.0f;
+        if (!resetPhysics && !d.playing && (posing || d.physicsAlways)) physicsDt = 1.0f / 60.0f;
     }
     d.physicsFrame = frame;
     // S1b: the MMDX stage material targets at the timeline time, BEFORE UpdateMaterials (a changed shadow flag rebuilds
@@ -690,6 +699,9 @@ void App::StudioUpdateModel(StudioModel& m, uint64_t slot, float frame, float ph
             inst.SetRootTransform(root);
         }
         inst.EnablePhysics(d.physics && !m.physicsOff);
+        // Always sync wind (including zero values) so turning it off explicitly clears the physics-world state.
+        if (d.physics && !m.physicsOff)
+            inst.SetWind(d.windDir, d.windStrength, d.windGust, d.windGustFreq, d.windJitter);
         // Interactive playback caps Bullet substeps (drops simulated time on a slow frame); offline renders keep full.
         inst.SetPhysicsMaxSubsteps(offline_.mode == OfflineMode::None ? 4 : 10);
         if (!(m.placeApplied == m.place)) {  // moved by hand: the bodies restart at the new place
@@ -4140,7 +4152,8 @@ void App::StudioRebuildRows() {
             r.depth = 1;
             if (it.morph) {
                 r.id = MakeRowId(RowKind::Morph, g, (uint32_t)it.index);
-                r.label = pmx.morphs[(size_t)it.index].name;
+                r.label = pmx.morphs[(size_t)it.index].name;  // internal track key (VMD/VPD-safe)
+                r.displayLabel = DisplayName(pmx.morphs[(size_t)it.index].name, pmx.morphs[(size_t)it.index].nameEn);
                 r.hasStopwatch = true;
                 const auto t = mo.morphs.find(r.label);
                 r.animated = (t != mo.morphs.end() && !t->second.empty() && !IsStaticMorphTrack(mo, r.label));
@@ -4150,7 +4163,8 @@ void App::StudioRebuildRows() {
                 }
             } else {
                 r.id = MakeRowId(RowKind::Bone, g, (uint32_t)it.index);
-                r.label = pmx.bones[(size_t)it.index].name;
+                r.label = pmx.bones[(size_t)it.index].name;  // internal track key (VMD/VPD-safe)
+                r.displayLabel = DisplayName(pmx.bones[(size_t)it.index].name, pmx.bones[(size_t)it.index].nameEn);
                 r.hasStopwatch = true;
                 const auto t = mo.bones.find(r.label);
                 r.animated = (t != mo.bones.end() && !t->second.empty() && !IsStaticBoneTrack(mo, r.label));
@@ -4691,7 +4705,11 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
                     std::snprintf(sub, sizeof(sub), Tr("키 %d개"), (int)keys);
                 }
                 const char* glyph = m.IsProp() ? icon::Cube : icon::PersonSimple;
-                row(i, glyph, m.name.c_str(), sub, &m.visible);
+                // English-name preference when the label has not been custom-renamed (rename keeps the custom label)
+                const std::string modelLabel = (m.pmx && m.name == m.pmx->name)
+                                                   ? std::string(DisplayName(m.pmx->name, m.pmx->nameEn))
+                                                   : m.name;
+                row(i, glyph, modelLabel.c_str(), sub, &m.visible);
             }
         }
         // S3: an MMDX stage is ONE row (its entity's name) with its parts as children, collapsed by default. Selecting
@@ -5699,6 +5717,11 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
 void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
     using namespace ui;
     StudioDoc& d = *studio_;
+    if (ImGui::IsWindowFocused())
+        studioFocusPanel_ = 1;
+    else if ((ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) &&
+             ImGui::IsMouseHoveringRect(ImVec2(x0, y0), ImVec2(x1, y1)))
+        studioFocusPanel_ = 1;  // a click in the timeline body / transport focuses it
     const Palette& p = P();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), p.surface);
@@ -5844,6 +5867,79 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
         d.physics = !d.physics;
         d.physicsFrame = -1.0f;  // start from the motion's pose
     }
+    rx -= Dp(28.0f);
+    const ImVec2 physAt(rx, cy - Dp(17.0f));
+    ImGui::SetCursorScreenPos(physAt);
+    if (IconButton("##physmenu", icon::CaretDown, Tr("물리/바람 설정"), false, 24.0f)) ImGui::OpenPopup("##studiophysics");
+    ImGui::SetNextWindowPos(ImVec2(physAt.x + Dp(24.0f), physAt.y - Dp(6.0f)), ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+    ImGui::SetNextWindowSize(ImVec2(Dp(300.0f), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(14.0f), Dp(12.0f)));
+    if (ImGui::BeginPopup("##studiophysics")) {
+        ImGui::Checkbox(Tr("물리 항상 계산"), &d.physicsAlways);
+        ui::Tooltip(Tr("재생 중이 아니어도 같은 프레임에 멈춰 있을 때 물리를 계속 계산해 (머리카락/치마가 계속 흔들림)"));
+        ImGui::Checkbox(Tr("물리 꺼도 본 표시"), &d.showPhysicsBones);
+        ui::Tooltip(Tr("물리를 꺼도 물리 뼈(머리카락/치마)를 뷰포트에 표시해 직접 키를 넣을 수 있게"));
+        ImGui::SeparatorText(Tr("바람"));
+        ImGui::Checkbox(Tr("뷰포트에 바람 벡터 표시"), &d.showWindVector);
+        bool windEditEnded = false;  // physics re-seeds only when a drag finishes, not every slider tick
+        {
+            const bool hasWind = (d.windStrength > 0.0f || d.windGust > 0.0f || d.windJitter > 0.0f);
+            // Direction visualizer (top-down: +X right, +Z up) with two compact X/Z sliders to its right.
+            const float sz = Dp(64.0f);
+            const ImVec2 c0 = ImGui::GetCursorScreenPos();
+            ImDrawList* wdl = ImGui::GetWindowDrawList();
+            wdl->AddRectFilled(c0, ImVec2(c0.x + sz, c0.y + sz), p.sunken, Dp(8.0f));
+            wdl->AddRect(c0, ImVec2(c0.x + sz, c0.y + sz), p.line, Dp(8.0f));
+            const ImVec2 cc(c0.x + sz * 0.5f, c0.y + sz * 0.5f);
+            wdl->AddLine(cc, ImVec2(c0.x + sz - Dp(6.0f), cc.y), IM_COL32(235, 75, 75, 90));
+            wdl->AddLine(cc, ImVec2(cc.x, c0.y + Dp(6.0f)), IM_COL32(70, 130, 245, 90));
+            float nx = d.windDir.x, nz = d.windDir.z;
+            const float len = std::sqrt(nx * nx + nz * nz);
+            if (len > 1e-5f) { nx /= len; nz /= len; }
+            if (hasWind && len > 1e-5f) {
+                const float r = sz * 0.34f;
+                const ImVec2 tip(cc.x + nx * r, cc.y - nz * r);
+                const ImU32 arrowCol = IM_COL32(140, 230, 150, 235);
+                wdl->AddLine(cc, tip, arrowCol, Dp(2.0f));
+                const float ah = Dp(8.0f), hw = Dp(4.5f);
+                const float dx = nx, dy = -nz;
+                const float bx = tip.x - dx * ah, by = tip.y - dy * ah;
+                const float px = -nz * hw, py = nx * hw;
+                wdl->AddTriangleFilled(tip, ImVec2(bx + px, by + py), ImVec2(bx - px, by - py), arrowCol);
+            }
+            ImGui::BeginDisabled(!hasWind);  // no wind: direction controls are greyed out
+            ImGui::Dummy(ImVec2(sz, sz));
+            ImGui::SameLine(0, Dp(10.0f));
+            ImGui::BeginGroup();
+            {
+                const float rem = ImGui::GetContentRegionAvail().x;
+                ImGui::SetNextItemWidth(rem);
+                ImGui::SliderFloat("##windx", &d.windDir.x, -1.0f, 1.0f, "X %.2f");
+                windEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
+                ImGui::SetNextItemWidth(rem);
+                ImGui::SliderFloat("##windz", &d.windDir.z, -1.0f, 1.0f, "Z %.2f");
+                windEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
+            }
+            ImGui::EndGroup();
+            ImGui::EndDisabled();
+        }
+        {
+            const auto wSlider = [&](const char* label, float* v, float lo, float hi) {
+                ImGui::Text("%s", Tr(label));
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                ImGui::SliderFloat((std::string("##w") + label).c_str(), v, lo, hi, "%.2f");
+                windEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
+            };
+            wSlider(Tr("바람 세기"), &d.windStrength, 0.0f, 1.0f);
+            wSlider(Tr("돌풍 폭"), &d.windGust, 0.0f, 1.0f);
+            wSlider(Tr("돌풍 주파수"), &d.windGustFreq, 0.1f, 20.0f);
+            wSlider(Tr("바람 무작위성"), &d.windJitter, 0.0f, 1.0f);
+        }
+        // Re-seed bodies only when a wind drag ends (not per tick) so sliding doesn't freeze or thrash physics.
+        if (windEditEnded) d.physicsFrame = -1.0f;
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
     separator(rx - Dp(8.0f));
     {
         const bool range = d.HasRange();
@@ -6063,6 +6159,32 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
         const float av = pick(a), bv = pick(b);
         return av + (bv - av) * e;
     };
+
+    // Lazy audio-waveform cache: rebuild when the loaded track (path) or its duration changes, so replacing a file
+    // with another of the same length also refreshes the waveform.
+    {
+        const double dur = d.hasAudio ? audio_.DurationSeconds() : 0.0;
+        const std::string curPath = d.hasAudio ? PathToUtf8(d.audioPath) : std::string();
+        if (dur <= 0.0 || curPath.empty()) { audioPeaks_.clear(); audioPeaksDur_ = 0.0; audioPeaksPath_.clear(); }
+        else if (audioPeaks_.empty() || audioPeaksPath_ != curPath || std::fabs(audioPeaksDur_ - dur) > 0.01) {
+            audioPeaks_.clear();
+            if (audio_.BuildPeaks(1280, audioPeaks_)) { audioPeaksDur_ = dur; audioPeaksPath_ = curPath; }
+            else { audioPeaksDur_ = 0.0; audioPeaksPath_.clear(); }
+        }
+    }
+    if (d.hasAudio && !audioPeaks_.empty()) {
+        d.view.waveformPeaks = audioPeaks_.data();
+        d.view.waveformBands = (int)audioPeaks_.size();
+        d.view.waveformDurationSeconds = (float)audio_.DurationSeconds();
+        d.view.waveformOffsetSeconds = (float)d.audioOffset;
+        d.view.waveformFps = (float)kMmdFps;
+        d.view.waveformAlpha = d.showWaveform ? d.waveformAlpha : 0.0f;
+    } else {
+        d.view.waveformPeaks = nullptr;
+        d.view.waveformBands = 0;
+        d.view.waveformAlpha = 0.0f;
+    }
+
     TimelineEvents ev;
     Timeline("##tl", ImVec2(0, 0), d.rows, d.Frame(), d.EndFrame(), d.view, ev);
     ImGui::EndChild();
@@ -6239,6 +6361,9 @@ void App::StudioViewportNavigate(bool hovered, bool active) {
     StudioDoc& d = *studio_;
     ImGuiIO& io = ImGui::GetIO();
     const bool possessed = d.possessCamera;
+    const AppSettings& st = settings_;
+    const float rotX = (st.cameraInvertX ? -1.0f : 1.0f) * st.cameraRotateSpeed;
+    const float rotY = (st.cameraInvertY ? -1.0f : 1.0f) * st.cameraRotateSpeed;
     const bool rmb = active && ImGui::IsMouseDown(ImGuiMouseButton_Right);
     const auto keyDown = [](ImGuiKey k) { return ImGui::IsKeyDown(k); };
     const float fwdIn = rmb && !io.KeyAlt ? (float)keyDown(ImGuiKey_W) - (float)keyDown(ImGuiKey_S) : 0.0f;
@@ -6261,29 +6386,29 @@ void App::StudioViewportNavigate(bool hovered, bool active) {
     if (dragging) {
         const ImVec2 delta = io.MouseDelta;
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            cam.yaw += delta.x * 0.006f;
-            cam.pitch = std::clamp(cam.pitch + delta.y * 0.006f, -1.45f, 1.45f);
+            cam.yaw += delta.x * 0.006f * rotX;
+            cam.pitch = std::clamp(cam.pitch + delta.y * 0.006f * rotY, -1.45f, 1.45f);
         } else if (rmb && io.KeyAlt) {  // dolly
             if (possessed) {
                 const float sy = std::sin(cam.yaw), cy = std::cos(cam.yaw), sp = std::sin(cam.pitch), cp = std::cos(cam.pitch);
-                const float step = reach * (delta.x - delta.y) * 0.006f;
+                const float step = reach * (delta.x - delta.y) * 0.006f * st.cameraZoomSpeed;
                 cam.target.x += -sy * cp * step;
                 cam.target.y += -sp * step;
                 cam.target.z += cy * cp * step;
             } else {
-                cam.distance = std::clamp(cam.distance * std::exp((delta.x - delta.y) * 0.006f), minDist, 600.0f);
+                cam.distance = std::clamp(cam.distance * std::exp((delta.x - delta.y) * 0.006f * st.cameraZoomSpeed), minDist, 600.0f);
             }
         } else if (rmb) {  // look around the eye: the target follows
             const float sy = std::sin(cam.yaw), cy = std::cos(cam.yaw), sp = std::sin(cam.pitch), cp = std::cos(cam.pitch);
             const DirectX::XMFLOAT3 eye{cam.target.x + sy * cp * cam.distance, cam.target.y + sp * cam.distance,
                                         cam.target.z - cy * cp * cam.distance};
-            cam.yaw -= delta.x * 0.004f;
-            cam.pitch = std::clamp(cam.pitch + delta.y * 0.004f, -1.45f, 1.45f);
+            cam.yaw -= delta.x * 0.004f * rotX;
+            cam.pitch = std::clamp(cam.pitch + delta.y * 0.004f * rotY, -1.45f, 1.45f);
             const float sy2 = std::sin(cam.yaw), cy2 = std::cos(cam.yaw), sp2 = std::sin(cam.pitch), cp2 = std::cos(cam.pitch);
             cam.target = {eye.x - sy2 * cp2 * cam.distance, eye.y - sp2 * cam.distance, eye.z + cy2 * cp2 * cam.distance};
         } else {  // pan
             const float rx = std::cos(cam.yaw), rz = std::sin(cam.yaw);
-            const float scale = reach * 0.0015f;
+            const float scale = reach * 0.0015f * st.cameraPanSpeed;
             cam.target.x += (-delta.x * rx) * scale;
             cam.target.y += delta.y * scale;
             cam.target.z += (-delta.x * rz) * scale;
@@ -6292,7 +6417,7 @@ void App::StudioViewportNavigate(bool hovered, bool active) {
     if (flying) {
         const float sy = std::sin(cam.yaw), cy = std::cos(cam.yaw), sp = std::sin(cam.pitch), cp = std::cos(cam.pitch);
         const float fx = -sy * cp, fy = -sp, fz = cy * cp;  // eye -> target
-        const float speed = 30.0f * studioFlyMul_ * (io.KeyShift ? 3.0f : 1.0f) * io.DeltaTime;
+        const float speed = 30.0f * st.cameraFlySpeed * studioFlyMul_ * (io.KeyShift ? 3.0f : 1.0f) * io.DeltaTime;
         cam.target.x += (fx * fwdIn + cy * rightIn) * speed;
         cam.target.y += (fy * fwdIn + upIn) * speed;
         cam.target.z += (fz * fwdIn + sy * rightIn) * speed;
@@ -6300,15 +6425,15 @@ void App::StudioViewportNavigate(bool hovered, bool active) {
     if (hovered && io.MouseWheel != 0.0f) {
         if (rmb) studioFlyMul_ = std::clamp(studioFlyMul_ * std::pow(1.2f, io.MouseWheel), 0.1f, 20.0f);  // fly speed
         else if (!io.KeyCtrl) {  // the lens: field of view (a possessed camera keys it like any other camera edit)
-            cam.fovDeg = std::clamp(cam.fovDeg * std::pow(0.92f, io.MouseWheel), possessed ? 1.0f : 5.0f, possessed ? 125.0f : 120.0f);
+            cam.fovDeg = std::clamp(cam.fovDeg * std::pow(0.92f, io.MouseWheel * st.cameraFovSpeed), possessed ? 1.0f : 5.0f, possessed ? 125.0f : 120.0f);
             if (!possessed) cam.fovDeg = std::round(cam.fovDeg * 10.0f) * 0.1f;
         } else if (possessed) {  // dolly the camera itself: eye and target move together, the lens distance stays
             const float sy = std::sin(cam.yaw), cy = std::cos(cam.yaw), sp = std::sin(cam.pitch), cp = std::cos(cam.pitch);
-            const float step = reach * 0.12f * io.MouseWheel;
+            const float step = reach * 0.12f * io.MouseWheel * st.cameraZoomSpeed;
             cam.target.x += -sy * cp * step;
             cam.target.y += -sp * step;
             cam.target.z += cy * cp * step;
-        } else cam.distance = std::clamp(cam.distance * std::pow(0.88f, io.MouseWheel), minDist, 600.0f);
+        } else cam.distance = std::clamp(cam.distance * std::pow(0.88f, io.MouseWheel * st.cameraZoomSpeed), minDist, 600.0f);
     }
     if (possessed && input) StudioWriteCamera(cam);
     StudioNavEditTick();
@@ -6332,7 +6457,59 @@ void App::StudioOrthoNavigate(const ViewProj& vp, bool hovered, bool active) {
         d.quadCenter[v].y += (-io.MouseDelta.x * right.y + io.MouseDelta.y * up.y) * s;
         d.quadCenter[v].z += (-io.MouseDelta.x * right.z + io.MouseDelta.y * up.z) * s;
     }
-    if (hovered && io.MouseWheel != 0.0f) d.quadHeight[v] = std::clamp(d.quadHeight[v] * std::pow(0.88f, io.MouseWheel), 2.0f, 4000.0f);
+    if (hovered && io.MouseWheel != 0.0f)
+        d.quadHeight[v] = std::clamp(d.quadHeight[v] * std::pow(0.88f, io.MouseWheel * settings_.cameraZoomSpeed), 2.0f, 4000.0f);
+}
+
+void App::DrawStudioWindOverlay(const float rr[4]) {
+    StudioDoc& d = *studio_;
+    (void)rr;
+    if (!d.showWindVector) return;
+    if (!(d.windStrength > 0.0f || d.windGust > 0.0f || d.windJitter > 0.0f)) return;
+    float nx = d.windDir.x, nz = d.windDir.z;
+    const float len = std::sqrt(nx * nx + nz * nz);
+    if (len < 1e-5f) return;
+    nx /= len; nz /= len;
+
+    // 3D arrow in the scene: from an anchor on the floor along the (horizontal) wind direction, projected to screen.
+    // The shaft ends at `tail`; the arrowhead occupies the last `headLen` world units so the line never pokes past it.
+    const DirectX::XMFLOAT3 anchor(0, 1.5f, 0);
+    const float L = 8.0f, headLen = 1.2f;
+    const DirectX::XMFLOAT3 tailW(anchor.x + nx * L, anchor.y, anchor.z + nz * L);
+    const DirectX::XMFLOAT3 tipW(anchor.x + nx * (L + headLen), anchor.y, anchor.z + nz * (L + headLen));
+    const DirectX::XMFLOAT3 aX(anchor.x + 8.0f, anchor.y, anchor.z), aZ(anchor.x, anchor.y, anchor.z + 8.0f);
+
+    ImVec2 a, tail, tip, ax, az;
+    if (!studioVp_.Project(anchor, a) || !studioVp_.Project(tailW, tail) || !studioVp_.Project(tipW, tip)) return;
+    const bool canX = studioVp_.Project(aX, ax);
+    const bool canZ = studioVp_.Project(aZ, az);
+
+    const ui::Palette& p = ui::P();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float dpi = ui::Dpi();
+
+    // faint floor guide: X (red) and Z (blue) ground lines from the anchor
+    if (canX) dl->AddLine(a, ax, ui::WithAlpha(IM_COL32(235, 75, 75, 255), 0.35f), 1.0f * dpi);
+    if (canZ) dl->AddLine(a, az, ui::WithAlpha(IM_COL32(70, 130, 245, 255), 0.35f), 1.0f * dpi);
+
+    // the wind shaft (outline + fill) ends at `tail`, under the arrowhead
+    dl->AddLine(a, tail, ui::WithAlpha(IM_COL32(10, 14, 20, 255), 0.85f), 5.0f * dpi);
+    dl->AddLine(a, tail, IM_COL32(140, 230, 150, 235), 2.4f * dpi);
+
+    // arrowhead spans `tail` -> `tip` (the shaft never exceeds it)
+    ImVec2 ds(tip.x - tail.x, tip.y - tail.y);
+    const float dl2 = std::sqrt(ds.x * ds.x + ds.y * ds.y);
+    if (dl2 > 1e-3f) {
+        ds.x /= dl2; ds.y /= dl2;
+        const float hw = 4.5f * dpi;
+        const ImVec2 perp(-ds.y, ds.x);
+        dl->AddTriangleFilled(tip, ImVec2(tail.x + perp.x * hw, tail.y + perp.y * hw),
+                              ImVec2(tail.x - perp.x * hw, tail.y - perp.y * hw), IM_COL32(140, 230, 150, 235));
+        dl->AddTriangle(ImVec2(tail.x + perp.x * hw, tail.y + perp.y * hw),
+                        ImVec2(tail.x - perp.x * hw, tail.y - perp.y * hw), tip, ui::WithAlpha(IM_COL32(10, 14, 20, 255), 0.6f));
+    }
+    // anchor dot
+    dl->AddCircleFilled(a, 3.0f * dpi, IM_COL32(120, 130, 140, 255), 12);
 }
 
 void App::StudioAddQuadViews(FrameView& view) const {
@@ -6352,6 +6529,11 @@ void App::StudioAddQuadViews(FrameView& view) const {
 void App::DrawStudioViewport(float x0, float y0, float x1, float y1) {
     using namespace ui;
     StudioDoc& d = *studio_;
+    if (ImGui::IsWindowFocused())
+        studioFocusPanel_ = 0;
+    else if ((ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) &&
+             ImGui::IsMouseHoveringRect(ImVec2(x0, y0), ImVec2(x1, y1)))
+        studioFocusPanel_ = 0;  // a click in the viewport focuses it
     ImGuiIO& io = ImGui::GetIO();
     // camera of this frame: overlays, picking and the gizmo project with it
     CameraParams cp;
@@ -6446,8 +6628,11 @@ void App::DrawStudioViewport(float x0, float y0, float x1, float y1) {
         studioViewDrag_ = 0;
     }
 
-    if (av == 0) StudioViewportNavigate(hovered, active);
-    else StudioOrthoNavigate(act.vp, hovered, active);
+    if (av == 0) {
+        StudioViewportNavigate(hovered, active);
+        DrawStudioViewportAxisControls(rr[0], rr[1], rr[0] + rr[2], rr[1] + rr[3]);
+        DrawStudioWindOverlay(rr);
+    } else StudioOrthoNavigate(act.vp, hovered, active);
     (void)consumed;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();

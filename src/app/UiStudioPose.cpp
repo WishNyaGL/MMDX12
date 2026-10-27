@@ -112,6 +112,26 @@ void App::StudioSetPose(const char* undoName, const PoseLayer& before) {
     d.history.Push(std::make_unique<PoseEditCommand>(d, d.selectedModel, undoName, std::move(b), std::move(a)));
 }
 
+void App::StudioSelectAllBones() {
+    StudioDoc& d = *studio_;
+    StudioModel* m = StudioPoseModel();
+    if (!m) return;
+    d.selectedBones.clear();
+    for (size_t i = 0; i < m->pmx->bones.size(); ++i) d.selectedBones.insert((int)i);
+    d.activeBone = d.selectedBones.empty() ? -1 : *d.selectedBones.rbegin();
+    // timeline: the bones' rows are picked, their keys at the current frame selected
+    const int frame = d.Frame();
+    d.selectedRows.clear();
+    d.selection.clear();
+    for (int b : d.selectedBones) {
+        const uint64_t row = CanonicalRow(*m, RowKind::Bone, (uint32_t)b);
+        d.selectedRows.insert(row);
+        const auto it = m->motion.bones.find(m->pmx->bones[(size_t)b].name);
+        if (it != m->motion.bones.end() && FindKey(it->second, frame)) d.selection.insert({row, frame});
+    }
+    d.rowsKey = ~0ull;
+}
+
 void App::StudioSelectBone(int bone, bool toggle) {
     StudioDoc& d = *studio_;
     StudioModel* m = StudioPoseModel();
@@ -362,9 +382,9 @@ GizmoStyle MakeGizmoStyle() {
     s.thickness *= k;
     return s;
 }
-BoneOverlayStyle MakeOverlayStyle() {
+BoneOverlayStyle MakeOverlayStyle(float scale = 1.0f) {
     BoneOverlayStyle s;
-    const float k = ui::Dpi();
+    const float k = ui::Dpi() * std::clamp(scale, 0.5f, 2.5f);
     s.jointRadius *= k;
     s.linkWidth *= k;
     s.pickRadius *= k;
@@ -442,7 +462,8 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
 
     }
     const GizmoStyle gs = MakeGizmoStyle();
-    const BoneOverlayStyle os = MakeOverlayStyle();
+    BoneOverlayStyle os = MakeOverlayStyle(settings_.boneOverlayScale);
+    os.showPhysicsBones = studio_->showPhysicsBones;
     if (m && d.activeBone >= (int)m->pmx->bones.size()) d.activeBone = -1;
     studioGizmoShown_ = m && d.activeBone >= 0 && StudioGizmoFrameOf(*m, d.activeBone, studioGizmoFrame_, studioGizmoMode_);
     // no bone picked: the toolbar's model tool moves / rotates the whole character / stage (world axes at its origin)
@@ -455,6 +476,27 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
         studioGizmoShown_ = true;
     }
     const ImVec2 mouse = io.MousePos;
+
+    // Precision modifier (Ctrl) while a gizmo drag is live: the pointer motion is dampened through a running
+    // effective-mouse. Because the gizmo solvers recompute the value from the drag-start base every frame, this
+    // re-anchors cleanly when Ctrl toggles mid-drag (no jump) and the single undo step is unchanged.
+    ImVec2 gizmoMouse = mouse;
+    if (studioViewDrag_ == 2) {
+        const bool ctrl = io.KeyCtrl;
+        if (!studioGizmoInit_ || ctrl != studioGizmoCtrl_) {
+            studioGizmoEffMouse_ = mouse;
+            studioGizmoLastRaw_ = mouse;
+            studioGizmoCtrl_ = ctrl;
+            studioGizmoInit_ = true;
+        }
+        const float factor = ctrl ? std::clamp(settings_.editorPrecisionFactor, 0.01f, 1.0f) : 1.0f;
+        studioGizmoEffMouse_.x += (mouse.x - studioGizmoLastRaw_.x) * factor;
+        studioGizmoEffMouse_.y += (mouse.y - studioGizmoLastRaw_.y) * factor;
+        studioGizmoLastRaw_ = mouse;
+        gizmoMouse = studioGizmoEffMouse_;
+    } else if (studioGizmoInit_) {
+        studioGizmoInit_ = false;
+    }
 
     // hover (not while dragging): the gizmo first, then the bones
     if (studioViewDrag_ != 2) {
@@ -520,7 +562,31 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
                 }
             }
         } else if (studioHoverBone_ >= 0) {
-            StudioSelectBone(studioHoverBone_, io.KeyCtrl);
+            // Overlapping joints (e.g. an IK helper on a rotatable bone): repeated clicks at the same spot cycle
+            // through the candidates instead of always picking the same one.
+            int pick = studioHoverBone_;
+            if (!io.KeyCtrl && !io.KeyShift) {
+                const std::vector<int> cands = PickBoneCandidates(studioVp_, *m->pmx, *m->inst, mouse, os);
+                if (cands.size() > 1) {
+                    const bool sameSpot = std::hypot(mouse.x - studioCyclePos_.x, mouse.y - studioCyclePos_.y) <= ui::Dp(4.0f);
+                    if (sameSpot) {
+                        auto it = std::find(cands.begin(), cands.end(), studioCycleBone_);
+                        if (it != cands.end()) {
+                            ++it;
+                            if (it == cands.end()) it = cands.begin();
+                            pick = *it;
+                        } else pick = cands.front();
+                    } else pick = cands.front();
+                }
+                studioCyclePos_ = mouse;
+                studioCycleBone_ = pick;
+            }
+            StudioSelectBone(pick, io.KeyCtrl || io.KeyShift);
+            if (studioCenterOnBone_ && m && m->inst) {
+                StudioTakeFreeCamera();
+                // centre on the bone without zooming: re-aim the target, keep the distance
+                freeCam_.target = m->inst->BoneWorldPosition(studioHoverBone_);
+            }
             studioViewDrag_ = 3;
         }
     }
@@ -537,7 +603,7 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
             const XMVECTOR parent = XMLoadFloat4(&studioDragParentRot_);
             if (studioAutoIkActive_) {
                 // auto-IK: solve the two parent bones so the end bone follows the gizmo (world), keep its orientation
-                const XMFLOAT3 w = GizmoDragTranslation(studioGizmoDrag_, mouse);
+                const XMFLOAT3 w = GizmoDragTranslation(studioGizmoDrag_, gizmoMouse);
                 const XMFLOAT3 target{w.x + studioAutoIkDrag_.endPos.x, w.y + studioAutoIkDrag_.endPos.y,
                                       w.z + studioAutoIkDrag_.endPos.z};
                 AutoIkResult r;
@@ -563,13 +629,13 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
                     pose.bones[studioAutoIkDrag_.end] = eb;
                 }
             } else if (studioGizmoMode_ == GizmoMode::Translate) {
-                XMFLOAT3 w = GizmoDragTranslation(studioGizmoDrag_, mouse);
+                XMFLOAT3 w = GizmoDragTranslation(studioGizmoDrag_, gizmoMouse);
                 XMVECTOR dt = XMVectorScale(XMLoadFloat3(&w), 1.0f / std::max(studioDragScale_, 1e-4f));
                 dt = XMVector3Rotate(dt, XMQuaternionInverse(parent));  // world -> parent frame (the key's space)
                 XMStoreFloat3(&v.t, XMVectorAdd(XMLoadFloat3(&studioDragBase_.t), dt));
             } else {
                 XMFLOAT3 axis;
-                const float angle = GizmoDragAngle(studioGizmoDrag_, mouse, &axis);
+                const float angle = GizmoDragAngle(studioGizmoDrag_, gizmoMouse, &axis);
                 if (angle != 0.0f) {
                     // world rotation q about `axis` after the bone's rotation: local' = local * (P q P^-1)
                     const XMVECTOR q = XMQuaternionRotationAxis(XMVector3Normalize(XMLoadFloat3(&axis)), angle);
@@ -637,7 +703,8 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
     dl->PopClipRect();
     if (studioHoverBone_ >= 0 && studioViewDrag_ == 0) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        ui::Tooltip(m->pmx->bones[(size_t)studioHoverBone_].name.c_str());
+        const PmxBone& hb = m->pmx->bones[(size_t)studioHoverBone_];
+        ui::Tooltip(DisplayName(hb.name, hb.nameEn));
     }
 }
 
@@ -648,7 +715,7 @@ void App::StudioViewportToolbar(float x, float cy) {
     const Palette& p = P();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float b = 30.0f, gap = 2.0f;
-    const float w = Dp(6 * b + 5 * gap + 3 * 9.0f + 8.0f);
+    const float w = Dp(7 * b + 6 * gap + 3 * 9.0f + 8.0f);
     dl->AddRectFilled(ImVec2(x, cy - Dp(b * 0.5f + 4.0f)), ImVec2(x + w, cy + Dp(b * 0.5f + 4.0f)), WithAlpha(p.surface, 0.85f),
                       Dp(10.0f));
     ImGui::SetCursorScreenPos(ImVec2(x + Dp(4.0f), cy - Dp(b * 0.5f)));
@@ -666,6 +733,202 @@ void App::StudioViewportToolbar(float x, float cy) {
     if (IconButton("##vplocal", d.gizmoLocal ? icon::Cube : icon::Globe,
                    d.gizmoLocal ? Tr("로컬 축 (클릭: 전역 축)  (L)") : Tr("전역 축 (클릭: 로컬 축)  (L)"), false, b))
         d.gizmoLocal = !d.gizmoLocal;
+    ImGui::SameLine(0, Dp(gap));
+    if (IconButton("##vpcenter", icon::Crosshair,
+                   studioCenterOnBone_ ? Tr("카메라 본 중심 잠금 해제") : Tr("본 클릭 시 카메라 중심 이동"),
+                   studioCenterOnBone_, b))
+        studioCenterOnBone_ = !studioCenterOnBone_;
+}
+
+// Bottom-corner XYZ controllers for the active bone (the original MMD's axis sliders): move / rotate the bone by
+// typing or dragging X/Y/Z directly, without touching the gizmo. Writes through the pose layer (like the gizmo), one
+// undo step per field gesture.
+void App::DrawStudioViewportAxisControls(float x0, float y0, float x1, float y1) {
+    using namespace ui;
+    StudioDoc& d = *studio_;
+    StudioModel* m = StudioPoseModel();
+    (void)y0;
+    if (!m || d.activeBone < 0 || d.activeBone >= (int)m->pmx->bones.size()) return;
+    const int frame = d.Frame();
+    const PmxBone& b = m->pmx->bones[(size_t)d.activeBone];
+    const bool movable = (b.flags & PmxBone_Movable) != 0;
+    const bool rotatable = (b.flags & PmxBone_Rotatable) != 0;
+    if (!movable && !rotatable) return;
+    const Palette& p = P();
+
+    // Axis colours (match the gizmo: X red, Y green, Z blue).
+    static const ImU32 kAxisCol[3] = {IM_COL32(235, 75, 75, 255), IM_COL32(110, 205, 70, 255), IM_COL32(70, 130, 245, 255)};
+    static const char* kAxisName[3] = {"X", "Y", "Z"};
+
+    const bool fixedAxis = (b.flags & PmxBone_FixedAxis) != 0;
+    // parent world rotation (the frame the bone's local keys live in)
+    XMFLOAT4 parentRotF;
+    {
+        const int parent = b.parentIndex;
+        const XMVECTOR pq = parent >= 0 && parent < (int)m->pmx->bones.size()
+                               ? RotationOf(m->inst->BoneWorld(parent)) : XMQuaternionIdentity();
+        XMStoreFloat4(&parentRotF, pq);
+    }
+    // Effective tool mode (mirrors the gizmo): auto-IK / move tool => translate, else rotate.
+    int ikRoot = -1, ikMid = -1;
+    const bool autoIk = d.autoIk && FindAutoIkChain(*m->pmx, d.activeBone, ikRoot, ikMid);
+    const bool rotateMode = !autoIk && (d.gizmoTool == 1 ? !movable : rotatable);
+    const bool transActive = !rotateMode;
+
+    char title[96];
+    std::snprintf(title, sizeof(title), "%s · %s", DisplayName(b.name, b.nameEn), Tr("본 값 편집"));
+
+    // Two rows (Move / Rotate) of three side-by-side slider boxes, laid out with explicit coordinates.
+    const float pad = Dp(6.0f);
+    const float panelW = Dp(252.0f);
+    const float innerW = panelW - pad * 2.0f;
+    const float rowLabelW = Dp(34.0f);
+    const float cGap = Dp(6.0f);
+    const float cellsAvail = innerW - rowLabelW - cGap;
+    const float cW = (cellsAvail - cGap * 2.0f) / 3.0f;
+    const float labelH = Dp(16.0f);
+    const float fieldH = Dp(24.0f);
+    const float rowH = labelH + fieldH + Dp(6.0f);
+    const int rowsN = (movable ? 1 : 0) + (rotatable ? 1 : 0);
+    const float panelH = pad * 2.0f + Dp(18.0f) + rowsN * rowH + (rowsN > 1 ? Dp(10.0f) : 0.0f) + Dp(6.0f);
+    const ImVec2 pos(x0 + Dp(4.0f), y1 - panelH - Dp(4.0f));
+
+    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(panelW, panelH), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, Dp(10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##vpaxis", nullptr, wf)) {
+        const PoseBone cur = StudioCurrentPose(*m)[(size_t)d.activeBone];
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        TextEllipsis(dl, Font::Semibold, size::Caption, ImGui::GetCursorScreenPos(),
+                     ImGui::GetCursorScreenPos().x + panelW - pad * 2, p.ink2, title);
+        ImGui::Dummy(ImVec2(0, Dp(4.0f)));
+
+        // Draw one row of three cells. Each cell: axis label above a slider box with < > chevrons.
+        const auto drawRow = [&](const char* groupLabel, float vals[3], bool enabled, float speed, const char* fmt,
+                                 const char* unit, int fixedAxisOnly) {
+            const ImVec2 row0 = ImGui::GetCursorScreenPos();
+            Text(dl, Font::Regular, size::Caption, ImVec2(row0.x, row0.y + labelH * 0.5f), p.ink3, groupLabel);
+            bool rowCh = false, rowEnd = false;
+            for (int ax = 0; ax < 3; ++ax) {
+                if (fixedAxisOnly >= 0 && ax != fixedAxisOnly) continue;
+                const float x = row0.x + rowLabelW + cGap + ax * (cW + cGap);
+                const ImU32 axisCol = enabled ? kAxisCol[ax] : IM_COL32(90, 98, 106, 180);
+                const std::string an = kAxisName[ax];
+                const float lw = TextSize(Font::Semibold, size::Caption, an.c_str()).x;
+                Text(dl, Font::Semibold, size::Caption, ImVec2(x + cW * 0.5f - lw * 0.5f, row0.y), axisCol, an.c_str());
+                const float yf = row0.y + labelH;
+                const float bx0 = x + Dp(9.0f), bx1 = x + cW - Dp(9.0f);
+                const ImU32 chevron = enabled ? kAxisCol[ax] : IM_COL32(90, 98, 106, 140);
+                dl->AddTriangleFilled(ImVec2(x + Dp(2.0f), yf + fieldH * 0.5f),
+                                      ImVec2(x + Dp(8.0f), yf + fieldH * 0.5f - Dp(4.0f)),
+                                      ImVec2(x + Dp(8.0f), yf + fieldH * 0.5f + Dp(4.0f)), chevron);
+                ImGui::BeginDisabled(!enabled);
+                ImGui::SetCursorScreenPos(ImVec2(bx0, yf));
+                ImGui::SetNextItemWidth(std::max(bx1 - bx0, Dp(30.0f)));
+                const bool started = ImGui::IsItemActivated();
+                const bool ch = ImGui::DragFloat(("##ax" + std::to_string(ax) + unit).c_str(), &vals[ax], speed,
+                                                 0.0f, 0.0f, fmt);
+                const bool ended = ImGui::IsItemDeactivated();
+                ImGui::EndDisabled();
+                dl->AddTriangleFilled(ImVec2(bx1 + Dp(6.0f), yf + fieldH * 0.5f),
+                                      ImVec2(bx1 + Dp(0.0f), yf + fieldH * 0.5f - Dp(4.0f)),
+                                      ImVec2(bx1 + Dp(0.0f), yf + fieldH * 0.5f + Dp(4.0f)), chevron);
+                if (started && !studioPoseFieldEdit_) {
+                    studioPoseBefore_ = m->pose;
+                    studioPoseFieldEdit_ = true;
+                }
+                rowCh |= ch; rowEnd |= ended;
+            }
+            return std::pair<bool, bool>{rowCh, rowEnd};
+        };
+        // helper to apply the changed flag of the whole row
+        PoseBone v = cur;
+        bool anyChanged = false, anyEnded = false;
+
+        if (movable) {
+            float t[3] = {cur.t.x, cur.t.y, cur.t.z};
+            const auto apply = [&]() {
+                const auto r = drawRow(Tr("이동"), t, transActive, 0.02f, "%.2f", "t", -1);
+                if (r.first) v.t = {t[0], t[1], t[2]};
+                anyChanged |= r.first; anyEnded |= r.second;
+            };
+            apply();
+            ImGui::Dummy(ImVec2(0, Dp(6.0f)));
+        }
+
+        if (rotatable) {
+            if (fixedAxis) {
+                // Fixed-axis: a single full-width angle control. The angle is an accumulated offset from the pose
+                // captured at the gesture start, so dragging never re-applies to an already-changed rotation each frame.
+                XMVECTOR axW = XMLoadFloat3(&b.fixedAxis);
+                if (XMVectorGetX(XMVector3LengthSq(axW)) < 1e-12f) axW = XMVectorSet(1, 0, 0, 0);
+                axW = XMVector3Normalize(XMVector3Rotate(XMVector3Normalize(axW), XMLoadFloat4(&parentRotF)));
+                XMFLOAT3 axWf; XMStoreFloat3(&axWf, axW);
+                const ImVec2 row0 = ImGui::GetCursorScreenPos();
+                Text(dl, Font::Regular, size::Caption, ImVec2(row0.x, row0.y + labelH * 0.5f), p.ink3, Tr("회전"));
+                const float yf = row0.y + labelH;
+                const float bx0 = row0.x + rowLabelW + cGap;
+                const float bx1 = row0.x + innerW - pad;
+                const ImU32 axisCol = rotateMode ? kAxisCol[0] : IM_COL32(90, 98, 106, 180);
+                Text(dl, Font::Semibold, size::Caption, ImVec2(bx0, row0.y), axisCol, "A");
+                ImGui::BeginDisabled(!rotateMode);
+                ImGui::SetCursorScreenPos(ImVec2(bx0, yf));
+                ImGui::SetNextItemWidth(std::max(bx1 - bx0, Dp(40.0f)));
+                const bool started = ImGui::IsItemActivated();
+                if (started && !studioFixedAxisActive_) {
+                    studioFixedAxisBaseR_ = cur.r;
+                    studioFixedAxisDelta_ = 0.0f;
+                    studioFixedAxisActive_ = true;
+                    studioPoseBefore_ = m->pose;
+                    studioPoseFieldEdit_ = true;
+                }
+                const bool ch = ImGui::DragFloat("##vpfixeda", &studioFixedAxisDelta_, 0.5f, 0.0f, 0.0f, "%.1f°");
+                const bool ended = ImGui::IsItemDeactivated();
+                ImGui::EndDisabled();
+                if (ch) {
+                    const XMVECTOR q = XMQuaternionRotationAxis(XMVector3Normalize(XMLoadFloat3(&axWf)),
+                                                               XMConvertToRadians(studioFixedAxisDelta_));
+                    const XMVECTOR parentQ = XMLoadFloat4(&parentRotF);
+                    const XMVECTOR dq = XMQuaternionMultiply(XMQuaternionMultiply(parentQ, q), XMQuaternionInverse(parentQ));
+                    XMStoreFloat4(&v.r, XMQuaternionNormalize(XMQuaternionMultiply(XMLoadFloat4(&studioFixedAxisBaseR_), dq)));
+                    anyChanged = true;
+                }
+                if (ended) {
+                    studioFixedAxisActive_ = false;
+                    studioPoseFieldEdit_ = false;
+                    StudioSetPose(Tr("본 값 편집"), studioPoseBefore_);
+                }
+            } else {
+                const XMFLOAT3 e0 = EulerDeg(cur.r);
+                float r[3] = {e0.x, e0.y, e0.z};
+                const auto apply = [&]() {
+                    const auto rr = drawRow(Tr("회전"), r, rotateMode, 0.25f, "%.1f°", "r", -1);
+                    if (rr.first) v.r = QuatFromEulerDeg({r[0], r[1], r[2]});
+                    anyChanged |= rr.first; anyEnded |= rr.second;
+                };
+                apply();
+            }
+        }
+
+        if (anyChanged) {
+            PoseLayer& pose = m->pose;
+            if (pose.frame != frame) pose = PoseLayer{};
+            pose.frame = frame;
+            pose.bones[d.activeBone] = v;
+        }
+        if (anyEnded && studioPoseFieldEdit_) {
+            studioPoseFieldEdit_ = false;
+            StudioSetPose(Tr("본 값 편집"), studioPoseBefore_);
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleVar();
 }
 
 // Eye and target handles of the motion camera, drawn with the translate gizmo in the free view (the camera row is
@@ -1368,8 +1631,11 @@ void App::StudioDrawPoseOverlay(const ViewProj& vp, float x0, float y0, float x1
     if (!m || !m->visible || d.playing) return;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y1), true);
-    if (m && d.showBones)
-        DrawBoneOverlay(dl, vp, *m->pmx, *m->inst, d.selectedBones, d.activeBone, -1, MakeOverlayStyle());
+    if (m && d.showBones) {
+        BoneOverlayStyle os2 = MakeOverlayStyle(settings_.boneOverlayScale);
+        os2.showPhysicsBones = studio_->showPhysicsBones;
+        DrawBoneOverlay(dl, vp, *m->pmx, *m->inst, d.selectedBones, d.activeBone, -1, os2);
+    }
     if (studioGizmoShown_) DrawGizmo(dl, vp, studioGizmoFrame_, studioGizmoMode_, MakeGizmoStyle(), GizmoPart::None, GizmoPart::None);
     dl->PopClipRect();
 }
@@ -1545,7 +1811,7 @@ void App::DrawStudioBoneTab(float w) {
         const PmxBone& b = pmx.bones[(size_t)bone];
         {
             const ImVec2 c = ImGui::GetCursorScreenPos();
-            TextEllipsis(cdl, Font::Semibold, size::Body, c, c.x + w, p.ink, b.name.c_str());
+            TextEllipsis(cdl, Font::Semibold, size::Body, c, c.x + w, p.ink, DisplayName(b.name, b.nameEn));
             ImGui::Dummy(ImVec2(w, Dp(26.0f)));
         }
         {
@@ -1851,7 +2117,7 @@ void App::DrawStudioMorphTab(float w) {
                     if (hovered || held) dl->AddRectFilled(c, bb.Max, WithAlpha(p.ink, 0.04f), Dp(6.0f));
                     ImGui::SetCursorScreenPos(rowEnd);
                     TextEllipsis(dl, Font::Regular, size::Small, ImVec2(c.x + Dp(4.0f), c.y + Dp(5.0f)), c.x + labelW + Dp(16.0f),
-                                 edited ? p.warn : p.ink, pmx.morphs[(size_t)i].name.c_str());
+                                 edited ? p.warn : p.ink, DisplayName(pmx.morphs[(size_t)i].name, pmx.morphs[(size_t)i].nameEn));
                     const float cy = c.y + rowH * 0.5f, th = Dp(4.0f);
                     dl->AddRectFilled(ImVec2(sx0, cy - th * 0.5f), ImVec2(sx1, cy + th * 0.5f), p.sunken, th);
                     dl->AddRectFilled(ImVec2(sx0, cy - th * 0.5f), ImVec2(sx0 + (sx1 - sx0) * std::clamp(v, 0.0f, 1.0f), cy + th * 0.5f),
@@ -1864,7 +2130,7 @@ void App::DrawStudioMorphTab(float w) {
                     std::snprintf(val, sizeof(val), "%.2f", v);
                     const ImVec2 vs = TextSize(Font::Semibold, size::Caption, val);
                     Text(dl, Font::Semibold, size::Caption, ImVec2(c.x + w - vs.x, c.y + Dp(6.0f)), p.ink2, val);
-                    if (hovered) Tooltip(pmx.morphs[(size_t)i].name.c_str());
+                    if (hovered) Tooltip(DisplayName(pmx.morphs[(size_t)i].name, pmx.morphs[(size_t)i].nameEn));
                 }
                 ImGui::PopID();
             }

@@ -188,6 +188,28 @@ struct AppSettings {
     std::string StageVariant(const std::string& stageId) const;
     void SetStageVariant(const std::string& stageId, const std::string& variantId);   // empty removes the entry
 
+    // --- Program settings (UiSelect's settings popup) ----------------------------------------------
+    // Viewport camera control (studio). Multipliers default to 1.0 = the classic MMDX12 feel; the
+    // buttons only scale/reflect the gestures, never the motion-camera key values.
+    bool cameraInvertX = false;            // invert the horizontal axis of orbit / look
+    bool cameraInvertY = false;            // invert the vertical axis of orbit / look
+    float cameraRotateSpeed = 1.0f;        // orbit / look rotation multiplier (0.05 .. 10)
+    float cameraPanSpeed = 1.0f;           // pan multiplier (0.05 .. 10)
+    float cameraZoomSpeed = 1.0f;          // wheel distance zoom + drag-dolly multiplier (0.05 .. 10)
+    float cameraFovSpeed = 1.0f;           // wheel FOV zoom multiplier (0.05 .. 10)
+    float cameraFlySpeed = 1.0f;           // WASDQE fly speed multiplier (0.05 .. 20)
+    // Pose editing: hold Ctrl while dragging a gizmo to move / rotate at a fraction of the pointer
+    // motion (1 / editorPrecisionFactor = 10x finer by default).
+    float editorPrecisionFactor = 0.1f;    // 0.01 .. 1 (1 = no precision modifier)
+    // Interface: prefer the PMX English name (nameEn) in lists / tooltips when one exists, falling back
+    // to the original name. Internal ids (VMD / VPD track names) are never changed.
+    bool showEnglishNames = false;
+    float boneOverlayScale = 1.0f;   // studio bone-overlay marker size (joints / links), 0.5 .. 2.5
+    // Rebindable editor / viewport keys: action name -> ImGuiKey value (int). Stored in ini as
+    // "key<Action>=<ImGuiKey int>"; absent actions fall back to the built-in defaults (Settings.cpp).
+    std::map<std::string, int> keys;
+    int KeyFor(const char* action) const;
+
     const VideoProbe* FindVideoProbe(uint64_t key) const;
     void SetVideoProbe(uint64_t key, double secondsPerFrame);  // replaces an entry with the same key
 

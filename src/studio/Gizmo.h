@@ -6,6 +6,7 @@
 #include <DirectXMath.h>
 #include <cstdint>
 #include <set>
+#include <vector>
 
 namespace mmdx {
 class ModelInstance;
@@ -49,6 +50,7 @@ struct BoneOverlayStyle {
     float pickRadius = 9.0f;     // screen px (caller scales by DPI)
     float minPixelRadius = 2.0f; // joint marker clamp (px): never vanishes in the distance
     float maxPixelRadius = 14.0f; // joint marker clamp (px): never blows up close to the camera
+    bool showPhysicsBones = false; // include physics-driven bones (hair/skirts) even though they can't be posed by hand
     ImU32 normal = IM_COL32(90, 170, 255, 235);     // rotatable bones
     ImU32 movable = IM_COL32(120, 220, 140, 235);   // movable (square joint)
     ImU32 ik = IM_COL32(255, 150, 40, 245);         // IK bones (orange)
@@ -65,8 +67,8 @@ bool IsMinorBone(const PmxModel& model, int bone);
 bool IsFaceBone(const PmxModel& model, int bone);
 
 // A bone is shown when it has PmxBone_Visible and (PmxBone_Rotatable or PmxBone_Movable or PmxBone_IK), and no
-// simulated rigid body (physicsMode 1/2) drives it.
-bool BoneShownInOverlay(const PmxModel& model, int bone);
+// simulated rigid body (physicsMode 1/2) drives it (unless `showPhysicsBones`).
+bool BoneShownInOverlay(const PmxModel& model, int bone, bool showPhysicsBones = false);
 // World position of a bone's joint and of its tail (link end). Uses the skinning matrices, so the model's display
 // scale is included. Tail: the tail bone's joint (PmxBone_TailIsBone, valid index), else rest position + tailOffset
 // transformed by the bone; false when the bone has no tail (TailIsBone with index -1, or a zero offset).
@@ -87,6 +89,11 @@ void DrawBoneOverlay(ImDrawList* dl, const ViewProj& vp, const PmxModel& model, 
 // the bone nearer the camera. -1 if none.
 int PickBone(const ViewProj& vp, const PmxModel& model, const ModelInstance& inst, ImVec2 mouse,
              const BoneOverlayStyle& style);
+// All bones whose projected joint is within the pick radius (nearest first; among ties, operable bones before the
+// nearer camera-neighbour). Used to cycle through overlapping joints (e.g. an IK helper sitting on a rotatable bone)
+// on repeated clicks at the same spot.
+std::vector<int> PickBoneCandidates(const ViewProj& vp, const PmxModel& model, const ModelInstance& inst, ImVec2 mouse,
+                                    const BoneOverlayStyle& style);
 
 // ---- gizmo ------------------------------------------------------------------------------------------------------
 

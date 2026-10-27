@@ -1,11 +1,14 @@
 #include "app/Settings.h"
 
+#include "imgui.h"
+
 #include "core/TextUtil.h"
 
 #include <algorithm>
 #include <charconv>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -113,7 +116,32 @@ bool ParseFloat(const std::string& v, float& out) {
     return true;
 }
 
+// Built-in editor / viewport key bindings (studio bone / camera tools). The action names are stable ids; users may
+// rebind them in the settings popup (saved as "key<Action>=<ImGuiKey int>" ini lines). The viewport camera fly
+// keys (W/A/S/D/E/Q/Space) stay hardcoded.
+struct DefaultKey { const char* action; int key; };
+const DefaultKey kDefaultKeys[] = {
+    {"toolMove",      ImGuiKey_W},
+    {"toolRotate",    ImGuiKey_E},
+    {"toolAutoIk",    ImGuiKey_K},
+    {"toggleBones",   ImGuiKey_C},
+    {"registerPose",  ImGuiKey_I},
+    {"togglePlay",    ImGuiKey_Space},
+};
+
+int FindDefaultKey(const char* action) {
+    for (const DefaultKey& dk : kDefaultKeys)
+        if (std::strcmp(dk.action, action) == 0) return dk.key;
+    return -1;
+}
+
 } // namespace
+
+int AppSettings::KeyFor(const char* action) const {
+    auto it = keys.find(action);
+    if (it != keys.end()) return it->second;
+    return FindDefaultKey(action);
+}
 
 const VideoProbe* AppSettings::FindVideoProbe(uint64_t key) const {
     for (const VideoProbe& p : videoProbes)
@@ -537,6 +565,20 @@ bool AppSettings::Load(const std::filesystem::path& file) {
                 }
             }
         }
+        else if (key == "cameraInvertX" && ParseBool(value, b)) cameraInvertX = b;
+        else if (key == "cameraInvertY" && ParseBool(value, b)) cameraInvertY = b;
+        else if (key == "cameraRotateSpeed" && ParseFloat(value, f)) cameraRotateSpeed = std::clamp(f, 0.05f, 10.0f);
+        else if (key == "cameraPanSpeed" && ParseFloat(value, f)) cameraPanSpeed = std::clamp(f, 0.05f, 10.0f);
+        else if (key == "cameraZoomSpeed" && ParseFloat(value, f)) cameraZoomSpeed = std::clamp(f, 0.05f, 10.0f);
+        else if (key == "cameraFovSpeed" && ParseFloat(value, f)) cameraFovSpeed = std::clamp(f, 0.05f, 10.0f);
+        else if (key == "cameraFlySpeed" && ParseFloat(value, f)) cameraFlySpeed = std::clamp(f, 0.05f, 20.0f);
+        else if (key == "editorPrecisionFactor" && ParseFloat(value, f)) editorPrecisionFactor = std::clamp(f, 0.01f, 1.0f);
+        else if (key == "showEnglishNames" && ParseBool(value, b)) showEnglishNames = b;
+        else if (key == "boneOverlayScale" && ParseFloat(value, f)) boneOverlayScale = std::clamp(f, 0.5f, 2.5f);
+        else if (key.rfind("key", 0) == 0 && key.size() > 4) {
+            // key<Action>=<ImGuiKey int>
+            if (ParseInt(value, i) && i >= ImGuiKey_NamedKey_BEGIN && i < ImGuiKey_NamedKey_END) keys[key.substr(3)] = i;
+        }
         else if (key == "recentProject" && !value.empty() && recentProjects.size() < 8) recentProjects.push_back(value);
         else if (key == "windowWidth" && ParseInt(value, i)) windowWidth = i;
         else if (key == "windowHeight" && ParseInt(value, i)) windowHeight = i;
@@ -762,6 +804,13 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
         for (const auto& [dance, cid] : form.byDance)
             std::fprintf(f, "songFormationPart=%s|%s|%s\n", dance.c_str(), cid.c_str(), songId.c_str());
     }
+    std::fprintf(f, "cameraInvertX=%d\ncameraInvertY=%d\n", cameraInvertX ? 1 : 0, cameraInvertY ? 1 : 0);
+    std::fprintf(f, "cameraRotateSpeed=%.3f\ncameraPanSpeed=%.3f\ncameraZoomSpeed=%.3f\ncameraFovSpeed=%.3f\ncameraFlySpeed=%.3f\n",
+                 cameraRotateSpeed, cameraPanSpeed, cameraZoomSpeed, cameraFovSpeed, cameraFlySpeed);
+    std::fprintf(f, "editorPrecisionFactor=%.3f\n", editorPrecisionFactor);
+    std::fprintf(f, "showEnglishNames=%d\n", showEnglishNames ? 1 : 0);
+    std::fprintf(f, "boneOverlayScale=%.3f\n", boneOverlayScale);
+    for (const auto& [action, key] : keys) std::fprintf(f, "key%s=%d\n", action.c_str(), key);
     for (const std::string& r : recentProjects) std::fprintf(f, "recentProject=%s\n", r.c_str());
     std::fprintf(f, "windowWidth=%d\n", windowWidth);
     std::fprintf(f, "windowHeight=%d\n", windowHeight);

@@ -57,6 +57,25 @@ struct KinematicMotionState : btMotionState {
     void setWorldTransform(const btTransform&) override {}
 };
 
+// Cheap 1D value noise (smoothstep-interpolated hashes) used for wind jitter.
+inline float WindHash(float x) {
+    x = std::fmod(x, 10000.0f);
+    if (x < 0) x += 10000.0f;
+    float h = std::sin(x * 12.9898f) * 43758.5453f;
+    h -= std::floor(h);
+    return h;
+}
+inline float WindSmooth(float t) { return t * t * (3.0f - 2.0f * t); }
+inline float WindValueNoise(float t) {
+    const float i = std::floor(t);
+    const float f = t - i;
+    return WindHash(i) + (WindHash(i + 1.0f) - WindHash(i)) * WindSmooth(f);
+}
+inline float WindNoise(float t) {
+    const float n = WindValueNoise(t) + 0.5f * WindValueNoise(t * 2.0f + 7.13f);
+    return n * (2.0f / 1.5f) - 1.0f;
+}
+
 }  // namespace
 
 struct PhysicsWorld::Impl {
@@ -80,6 +99,15 @@ struct PhysicsWorld::Impl {
     std::vector<Body> bodies;
     std::vector<std::unique_ptr<btTypedConstraint>> joints;
     std::vector<XMFLOAT4X4> boneWorld;  // read by the kinematic motion states
+
+    // Wind (optional, default off): a horizontal force + a time-varying gust term applied to dynamic bodies each step.
+    bool windOn = false;
+    btVector3 windDir{0, 0, 0};
+    float windBase = 0.0f;       // constant force magnitude
+    float windGust = 0.0f;       // gust amplitude
+    float windGustFreq = 0.0f;   // gust frequency (Hz)
+    float windJitter = 0.0f;     // random (high-frequency) amplitude component
+    float windTime = 0.0f;       // simulation-time accumulator for the gust term
 
     ~Impl() {
         for (auto& j : joints) world.removeConstraint(j.get());
@@ -237,7 +265,45 @@ void PhysicsWorld::Step(const std::vector<XMFLOAT4X4>& boneWorld, float dt, int 
         }
     }
     s.boneWorld = boneWorld;
-    if (dt > 0) s.world.stepSimulation(dt, maxSubsteps, kSubstep);
+    if (dt > 0) {
+        if (s.windOn) {
+            s.windTime += dt;
+            const float gust = s.windGust * std::sin(6.2831853f * s.windGustFreq * s.windTime)
+                             + s.windJitter * WindNoise(s.windGustFreq * 3.0f * s.windTime);
+            const btVector3 force = s.windDir * (s.windBase + gust);
+            for (const Impl::Body& b : s.bodies) {
+                if (b.mode != 0) b.rb->applyCentralForce(force);
+            }
+        }
+        s.world.stepSimulation(dt, maxSubsteps, kSubstep);
+    }
+}
+
+void PhysicsWorld::SetWind(const DirectX::XMFLOAT3& dir, float strength, float gust, float gustFreq, float jitter) {
+    Impl& s = *impl_;
+    const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    // Wind at 1.0 should feel clearly strong; strength/gust and jitter are scaled up. Wind stays on when any of
+    // strength / gust / jitter is non-zero (gust-only at strength 0 is allowed).
+    constexpr float kForceScale = 200.0f;    // strength & gust amplitude
+    constexpr float kForceJitter = 160.0f;   // randomness (stronger)
+    const float s0 = std::max(0.0f, strength), g0 = std::max(0.0f, gust), j0 = std::clamp(jitter, 0.0f, 1.0f);
+    const bool active = len > 1e-6f && (s0 > 0.0f || g0 > 0.0f || j0 > 0.0f);
+    if (active) {
+        s.windOn = true;
+        s.windDir = btVector3(dir.x / len, dir.y / len, dir.z / len);
+        s.windBase = s0 * kForceScale;
+        s.windGust = g0 * kForceScale;
+        s.windGustFreq = std::max(0.05f, gustFreq);
+        s.windJitter = j0 * kForceJitter;
+    } else {
+        s.windOn = false;
+        s.windDir = btVector3(0, 0, 0);
+        s.windBase = 0.0f;
+        s.windGust = 0.0f;
+        s.windGustFreq = 0.0f;
+        s.windJitter = 0.0f;
+        s.windTime = 0.0f;
+    }
 }
 
 void PhysicsWorld::Results(std::vector<BoneResult>& out) const {

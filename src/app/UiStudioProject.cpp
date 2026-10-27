@@ -2,6 +2,8 @@
 // studio (library or file, loaded on worker threads), props (accessories following a bone of another model) and audio.
 #include "app/App.h"
 
+#include <windows.h>
+#include <shellapi.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1201,6 +1203,17 @@ void App::DrawStudioAddMenu() {
             const std::string title = replaceUid ? std::string(Tr("모델 바꾸기 · ")) + d.models[(size_t)replaceIdx]->name
                                                  : std::string(chars ? Tr("캐릭터 추가") : Tr("스테이지 추가"));
             header(title.c_str(), 4);
+            {
+                // grid density control: number of thumbnail columns (scales the tile size)
+                PushFont(Font::Regular, size::Caption);
+                ImGui::TextUnformatted(Tr("미리보기 열 수"));
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(Dp(120.0f));
+                ImGui::SliderInt("##addgridcols", &studioAddGridCols_, 2, 6);
+                studioAddGridCols_ = std::clamp(studioAddGridCols_, 2, 6);
+                PopFont();
+                Gap(4.0f);
+            }
             if (replaceUid) {
                 PushFont(Font::Regular, size::Caption);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.ink3));
@@ -1218,7 +1231,7 @@ void App::DrawStudioAddMenu() {
                 const float inset = Dp(4.0f);
                 const float availW = ImGui::GetContentRegionAvail().x - inset * 2.0f - Dp(10.0f);
                 const ImVec2 origin(ImGui::GetCursorScreenPos().x + inset, ImGui::GetCursorScreenPos().y + inset);
-                const int cols = 3;
+                const int cols = std::clamp(studioAddGridCols_, 2, 6);
                 const float cgap = Dp(10.0f);
                 const float cw = (availW - cgap * (cols - 1)) / cols;
                 const float boxH = cw * 0.75f;                          // thumbnail surface box
@@ -1355,6 +1368,13 @@ void App::DrawStudioModelMenu(int index) {
             if (ImGui::IsItemDeactivatedAfterEdit()) ++d.projectVersion;
             PopFont();
             Tooltip(Tr("음원이 타임라인의 이 시간에 시작해요 (양수: 늦게, 음수: 앞부분을 건너뜀)"));
+            Gap(10.0f);
+            ImGui::Checkbox(Tr("타임라인에 waveform 표시"), &d.showWaveform);
+            if (d.showWaveform) {
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::SliderFloat("##wavealpha", &d.waveformAlpha, 0.0f, 1.0f, Tr("투명도 %.2f"));
+                d.waveformAlpha = std::clamp(d.waveformAlpha, 0.0f, 1.0f);
+            }
             Gap(8.0f);
             if (MenuItemChip("##audioreplace", Tr("음원 바꾸기…"), icon::FolderOpen)) {
                 ImGui::CloseCurrentPopup();
@@ -1402,6 +1422,11 @@ void App::DrawStudioModelMenu(int index) {
                     StudioSelectModel(index);
                     StudioOpenBakeDialog();
                 }
+            }
+            if (MenuItemChip("##mexplore", Tr("탐색기에서 보기"), icon::FolderOpen) && !m.path.empty()) {
+                const std::wstring args = L"/select,\"" + m.path.lexically_normal().wstring() + L"\"";
+                ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+                ImGui::CloseCurrentPopup();
             }
             MenuSeparator();
             if (MenuItemChip("##remove", Tr("제거…"), icon::Trash)) {

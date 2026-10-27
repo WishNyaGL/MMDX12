@@ -34,6 +34,11 @@ public:
     // the motion), this resets instead of simulating.
     void Step(const std::vector<DirectX::XMFLOAT4X4>& boneWorld, float dt, int maxSubsteps = 10);
 
+    // Sets a global wind: a force along `dir` applied to every simulated body each step, plus an oscillating
+    // gust term (amplitude `gust`, frequency `gustFreq` Hz) and a high-frequency jitter (0..1). Zero / empty
+    // `strength` disables wind.
+    void SetWind(const DirectX::XMFLOAT3& dir, float strength, float gust, float gustFreq, float jitter);
+
     // Per simulated body attached to a bone: the bone's new world matrix.
     struct BoneResult { int bone; DirectX::XMFLOAT4X4 world; bool mode2 = false; };
     // A mode-2 result (mode2 == true) carries the physics rotation only; the caller rebuilds its

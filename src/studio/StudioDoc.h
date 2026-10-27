@@ -193,6 +193,8 @@ struct StudioDoc {
     bool hasAudio = false;
     float audioEndFrame = 0;          // timeline frame where the audio ends (includes audioOffset)
     double audioOffset = 0;           // seconds: the audio starts at this timeline time (may be negative)
+    bool showWaveform = true;         // draw the audio waveform in the timeline ruler
+    float waveformAlpha = 0.5f;       // waveform visibility 0..1
     // Background AVI (背景AVI): an absolute video path (empty = none) whose current frame feeds screen.bmp materials
     // and, with bgVideoAsBackground, is also drawn as the screen background. bgVideoOffset is seconds: the video
     // starts at this timeline time (may be negative, like audioOffset).
@@ -310,6 +312,15 @@ struct StudioDoc {
     std::map<uint64_t, std::vector<uint64_t>> groupChildren;  // group row -> its bone/morph rows (also when collapsed)
     bool loop = false;                // playback loops over the frame range (or the whole timeline without one)
     bool physics = true;              // physics toggle (initialised from the app settings on load)
+    bool physicsAlways = false;       // keep simulating even when paused on the same frame (hair/skirts settle)
+    bool showPhysicsBones = false;    // show physics-driven bones in the viewport overlay even when physics is off
+    // Wind (studio): horizontal direction (X,Z), constant strength, gust amplitude/frequency, jitter.
+    DirectX::XMFLOAT3 windDir{0, 0, 1};
+    float windStrength = 0.0f;
+    float windGust = 0.0f;
+    float windGustFreq = 2.0f;
+    float windJitter = 0.0f;
+    bool showWindVector = true;   // viewport 3D wind-direction arrow
     RowKind curveClipKind = RowKind::Group;  // copied interpolation block: Bone (64 bytes) or Camera (24); Group = empty
     uint8_t curveClip[64] = {};
 

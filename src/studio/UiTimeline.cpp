@@ -907,8 +907,9 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
         }
         ImU32 textCol = r.selected ? p.accentInk : p.ink;
         if (r.graphChannelIndex >= 0) textCol = r.graphOpen ? p.accentInk : p.ink2;
+        const std::string& shownLabel = r.displayLabel.empty() ? r.label : r.displayLabel;
         TextEllipsis(dl, r.isGroup ? Font::Semibold : Font::Regular, size::Small,
-                     ImVec2(labelX, rowY + (rowHeight - Dp(size::Small * 1.25f)) * 0.5f), textRight, textCol, r.label.c_str());
+                     ImVec2(labelX, rowY + (rowHeight - Dp(size::Small * 1.25f)) * 0.5f), textRight, textCol, shownLabel.c_str());
 
         if (cr.hasGraph) {
             // graph toggle: accent while the lane is open, quiet otherwise
@@ -1172,6 +1173,42 @@ bool Timeline(const char* id, ImVec2 size, const std::vector<TimelineRow>& rows,
     // Ruler
     dl->AddRectFilled(bb.Min, ImVec2(bb.Max.x, contentY), p.surface);
     dl->AddLine(ImVec2(bb.Min.x, contentY), ImVec2(bb.Max.x, contentY), p.lineStrong);
+
+    // Audio waveform behind the frame/second ticks (theme soft cold-green, alpha = visibility). Bars keep a visible
+    // gap at any zoom: the step widens when zooming out and the bar width grows when zooming in.
+    if (view.waveformAlpha > 0.0f && view.waveformPeaks && view.waveformBands > 0 &&
+        view.waveformDurationSeconds > 0.0f) {
+        const float rulerH = std::max(1.0f, contentY - bb.Min.y);
+        const float yMid = (bb.Min.y + contentY) * 0.5f;
+        const float halfH = rulerH * 0.42f;
+        const ImU32 wcol = IM_COL32(120, 220, 150, (int)(200.0f * std::clamp(view.waveformAlpha, 0.0f, 1.0f)));
+        dl->PushClipRect(ImVec2(keyAreaX, bb.Min.y), ImVec2(bb.Max.x, contentY), true);
+        const float wfps = view.waveformFps > 0.0f ? view.waveformFps : 30.0f;
+        const float bandSecs = view.waveformDurationSeconds / (float)view.waveformBands;
+        const float spacingPx = bandSecs * wfps * view.pxPerFrame * Dpi();
+        // decimate so the on-screen gap stays visible when zoomed out
+        const float minStepPx = 3.0f;
+        int step = spacingPx > 0.0f ? (int)std::ceil(minStepPx / spacingPx) : 1;
+        if (step < 1) step = 1;
+        const float barW = std::clamp(spacingPx * (float)step * 0.55f, 1.0f, 6.0f);
+        const float halfW = barW * 0.5f;
+        const int bands = view.waveformBands;
+        for (int i = 0; i < bands; i += step) {
+            // local max over the decimated range (better holds transients)
+            float amp = 0.0f;
+            const int iEnd = std::min(bands, i + step);
+            for (int k = i; k < iEnd; ++k) {
+                const float v = view.waveformPeaks[k];
+                if (v > amp) amp = v;
+            }
+            const float f = (bandSecs * (float)i + view.waveformOffsetSeconds) * wfps;
+            const float x = originX + (f - view.scrollFrame) * view.pxPerFrame * Dpi();
+            if (x + halfW < keyAreaX || x - halfW > bb.Max.x) continue;
+            amp = std::clamp(amp, 0.0f, 1.0f) * halfH;
+            dl->AddRectFilled(ImVec2(x - halfW, yMid - amp), ImVec2(x + halfW, yMid + amp), wcol);
+        }
+        dl->PopClipRect();
+    }
 
     if (view.rangeStart >= 0 && view.rangeEnd >= view.rangeStart) {
         float xa = originX + (view.rangeStart - view.scrollFrame) * view.pxPerFrame * Dpi() - 0.5f * view.pxPerFrame * Dpi();

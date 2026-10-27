@@ -32,7 +32,8 @@ struct TimelineGraphChannel {
 
 struct TimelineRow {
     uint64_t id = 0;            // unique per row, stable across frames
-    std::string label;          // UTF-8
+    std::string label;          // UTF-8 internal key (track name; VMD/VPD-safe). Never localised.
+    std::string displayLabel;   // optional UI-only label (e.g. the PMX English bone name); empty = use `label`
     int depth = 0;              // indent level (0 = top)
     bool isGroup = false;       // group rows have a caret and show their children's keys summarised
     bool expanded = true;       // only meaningful for groups; the CALLER hides collapsed children (do not pass them in)
@@ -87,6 +88,14 @@ struct TimelineView {
     // Set by the caller each frame before calling Timeline(): value of `row`'s `channel` at a fractional frame
     // (the caller owns the interpretation). Used only to draw the graph lanes.
     std::function<float(uint64_t row, int channel, float frame)> graphSample;
+
+    // Optional audio waveform drawn in the ruler background (behind the frame/second ticks).
+    const float* waveformPeaks = nullptr;   // normalised envelope [0,1]
+    int waveformBands = 0;                  // length of waveformPeaks
+    float waveformDurationSeconds = 0.0f;   // total audio duration
+    float waveformOffsetSeconds = 0.0f;     // audio offset on the timeline (seconds, may be negative)
+    float waveformFps = 30.0f;              // timeline frames per second
+    float waveformAlpha = 0.0f;             // 0 = hidden
 };
 
 struct TimelineKeyRef { uint64_t row; int frame; };
