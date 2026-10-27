@@ -10,6 +10,7 @@ Texture2D<float> gDepthTex : register(t1);
 Texture2D<float4> gNormalTex : register(t2);
 Texture2D<float> gAoTex : register(t3);
 Texture2D<float4> gSsrTex : register(t4);
+Texture2D<float4> gMirrorTex : register(t5);
 
 // S9b-3: composite has no bindless texture table, and its only SkyColor caller is the distance haze, which wants a
 // colour rather than the panorama: rebuild it from the CPU averages FillSceneConstants wrote (the image's zenith /
@@ -54,12 +55,17 @@ float4 PSComposite(FsOut i) : SV_Target {
         c.rgb *= lerp(1.0, ao, gP0.x);
     }
     if (cam && gP0.y > 0.0 && nt.z > 0.01) {
-        if (gP2.x > 0.5) {
+        if (nt.z > 1.5 && gP2.y > 0.5) {
+            // Mirror pixel (mmd.hlsl MAT_MIRROR wrote reflectivity 2): the full-res ray-traced mirror is the whole
+            // reflection, multiplied by the tint the material already drew (no Fresnel, no alpha, no gather).
+            c.rgb *= gMirrorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
+        } else if (gP2.x > 0.5) {
             // DLSS-RR: hand RR the raw 1-frame ray-traced reflection (no 3x3 spatial gather).
             float4 sr = gSsrTex.SampleLevel(gPoint, i.uv, 0);
             float3 V = normalize(ViewPosFromDepth(i.uv, d));
             float3 N = OctDecode(nt.xy);
-            float fres = nt.z + (1.0 - nt.z) * pow(1.0 - saturate(dot(-V, N)), 5.0);
+            float refl = min(nt.z, 1.0);
+            float fres = refl + (1.0 - refl) * pow(1.0 - saturate(dot(-V, N)), 5.0);
             float w = saturate(fres * sr.a * nt.w);
             c.rgb = lerp(c.rgb, sr.rgb, w);
         } else {
@@ -76,7 +82,8 @@ float4 PSComposite(FsOut i) : SV_Target {
         r.a /= 10.0;
         float3 V = normalize(ViewPosFromDepth(i.uv, d));
         float3 N = OctDecode(nt.xy);
-        float fres = nt.z + (1.0 - nt.z) * pow(1.0 - saturate(dot(-V, N)), 5.0);
+        float refl = min(nt.z, 1.0);
+        float fres = refl + (1.0 - refl) * pow(1.0 - saturate(dot(-V, N)), 5.0);
         float w = saturate(fres * r.a * nt.w);
         c.rgb = lerp(c.rgb, r.rgb, w);
         }

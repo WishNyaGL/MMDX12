@@ -579,9 +579,9 @@ PSOut MmdShadePbr(VSOut i, bool front, GpuPbrMaterial m, float3 n0, float4 tex, 
         const float rough = PbrSlotRoughness(m.slots[PBR_SLOT_SMOOTHNESS], uv);
         const float3 refl = MirrorReflection(MirrorSrv(slot), slot, i.worldPos, pbrAlbedo, rough);
         // A planar reflection this frame owns the pixel (reflectivity 0: the screen-space / ray-traced reflection must
-        // not add a second one over it). Without a slot (RT / PT / GI, quad, feeds) reflectivity 1 hands the pixel to
-        // the ray-traced reflection, which then reflects natively -- the tint fills whatever it does not cover.
-        return PackOutput(refl, alpha, n, slot >= 0 ? 0.0 : 1.0, i.curClip, i.prevClip);
+        // not add a second one over it). Without a slot (RT / PT / GI, quad, feeds) reflectivity 2 marks a mirror pixel
+        // for the ray-traced pass (2 = full-resolution opaque mirror reflection; every other reader clamps to 1).
+        return PackOutput(refl, alpha, n, slot >= 0 ? 0.0 : 2.0, i.curClip, i.prevClip);
     }
 
     float rawSh = (gFlags & MAT_RECEIVE) ? SHADOW_TERM(i.worldPos, n, i.viewZ, i.pos.xy) : 1.0;

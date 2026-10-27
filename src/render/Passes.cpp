@@ -2573,6 +2573,8 @@ bool SsrPass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& sha
     if (!pipe_.Create(ctx, shaderDir / L"ssr.hlsl", "PSSsr", {DXGI_FORMAT_R16G16B16A16_FLOAT})) return false;
     if (RtPipelinesSupported(ctx) && !rt_.Create(ctx, shaderDir / L"rtreflect.hlsl", "CSReflect"))
         LOG_WARN("SSR: ray-traced reflections unavailable");  // never fails the pass
+    if (RtPipelinesSupported(ctx) && !rtMirror_.Create(ctx, shaderDir / L"rtreflect.hlsl", "CSReflectMirror"))
+        LOG_WARN("SSR: ray-traced mirror reflections unavailable");  // never fails the pass
     return true;
 }
 
@@ -2580,14 +2582,21 @@ void SsrPass::OnResize(Dx12Context& ctx, RenderTargets& targets) {
     out_.Create(ctx, Half(targets.width), Half(targets.height), DXGI_FORMAT_R16G16B16A16_FLOAT,
                 D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, kSrv,
                 L"ssr.out");
+    mirrorOut_.Create(ctx, targets.width, targets.height, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, kSrv,
+                      L"ssr.mirror");
 }
 
-void SsrPass::ReleaseTargets(Dx12Context& ctx) { out_.Release(ctx); }
+void SsrPass::ReleaseTargets(Dx12Context& ctx) {
+    out_.Release(ctx);
+    mirrorOut_.Release(ctx);
+}
 
 void SsrPass::Execute(PassContext& pc) {
     RenderTargets& t = pc.targets;
     ID3D12GraphicsCommandList* cmd = pc.cmd;
     t.ssr = nullptr;
+    t.ssrMirror = nullptr;
     if (pc.path == RenderPath::PathTraced || !pc.settings.ssr || !out_) return;
     if (pc.path == RenderPath::RayTraced && pc.rt && rt_) {
         out_.Transition(cmd, kUav);
@@ -2597,6 +2606,15 @@ void SsrPass::Execute(PassContext& pc) {
         rt_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&t.depth, &t.normal}),
                      pc.transient.UavTable(pc.ctx, {&out_}), c0, 4, Groups(out_.width), Groups(out_.height));
         out_.Transition(cmd, kSrv);
+        if (rtMirror_ && mirrorOut_) {
+            mirrorOut_.Transition(cmd, kUav);
+            const float c0m[4] = {1.0f / mirrorOut_.width, 1.0f / mirrorOut_.height, 1200.0f, 0};
+            rtMirror_.Dispatch(pc, pc.transient.SrvTable(pc.ctx, {&t.depth, &t.normal}),
+                               pc.transient.UavTable(pc.ctx, {&mirrorOut_}), c0m, 4, Groups(mirrorOut_.width),
+                               Groups(mirrorOut_.height));
+            mirrorOut_.Transition(cmd, kSrv);
+            t.ssrMirror = &mirrorOut_;
+        }
         t.depth.Transition(cmd, kSrv);
         t.normal.Transition(cmd, kSrv);
     } else {
@@ -2922,9 +2940,12 @@ void CompositePass::Execute(PassContext& pc) {
                           quad ? pc.view.mainRect[0] : 0.0f, quad ? pc.view.mainRect[1] : 0.0f,
                           quad ? pc.view.mainRect[2] : 0.0f, quad ? pc.view.mainRect[3] : 0.0f,
                           // gP2.x: DLSS-RR runs on the RayTraced path (raw AO + raw reflections, no spatial gathers).
-                          pc.dlssRr && pc.path == RenderPath::RayTraced ? 1.0f : 0.0f, 0, 0, 0};
+                          pc.dlssRr && pc.path == RenderPath::RayTraced ? 1.0f : 0.0f,
+                          // gP2.y: the full-res mirror reflection texture is bound this frame.
+                          t.ssrMirror ? 1.0f : 0.0f, 0, 0};
     t.lit.Transition(pc.cmd, kRt);
-    pipe_.Draw(pc, {&t.lit}, pc.transient.SrvTable(pc.ctx, {&t.color, &t.depth, &t.normal, t.ao, t.ssr}), c0, 12);
+    pipe_.Draw(pc, {&t.lit},
+               pc.transient.SrvTable(pc.ctx, {&t.color, &t.depth, &t.normal, t.ao, t.ssr, t.ssrMirror}), c0, 12);
     t.lit.Transition(pc.cmd, kSrv);
     t.hdrFinal = &t.lit;
 }

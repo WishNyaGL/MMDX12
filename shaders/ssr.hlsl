@@ -10,7 +10,7 @@ Texture2D<float4> gColorTex : register(t2);
 
 float4 PSSsr(FsOut i) : SV_Target {
     float4 nt = gNormalTex.SampleLevel(gPoint, i.uv, 0);
-    float refl = nt.z;
+    float refl = min(nt.z, 1.0);
     float d = gDepthTex.SampleLevel(gPoint, i.uv, 0);
     if (refl < 0.01 || d >= 1.0) return 0;
 

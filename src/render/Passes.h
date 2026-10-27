@@ -218,7 +218,9 @@ public:
 private:
     FullscreenPipeline pipe_;
     ComputePipeline rt_;     // rtreflect.hlsl, writes out_ as a UAV
+    ComputePipeline rtMirror_;   // rtreflect.hlsl CSReflectMirror, writes mirrorOut_ as a UAV (full res)
     Texture out_;
+    Texture mirrorOut_;
 };
 
 // Path tracer (pathtrace.hlsl) and denoiser (pt_denoise.hlsl), PathTraced only. Writes

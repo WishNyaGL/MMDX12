@@ -95,6 +95,7 @@ struct RenderTargets {
     // Outputs of optional passes for this frame (null when the pass is disabled)
     Texture* ao = nullptr;        // R8 (half res), SsaoPass after blur
     Texture* ssr = nullptr;       // RGBA16F (half res), SsrPass
+    Texture* ssrMirror = nullptr;  // RGBA16F (full res), SsrPass RayTraced: mirror pixels (nt.z > 1.5)
     Texture* hdrFinal = nullptr;  // input of PostPass: &lit, the TAA output, or the upscaler output (output resolution)
     Texture* idTarget = nullptr;  // non-MSAA R16_UINT ID image at render resolution; null when no enabled effect requires inputs.id
     Texture* bloom = nullptr;     // half output res, BloomPass: rgb bloom, a = luminance x linear depth
