@@ -2527,3 +2527,20 @@ word to deploy. Workers: opencode deepseek 4.1 1017 #low; Claude designed, revie
 - Mistake: the first cover shots used 01_9001 (Sekai) and then IA; screenshots that are shown use Sour Miku White
   (`--character sour_miku/White`), as the README / earlier covers did.
 - NOT verified by hand: the clip drag, the audio menu and undo of the offset (build + one studio capture only).
+
+## 2026-10-28 (2) - Release 3.1.1: inverse-square falloff; practice_room 1.0.1
+- Bug (user: practice room spots invisible / room dark with "역제곱"): `PunctualFalloff`'s inverse_square was a raw
+  1 / d^2 in MMD units (intensity 1.75 -> ~0.002 on a wall 27 units away), so every inverse_square light in
+  practice_room and color_cove was effectively off (color_cove's cyc rendered grey). Now normalised: intensity = the
+  brightness at 25 units (2 m) for every curve, `(25 / max(d, 12.5))^2` (near-source peak capped at 4x); documented in
+  docs/stage_format.md. One function, so raster / RT / PT / GI / haze all follow. A/B: None vs new inverse_square nearly
+  identical on practice_room; color_cove now shows its pink cyc wash.
+- Bug (user: floor black blotches in raster and RT): practice_room's dark exterior shell slab had its top face at Y = 0,
+  coplanar with the wood floor (z-fighting; RT hit either). glb patched in place (4 vertices -1.6 cm), build.py moved
+  the shell to Y [-1.2, -0.2] (MMDX12_Stages d8357c9), stage 1.0.1. Pitfall: the user's live view at 3.1.0 also had a
+  strong haze in my build's ini (volumetric gain 4): it shows with None too, not a falloff effect.
+- Release 3.1.1 (patch): notes `dist/notes_3.1.1.md`, package (196 / 16.3 MB), packaged smoke (select, v3.1.1, 0
+  `[E]`/`[W]`, leftovers removed), delta manifest 4 new objects uploaded (live manifest + exe hashes match), GitHub v3.1.1
+  (digests = local zips), website deployed (`/latest.json` -> 3.1.1); stage gallery: practice_room-1.0.1.zip uploaded to
+  `/stage-files/` (hash matches), index lists 1.0.1 (other zips byte-identical to the server's).
+- NOT verified: the in-app gallery "update" flow for practice_room 1.0.0 -> 1.0.1 on the user's install.
