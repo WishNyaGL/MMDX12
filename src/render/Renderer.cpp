@@ -2112,6 +2112,9 @@ void Renderer::ReleaseVideoLayers() {
         ctx_->WaitForGpu();   // no command list in flight may still reference the feed PSO
         feedResolve_ = FullscreenPipeline{};
     }
+    // the next scene's first feed creates the resolve PSO again (with the flag left set, every feed after leaving a
+    // scene / the studio stayed black: the PSO was gone and never retried)
+    feedResolveTried_ = false;
 }
 
 void Renderer::ClearBackBuffer(ID3D12GraphicsCommandList* cmd) {

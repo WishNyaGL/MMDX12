@@ -1986,8 +1986,9 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
         return true;
     }
     if (kind == RowKind::StageParam) {
-        if (d.selectedModel >= 0) return false;   // the stage rows sit under the camera target, like the world rows
+        // the stage rows sit under the camera target, and under the stage itself while one of its parts is selected
         const uint32_t uid = RowGroupOf(row);
+        if (d.selectedModel >= 0 && (!d.Selected() || d.Selected()->stageUid != uid)) return false;
         const uint32_t pidx = RowIndexOf(row);
         const StudioStage* stage = d.FindStage(uid);
         if (!stage) return false;
@@ -2967,25 +2968,27 @@ void App::StudioRowStopwatch(uint64_t rowId) {
                                 ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr)
                                 : d.FindEffect(uid);
         if (!fx) return;
-        EffectParamTrack* tr = FindParamTrack(*fx, name);
+        std::string param;   // `name` is the "uid:param" track name
+        { uint32_t parsedUid = 0; ParseEffectParamTrackName(name, parsedUid, param); }
+        EffectParamTrack* tr = FindParamTrack(*fx, param);
         const bool animated = tr && !tr->keys.empty();
         if (!animated) {
             std::vector<TrackState> before = {CaptureTrack(d, -1, kind, name)};
             if (!tr) {
-                fx->tracks.push_back({name, {}});
+                fx->tracks.push_back({param, {}});
                 tr = &fx->tracks.back();
             }
-            const float val = EvaluateParamTrack(*tr, (float)frame, ParamStaticValue(*fx, name));
-            UpsertParamKey(*tr, EffectParamKey{frame, val, ParamTrackStepped(*fx, name)});
+            const float val = EvaluateParamTrack(*tr, (float)frame, ParamStaticValue(*fx, param));
+            UpsertParamKey(*tr, EffectParamKey{frame, val, ParamTrackStepped(*fx, param)});
             StudioPushTrackEdit(Tr("애니메이션 켜기"), before);
             d.rowsKey = ~0ull;
         } else {
             const std::string label =
                 kind == RowKind::WorldParam
-                    ? ParamRowLabel(*fx, d.FindWorld(uid) ? d.FindWorld(uid)->name : std::string(), name)
-                    : ParamRowLabel(*fx, std::string(), name);
+                    ? ParamRowLabel(*fx, d.FindWorld(uid) ? d.FindWorld(uid)->name : std::string(), param)
+                    : ParamRowLabel(*fx, std::string(), param);
             studioStopwatchLabel_ = label;
-            studioStopwatchOff_ = [this, &d, kind, uid, param = name] {
+            studioStopwatchOff_ = [this, &d, kind, uid, param] {
                 // the entity is looked up again (the list may have changed since the modal opened)
                 StudioEffect* target = kind == RowKind::WorldParam
                                            ? (d.FindWorld(uid) ? &d.FindWorld(uid)->fx : nullptr)
@@ -3024,21 +3027,23 @@ void App::StudioRowStopwatch(uint64_t rowId) {
         const uint32_t uid = RowGroupOf(rowId);
         StudioStage* stage = d.FindStage(uid);
         if (!stage) return;
-        EffectParamTrack* tr = FindStageParamTrack(*stage, name);
+        std::string param;   // `name` is the "uid:param" track name
+        { uint32_t parsedUid = 0; ParseStageParamTrackName(name, parsedUid, param); }
+        EffectParamTrack* tr = FindStageParamTrack(*stage, param);
         const bool animated = tr && !tr->keys.empty();
         if (!animated) {
             std::vector<TrackState> before = {CaptureTrack(d, -1, kind, name)};
             if (!tr) {
-                stage->tracks.push_back({name, {}});
+                stage->tracks.push_back({param, {}});
                 tr = &stage->tracks.back();
             }
-            const float val = EvaluateParamTrack(*tr, (float)frame, StageParamStaticValue(*stage, name));
-            UpsertParamKey(*tr, EffectParamKey{frame, val, StageParamTrackStepped(*stage, name)});
+            const float val = EvaluateParamTrack(*tr, (float)frame, StageParamStaticValue(*stage, param));
+            UpsertParamKey(*tr, EffectParamKey{frame, val, StageParamTrackStepped(*stage, param)});
             StudioPushTrackEdit(Tr("애니메이션 켜기"), before);
             d.rowsKey = ~0ull;
         } else {
-            studioStopwatchLabel_ = StageParamLabel(*stage, name);
-            studioStopwatchOff_ = [this, &d, uid, param = name] {
+            studioStopwatchLabel_ = StageParamLabel(*stage, param);
+            studioStopwatchOff_ = [this, &d, uid, param] {
                 // the stage is looked up again (the list may have changed since the modal opened); its last value
                 // becomes the base value so the pose at the playhead is kept
                 StudioStage* target = d.FindStage(uid);
@@ -3083,6 +3088,11 @@ void App::StudioRowKeyNav(uint64_t rowId, int dir) {
     RowKind kind;
     std::string name;
     if (!StudioTrackOfRow(rowId, kind, name)) return;
+    std::string param;   // an effect / world / stage param row: `name` is the "uid:param" track name
+    if (kind == RowKind::EffectParam || kind == RowKind::WorldParam || kind == RowKind::StageParam) {
+        uint32_t parsedUid = 0;
+        ParseEffectParamTrackName(name, parsedUid, param);
+    }
     const int frame = d.Frame();
 
     if (dir == -1 || dir == 1) {
@@ -3127,7 +3137,7 @@ void App::StudioRowKeyNav(uint64_t rowId, int dir) {
                                          : d.FindEffect(uid);
             if (fx) {
                 for (const auto& t : fx->tracks) {
-                    if (t.param != name) continue;
+                    if (t.param != param) continue;
                     if (dir < 0) {
                         for (const EffectParamKey& k : t.keys) { if (k.frame < frame) target = k.frame; else break; }
                     } else {
@@ -3139,7 +3149,7 @@ void App::StudioRowKeyNav(uint64_t rowId, int dir) {
         } else if (kind == RowKind::StageParam) {
             const StudioStage* stage = d.FindStage(RowGroupOf(rowId));
             if (stage) {
-                const EffectParamTrack* t = FindStageParamTrack(*stage, name);
+                const EffectParamTrack* t = FindStageParamTrack(*stage, param);
                 if (t) {
                     if (dir < 0) {
                         for (const EffectParamKey& k : t->keys) { if (k.frame < frame) target = k.frame; else break; }
@@ -3225,18 +3235,18 @@ void App::StudioRowKeyNav(uint64_t rowId, int dir) {
             if (!fx) return;
             const char* addName = kind == RowKind::WorldParam ? Tr("월드 키 등록") : Tr("효과 키 등록");
             const char* delName = kind == RowKind::WorldParam ? Tr("월드 키 삭제") : Tr("효과 키 삭제");
-            EffectParamTrack* tr = FindParamTrack(*fx, name);
+            EffectParamTrack* tr = FindParamTrack(*fx, param);
             std::vector<TrackState> before = {CaptureTrack(d, -1, kind, name)};
             if (tr && FindKey(tr->keys, frame)) {
                 EraseParamKeys(*tr, {(int32_t)frame});
                 StudioPushTrackEdit(delName, before);
             } else {
                 if (!tr) {
-                    fx->tracks.push_back({name, {}});
+                    fx->tracks.push_back({param, {}});
                     tr = &fx->tracks.back();
                 }
-                const float val = EvaluateParamTrack(*tr, (float)frame, ParamStaticValue(*fx, name));
-                UpsertParamKey(*tr, EffectParamKey{frame, val, ParamTrackStepped(*fx, name)});
+                const float val = EvaluateParamTrack(*tr, (float)frame, ParamStaticValue(*fx, param));
+                UpsertParamKey(*tr, EffectParamKey{frame, val, ParamTrackStepped(*fx, param)});
                 StudioPushTrackEdit(addName, before);
             }
             d.rowsKey = ~0ull;
@@ -3244,18 +3254,18 @@ void App::StudioRowKeyNav(uint64_t rowId, int dir) {
             const uint32_t uid = RowGroupOf(rowId);
             StudioStage* stage = d.FindStage(uid);
             if (!stage) return;
-            EffectParamTrack* tr = FindStageParamTrack(*stage, name);
+            EffectParamTrack* tr = FindStageParamTrack(*stage, param);
             std::vector<TrackState> before = {CaptureTrack(d, -1, kind, name)};
             if (tr && FindKey(tr->keys, frame)) {
                 EraseParamKeys(*tr, {(int32_t)frame});
                 StudioPushTrackEdit(Tr("스테이지 키 삭제"), before);
             } else {
                 if (!tr) {
-                    stage->tracks.push_back({name, {}});
+                    stage->tracks.push_back({param, {}});
                     tr = &stage->tracks.back();
                 }
-                const float val = EvaluateParamTrack(*tr, (float)frame, StageParamStaticValue(*stage, name));
-                UpsertParamKey(*tr, EffectParamKey{frame, val, StageParamTrackStepped(*stage, name)});
+                const float val = EvaluateParamTrack(*tr, (float)frame, StageParamStaticValue(*stage, param));
+                UpsertParamKey(*tr, EffectParamKey{frame, val, StageParamTrackStepped(*stage, param)});
                 StudioPushTrackEdit(Tr("스테이지 키 등록"), before);
             }
             d.rowsKey = ~0ull;
