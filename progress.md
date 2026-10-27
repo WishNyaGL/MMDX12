@@ -2495,3 +2495,19 @@ word to deploy. Workers: opencode deepseek 4.1 1017 #low; Claude designed, revie
     conf backup `*.pre-stage-files.bak`); `STAGE_CDN_BASE` in the web repo's git-ignored deploy.env.
   - Sakura 1.2.0 published to the gallery (web repo `shader-packs/sakura`, `minAppVersion` 3.0.0, authors MMDX12,
     "Built-in" wording removed, ja typo), previews re-shot with `pack_previews.py --only sakura`.
+
+## 2026-10-27 (3) - Release 3.0.1: studio stage param key editing
+- Bug (user screenshot: stage "키 · 필 · 림 조명" rows): with a stage part selected the timeline shows that stage's
+  param rows, but `StudioTrackOfRow` rejected every StageParam row while `selectedModel >= 0`, so key delete, the
+  stopwatch, prev / next key and the key diamond did nothing. Now allowed for the camera target and for a selected part
+  of that same stage.
+- Bug: `StudioRowStopwatch` / `StudioRowKeyNav` compared the "uid:param" track name with `EffectParamTrack::param`
+  (effect, world and stage rows): the stopwatch never turned off (it added a bogus "uid:param" track) and prev / next
+  found no key. Both parse the param name now; `CaptureTrack` keeps the full track name.
+- Shipped the pending `Renderer::ReleaseVideoLayers` fix too (`feedResolveTried_` reset: stage camera screens stayed
+  black after leaving a scene / the studio).
+- Release 3.0.1 (patch): notes `dist/notes_3.0.1.md`, `package_release.ps1` (196 / 16.2 MB), packaged smoke (select
+  screen, v3.0.1, 0 `[E]`/`[W]`; a fresh install's cold shader compile needs `--first-frame-timeout` > 60 s), leftovers
+  removed, delta manifest 3 new objects uploaded (live manifest hash matches), GitHub v3.0.1, website deployed
+  (`/latest.json` -> 3.0.1 with manifest).
+- NOT verified in the app by hand: the stage row key edits themselves (build + code path only).
