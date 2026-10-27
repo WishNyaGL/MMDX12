@@ -462,7 +462,9 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     (common.hlsli) adds diffuse x texture x (power - 100) / 10 x 4 as HDR after lighting in the raster / RT PS, PT and
     offline GI (emitters light their surroundings there). Switch `RenderSettings::autoLuminous` (ini `autoLuminous=`,
     `--auto-luminous 0|1`, lobby + studio effects toggles) -> `SceneConstants::autoLumParams.x`; off = identical frame.
-    Translucent pixels (alpha < 0.98) write nt.z = -1 (no AO / no SSR): SSAO no longer greys sheer curtains.
+    Translucent stage pixels (alpha < 0.98, `MAT_STAGE`) write nt.z = -1 (no AO / no SSR): SSAO no longer greys sheer
+    curtains. Character / prop pixels keep their reflectivity (`NormalTag` in mmd.hlsl): the normal target is
+    alpha-blended, so a faint face overlay (blush) took the face's AO away in the overlay's whole footprint.
     Bloom look (`RenderSettings::bloomLook`, `BloomLook` in RenderTypes.h; ini `bloom*=`, `--bloom-kernel/-blend/-depth-mask/
     -intensity/-threshold/-radius`, MCP `set_render_settings bloom_*`, UI `App::DrawBloomControls`): mip chain levels
     weighted falloff^j (radius) and normalised (`RenderTargets::bloomScale`); bloom alpha = luminance x linear depth through
