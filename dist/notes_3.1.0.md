@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/digital8150/MMDX12/master/docs/media/studio-audio-3.1.0.jpg" alt="MMDX12 3.1.0 - Studio audio lane" width="100%">
+
 # MMDX12 3.1.0 — Studio Workflow Update
 
 > 🌐 **Language:** [한국어](#한국어) · [English](#english) · [日本語](#日本語) · [简体中文](#简体中文)
