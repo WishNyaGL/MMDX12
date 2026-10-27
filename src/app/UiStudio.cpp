@@ -5874,70 +5874,77 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
     ImGui::SetNextWindowPos(ImVec2(physAt.x + Dp(24.0f), physAt.y - Dp(6.0f)), ImGuiCond_Always, ImVec2(1.0f, 1.0f));
     ImGui::SetNextWindowSize(ImVec2(Dp(300.0f), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(14.0f), Dp(12.0f)));
+    // SliderRow's last item is the slider itself, so a drag shows up as IsItemActive() on the row. These track the
+    // gesture: bodies are re-seeded only when a drag that changed something ends (not on every slider tick).
+    static bool windActive = false;
+    static bool windChanged = false;
     if (ImGui::BeginPopup("##studiophysics")) {
-        ImGui::Checkbox(Tr("물리 항상 계산"), &d.physicsAlways);
-        ui::Tooltip(Tr("재생 중이 아니어도 같은 프레임에 멈춰 있을 때 물리를 계속 계산해 (머리카락/치마가 계속 흔들림)"));
-        ImGui::Checkbox(Tr("물리 꺼도 본 표시"), &d.showPhysicsBones);
-        ui::Tooltip(Tr("물리를 꺼도 물리 뼈(머리카락/치마)를 뷰포트에 표시해 직접 키를 넣을 수 있게"));
-        ImGui::SeparatorText(Tr("바람"));
-        ImGui::Checkbox(Tr("뷰포트에 바람 벡터 표시"), &d.showWindVector);
-        bool windEditEnded = false;  // physics re-seeds only when a drag finishes, not every slider tick
+        bool windEditEnded = false;
         {
+            bool anyActive = false, anyChanged = false;
+            const auto windRow = [&](const char* id, const char* label, float* v, float lo, float hi) {
+                if (SliderRow(id, label, v, lo, hi, "%.2f")) anyChanged = true;
+                anyActive |= ImGui::IsItemActive();
+            };
+            Switch("##physalways", Tr("물리 항상 계산"), &d.physicsAlways);
+            ui::Tooltip(Tr("재생 중이 아니어도 같은 프레임에 멈춰 있을 때 물리를 계속 계산해 (머리카락/치마가 계속 흔들림)"));
+            Switch("##physbones", Tr("물리 꺼도 본 표시"), &d.showPhysicsBones);
+            ui::Tooltip(Tr("물리를 꺼도 물리 뼈(머리카락/치마)를 뷰포트에 표시해 직접 키를 넣을 수 있게"));
+            SectionLabel(Tr("바람"));
+            Switch("##windvec", Tr("뷰포트에 바람 벡터 표시"), &d.showWindVector);
             const bool hasWind = (d.windStrength > 0.0f || d.windGust > 0.0f || d.windJitter > 0.0f);
-            // Direction visualizer (top-down: +X right, +Z up) with two compact X/Z sliders to its right.
-            const float sz = Dp(64.0f);
-            const ImVec2 c0 = ImGui::GetCursorScreenPos();
-            ImDrawList* wdl = ImGui::GetWindowDrawList();
-            wdl->AddRectFilled(c0, ImVec2(c0.x + sz, c0.y + sz), p.sunken, Dp(8.0f));
-            wdl->AddRect(c0, ImVec2(c0.x + sz, c0.y + sz), p.line, Dp(8.0f));
-            const ImVec2 cc(c0.x + sz * 0.5f, c0.y + sz * 0.5f);
-            wdl->AddLine(cc, ImVec2(c0.x + sz - Dp(6.0f), cc.y), IM_COL32(235, 75, 75, 90));
-            wdl->AddLine(cc, ImVec2(cc.x, c0.y + Dp(6.0f)), IM_COL32(70, 130, 245, 90));
-            float nx = d.windDir.x, nz = d.windDir.z;
-            const float len = std::sqrt(nx * nx + nz * nz);
-            if (len > 1e-5f) { nx /= len; nz /= len; }
-            if (hasWind && len > 1e-5f) {
-                const float r = sz * 0.34f;
-                const ImVec2 tip(cc.x + nx * r, cc.y - nz * r);
-                const ImU32 arrowCol = IM_COL32(140, 230, 150, 235);
-                wdl->AddLine(cc, tip, arrowCol, Dp(2.0f));
-                const float ah = Dp(8.0f), hw = Dp(4.5f);
-                const float dx = nx, dy = -nz;
-                const float bx = tip.x - dx * ah, by = tip.y - dy * ah;
-                const float px = -nz * hw, py = nx * hw;
-                wdl->AddTriangleFilled(tip, ImVec2(bx + px, by + py), ImVec2(bx - px, by - py), arrowCol);
-            }
-            ImGui::BeginDisabled(!hasWind);  // no wind: direction controls are greyed out
-            ImGui::Dummy(ImVec2(sz, sz));
+            // Direction visualizer (top-down: +X right, +Z up) with the two X/Z slider rows to its right. The pad is
+            // drawn after the rows so it takes exactly their height and both columns line up.
+            const float padW = Dp(84.0f);
+            const ImVec2 rowStart = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(padW, 1.0f));
             ImGui::SameLine(0, Dp(10.0f));
+            ImGui::BeginDisabled(!hasWind);  // no wind: direction controls are greyed out
             ImGui::BeginGroup();
-            {
-                const float rem = ImGui::GetContentRegionAvail().x;
-                ImGui::SetNextItemWidth(rem);
-                ImGui::SliderFloat("##windx", &d.windDir.x, -1.0f, 1.0f, "X %.2f");
-                windEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
-                ImGui::SetNextItemWidth(rem);
-                ImGui::SliderFloat("##windz", &d.windDir.z, -1.0f, 1.0f, "Z %.2f");
-                windEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
-            }
+            windRow("##windx", Tr("바람 방향 X"), &d.windDir.x, -1.0f, 1.0f);
+            windRow("##windz", Tr("바람 방향 Z"), &d.windDir.z, -1.0f, 1.0f);
             ImGui::EndGroup();
             ImGui::EndDisabled();
-        }
-        {
-            const auto wSlider = [&](const char* label, float* v, float lo, float hi) {
-                ImGui::Text("%s", Tr(label));
-                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-                ImGui::SliderFloat((std::string("##w") + label).c_str(), v, lo, hi, "%.2f");
-                windEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
-            };
-            wSlider(Tr("바람 세기"), &d.windStrength, 0.0f, 1.0f);
-            wSlider(Tr("돌풍 폭"), &d.windGust, 0.0f, 1.0f);
-            wSlider(Tr("돌풍 주파수"), &d.windGustFreq, 0.1f, 20.0f);
-            wSlider(Tr("바람 무작위성"), &d.windJitter, 0.0f, 1.0f);
+            const float padH = std::max(ImGui::GetItemRectMax().y - rowStart.y, Dp(60.0f));
+            {
+                const float side = std::min(padW, padH);  // square pad, as tall as the two slider rows allow
+                const ImVec2 c0(rowStart.x, rowStart.y + (padH - side) * 0.5f);
+                ImDrawList* wdl = ImGui::GetWindowDrawList();
+                wdl->AddRectFilled(c0, ImVec2(c0.x + side, c0.y + side), p.sunken, Dp(8.0f));
+                wdl->AddRect(c0, ImVec2(c0.x + side, c0.y + side), p.line, Dp(8.0f));
+                const ImVec2 cc(c0.x + side * 0.5f, c0.y + side * 0.5f);
+                wdl->AddLine(cc, ImVec2(c0.x + side - Dp(6.0f), cc.y), IM_COL32(235, 75, 75, 90));
+                wdl->AddLine(cc, ImVec2(cc.x, c0.y + Dp(6.0f)), IM_COL32(70, 130, 245, 90));
+                float nx = d.windDir.x, nz = d.windDir.z;
+                const float len = std::sqrt(nx * nx + nz * nz);
+                if (len > 1e-5f) { nx /= len; nz /= len; }
+                if (hasWind && len > 1e-5f) {
+                    const float r = side * 0.34f;
+                    const ImVec2 tip(cc.x + nx * r, cc.y - nz * r);
+                    const ImU32 arrowCol = IM_COL32(140, 230, 150, 235);
+                    wdl->AddLine(cc, tip, arrowCol, Dp(2.0f));
+                    const float ah = Dp(8.0f), hw = Dp(4.5f);
+                    const float dx = nx, dy = -nz;
+                    const float bx = tip.x - dx * ah, by = tip.y - dy * ah;
+                    const float px = -nz * hw, py = nx * hw;
+                    wdl->AddTriangleFilled(tip, ImVec2(bx + px, by + py), ImVec2(bx - px, by - py), arrowCol);
+                }
+            }
+            ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + padH));
+            windRow("##wstrength", Tr("바람 세기"), &d.windStrength, 0.0f, 1.0f);
+            windRow("##wgust", Tr("돌풍 폭"), &d.windGust, 0.0f, 1.0f);
+            windRow("##wgustfreq", Tr("돌풍 주파수"), &d.windGustFreq, 0.1f, 20.0f);
+            windRow("##wjitter", Tr("바람 무작위성"), &d.windJitter, 0.0f, 1.0f);
+            windEditEnded = windActive && !anyActive && (anyChanged || windChanged);
+            windActive = anyActive;
+            windChanged = anyActive ? (anyChanged || windChanged) : false;
         }
         // Re-seed bodies only when a wind drag ends (not per tick) so sliding doesn't freeze or thrash physics.
         if (windEditEnded) d.physicsFrame = -1.0f;
         ImGui::EndPopup();
+    } else {
+        windActive = false;
+        windChanged = false;
     }
     ImGui::PopStyleVar();
     separator(rx - Dp(8.0f));
@@ -6160,16 +6167,47 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
         return av + (bv - av) * e;
     };
 
-    // Lazy audio-waveform cache: rebuild when the loaded track (path) or its duration changes, so replacing a file
-    // with another of the same length also refreshes the waveform.
+    // Audio-waveform cache, decoded off the UI thread: a track change launches a background decode, the frame only
+    // polls it and draws no waveform until it is ready (a decode error leaves empty peaks and is not retried).
     {
         const double dur = d.hasAudio ? audio_.DurationSeconds() : 0.0;
         const std::string curPath = d.hasAudio ? PathToUtf8(d.audioPath) : std::string();
-        if (dur <= 0.0 || curPath.empty()) { audioPeaks_.clear(); audioPeaksDur_ = 0.0; audioPeaksPath_.clear(); }
-        else if (audioPeaks_.empty() || audioPeaksPath_ != curPath || std::fabs(audioPeaksDur_ - dur) > 0.01) {
+
+        // 1) pick up a finished decode (never .get() an unfinished future: that would block the frame)
+        if (audioPeaksRunning_ && audioPeaksFuture_.valid() &&
+            audioPeaksFuture_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            std::vector<float> peaks = audioPeaksFuture_.get();
+            audioPeaksRunning_ = false;
+            const bool current = !curPath.empty() && audioPeaksPendingPath_ == curPath &&
+                                 std::fabs(audioPeaksPendingDur_ - dur) <= 0.01;
+            if (current) {
+                audioPeaks_ = std::move(peaks);
+                audioPeaksPath_ = audioPeaksPendingPath_;
+                audioPeaksDur_ = audioPeaksPendingDur_;
+                if (audioPeaks_.empty()) audioPeaksFailedPath_ = audioPeaksPath_;  // decode error: no retry loop
+            }
+        }
+
+        // 2) forget a waveform that no longer belongs to the current track / its length
+        if (curPath.empty() || dur <= 0.0 || audioPeaksPath_ != curPath || std::fabs(audioPeaksDur_ - dur) > 0.01) {
             audioPeaks_.clear();
-            if (audio_.BuildPeaks(1280, audioPeaks_)) { audioPeaksDur_ = dur; audioPeaksPath_ = curPath; }
-            else { audioPeaksDur_ = 0.0; audioPeaksPath_.clear(); }
+            audioPeaksPath_.clear();
+            audioPeaksDur_ = 0.0;
+        }
+        if (curPath.empty() || dur <= 0.0) audioPeaksFailedPath_.clear();
+
+        // 3) launch a decode between decodes only: a running one finishes first, the new track follows
+        if (!curPath.empty() && dur > 0.0 && audioPeaks_.empty() && !audioPeaksRunning_ &&
+            audioPeaksFailedPath_ != curPath) {
+            audioPeaksPendingPath_ = curPath;
+            audioPeaksPendingDur_ = dur;
+            const std::filesystem::path path = d.audioPath;
+            audioPeaksFuture_ = std::async(std::launch::async, [path, dur]() {
+                std::vector<float> peaks;
+                AudioPlayer::BuildPeaks(path, dur, 1280, peaks);
+                return peaks;
+            });
+            audioPeaksRunning_ = true;
         }
     }
     if (d.hasAudio && !audioPeaks_.empty()) {

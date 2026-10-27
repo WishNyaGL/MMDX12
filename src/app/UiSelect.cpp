@@ -172,11 +172,19 @@ void App::DrawAppBar(int activeNav) {
     ImGui::SetNextWindowPos(ImVec2(right - Dp(40.0f), h + Dp(6.0f)), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowSize(ImVec2(Dp(360.0f), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(16.0f), Dp(14.0f)));
+    static bool s_pendingSave = false;  // a slider moved: the ini is written when the drag ends, not every frame
     if (ImGui::BeginPopup("##settingspopup")) {
-        // Save only when a value actually changed (checkbox toggled, numeric field commit, key rebind, reset).
-        // Never save unconditionally every frame while the popup is open.
+        // Save only when a value actually changed (switch toggled, slider released, key rebind, reset).
+        // Never save unconditionally every frame while the popup is open, and never on every drag frame.
         bool changed = false;
-        const auto saveIfChanged = [&]() { if (changed) { settings_.Save(settingsPath_); changed = false; } };
+        bool sliderActive = false;  // a slider row is being dragged right now
+        const auto flushSave = [&](bool dragging) {
+            if (!dragging && (changed || s_pendingSave)) {
+                settings_.Save(settingsPath_);
+                changed = false;
+                s_pendingSave = false;
+            }
+        };
 
         const float popupW = ImGui::GetContentRegionAvail().x;
         const float availH = ImGui::GetIO().DisplaySize.y - ImGui::GetWindowPos().y - Dp(96.0f);
@@ -185,7 +193,7 @@ void App::DrawAppBar(int activeNav) {
         // Scrollable body; the reset button stays pinned in a footer below it (always visible).
         ImGui::BeginChild("##settingsbody", ImVec2(popupW, bodyH), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
 
-        ImGui::SeparatorText(Tr("언어"));
+        SectionLabel(Tr("언어"));
         {
             // Two-column grid with explicit positions (guaranteed alignment regardless of SameLine behaviour).
             const Language langs[] = {Language::Auto, Language::Korean, Language::English, Language::Japanese,
@@ -213,85 +221,88 @@ void App::DrawAppBar(int activeNav) {
             ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rows * (chipH + rowGap)));
         }
 
-        // A labelled row: label on the left, a uniform slider + typed input on the right (all clamped to avail width).
-        const auto speedRow = [&](const char* label, float* v, float vmin, float vmax) -> bool {
-            const float rowAvail = ImGui::GetContentRegionAvail().x;
-            const float labelW = std::min(rowAvail * 0.42f, Dp(170.0f));
-            const float ctrlW = rowAvail - labelW - Dp(6.0f);
-            const float inputW = Dp(62.0f);
-            const float slideW = ctrlW - inputW - Dp(4.0f);
-            ImGui::Text("%s", Tr(label));
-            ImGui::SameLine(0, Dp(6.0f));
-            ImGui::SetNextItemWidth(std::max(slideW, Dp(40.0f)));
-            bool changedRow = ImGui::SliderFloat(("##sl_" + std::string(label)).c_str(), v, vmin, vmax, "%.2f");
-            changedRow |= ImGui::IsItemDeactivatedAfterEdit();
-            ImGui::SameLine(0, Dp(4.0f));
-            ImGui::SetNextItemWidth(inputW);
-            changedRow |= ImGui::InputFloat(("##in_" + std::string(label)).c_str(), v, 0.0f, 0.0f, "%.2f");
-            changedRow |= ImGui::IsItemDeactivatedAfterEdit();
+        // A labelled slider row from the kit: no second input box (Ctrl+click on the slider types a value).
+        // The ini is written when the drag ends (see flushSave), never on every drag frame.
+        const auto speedRow = [&](const char* id, const char* labelKo, float* v, float vmin, float vmax) {
+            const bool rowChanged = SliderRow(id, Tr(labelKo), v, vmin, vmax, "%.2f");
             *v = std::clamp(*v, vmin, vmax);
-            return changedRow;
+            // SliderRow's last item is the slider: a drag keeps the ini untouched, releasing it writes once.
+            if (ImGui::IsItemActive()) sliderActive = true;
+            if (rowChanged) {
+                changed = true;
+                s_pendingSave = true;
+            }
         };
 
-        ImGui::SeparatorText(Tr("카메라"));
-        changed |= ImGui::Checkbox(Tr("가로 축 반전"), &settings_.cameraInvertX);
-        changed |= ImGui::Checkbox(Tr("세로 축 반전"), &settings_.cameraInvertY);
-        changed |= speedRow(Tr("회전 감도"), &settings_.cameraRotateSpeed, 0.05f, 10.0f);
-        changed |= speedRow(Tr("이동 감도"), &settings_.cameraPanSpeed, 0.05f, 10.0f);
-        changed |= speedRow(Tr("줌 감도"), &settings_.cameraZoomSpeed, 0.05f, 10.0f);
-        changed |= speedRow(Tr("화각 감도"), &settings_.cameraFovSpeed, 0.05f, 10.0f);
-        changed |= speedRow(Tr("비행 속도"), &settings_.cameraFlySpeed, 0.05f, 20.0f);
+        SectionLabel(Tr("카메라"));
+        changed |= Switch("##set_invx", Tr("가로 축 반전"), &settings_.cameraInvertX);
+        changed |= Switch("##set_invy", Tr("세로 축 반전"), &settings_.cameraInvertY);
+        speedRow("##set_rotspd", "회전 감도", &settings_.cameraRotateSpeed, 0.05f, 10.0f);
+        speedRow("##set_panspd", "이동 감도", &settings_.cameraPanSpeed, 0.05f, 10.0f);
+        speedRow("##set_zoomspd", "줌 감도", &settings_.cameraZoomSpeed, 0.05f, 10.0f);
+        speedRow("##set_fovspd", "화각 감도", &settings_.cameraFovSpeed, 0.05f, 10.0f);
+        speedRow("##set_flyspd", "비행 속도", &settings_.cameraFlySpeed, 0.05f, 20.0f);
 
-        ImGui::SeparatorText(Tr("편집"));
-        changed |= speedRow(Tr("Ctrl 정밀도"), &settings_.editorPrecisionFactor, 0.01f, 1.0f);
+        SectionLabel(Tr("편집"));
+        speedRow("##set_precision", "Ctrl 정밀도", &settings_.editorPrecisionFactor, 0.01f, 1.0f);
         ui::Tooltip(Tr("기즈모를 드래그할 때 Ctrl을 누르면 이 배율만큼 정밀하게 이동·회전합니다."));
 
-        ImGui::SeparatorText(Tr("인터페이스"));
-        changed |= ImGui::Checkbox(Tr("본·모프 영문 이름 표시"), &settings_.showEnglishNames);
+        SectionLabel(Tr("인터페이스"));
+        changed |= Switch("##set_enames", Tr("본·모프 영문 이름 표시"), &settings_.showEnglishNames);
         ui::Tooltip(Tr("PMX에 영어 이름이 있으면 목록과 툴팁에서 표시합니다 (내부 식별자는 그대로)."));
-        changed |= speedRow(Tr("본 오버레이 크기"), &settings_.boneOverlayScale, 0.5f, 2.5f);
+        speedRow("##set_boneoverlay", "본 오버레이 크기", &settings_.boneOverlayScale, 0.5f, 2.5f);
         ui::Tooltip(Tr("뷰포트에서 본 마커(점과 선)의 크기입니다."));
 
-        ImGui::SeparatorText(Tr("입력"));
+        SectionLabel(Tr("입력"));
         {
             // Rebindable studio keys (bone tools + transport). Click a row, then press the new key.
+            // The table keeps the Korean source strings; Tr() runs while drawing so a language switch retranslates.
             static std::string recAction;
             struct KeyRow { const char* action; const char* label; };
             static const KeyRow kRows[] = {
-                {"toolMove",     Tr("이동 도구 (W)")},
-                {"toolRotate",   Tr("회전 도구 (E)")},
-                {"toolAutoIk",   Tr("자동 IK 전환 (K)")},
-                {"toggleBones",  Tr("본 표시 전환 (C)")},
-                {"registerPose", Tr("키 등록 (I)")},
-                {"togglePlay",   Tr("재생/일시정지 (Space)")},
+                {"toolMove",     "이동 도구 (W)"},
+                {"toolRotate",   "회전 도구 (E)"},
+                {"toolAutoIk",   "자동 IK 전환 (K)"},
+                {"toggleBones",  "본 표시 전환 (C)"},
+                {"registerPose", "키 등록 (I)"},
+                {"togglePlay",   "재생/일시정지 (Space)"},
             };
             for (int ai = 0; ai < (int)(sizeof(kRows) / sizeof(kRows[0])); ++ai) {
-                const std::string id = std::string("##keybtn") + std::to_string(ai);
-                std::string label = kRows[ai].label;
-                label += ": ";
-                if (recAction == kRows[ai].action) {
-                    label += Tr("[키 입력 중...]");
-                } else {
-                    const int cur = settings_.KeyFor(kRows[ai].action);
-                    const char* nm = cur >= 0 ? ImGui::GetKeyName((ImGuiKey)cur) : nullptr;
-                    label += (nm && nm[0]) ? nm : "-";
-                }
-                if (Button(id.c_str(), label.c_str(), nullptr, ButtonKind::Secondary, ImVec2(-1.0f, 28.0f))) {
-                    if (recAction == kRows[ai].action) recAction.clear();
+                const bool rec = recAction == kRows[ai].action;
+                const int cur = rec ? -1 : settings_.KeyFor(kRows[ai].action);
+                const char* nm = cur >= 0 ? ImGui::GetKeyName((ImGuiKey)cur) : nullptr;
+                const char* keyLabel = rec ? Tr("[키 입력 중...]") : ((nm && nm[0]) ? nm : "-");
+                const char* rowLabel = Tr(kRows[ai].label);
+                // label left, the key name on a right-aligned Secondary button (one row, like SliderRow's layout)
+                const float rowW = ImGui::GetContentRegionAvail().x;
+                const ImVec2 rowPos = ImGui::GetCursorScreenPos();
+                const float rowH = Dp(34.0f), btnW = Dp(132.0f), btnH = Dp(30.0f);
+                TextEllipsis(ImGui::GetWindowDrawList(), Font::Regular, size::Body,
+                             ImVec2(rowPos.x, rowPos.y + (rowH - TextSize(Font::Regular, size::Body, rowLabel).y) * 0.5f),
+                             rowPos.x + rowW - btnW - Dp(10.0f), P().ink, rowLabel);
+                ImGui::SetCursorScreenPos(ImVec2(rowPos.x + rowW - btnW, rowPos.y + (rowH - btnH) * 0.5f));
+                if (Button((std::string("##keybtn") + std::to_string(ai)).c_str(), keyLabel, nullptr,
+                           ButtonKind::Secondary, ImVec2(132.0f, 30.0f))) {
+                    if (rec) recAction.clear();
                     else recAction = kRows[ai].action;
                 }
-                if (recAction == kRows[ai].action) {
-                    for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; ++k) {
-                        const ImGuiKey kk = (ImGuiKey)k;
-                        if (kk == ImGuiKey_LeftCtrl || kk == ImGuiKey_RightCtrl || kk == ImGuiKey_LeftShift ||
-                            kk == ImGuiKey_RightShift || kk == ImGuiKey_LeftAlt || kk == ImGuiKey_RightAlt ||
-                            kk == ImGuiKey_LeftSuper || kk == ImGuiKey_RightSuper)
-                            continue;
-                        if (ImGui::IsKeyPressed(kk)) {
-                            settings_.keys[kRows[ai].action] = k;
-                            recAction.clear();
-                            changed = true;
-                            break;
+                ImGui::SetCursorScreenPos(ImVec2(rowPos.x, rowPos.y + rowH));
+                if (rec) {
+                    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {  // Escape cancels recording and is never bindable
+                        recAction.clear();
+                    } else {
+                        for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; ++k) {
+                            const ImGuiKey kk = (ImGuiKey)k;
+                            if (kk == ImGuiKey_Escape || kk == ImGuiKey_LeftCtrl || kk == ImGuiKey_RightCtrl ||
+                                kk == ImGuiKey_LeftShift || kk == ImGuiKey_RightShift || kk == ImGuiKey_LeftAlt ||
+                                kk == ImGuiKey_RightAlt || kk == ImGuiKey_LeftSuper || kk == ImGuiKey_RightSuper)
+                                continue;
+                            if (ImGui::IsKeyPressed(kk)) {
+                                settings_.keys[kRows[ai].action] = k;
+                                recAction.clear();
+                                changed = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -312,8 +323,11 @@ void App::DrawAppBar(int activeNav) {
             settings_.keys.clear();
             changed = true;
         }
-        saveIfChanged();
+        flushSave(sliderActive);
         ImGui::EndPopup();
+    } else if (s_pendingSave) {  // closed while a value was still unsaved (a drag that ended with the popup)
+        settings_.Save(settingsPath_);
+        s_pendingSave = false;
     }
     ImGui::PopStyleVar();
     ImGui::SetCursorScreenPos(ImVec2(right - Dp(36.0f), (h - Dp(36.0f)) * 0.5f));
@@ -376,6 +390,7 @@ void App::DrawAppBar(int activeNav) {
             if (Button("##libunhide", label.c_str(), icon::Eye, ButtonKind::Ghost)) {
                 ImGui::CloseCurrentPopup();
                 ClearHiddenOverrides();
+                libraryOverridesCache_ = LoadLibraryOverrides();  // the hidden-items list changed: refresh its cache
             }
         }
         ImGui::EndPopup();
@@ -417,6 +432,7 @@ void App::AssetContextMenu(const std::vector<std::filesystem::path>& files, bool
         if (pick) {
             ImGui::CloseCurrentPopup();
             SetLibraryOverride(files, *pick);
+            libraryOverridesCache_ = LoadLibraryOverrides();  // the hidden-items list changed: refresh its cache
         }
         ImGui::EndPopup();
     }
@@ -560,15 +576,30 @@ void App::DrawSelect() {
         // view toggle + hidden items, styled like the category tabs (segmented)
         const char* viewLabels[2] = {Tr("격자"), Tr("목록")};
         int viewMode = libraryListView_ ? 1 : 0;
-        if (Segmented("##libview", viewLabels, 2, &viewMode, Dp(108.0f), 30.0f)) libraryListView_ = viewMode == 1;
+        if (Segmented("##libview", viewLabels, 2, &viewMode, 108.0f, 30.0f)) libraryListView_ = viewMode == 1;
         ImGui::SameLine(0, Dp(10.0f));
-        if (Chip("##showhidden", Tr("숨긴 항목"), icon::EyeSlash, libraryShowHidden_, Dp(150.0f)))
+        if (Chip("##showhidden", Tr("숨긴 항목"), icon::EyeSlash, libraryShowHidden_, 150.0f)) {
             libraryShowHidden_ = !libraryShowHidden_;
+            if (libraryShowHidden_) libraryOverridesCache_ = LoadLibraryOverrides();  // read the file once per open
+        }
         ImGui::SameLine(0, Dp(12.0f));
         if (!libraryShowHidden_) {
-            // stepped column count (2..7)
-            ImGui::SetNextItemWidth(Dp(150.0f));
-            ImGui::SliderInt("##tilescale", &libraryCols_, 2, 7, Tr("열 %d"));
+            // stepped column count (2..7): minus / "열 N" / plus, one compact row
+            const float stepH = Dp(30.0f), btn = Dp(24.0f);
+            ImGui::PushID("##tilescale");
+            float x = ImGui::GetCursorScreenPos().x;
+            ImGui::SetCursorScreenPos(ImVec2(x, controlsY + (stepH - btn) * 0.5f));
+            if (IconButton("##minus", icon::Minus, Tr("열 줄이기"), false, 24.0f) && libraryCols_ > 2) --libraryCols_;
+            x = ImGui::GetItemRectMax().x + Dp(6.0f);
+            char label[32];
+            std::snprintf(label, sizeof(label), Tr("열 %d"), libraryCols_);
+            const ImVec2 ts = TextSize(Font::Semibold, size::Small, label);
+            Text(ImGui::GetWindowDrawList(), Font::Semibold, size::Small,
+                 ImVec2(x, controlsY + (stepH - ts.y) * 0.5f), p.ink2, label);
+            x += std::max(ts.x, Dp(44.0f)) + Dp(6.0f);
+            ImGui::SetCursorScreenPos(ImVec2(x, controlsY + (stepH - btn) * 0.5f));
+            if (IconButton("##plus", icon::Plus, Tr("열 늘리기"), false, 24.0f) && libraryCols_ < 7) ++libraryCols_;
+            ImGui::PopID();
             libraryCols_ = std::clamp(libraryCols_, 2, 7);
         }
     }
@@ -584,90 +615,157 @@ void App::DrawSelect() {
         const float cgap = Dp(16.0f);
         float contentH = 0;
 
+        // One list row's look, shared by the list view and the hidden-items list: surface, hover tint, the accent
+        // tint of a selected grid card, the name in ink and the meta in a caption on the right.
+        const auto drawRowLook = [&](ImVec2 a, ImVec2 b, const char* name, const char* meta, float hv, float sv,
+                                     float rightInset) {
+            const float r = Dp(10.0f);
+            dl->AddRectFilled(a, b, Mix(Mix(p.surface, p.sunken, hv * 0.35f), p.accentSoft, sv), r);
+            dl->AddRect(a, b, Mix(WithAlpha(p.ink, 0.05f), p.accent, sv), r, 0, sv > 0.5f ? Dp(2.0f) : 1.0f);
+            const float cy = (a.y + b.y) * 0.5f;
+            const float maxX = b.x - Dp(12.0f) - rightInset;
+            const ImVec2 ns = TextSize(Font::Semibold, size::Body, name);
+            TextEllipsis(dl, Font::Semibold, size::Body, ImVec2(a.x + Dp(14.0f), cy - ns.y * 0.5f), maxX, p.ink, name);
+            if (meta && *meta) {
+                const ImVec2 ms = TextSize(Font::Regular, size::Caption, meta);
+                const float metaX = maxX - ms.x;
+                const float nameEnd = a.x + Dp(14.0f) + ns.x;
+                if (metaX > nameEnd + Dp(12.0f))
+                    Text(dl, Font::Regular, size::Caption, ImVec2(metaX, cy - ms.y * 0.5f), p.ink3, meta);
+            }
+        };
+
         if (libraryShowHidden_) {
-            const LibraryOverrides ov = LoadLibraryOverrides();
+            // The list is reloaded when the view opens and after an unhide (never once per frame: no file read here).
+            const LibraryOverrides& ov = libraryOverridesCache_;
             const std::filesystem::path root = ResolveLibraryPath().lexically_normal();
+            const float rowH = Dp(38.0f), rgap = Dp(4.0f);
             int count = 0;
+            bool unhid = false;
             for (const auto& [rel, k] : ov.byPath) {
                 if (k != AssetKind::Hidden) continue;
+                const ImVec2 ra(origin.x, origin.y + count * (rowH + rgap));
+                const ImVec2 rb(origin.x + availW, ra.y + rowH);
                 ++count;
+                if (!ImGui::IsRectVisible(ra, rb)) continue;
                 const std::filesystem::path full = root / Utf8ToPath(rel);
                 const std::string name = PathToUtf8(full.filename());
+                const char* action = Tr("다시 표시");
+                const float btnW = Dp(96.0f), btnH = Dp(28.0f);
                 ImGui::PushID(rel.c_str());
-                ImGui::TextUnformatted(name.c_str());
-                ImGui::SameLine();
-                if (Button("##unhide", Tr("숨긴 항목 다시 표시"), icon::Eye, ButtonKind::Ghost)) {
+                const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(ra, rb);
+                drawRowLook(ra, rb, name.c_str(), rel.c_str(), Anim(ImGui::GetID("##hv"), hovered, 14.0f), 0.0f,
+                            btnW + Dp(18.0f));
+                ImGui::SetCursorScreenPos(ImVec2(rb.x - Dp(10.0f) - btnW, ra.y + (rowH - btnH) * 0.5f));
+                if (Button("##unhide", action, icon::Eye, ButtonKind::Ghost, ImVec2(96.0f, 28.0f))) {
                     SetLibraryOverride({full}, AssetKind::Auto);
+                    unhid = true;
                 }
-                PushFont(Font::Regular, size::Caption);
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(p.ink3), "%s", rel.c_str());
-                PopFont();
-                Gap(4.0f);
                 ImGui::PopID();
             }
+            if (unhid) libraryOverridesCache_ = LoadLibraryOverrides();  // the list changed: reload once
+            contentH = std::max(contentH, count * (rowH + rgap));
             if (count == 0) {
                 const ImVec2 ms = TextSize(Font::Semibold, size::Title, Tr("숨긴 항목 없음"));
                 Text(dl, Font::Semibold, size::Title, ImVec2(origin.x + (availW - ms.x) * 0.5f, origin.y + Dp(80.0f)),
                      p.ink2, Tr("숨긴 항목 없음"));
             }
         } else if (libraryListView_) {
-            const float rowH = Dp(38.0f);
+            // Rows wear the grid cards' look: hover, the accent tint of the selection, click to select and the same
+            // right-click menu (one CardItem per row, exactly like a card).
+            const float rowH = Dp(38.0f), rgap = Dp(4.0f);
+            const auto rowRect = [&](int i) {
+                const ImVec2 ra(origin.x, origin.y + i * (rowH + rgap));
+                return std::pair<ImVec2, ImVec2>(ra, ImVec2(ra.x + availW, ra.y + rowH));
+            };
             if (libraryTab_ == 0) {
                 const std::string needle = ToLowerAscii(filterCharacter_);
                 int n = 0;
                 for (size_t i = 0; i < library_.characters.size(); ++i) {
                     const CharacterAsset& a = library_.characters[i];
                     if (!MatchesFilter(needle, a.displayName, a.id)) continue;
-                    char buf[512];
+                    const auto [ra, rb] = rowRect(n);
+                    ++n;
+                    if (!ImGui::IsRectVisible(ra, rb)) continue;
                     const std::string meta = std::string(Tr("정점 ")) + Thousands(a.vertexCount) +
                                              std::string(Tr("  ·  본 ")) + Thousands(a.boneCount);
-                    std::snprintf(buf, sizeof(buf), "%s    ·    %s", a.displayName.c_str(), meta.c_str());
                     ImGui::PushID((int)i);
-                    if (ImGui::Selectable(buf, selCharacter_ == (int)i)) {
+                    bool hovered = false;
+                    if (CardItem("##row", ra, rb, &hovered, a.displayName.c_str())) {
                         selCharacter_ = (int)i;
                         settings_.lastCharacter = a.id;
                     }
                     AssetContextMenu({a.modelPath}, true);
+                    const bool sel = selCharacter_ == (int)i;
+                    drawRowLook(ra, rb, a.displayName.c_str(), meta.c_str(), Anim(ImGui::GetID("##hv"), hovered),
+                                Anim(ImGui::GetID("##sv"), sel, 14.0f), 0.0f);
                     ImGui::PopID();
-                    ++n;
                 }
-                contentH = std::max(contentH, n * rowH);
+                contentH = std::max(contentH, n * (rowH + rgap));
                 if (n == 0) contentH = std::max(contentH, Dp(120.0f));
             } else if (libraryTab_ == 1) {
                 const std::string needle = ToLowerAscii(filterStage_);
                 int n = 0;
-                if (ImGui::Selectable(Tr("스튜디오"), selStage_ == -1)) { selStage_ = -1; settings_.lastStage.clear(); }
+                {   // the built-in "studio" row (no stage), like the grid's studio card
+                    const auto [ra, rb] = rowRect(n);
+                    ++n;
+                    if (ImGui::IsRectVisible(ra, rb)) {
+                        ImGui::PushID(-1);
+                        bool hovered = false;
+                        if (CardItem("##row", ra, rb, &hovered, Tr("스튜디오"))) {
+                            selStage_ = -1;
+                            settings_.lastStage.clear();
+                        }
+                        const bool sel = selStage_ == -1;
+                        drawRowLook(ra, rb, Tr("스튜디오"), Tr("스테이지 없이 밝은 바닥 위에서"),
+                                    Anim(ImGui::GetID("##hv"), hovered), Anim(ImGui::GetID("##sv"), sel, 14.0f), 0.0f);
+                        ImGui::PopID();
+                    }
+                }
                 for (size_t i = 0; i < library_.stages.size(); ++i) {
                     const StageAsset& a = library_.stages[i];
                     if (!MatchesFilter(needle, a.displayName, a.id)) continue;
+                    const auto [ra, rb] = rowRect(n);
+                    ++n;
+                    if (!ImGui::IsRectVisible(ra, rb)) continue;
+                    const std::string meta = (a.format != "PMX" ? a.format + "  ·  " : std::string()) + Tr("파트 ") +
+                                             std::to_string(a.parts.size()) + Tr("  ·  정점 ") + Thousands(a.vertexCount);
                     ImGui::PushID((int)i);
-                    if (ImGui::Selectable(a.displayName.c_str(), selStage_ == (int)i)) {
+                    bool hovered = false;
+                    if (CardItem("##row", ra, rb, &hovered, a.displayName.c_str())) {
                         selStage_ = (int)i;
                         settings_.lastStage = a.id;
                     }
                     AssetContextMenu(a.parts, false);
+                    const bool sel = selStage_ == (int)i;
+                    drawRowLook(ra, rb, a.displayName.c_str(), meta.c_str(), Anim(ImGui::GetID("##hv"), hovered),
+                                Anim(ImGui::GetID("##sv"), sel, 14.0f), 0.0f);
                     ImGui::PopID();
-                    ++n;
                 }
-                contentH = std::max(contentH, n * rowH);
+                contentH = std::max(contentH, n * (rowH + rgap));
             } else {
                 const std::string needle = ToLowerAscii(filterSong_);
                 int n = 0;
                 for (size_t i = 0; i < library_.songs.size(); ++i) {
                     const SongAsset& a = library_.songs[i];
                     if (!MatchesFilter(needle, a.displayName, a.id)) continue;
-                    char buf[512];
-                    std::snprintf(buf, sizeof(buf), "%s    ·    %s", a.displayName.c_str(), MinSec(a.durationSec).c_str());
+                    const auto [ra, rb] = rowRect(n);
+                    ++n;
+                    if (!ImGui::IsRectVisible(ra, rb)) continue;
+                    const std::string meta = a.audioPath.empty() ? std::string(Tr("음원 없음")) : MinSec(a.durationSec);
                     ImGui::PushID((int)i);
-                    if (ImGui::Selectable(buf, selSong_ == (int)i)) {
+                    bool hovered = false;
+                    if (CardItem("##row", ra, rb, &hovered, a.displayName.c_str())) {
                         selSong_ = (int)i;
                         settings_.lastSong = a.id;
                         ResetVideoRange();
                     }
+                    const bool sel = selSong_ == (int)i;
+                    drawRowLook(ra, rb, a.displayName.c_str(), meta.c_str(), Anim(ImGui::GetID("##hv"), hovered),
+                                Anim(ImGui::GetID("##sv"), sel, 14.0f), 0.0f);
                     ImGui::PopID();
-                    ++n;
                 }
-                contentH = std::max(contentH, n * rowH);
+                contentH = std::max(contentH, n * (rowH + rgap));
                 if (n == 0) contentH = std::max(contentH, Dp(120.0f));
             }
         } else if (libraryTab_ == 0) {

@@ -73,6 +73,7 @@ inline constexpr const char* UploadSimple = "\xee\x93\x80";
 inline constexpr const char* SkipForward = "\xee\x96\xa6";
 inline constexpr const char* Diamond = "\xee\x87\xac";
 inline constexpr const char* Plus = "\xee\x8f\x94";
+inline constexpr const char* Minus = "\xee\x8c\xaa";
 inline constexpr const char* Trash = "\xee\x92\xa6";
 inline constexpr const char* Scissors = "\xee\xab\xa0";
 inline constexpr const char* FlipHorizontal = "\xee\xb5\xaa";

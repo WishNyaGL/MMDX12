@@ -38,9 +38,15 @@ public:
     void SetMuted(bool muted);
     bool Muted() const;
 
-    // Decodes the current/loaded file into `bands` envelope samples (0..1, normalised to the global peak) for the
-    // timeline waveform. Returns false when nothing is loaded or decoding fails. Out is resized to `bands`.
-    bool BuildPeaks(int bands, std::vector<float>& out) const;
+    // The file the current sound was loaded from (empty when nothing is loaded).
+    const std::filesystem::path& Path() const;
+
+    // Decodes `path` into `bands` envelope samples (0..1, normalised to the global peak) for the timeline waveform.
+    // Runs on any thread and never touches the playing sound (it opens its own decoder), so the UI can decode in the
+    // background. Returns false when decoding fails; `out` is resized to `bands` (empty on failure).
+    // `durationSeconds` is the loaded track's length.
+    static bool BuildPeaks(const std::filesystem::path& path, double durationSeconds, int bands,
+                           std::vector<float>& out);
 
 private:
     struct Impl;

@@ -1204,12 +1204,29 @@ void App::DrawStudioAddMenu() {
                                                  : std::string(chars ? Tr("캐릭터 추가") : Tr("스테이지 추가"));
             header(title.c_str(), 4);
             {
-                // grid density control: number of thumbnail columns (scales the tile size)
+                // grid density control: number of thumbnail columns (scales the tile size), a minus / N / plus stepper
                 PushFont(Font::Regular, size::Caption);
                 ImGui::TextUnformatted(Tr("미리보기 열 수"));
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(Dp(120.0f));
-                ImGui::SliderInt("##addgridcols", &studioAddGridCols_, 2, 6);
+                const float stepH = Dp(30.0f);
+                ImGui::PushID("##addgridcols");
+                const float stepY = ImGui::GetCursorScreenPos().y + (stepH - Dp(22.0f)) * 0.5f;
+                if (IconButton("##minus", icon::Minus, Tr("열 줄이기"), false, 22.0f) && studioAddGridCols_ > 2)
+                    --studioAddGridCols_;
+                ImGui::SameLine(0, Dp(6.0f));
+                {
+                    char label[32];
+                    std::snprintf(label, sizeof(label), Tr("열 %d"), studioAddGridCols_);
+                    const ImVec2 ts = TextSize(Font::Semibold, size::Small, label);
+                    const ImVec2 at(ImGui::GetCursorScreenPos().x, stepY + (Dp(22.0f) - ts.y) * 0.5f);
+                    Text(ImGui::GetWindowDrawList(), Font::Semibold, size::Small, at, p.ink2, label);
+                    ImGui::SetCursorScreenPos(ImVec2(at.x, stepY));
+                    ImGui::Dummy(ImVec2(std::max(ts.x, Dp(40.0f)), Dp(22.0f)));
+                    ImGui::SameLine(0, Dp(6.0f));
+                }
+                if (IconButton("##plus", icon::Plus, Tr("열 늘리기"), false, 22.0f) && studioAddGridCols_ < 6)
+                    ++studioAddGridCols_;
+                ImGui::PopID();
                 studioAddGridCols_ = std::clamp(studioAddGridCols_, 2, 6);
                 PopFont();
                 Gap(4.0f);
@@ -1369,10 +1386,9 @@ void App::DrawStudioModelMenu(int index) {
             PopFont();
             Tooltip(Tr("음원이 타임라인의 이 시간에 시작해요 (양수: 늦게, 음수: 앞부분을 건너뜀)"));
             Gap(10.0f);
-            ImGui::Checkbox(Tr("타임라인에 waveform 표시"), &d.showWaveform);
+            Switch("##showwaveform", Tr("타임라인에 파형 표시"), &d.showWaveform);
             if (d.showWaveform) {
-                ImGui::SetNextItemWidth(-1.0f);
-                ImGui::SliderFloat("##wavealpha", &d.waveformAlpha, 0.0f, 1.0f, Tr("투명도 %.2f"));
+                SliderRow("##wavealpha", Tr("투명도"), &d.waveformAlpha, 0.0f, 1.0f, "%.2f");
                 d.waveformAlpha = std::clamp(d.waveformAlpha, 0.0f, 1.0f);
             }
             Gap(8.0f);

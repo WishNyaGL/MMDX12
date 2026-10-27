@@ -1289,9 +1289,16 @@ private:
     Dx12Context ctx_;
     Renderer renderer_;
     AudioPlayer audio_;
-    std::vector<float> audioPeaks_;   // timeline waveform envelope (0..1), cached from the loaded audio
-    double audioPeaksDur_ = 0.0;      // audio duration the cache was built for (rebuild when it changes)
-    std::string audioPeaksPath_;      // audio path the cache was built for (rebuild on track replacement)
+    std::vector<float> audioPeaks_;   // timeline waveform envelope (0..1), decoded off the UI thread
+    double audioPeaksDur_ = 0.0;      // audio duration the cached envelope was decoded for
+    std::string audioPeaksPath_;      // audio path the cached envelope was decoded for
+    // Background waveform decode: the future plus the track it was launched for. The result is picked up when it
+    // is ready; a track change never blocks the UI on an unfinished decode.
+    std::future<std::vector<float>> audioPeaksFuture_;
+    bool audioPeaksRunning_ = false;
+    std::string audioPeaksPendingPath_;   // track the running decode was launched for
+    double audioPeaksPendingDur_ = 0.0;
+    std::string audioPeaksFailedPath_;    // a decode that failed is not retried while the track stays the same
 
     // library
     LibraryScanResult library_;
@@ -1324,6 +1331,8 @@ private:
     }
 
     bool libraryShowHidden_ = false;  // library grid: show the "숨긴 항목" (hidden) list instead of the active tab
+    LibraryOverrides libraryOverridesCache_;  // hidden items: the override file, read when the view opens and after an
+                                              // unhide / hide (never once per frame)
     bool libraryListView_ = false;    // library grid: show rows instead of thumbnail cards
     int libraryCols_ = 4;             // library card grid: number of columns (2..7), stepped
     int lobbyTab_ = 0;                                                   // select screen settings tab: 0 screen, 1 shader, 2 detail

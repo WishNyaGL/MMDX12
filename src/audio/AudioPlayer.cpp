@@ -74,13 +74,14 @@ void AudioPlayer::Unload() {
     impl_->path.clear();
 }
 
-bool AudioPlayer::BuildPeaks(int bands, std::vector<float>& out) const {
+bool AudioPlayer::BuildPeaks(const std::filesystem::path& path, double durationSeconds, int bands,
+                             std::vector<float>& out) {
     out.clear();
-    if (impl_->path.empty() || bands <= 0) return false;
+    if (path.empty() || bands <= 0) return false;
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 1, 0);  // mono f32, native rate
     ma_decoder decoder;
-    if (ma_decoder_init_file_w(impl_->path.c_str(), &cfg, &decoder) != MA_SUCCESS) return false;
-    const double dur = DurationSeconds();
+    if (ma_decoder_init_file_w(path.c_str(), &cfg, &decoder) != MA_SUCCESS) return false;
+    const double dur = durationSeconds;
     if (dur <= 0.0) {
         ma_decoder_uninit(&decoder);
         return false;
@@ -130,6 +131,8 @@ bool AudioPlayer::BuildPeaks(int bands, std::vector<float>& out) const {
 }
 
 bool AudioPlayer::IsLoaded() const { return impl_->soundOk; }
+
+const std::filesystem::path& AudioPlayer::Path() const { return impl_->path; }
 
 void AudioPlayer::Play() {
     if (!impl_->soundOk) return;
