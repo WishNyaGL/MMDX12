@@ -2472,3 +2472,26 @@ word to deploy. Workers: opencode deepseek 4.1 1017 #low; Claude designed, revie
   MMDX stage frames with haze + DoF (440 steady, 512+ on the first frame); not sky-specific. Window raised to 768.
 - S8b: one average colour per screen (a two-colour image lights the floor with the mix); raster / RT get no
   directional shadow from an image sky's own sun; clouds cast no ground shadows (the sun only dims with coverage).
+
+## 2026-10-27 (2) - Forward+ flicker, haze range, per-pixel spot beams, release 3.0.0
+- Bug (user: "캐릭터가 막 반짝거려", lights flicker): `light_cull.hlsl` cleared the groupshared light mask (threads 0..7)
+  and ORed light bits with no barrier between; on 32-wide GPUs the second wave (lights 32..63) could set bits before the
+  first wave cleared them, so lights dropped out of clusters at random per frame. The arena (46 lights) hit it; screenshots
+  calmed it (they stall the GPU = timing-dependent). Fix: one `GroupMemoryBarrierWithGroupSync` after the clear.
+  Measured before: paused frame, body mean 186..194 between shots, background stable; the user confirmed the fix by eye.
+- Haze range: without a stage radius the haze sphere grows to hold every punctual light with a haze share (cap 1000;
+  the arena rigs hang ~375 out, outside the old 180 sphere), plus a "안개 범위" slider (0 = auto, ini `volumetricRange=`).
+- That exposed the froxel grid's XY resolution (160 x 90: thin far beams = 8 px staircases). New per-pixel spot beam pass
+  (`volumetric_beams.hlsl`, `VolumetricPass::ExecuteBeams`): IntegrateVolume with `VOL_SPOTS_ONLY` at full render res,
+  temporal 0.15, `lit + L`; the froxel injector skips spots (`gP3.x` bit 1). Worker: opencode deepseek 1017 #low, 6 min,
+  no review fixes needed. A/B (same camera, `--dof 0`, pinned 1600x900; old = runtime shader edit): staircases gone,
+  +1.1 ms GPU on the arena (55.5 vs 54.4). Pitfall: my first A/B camera had no beams in either version; pick a view
+  where the old build shows beams before judging the new one. NOT verified: fast camera motion trails, RT / DLSS paths.
+- Open: DLSS edge flicker on silhouettes of a paused frame (upscaler none = stable) not re-measured after the flicker fix.
+- Release 3.0.0 (major: MMDX stages). Notes `dist/notes_3.0.0.md` approved by the user in Korean first, then EN / JA / ZH;
+  cover `docs/media/stages-3.0.0.jpg` (the user's studio screenshot). Order per the user: site first (stage gallery was
+  404: S13 built but never deployed), then server upload, then GitHub.
+  - Stage zips are served from the site server (`/stage-files/`, nginx alias outside html/, immutable, Range = resumable;
+    conf backup `*.pre-stage-files.bak`); `STAGE_CDN_BASE` in the web repo's git-ignored deploy.env.
+  - Sakura 1.2.0 published to the gallery (web repo `shader-packs/sakura`, `minAppVersion` 3.0.0, authors MMDX12,
+    "Built-in" wording removed, ja typo), previews re-shot with `pack_previews.py --only sakura`.
