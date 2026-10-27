@@ -193,12 +193,18 @@ float3 SkyColor(float3 dir) {
 
 // Shared punctual light falloff curves (common.hlsli).
 // falloffType: 0 = None (today's curve), 1 = Linear, 2 = InverseSquare.
+// InverseSquare is normalised to a reference distance: the intensity is the light's brightness at
+// kInverseSquareRefDist (25 units = 2 m, where it matches None within ~20 %), so the same intensity values work for
+// every curve. A raw 1 / d^2 in MMD units made an intensity of 2 read 0.003 on a wall 27 units away.
+static const float kInverseSquareRefDist = 25.0;
+static const float kInverseSquareMinDist = 12.5;  // 1 m: caps the near-source peak at 4x (haze beams, fixtures)
 float PunctualFalloff(float dist, float invRange, float falloffType) {
     float d = dist * invRange;
     if (d >= 1.0) return 0.0;
     float x = saturate(1.0 - pow(d, 4.0));
     if (falloffType > 1.5) {
-        return (x * x) / max(dist * dist, 1.0);
+        const float r = kInverseSquareRefDist / max(dist, kInverseSquareMinDist);
+        return (x * x) * r * r;
     } else if (falloffType > 0.5) {
         return saturate(1.0 - d);
     } else {

@@ -187,6 +187,9 @@ Fields (all optional except `kind` and `name`; a missing one keeps the `SceneLig
 (`aim` = `manual` / `target` / `sway`, `target`, `part` = `centre` / `head`, `swayPhase`), `sky` (`zenith`,
 `horizon`, `ground`), `shadow` (`type` = `nocast` / `hard` / `soft`, `softness`, `density`, `color`), `falloff`
 (`none` / `linear` / `inverse_square`), `affectDiffuse`, `affectSpecular`, `viewportVisible`, `keys`.
+Falloff curves (all windowed to 0 at `range`): `none` = 1 / (1 + (d / 50)^2), `linear` = 1 - d / range,
+`inverse_square` = (25 / max(d, 12.5))^2, i.e. `intensity` is the brightness at 25 units (2 m) for every curve, so the
+same intensity values work after switching the curve (the peak near the source is capped at 4x).
 
 S9 haze fields: `values.volumetric` (0..20, how much of the light shows in the volumetric haze; 1 = the physical share,
 0 = the light is invisible in the medium) and `volumetricG` (the light's Henyey-Greenstein anisotropy, -0.9..0.95; absent
