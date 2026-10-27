@@ -2511,3 +2511,19 @@ word to deploy. Workers: opencode deepseek 4.1 1017 #low; Claude designed, revie
   removed, delta manifest 3 new objects uploaded (live manifest hash matches), GitHub v3.0.1, website deployed
   (`/latest.json` -> 3.0.1 with manifest).
 - NOT verified in the app by hand: the stage row key edits themselves (build + code path only).
+
+## 2026-10-28 - Release 3.1.0: studio workflow (issue #5 + timeline audio lane)
+- Shipped the issue #5 merge (settings popup, English bone / morph names, library list view, studio bone tools, wind
+  physics) with the uncommitted follow-up: the waveform moved from the ruler background into a fixed audio lane
+  ((peak, rms) at 200 buckets / s, clip drag = offset snapping to the playhead / frame 0, Shift free, one
+  `AudioOffsetCommand` per drag, right click = the audio menu shared with the outliner row; any offset change re-seeks a
+  playing track), and the real-time video ETA / probe from the measured frame period (120-image window) instead of the
+  CPU record time. Added the missing JA / ZH strings for the lane.
+- Release 3.1.0 (minor): notes `dist/notes_3.1.0.md` (4 languages, credits WishNyaGL), cover
+  `docs/media/studio-audio-3.1.0.jpg` (studio 1920x1080, dark, audio lane, Sour Miku White), `package_release.ps1`
+  (196 / 16.3 MB), packaged smoke (select screen, v3.1.0, 0 `[E]`/`[W]`, leftovers removed), delta manifest 3 new
+  objects uploaded (live manifest hash matches), GitHub v3.1.0 (digests = local zips), website deployed
+  (`/latest.json` -> 3.1.0 with manifest).
+- Mistake: the first cover shots used 01_9001 (Sekai) and then IA; screenshots that are shown use Sour Miku White
+  (`--character sour_miku/White`), as the README / earlier covers did.
+- NOT verified by hand: the clip drag, the audio menu and undo of the offset (build + one studio capture only).
