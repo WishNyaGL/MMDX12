@@ -2544,3 +2544,16 @@ word to deploy. Workers: opencode deepseek 4.1 1017 #low; Claude designed, revie
   (digests = local zips), website deployed (`/latest.json` -> 3.1.1); stage gallery: practice_room-1.0.1.zip uploaded to
   `/stage-files/` (hash matches), index lists 1.0.1 (other zips byte-identical to the server's).
 - NOT verified: the in-app gallery "update" flow for practice_room 1.0.0 -> 1.0.1 on the user's install.
+
+## 2026-10-29 - Release 3.1.2 (patch): RT mirrors, overlay AO, short video export
+- Shipped since 3.1.1: RT mirrors at full resolution with punctual lights at reflection hits (1bd15fb), translucent
+  character overlays keep the AO below (PR #6) and short video exports no longer delete their MP4 (PR #7), both by
+  quasiquiescent (credited in the notes), and the MmeCompiler.h include-order build fix.
+- Release: notes `dist/notes_3.1.2.md` (4 languages), package (196 / 16.3 MB), packaged smoke (select, v3.1.2, 0
+  `[E]`/`[W]`), delta manifest 3.1.2 = 7 changed files (3 exes, composite / mmd / rtreflect / ssr .hlsl) uploaded (live
+  manifest + exe hashes match), GitHub v3.1.2 (digests = local zips), website deployed (`/latest.json` -> 3.1.2 with
+  manifest).
+- Pitfall: the smoke run leaves `pack_guard.json` (PackCrashGuard marker) in the stage dir besides cache / ini / log;
+  the first make_update run picked it up as a new file. Delete it with the other leftovers before `make_update.py`
+  (its orphan object stays local only, not uploaded).
+- NOT verified by hand: the RT mirror look in the packaged build (only the dev-build checks of 1bd15fb).
