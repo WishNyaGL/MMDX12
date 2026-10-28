@@ -28,6 +28,7 @@ public:
     void SetBoneAnim(int bone, const XMFLOAT3& translation, const XMFLOAT4& rotation);
     void SetMorphWeight(int morph, float weight);
     void SetIkEnabled(int ikBone, bool enabled);
+    bool IkEnabled(int ikBone) const { return bones_[(size_t)ikBone].ikEnabled; }
     // Current animation input (what SetBoneAnim / SetMorphWeight last wrote; identity / 0 after ResetPose).
     const XMFLOAT3& BoneAnimTranslation(int bone) const { return bones_[bone].animT; }
     const XMFLOAT4& BoneAnimRotation(int bone) const { return bones_[bone].animR; }

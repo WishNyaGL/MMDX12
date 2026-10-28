@@ -267,7 +267,7 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_pose_test.cpp)
 endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tools/studio_rig_test.cpp)
   add_executable(studio_rig_test tools/studio_rig_test.cpp src/studio/RigGenerator.cpp src/studio/RigDefinition.cpp
-                                     src/studio/RigPersistence.cpp)
+                                     src/studio/RigPersistence.cpp src/studio/RigSolver.cpp src/studio/AutoIk.cpp)
   target_include_directories(studio_rig_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(studio_rig_test PRIVATE mmdx_core)
 endif()

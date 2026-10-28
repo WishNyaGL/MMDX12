@@ -65,6 +65,7 @@ struct StudioModel {
     std::shared_ptr<RigDefinition> rig;   // generated rig (null = none); stored separately from the model/animation
     std::filesystem::path rigFile;        // persistence path of the rig (absolute); empty = in-memory only
     RigDiagnostics rigDiag;
+    bool showRig = true;                  // viewport controller rings visible
     PoseLayer pose;                // unregistered viewport edits (override the motion at pose.frame)
     // stages: what the static BLAS was last built from (StudioUpdateModel rebuilds it when this changes)
     uint64_t stageMotionApplied = 0;
@@ -84,7 +85,7 @@ struct StudioModel {
 // Timeline row ids: kind in the top byte, then a 24-bit group and a 32-bit index. Light is the camera VMD's light
 // track; SceneLight is the keys of one scene light (SceneLight.h): MakeRowId(RowKind::SceneLight, 0, light uid).
 // Focus is the studio's depth-of-field focus track (camera MotionData::focus, saved in the project, not in VMD).
-enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11 };
+enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11, Rig = 12 };
 inline uint64_t MakeRowId(RowKind k, uint32_t group, uint32_t index) {
     return ((uint64_t)k << 56) | ((uint64_t)(group & 0xFFFFFF) << 32) | index;
 }
@@ -235,6 +236,7 @@ struct StudioDoc {
     // editor
     int selectedModel = -1;     // index into models; -1 = camera (the camera VMD, or a scene light: selectedLightUid)
     uint32_t selectedLightUid = 0;  // the selected scene light (0 = none); selectedModel stays -1 (-2 is the audio row)
+    bool rigMode = false;       // timeline shows rig-controller rows for the selected model (instead of bones)
     TimelineView view;
     int followFrame = -1;             // frame the timeline last scrolled to show (follows playback and seeks)
     std::set<KeyId> selection;

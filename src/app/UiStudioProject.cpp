@@ -254,20 +254,45 @@ bool App::StudioSave(bool saveAs) {
     return StudioSaveTo(picked);
 }
 
+bool App::StudioSaveRigDialog() {
+    if (!studio_) return false;
+    StudioDoc& d = *studio_;
+    StudioModel* m = StudioPoseModel();
+    if (!m || !m->rig) return false;
+    std::wstring suggested = (m->rigFile.empty() ? L"rig" : m->rigFile.stem().wstring()) + kRigExtension;
+    const std::filesystem::path picked = SaveFileDialog(hwnd_, {{L"MMDX12 rig", L"*.mmdxrig"}}, suggested, L"mmdxrig",
+                                                        m->rigFile.empty() ? d.projectPath.parent_path() : m->rigFile.parent_path());
+    if (picked.empty()) return false;
+    std::filesystem::path target = std::filesystem::absolute(picked);
+    if (target.extension().empty()) target += kRigExtension;
+    std::string err;
+    if (!SaveRig(target, *m->rig, &err)) {
+        toast_ = {Tr("리그를 저장하지 못했습니다"), err, {}, true, timeSeconds_ + 6.0};
+        LOG_ERROR("studio: rig save failed: %s", err.c_str());
+        return false;
+    }
+    m->rigFile = target;
+    toast_ = {Tr("리그를 저장했어요"), PathToUtf8(target.filename()), target, false, timeSeconds_ + 4.0};
+    return true;
+}
+
 bool App::StudioWriteRigFiles(const std::filesystem::path& projectFile, ProjectData& data, std::string* error) {
     StudioDoc& d = *studio_;
     const std::filesystem::path dir = projectFile.parent_path();
-    bool any = false;
+    // No project file yet (untitled): keep rigs in-memory only, reference nothing on disk.
+    if (dir.empty()) {
+        for (size_t i = 0; i < data.models.size(); ++i) data.models[i].rigPath.clear();
+        return true;
+    }
     for (size_t i = 0; i < data.models.size() && i < d.models.size(); ++i) {
         StudioModel& m = *d.models[i];
         if (!m.rig || m.kind == ModelKind::Stage) { data.models[i].rigPath.clear(); continue; }
-        any = true;
-        if (!dir.empty()) std::filesystem::create_directories(dir);
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
         std::filesystem::path rf = dir / (Utf8ToWide(SanitizeFileName(data.models[i].name)) + L"-rig" + kRigExtension);
         if (!SaveRig(rf, *m.rig, error)) return false;
         m.rigFile = rf;
         data.models[i].rigPath = rf;
-        (void)any;
     }
     return true;
 }

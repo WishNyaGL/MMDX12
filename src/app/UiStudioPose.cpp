@@ -443,6 +443,13 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
     StudioDoc& d = *studio_;
     ImGuiIO& io = ImGui::GetIO();
     StudioModel* m = StudioPoseModel();
+    // A rig-controller drag owns the viewport: skip all bone/gizmo interaction for this gesture.
+    if (rigVpDrag_.active) {
+        studioHoverBone_ = -1;
+        studioGizmoHot_ = GizmoPart::None;
+        consumed = true;
+        return;
+    }
     studioGizmoShown_ = false;
     if (!m || !m->visible || d.playing) {
         studioHoverBone_ = -1;
@@ -1041,7 +1048,14 @@ void App::StudioViewportLightHandles(bool hovered) {
         const LightValues cur = SampleLightValues(l, frame);
         XMFLOAT3 anchor = cur.position;
         if (l.kind == LightKind::Sun) {
-            anchor = focus;
+            // Draw the directional-sun glyph up-sun from the model focus, so it does not sit on the focus (pelvis)
+            // or overlap a rig controller / bone.
+            XMFLOAT3 dir = cur.direction;
+            const float len = XMVectorGetX(XMVector3Length(XMLoadFloat3(&dir)));
+            if (len > 1e-5f) { dir.x /= len; dir.y /= len; dir.z /= len; }
+            else { dir = {0, -1, 0}; }
+            constexpr float kSunIconDist = 14.0f;
+            anchor = {focus.x - dir.x * kSunIconDist, focus.y - dir.y * kSunIconDist, focus.z - dir.z * kSunIconDist};
         } else if (l.kind == LightKind::Ambient) {
             continue;
         }
