@@ -941,6 +941,16 @@ std::vector<uint64_t> App::StudioRigRowToBoneRows(uint64_t rigRow) const {
         const int bi = m->rig->BoneFor(roles[idx][k]);
         if (bi >= 0) out.push_back(MakeRowId(RowKind::Bone, 0, (uint32_t)bi));
     }
+    // Chain controllers drive the model's ready IK bone (arm/leg/toe) as an object when present (the drag writes the
+    // key on that IK bone, not on the chain's bones), so include it in the row too — otherwise the controller's keys
+    // would not show up on the timeline for legs/toes.
+    if (idx < 6) {
+        const int ik = m->rig->IkBoneFor(roles[idx][cnt - 1]);
+        if (ik >= 0) {
+            const uint64_t ikRow = MakeRowId(RowKind::Bone, 0, (uint32_t)ik);
+            if (std::find(out.begin(), out.end(), ikRow) == out.end()) out.push_back(ikRow);
+        }
+    }
     return out;
 }
 
@@ -1854,6 +1864,15 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
             if (RowKindOf(r) == RowKind::Bone) d.selectedBones.insert((int)RowIndexOf(r));
         d.activeBone = RowKindOf(id) == RowKind::Bone && d.selectedBones.count((int)RowIndexOf(id)) ? (int)RowIndexOf(id)
                        : d.selectedBones.empty() ? -1 : *d.selectedBones.begin();
+        // a rig (controller) row pick also selects the controller for the viewport rings (works even when the rings
+        // are hidden: the choice is kept in rigController and the rings highlight it when shown).
+        {
+            int rig = -1;
+            for (uint64_t r : d.selectedRows)
+                if (RowKindOf(r) == RowKind::Rig && (int)RowIndexOf(r) < 13) { rig = (int)RowIndexOf(r); break; }
+            d.rigController = rig;
+            if (rig >= 0) d.inspectorTab = 1;
+        }
         d.rowsKey = ~0ull;
     }
     if (ev.select) {
@@ -1878,6 +1897,9 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
                 d.selectedBones.insert((int)RowIndexOf(row));
                 if (d.activeBone < 0) d.activeBone = (int)RowIndexOf(row);
             }
+            // keys of a rig controller row pick that controller for the viewport rings (even when hidden)
+            if (RowKindOf(row) == RowKind::Rig && (int)RowIndexOf(row) < 13)
+                d.rigController = (int)RowIndexOf(row);
         }
         // a key click brings its properties up in the inspector's "키" tab
         if (!ev.selectKeys.empty() && StudioPoseModel()) d.inspectorTab = 0;

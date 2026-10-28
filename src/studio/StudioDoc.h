@@ -237,6 +237,7 @@ struct StudioDoc {
     int selectedModel = -1;     // index into models; -1 = camera (the camera VMD, or a scene light: selectedLightUid)
     uint32_t selectedLightUid = 0;  // the selected scene light (0 = none); selectedModel stays -1 (-2 is the audio row)
     bool rigMode = false;       // timeline shows rig-controller rows for the selected model (instead of bones)
+    int rigController = -1;     // selected rig controller (0..12, -1 none); synced between the timeline rows and the viewport rings
     TimelineView view;
     int followFrame = -1;             // frame the timeline last scrolled to show (follows playback and seeks)
     std::set<KeyId> selection;

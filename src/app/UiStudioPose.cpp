@@ -191,6 +191,47 @@ void App::StudioSelectMorph(int morph) {
     d.rowsKey = ~0ull;
 }
 
+// Rig controller <-> timeline sync (like StudioSelectBone but for the rig controller row 0..12). The controller is a
+// row in the rig timeline; selecting it here also drives the viewport rings on the next frame. There is no per-bone
+// selection here: the whole controller is chosen (its bones become the "selected" grip of the rig).
+void App::StudioSelectRigController(int controller, bool toggle) {
+    StudioDoc& d = *studio_;
+    StudioModel* m = StudioPoseModel();
+    if (!m || !m->rig) return;
+    if (controller < 0 || controller >= 13) {
+        controller = -1;
+    } else if (toggle) {
+        controller = (d.rigController == controller) ? -1 : controller;
+    }
+    d.rigController = controller;
+    const uint64_t row = controller >= 0 ? MakeRowId(RowKind::Rig, 0, (uint32_t)controller) : 0;
+    d.selectedRows.clear();
+    d.selection.clear();
+    if (controller >= 0) {
+        d.selectedRows.insert(row);
+        // select the controller's bone rows at the current frame (the union of its bones' keys)
+        const int frame = d.Frame();
+        for (uint64_t brow : StudioRigRowToBoneRows(row))
+            if (RowKindOf(brow) == RowKind::Bone) {
+                d.selectedBones.insert((int)RowIndexOf(brow));
+                RowKind kind; std::string name;
+                if (StudioTrackOfRow(brow, kind, name) && m->motion.bones.count(name)) {
+                    const auto& keys = m->motion.bones.at(name);
+                    if (FindKey(keys, frame)) d.selection.insert({brow, frame});
+                }
+            }
+        d.rowAnchor = row;
+        d.collapsed.erase(MakeRowId(RowKind::Group, 0, 0));  // reveal the rig group
+        d.scrollRowId = row;
+        d.scrollToRow = 3;
+        d.inspectorTab = 1;
+    } else {
+        d.selectedBones.clear();
+        d.activeBone = -1;
+    }
+    d.rowsKey = ~0ull;
+}
+
 void App::StudioRegisterPose(bool allBones, const PoseLayer* layerBefore, const char* undoName) {
     StudioDoc& d = *studio_;
     StudioModel* m = StudioPoseModel();

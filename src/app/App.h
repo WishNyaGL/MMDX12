@@ -666,6 +666,7 @@ private:
     studio::StudioModel* StudioPoseModel();          // the selected model (pose editable: any kind)
     void StudioSelectBone(int bone, bool toggle);    // viewport pick / bone row click: selection sync (-1 clears)
     void StudioSelectMorph(int morph);               // morph slider / stopwatch: select the morph's timeline row and reveal it
+    void StudioSelectRigController(int controller, bool toggle);  // rig controller pick / rig row click: selection sync (0..12, -1 clears)
     std::vector<studio::PoseBone> StudioCurrentPose(const studio::StudioModel& m) const;  // effective anim values
     void StudioSetPose(const char* undoName, const studio::PoseLayer& before);  // push the selected model's layer edit
     // keys for the edited bones/morphs (all: every listed bone). layerBefore: the layer an undo restores (auto-key)
