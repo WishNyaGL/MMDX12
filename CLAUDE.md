@@ -16,6 +16,12 @@ progress.md is the session log. Read its latest entry first.
   Raster shaders use FXC (`*_5_1`), except the lit / floor scene PSOs (mmd.hlsl VSMain/PSMain, VSFloor/PSFloor): DXC
   `*_6_0` on SM 6.0 devices because FXC needs ~5.5 min for PSMain since the PBR branch (FXC stays their fallback; a PSO
   never mixes DXBC and DXIL). Slow cold compiles (> 1 s) log a `shader compile` line. Ray-query shaders use DXC (`*_6_5`, `-HV 2018` because common.hlsli uses vector ternaries that HLSL 2021 rejects). `dxcompiler.dll`/`dxil.dll` are copied from the Windows SDK.
+- Startup: `Renderer::Initialize` creates the passes' pipelines on one thread per logical processor, at most one per
+  pass (one DXC compiler per thread, `DescriptorHeap` Allocate / Free locked; `STARTUP renderer passes` log line), and
+  leaves the offline GI renderer to a background thread (`STARTUP offline renderer (background)`). `OfflineSupported`
+  counts it as available meanwhile, `OfflineReady` says it is done: a pending GI job and the studio's GI viewport wait
+  for that, `BeginOffline` and `Shutdown` block on it (`EnsureOffline`). Re-creating the pipelines for another MSAA
+  count (`Render`) stays serial: a pass may then release resources through the context (`WaitForGpu`, `DeferRelease`).
 - Upscaler runtime DLLs are git-ignored: run `tools/fetch_sdks.ps1` once (DLSS 310.9.16, XeSS 3.0.2, FidelityFX 2.3.0), then rebuild. Missing DLLs only disable that upscaler.
 - Render path / upscaler from the CLI: `--render raster|rt|pt`, `--studio-renderer raster|rt|pt|gi` (studio viewport: lit single view), `--upscaler none|dlss|fsr|xess`, `--upscale-quality native|quality|balanced|performance|ultra`,
   `--dlss-model auto|cnn|transformer|transformer2`, `--dlss-rr 0|1` (DLSS Ray Reconstruction on the RayTraced / PathTraced

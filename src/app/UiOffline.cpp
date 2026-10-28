@@ -636,6 +636,13 @@ void App::RecordOfflineFrame(ID3D12GraphicsCommandList* cmd) {
         renderer_.RenderOffline(cmd);
         return;
     }
+    // The offline GI renderer may still be in its background creation (Renderer::Initialize: seconds after a start,
+    // longer with a cold shader cache): the job stays pending ("장면 준비 중…") instead of blocking the window in
+    // BeginOffline.
+    if (renderer_.OfflineSupported() && !renderer_.OfflineReady()) {
+        renderer_.ClearBackBuffer(cmd);
+        return;
+    }
     const bool probe = offline_.mode == OfflineMode::Probe;
     const bool video = offline_.mode == OfflineMode::Video || probe;
     playTime_ = offline_.startSeconds + (video ? (double)offline_.frame / offline_.video.fps : 0.0);
@@ -715,7 +722,9 @@ bool App::StudioGiActive() const {
     if ((ViewShading)std::clamp(studio_->shading, 0, 2) != ViewShading::Lit) return false;
     if (studio_->viewLayout != 0) return false;
     if (std::clamp(settings_.studioRenderer, 0, 3) != 3) return false;
-    return renderer_.OfflineSupported();
+    // ready, not only supported: while the offline renderer is still created in the background the viewport stays on
+    // the real-time renderer (BeginOffline would block the window until then)
+    return renderer_.OfflineReady();
 }
 
 void App::ResetStudioGi() {

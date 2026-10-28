@@ -21,6 +21,19 @@ bool CheckHr(HRESULT hr, const char* what) {
 
 // ---- DescriptorHeap ---------------------------------------------------------
 
+DescriptorHeap& DescriptorHeap::operator=(DescriptorHeap&& other) noexcept {
+    if (this != &other) {
+        heap_ = std::move(other.heap_);
+        free_ = std::move(other.free_);
+        capacity_ = other.capacity_;
+        used_ = other.used_;
+        increment_ = other.increment_;
+        cpuStart_ = other.cpuStart_;
+        gpuStart_ = other.gpuStart_;
+    }
+    return *this;
+}
+
 bool DescriptorHeap::Create(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type, uint32_t capacity, bool shaderVisible) {
     if (!device) return false;
     D3D12_DESCRIPTOR_HEAP_DESC desc{};
@@ -39,6 +52,7 @@ bool DescriptorHeap::Create(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE typ
 
 uint32_t DescriptorHeap::Allocate(uint32_t count) {
     if (count == 0 || count > capacity_) return kInvalid;
+    std::lock_guard<std::mutex> lock(mutex_);
     // First range with count <= range.count -> take from its front.
     for (size_t i = 0; i < free_.size(); ++i) {
         if (count <= free_[i].count) {
@@ -55,6 +69,7 @@ uint32_t DescriptorHeap::Allocate(uint32_t count) {
 
 void DescriptorHeap::Free(uint32_t index, uint32_t count) {
     if (index == kInvalid || count == 0) return;
+    std::lock_guard<std::mutex> lock(mutex_);
     used_ = used_ >= count ? used_ - count : 0;
     Range r{index, count};
     auto it = std::lower_bound(free_.begin(), free_.end(), r,

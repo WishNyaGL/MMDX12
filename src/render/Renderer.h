@@ -16,8 +16,10 @@
 #include "render/SkyMap.h"
 #include "render/StageScreens.h"
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -147,8 +149,16 @@ public:
     bool RayReconstructionAvailable() const;
 
     // ---- offline GI renderer (render/OfflineRenderer.h) ------------------------------------
-    // Available with ray tracing when the offline pipelines compiled.
-    bool OfflineSupported() const { return offline_ != nullptr; }
+    // Available with ray tracing when the offline pipelines compiled. Only GI renders use it, so Initialize leaves its
+    // creation to a background thread: until that is done it counts as available, and BeginOffline waits for it.
+    bool OfflineSupported() const { return offline_ != nullptr || (offlineInit_.valid() && !offlineInitFailed_); }
+    // Created and usable now. The UI waits for this (a pending job, the studio's GI viewport) instead of blocking the
+    // window in BeginOffline while the background creation still runs.
+    bool OfflineReady() const {
+        return offline_ != nullptr ||
+               (offlineInit_.valid() && offlineInit_.wait_for(std::chrono::seconds(0)) == std::future_status::ready &&
+                !offlineInitFailed_);
+    }
     // Starts an offline image of `view` (the pose uploaded for ctx.FrameNumber()) and records its
     // first share of work into `cmd` (from ctx.BeginFrame()), then presents the preview: call it
     // instead of Render() for that frame (same back-buffer contract for the UI). Waits for the GPU
@@ -169,6 +179,7 @@ private:
     void EnsureTargets(uint32_t width, uint32_t height, uint32_t outWidth, uint32_t outHeight, uint32_t msaa);
     void EnsureShadowMap(uint32_t size);
     void EnsurePointShadowMap(const LightParams& light, bool offscreen);
+    void EnsureOffline();   // takes over the background-created offline renderer, waiting while it is created
     void ReleaseTargets();
     void CreateBuiltinTextures();
     void ReadGpuTimer();
@@ -292,6 +303,10 @@ private:
     std::unique_ptr<MmeRuntime> mme_;
     std::unique_ptr<MmeSkin> mmeSkin_;
     std::unique_ptr<OfflineRenderer> offline_;   // null without ray tracing / offline pipelines
+    // The background creation of offline_ (Initialize; EnsureOffline takes it over on the main thread). Declared after
+    // the flag it sets: its destructor waits for the task.
+    std::atomic<bool> offlineInitFailed_{false};
+    std::future<std::unique_ptr<OfflineRenderer>> offlineInit_;
     std::unique_ptr<ScreenVideo> screenVideo_;   // background AVI (背景AVI) feeding screen.bmp materials
     std::unique_ptr<StageScreens> stageScreens_;  // S5: MMDX stage screens (image / video / camera feed)
     bool offlinePresent_ = true;

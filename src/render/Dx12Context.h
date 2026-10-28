@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -16,10 +17,15 @@ using Microsoft::WRL::ComPtr;
 struct ImageRGBA8;
 struct CompressedImage;
 
-// Fixed-capacity descriptor heap with a first-fit free-list allocator of contiguous ranges.
+// Fixed-capacity descriptor heap with a first-fit free-list allocator of contiguous ranges. Allocate / Free are
+// thread-safe: the renderer creates its pipelines on several threads at startup (Renderer::Initialize).
 class DescriptorHeap {
 public:
     static constexpr uint32_t kInvalid = 0xFFFFFFFFu;
+    DescriptorHeap() = default;
+    // For a reset such as MmeRuntime's `samplerHeap_ = DescriptorHeap{}`: takes the heap and its free list (each
+    // object keeps its own lock). Never while either heap is in use.
+    DescriptorHeap& operator=(DescriptorHeap&& other) noexcept;
     bool Create(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type, uint32_t capacity, bool shaderVisible);
     uint32_t Allocate(uint32_t count = 1);          // kInvalid when full
     void Free(uint32_t index, uint32_t count = 1);  // merges adjacent free ranges
@@ -27,7 +33,10 @@ public:
     D3D12_GPU_DESCRIPTOR_HANDLE Gpu(uint32_t index) const;  // only for shader-visible heaps
     ID3D12DescriptorHeap* Heap() const { return heap_.Get(); }
     uint32_t Capacity() const { return capacity_; }
-    uint32_t Used() const { return used_; }
+    uint32_t Used() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return used_;
+    }
     // Inverse of Cpu(): index of a CPU handle inside this heap.
     uint32_t IndexOf(D3D12_CPU_DESCRIPTOR_HANDLE h) const;
 
@@ -38,6 +47,7 @@ private:
     uint32_t capacity_ = 0, used_ = 0, increment_ = 0;
     D3D12_CPU_DESCRIPTOR_HANDLE cpuStart_{};
     D3D12_GPU_DESCRIPTOR_HANDLE gpuStart_{};
+    mutable std::mutex mutex_;   // free_ and used_
 };
 
 struct DeviceCaps {

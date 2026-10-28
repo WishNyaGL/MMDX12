@@ -10,8 +10,11 @@
 #include "core/TextUtil.h"
 #include <directx/d3dx12.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <future>
+#include <thread>
 
 namespace mmdx {
 
@@ -73,6 +76,10 @@ float Halton(uint32_t index, uint32_t base) {
         index /= base;
     }
     return r;
+}
+
+double MsSince(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
 ComPtr<ID3D12Resource> CreateMappedUpload(ID3D12Device* device, uint64_t bytes, uint8_t** mapped, const wchar_t* name) {
@@ -168,13 +175,6 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     screenVideo_ = std::make_unique<ScreenVideo>();
     stageScreens_ = std::make_unique<StageScreens>();
     stageScreens_->Init(shaderDir);
-    if (rtSupported_) {
-        offline_ = std::make_unique<OfflineRenderer>();
-        if (!offline_->Initialize(ctx, shaderDir)) {
-            LOG_WARN("offline renderer unavailable");
-            offline_.reset();
-        }
-    }
 
     CreateBuiltinTextures();
     if (!transient_.Create(ctx, kCbSlots)) return false;
@@ -219,31 +219,43 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
     passes_.push_back(std::make_unique<BackdropPass>());
     passes_.push_back(std::make_unique<PresentPass>());
 
-    const uint32_t expectedShaders = GetExpectedShaderCount();
     if (progress) {
         progress->fraction.store(std::max(progress->fraction.load(), 0.15f));
         progress->SetStatus(GetColdShaderCount() > 0 ? Tr("셰이더 컴파일 중 (첫 실행은 시간이 걸립니다)") : Tr("셰이더 로딩 중"));
     }
 
+    // The passes create their pipelines on several threads (the splash follows the shader counters, which App::Run
+    // polls meanwhile). Here a pass only compiles shaders and creates objects of its own; the shader cache, the
+    // compilers and the descriptor heaps are thread-safe. A re-creation for another MSAA count (Render) stays serial:
+    // there a pass may also release resources through the context (WaitForGpu / DeferRelease).
     uint32_t msaa = SupportedMsaa(ctx, settings_.msaaSamples);
-    for (size_t p = 0; p < passes_.size(); ++p) {
-        auto& pass = passes_[p];
-        if (progress) {
-            uint32_t compiled = GetCompiledShaderCount();
-            float sFrac = expectedShaders > 0 ? std::clamp((float)compiled / (float)expectedShaders, 0.0f, 1.0f) : 0.0f;
-            float pFrac = (float)p / (float)passes_.size();
-            float f = 0.15f + 0.75f * std::max(sFrac, pFrac);
-            if (f > progress->fraction.load()) progress->fraction.store(f);
-            if (GetColdShaderCount() > 0) {
-                progress->SetStatus(Tr("셰이더 컴파일 중 (첫 실행은 시간이 걸립니다)"));
-            } else {
-                progress->SetStatus(Tr("셰이더 로딩 중"));
+    {
+        const auto start = std::chrono::steady_clock::now();
+        std::vector<double> passMs(passes_.size(), 0.0);
+        std::atomic<size_t> next{0};
+        std::atomic<bool> failed{false};
+        const auto work = [&] {
+            for (size_t p; !failed && (p = next.fetch_add(1)) < passes_.size();) {
+                const auto t0 = std::chrono::steady_clock::now();
+                if (!passes_[p]->CreatePipelines(ctx, shaderDir, msaa)) {
+                    LOG_ERROR("Renderer: failed to create pipelines for pass '%s'", passes_[p]->Name());
+                    failed = true;
+                }
+                passMs[p] = MsSince(t0);
             }
-        }
-        if (!pass->CreatePipelines(ctx, shaderDir, msaa)) {
-            LOG_ERROR("Renderer: failed to create pipelines for pass '%s'", pass->Name());
-            return false;
-        }
+        };
+        // One thread per logical processor (0 = unknown: serial), at most one per pass. The scene pass creates its
+        // shaders and PSOs one after another and is by far the longest one: it bounds the time, not the thread count.
+        const unsigned threads =
+            (unsigned)std::min<size_t>(std::max(std::thread::hardware_concurrency(), 1u), passes_.size());
+        std::vector<std::thread> pool;
+        for (unsigned i = 1; i < threads; ++i) pool.emplace_back(work);
+        work();
+        for (std::thread& t : pool) t.join();
+        if (failed) return false;
+        const size_t slowest = (size_t)(std::max_element(passMs.begin(), passMs.end()) - passMs.begin());
+        LOG_INFO("STARTUP renderer passes: %.0f ms (%zu passes, %u threads; longest %s %.0f ms)", MsSince(start),
+                 passes_.size(), threads, passes_[slowest]->Name(), passMs[slowest]);
     }
     pipelineMsaa_ = msaa;
 
@@ -461,6 +473,23 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
         return false;
     ctx.Queue()->GetTimestampFrequency(&timestampFrequency_);
     SaveExpectedShaderCount(GetCompiledShaderCount());
+    // The offline GI renderer is created in the background once the rest is ready: only GI renders need it, and its
+    // pipelines are the slowest to create (offline_gi.hlsl). Its Initialize only creates objects (device, descriptor
+    // heaps, its own upload batch); it records nothing into a frame and never waits on the frame fence, so the frames
+    // go on meanwhile. OfflineReady says when it is done; BeginOffline / Shutdown wait for it (EnsureOffline), and a
+    // failed one is dropped there.
+    if (rtSupported_) {
+        offlineInit_ = std::async(std::launch::async, [this, &ctx, shaderDir] {
+            const auto t0 = std::chrono::steady_clock::now();
+            auto offline = std::make_unique<OfflineRenderer>();
+            if (!offline->Initialize(ctx, shaderDir)) {
+                LOG_WARN("offline renderer unavailable");
+                offlineInitFailed_ = true;
+            }
+            LOG_INFO("STARTUP offline renderer (background): %.0f ms", MsSince(t0));
+            return offline;
+        });
+    }
     if (progress) {
         progress->fraction.store(1.0f);
         progress->SetStatus(Tr("완료"));
@@ -2679,6 +2708,7 @@ void Renderer::SetColorLut(const ImageRGBA8* strip) {
 void Renderer::Shutdown() {
     if (!ctx_) return;
     ctx_->WaitForGpu();
+    EnsureOffline();   // a background creation still running finishes before anything goes away
     if (offline_) {
         offline_->Shutdown();
         offline_.reset();
