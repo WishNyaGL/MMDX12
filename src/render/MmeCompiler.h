@@ -6,6 +6,8 @@
 // from effect-load worker threads; cache writes go through a tmp file + rename. See docs/mme/mme_design.md §2.2.
 #include "asset/MmeEffect.h"
 
+// DirectX-Headers' d3dcommon.h first: an older SDK's (10.0.22621) shares its include guard but lacks the types d3dx12 needs
+#include <directx/d3dcommon.h>
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
