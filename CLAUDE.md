@@ -145,7 +145,8 @@ progress.md is the session log. Read its latest entry first.
     `videorange <all|start end>` sets the lobby video render dialog's range (timecodes or seconds),
     `studioexport`/`studioimport <vmd>` and `studiovpdexport`/`studiovpdimport <vpd>` skip the file dialogs; pose editing:
     `studiobone <name>` clicks that bone's joint, `studiogizmo <x|y|z|yz|zx|xy|rx|ry|rz> <dx> <dy> [steps]` drags a gizmo
-    part; `studiostate` also logs `STUDIOPOSE`, `STUDIOPROJ` (including `aspect=`) and one `STUDIOMODEL` line per model). Projects/models
+    part; arm rest-pose correction is `studiorestpose <deg> [both|left|right]` (selected model, one undo step) and
+    `studiorestposeanswer <accept|keep> [deg]` (presses the import modal's button); `studiostate` also logs `STUDIOPOSE`, `STUDIOPROJ` (including `aspect=`) and one `STUDIOMODEL` line per model). Projects/models
     without dialogs: `studionew`, `studiosave`/`studioopen <file>`, `studioautosave`, `studioadd <character|stage|prop> <file>`,
     `studioaddlib <character|stage> <substr>`, `studiosong <substr>`, `studioaudio <file|none> [offset]`,
     `studiobgvideo <file|none>`, `studiobgvideoopt <offsetSeconds> <asBackground 0|1>`,
@@ -175,6 +176,7 @@ progress.md is the session log. Read its latest entry first.
   - `pmm_probe <file.pmm> [--no-fuzz] [--fuzz-rounds N]`: PMM (MMD project) dump (models / per-track key counts /
     camera / accessories / audio / MME controllers) + a fuzz self test (truncate at every 1 KiB, random byte flips)
   - `rest_pose_test [model|dir...]`: T-pose -> A-pose self test (synthetic model: bones, weights, morphs, bodies, joints), then the arm angle of every PMX/PMD found
+  - `restpose_retarget_test`: studio arm rest-pose correction (T-pose motion on an A-pose rig: FK exactness, un-keyed arms, detection, real library files)
   - `studio_edit_test`: Studio key-edit core (move/insert/delete frames, undo byte budget, 100k-key timings)
   - `studio_gizmo_test` / `studio_pose_test`: gizmo projection/hit/drag math and bone overlay; mirror names/poses, VPD pose ops
   - `studio_project_test`: .mmdxproj save/load round trip, VMD naming/cleanup, atomic writes, prop offset matrix
@@ -504,6 +506,11 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     clears the layer in one `CompositeCommand`. Bone values are VMD-local (parent frame); the gizmo converts world deltas
     with the parent's world rotation. Bones listed in two display frames select keys through `CanonicalRow`.
   - `asset/ModelImport.h` and `render/GpuModel.h` both declare `mmdx::ModelRole`: never include both in one .cpp.
+  - Arm rest-pose correction (`studio/RestPoseRetarget.*`, `app/UiStudioRestPose.cpp`): T-pose-authored VMDs (game rips)
+    on an MMD A-pose model. Detection = the median angle of the 腕 keys (0 = horizontal, 90 = down) >= 78 deg over >= 8
+    keys; the retarget rotates 腕 by R (A rest -> the source arm direction) and each subtree bone by R x key x R^-1 (with
+    translations rotated by R^-1). The VMD import asks "보정하고 불러오기 / 그대로 불러오기" before the merge; the model
+    menu's "팔 레스트 포즈 보정…" runs it on the whole motion. Studio-only (play mode is untouched).
   - Camera/light/self-shadow (`app/UiStudioCamera.cpp`): `StudioDoc::camera` holds the camera, light (`LightKf`, linear) and
     self-shadow (`ShadowKf`, stepped, VMD distance = 0.1 - UI*1e-5) tracks as timeline rows `RowKind::Camera/Light/Shadow`.
     The lighting source is `StudioDoc::lighting` (`studio/LightRig.h`, a 3-way choice saved in the project, timeline rows

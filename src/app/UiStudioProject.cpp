@@ -1462,6 +1462,12 @@ void App::DrawStudioModelMenu(int index) {
                     StudioSelectModel(index);
                     StudioOpenBakeDialog();
                 }
+                if (m.kind == ModelKind::Character &&
+                    MenuItemChip("##mrestpose", Tr("팔 레스트 포즈 보정…"), icon::Person)) {
+                    ImGui::CloseCurrentPopup();
+                    StudioSelectModel(index);
+                    StudioOpenRestPoseDialog();
+                }
             }
             if (MenuItemChip("##mexplore", Tr("탐색기에서 보기"), icon::FolderOpen) && !m.path.empty()) {
                 const std::wstring args = L"/select,\"" + m.path.lexically_normal().wstring() + L"\"";

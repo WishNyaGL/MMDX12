@@ -17,6 +17,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "studio/SceneLight.h"
+#include "studio/RestPoseRetarget.h"
 #include "studio/StudioDoc.h"
 
 namespace mmdx {
@@ -129,6 +130,10 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                      (int)d.physics, d.history.UndoName().c_str(), d.history.RedoName().c_str(), d.history.Count(),
                      d.history.Bytes() / 1048576.0, d.view.scrollFrame, d.view.pxPerFrame,
                      GImGui->HoveredWindow ? GImGui->HoveredWindow->Name : "-", (unsigned)GImGui->ActiveId);
+            LOG_INFO("STUDIORESTPOSE open=%d auto=%d model=%d median=%.1f", (int)studioRestPoseOpen_,
+                     (int)studioRestPoseAuto_,
+                     studioRestPoseModel_ < 0 ? -1 : d.IndexOfUid((uint32_t)studioRestPoseModel_),
+                     studioRestPoseGuess_.medianDeg);
             LOG_INFO("STUDIOFOCUS keys=%zu distance=%.2f aperture=%.2f subject=%u subjectName=%s dof=%d", d.camera.focus.size(),
                      studioFocusShown_, studioFocusAperture_, studioFocusSubject_,
                      StudioModelLabel(studioFocusSubject_).c_str(), (int)settings_.dof);
@@ -249,13 +254,13 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 }
                 const int parent = mm.attach.parent >= 0 ? d.IndexOfUid((uint32_t)mm.attach.parent) : -1;
                 LOG_INFO("STUDIOMODEL %zu kind=%s name=%s visible=%d keys=%zu parent=%d bone=%s t=(%.3f,%.3f,%.3f) "
-                         "r=(%.2f,%.2f,%.2f) s=%.3f pos=(%.3f,%.3f,%.3f) material=%s emd=%s file=%s",
+                         "r=(%.2f,%.2f,%.2f) s=%.3f pos=(%.3f,%.3f,%.3f) material=%s emd=%s file=%s armGuess=%.1f",
                          i, studio::ModelKindName(mm.kind), mm.name.c_str(), (int)mm.visible, keys, parent,
                          mm.attach.bone.empty() ? "-" : mm.attach.bone.c_str(), mm.attach.translation.x,
                          mm.attach.translation.y, mm.attach.translation.z, mm.attach.rotationDeg.x,
                          mm.attach.rotationDeg.y, mm.attach.rotationDeg.z, mm.attach.scale, pos.x, pos.y, pos.z,
                          mm.material.ray ? "ray" : "default", mm.material.emd.empty() ? "-" : mm.material.emd.c_str(),
-                         PathToUtf8(mm.path.filename()).c_str());
+                         PathToUtf8(mm.path.filename()).c_str(), studio::GuessTPoseMotion(mm.motion).medianDeg);
                 if (mm.IsProp()) {  // the accessory key track: the evaluated placement at the playhead
                     const float af = (float)(d.time * kMmdFps);
                     const studio::AccessoryKf ak =
@@ -652,7 +657,11 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
         if (!files.empty()) ApplyStudioDrop(std::move(files));
         else LOG_WARN("ui script: drop with no files");
     } else if (cmd == "studioimport") {
-        if (studio_ && !args.empty()) StudioImportVmdFrom(Utf8ToPath(args[0]));
+        if (studio_ && !args.empty()) {  // the path may contain spaces
+            std::string path = args[0];
+            for (size_t i = 1; i < args.size(); ++i) path += " " + args[i];
+            StudioImportVmdFrom(Utf8ToPath(path));
+        }
     } else if (cmd == "studioexport") {
         if (studio_ && !args.empty()) StudioExportVmdTo(Utf8ToPath(args[0]));
     } else if (cmd == "studionew") {
@@ -803,6 +812,29 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                 if (outError) *outError = "Bake could not start";
                 return false;
             }
+        }
+    } else if (cmd == "studiorestpose") {  // studiorestpose <deg> [both|left|right]: selected model's arm keys
+        if (studio_) {
+            const float deg = args.empty() ? 0.0f : (float)std::atof(args[0].c_str());
+            const std::string side = args.size() > 1 ? ToLowerAscii(args[1]) : "both";
+            if (!StudioApplyRestPose(deg, side != "right", side != "left")) {
+                LOG_WARN("ui script: studiorestpose applied nothing");
+                if (outError) *outError = "Nothing to correct";
+                return false;
+            }
+        }
+    } else if (cmd == "studiorestposeanswer") {  // studiorestposeanswer <accept|keep> [deg]: the auto modal's button
+        if (studio_ && studioRestPoseOpen_ && studioRestPoseAuto_) {
+            if (!args.empty() && args[0] != "accept" && args[0] != "keep") {
+                LOG_WARN("ui script: studiorestposeanswer expects accept|keep");
+            } else {
+                if (args.size() > 1) studioRestPoseSourceDeg_ = (float)std::atof(args[1].c_str());
+                studioRestPoseAnswer_ = args.empty() || args[0] == "accept" ? 1 : 2;
+            }
+        } else {
+            LOG_WARN("ui script: studiorestposeanswer without an open auto modal");
+            if (outError) *outError = "No rest-pose modal is open";
+            return false;
         }
     } else if (cmd == "studiomaterial") {  // studiomaterial <default|ray> [emd path] (selected studio model)
         studio::StudioModel* m = studio_ ? studio_->Selected() : nullptr;

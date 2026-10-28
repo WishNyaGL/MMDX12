@@ -33,6 +33,7 @@
 #include "studio/AutoIk.h"
 #include "studio/Gizmo.h"
 #include "studio/PhysicsBake.h"
+#include "studio/RestPoseRetarget.h"
 #include "studio/StudioDoc.h"
 #include "studio/StudioFocus.h"
 #include <Windows.h>
@@ -523,6 +524,9 @@ private:
     void StudioRowKeyNav(uint64_t rowId, int dir);   // keynav clicked in row (-1, 1, 2)
     void StudioImportVmd();                                   // open dialog, then StudioImportVmdFrom
     void StudioImportVmdFrom(const std::filesystem::path& path);  // merge into the selected model (camera VMDs: camera)
+    // The VMD import's tail (clear selection, refresh rows, "VMD를 불러왔어요" toast): shared with the arm
+    // rest-pose dialog, which merges the pending motion when the import asked for a correction first.
+    void StudioFinishVmdImport(const std::filesystem::path& path);
     void StudioExportVmd();                                   // save dialog, then StudioExportVmdTo
     bool StudioExportVmdTo(const std::filesystem::path& path);  // selected model's motion (or the camera)
     bool StudioGiActive() const;   // the GI preview draws the studio viewport this frame
@@ -822,6 +826,22 @@ private:
     bool studioBakeDialogOpen_ = false;
     int studioBakeOptStart_ = 0, studioBakeOptEnd_ = 0, studioBakeOptStep_ = 1;
     bool studioBakeOptSelectedOnly_ = false, studioBakeOptTurnOff_ = true;
+    // --- arm rest-pose correction (UiStudioRestPose.cpp): T-pose-authored VMDs onto an A-pose model
+    void StudioOpenRestPoseDialog();          // model menu / ribbon: manual correction of the selected character's motion
+    void DrawStudioRestPoseDialog();
+    bool StudioApplyRestPose(float sourceArmDeg, bool left, bool right);  // manual path, one undo step; script too
+    // The modal's primary / secondary button: auto mode merges the pending motion (retargeted when `accept`),
+    // manual mode applies the current settings when `accept`. Closes the modal; false when it was not open.
+    bool StudioRestPoseAnswer(bool accept);
+    bool studioRestPoseOpen_ = false;
+    bool studioRestPoseAuto_ = false;         // opened by the VMD import detection (pending motion below)
+    float studioRestPoseSourceDeg_ = 0.0f;
+    bool studioRestPoseSide_[2] = {true, true};
+    studio::ArmRestGuess studioRestPoseGuess_;
+    studio::MotionData studioRestPosePending_; // auto mode: the imported (canonicalised) motion not merged yet
+    std::filesystem::path studioRestPosePendingPath_;
+    int studioRestPoseModel_ = -1;
+    int studioRestPoseAnswer_ = 0;            // ui-script answer pending: 1 = primary, 2 = secondary
     void DrawStudioPropPanel(float w);                // inspector: prop parent / bone / offset
     void DrawStudioUnsavedPrompt();
     void DrawStudioProjectMenu();                     // top bar file menu (new / open / recent / save as)
@@ -843,7 +863,8 @@ private:
                            const char* idPrefix);
     void DrawStudioHelp();                            // shortcut overlay (? key / top bar button)
     bool StudioModal() const { return videoDialogOpen_ || studioHelpOpen_ || studioLeaveConfirm_ || studioLightPresetPending_ >= 0 ||
-                                       studioStopwatchOff_ || studioBakeDialogOpen_ || studioBakeRunning_; }
+                                       studioStopwatchOff_ || studioBakeDialogOpen_ || studioBakeRunning_ ||
+                                       studioRestPoseOpen_; }
 
     // --- scripted UI input for tests (UiScript.cpp) and MCP
     void PumpUiScript();  // before ImGui::NewFrame: feeds the events due at framesInScene_

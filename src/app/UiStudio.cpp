@@ -14,6 +14,7 @@
 #include "app/Icons.h"
 #include "app/Lighting.h"
 #include "app/UiKit.h"
+#include "asset/RestPose.h"
 #include "core/I18n.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
@@ -21,6 +22,7 @@
 #include "imgui_internal.h"
 #include "render/MmeSemantics.h"
 #include "studio/FileDialog.h"
+#include "studio/RestPoseRetarget.h"
 #include "studio/StudioPose.h"
 #include "studio/UiBezier.h"
 
@@ -4260,10 +4262,33 @@ void App::StudioImportVmdFrom(const std::filesystem::path& path) {
         in.light.clear();
         in.shadow.clear();
         in.CanonicalizeNames(*m->pmx);
+        // Arm rest-pose correction: a T-pose-authored motion onto an A-pose model asks before the merge.
+        if (m->kind == ModelKind::Character) {
+            const ArmRestGuess guess = GuessTPoseMotion(in);
+            const ArmRest rest = MeasureArmRest(*m->pmx);
+            if (guess.likely && rest.valid && rest.deg[0] >= 25.0f && rest.deg[1] >= 25.0f) {
+                studioRestPosePending_ = std::move(in);
+                studioRestPosePendingPath_ = path;
+                studioRestPoseGuess_ = guess;
+                studioRestPoseModel_ = (int)m->uid;
+                studioRestPoseSourceDeg_ = 0.0f;
+                studioRestPoseSide_[0] = studioRestPoseSide_[1] = true;
+                studioRestPoseAuto_ = true;
+                studioRestPoseOpen_ = true;
+                LOG_INFO("studio: VMD looks T-pose authored (median %.1f deg, %d keys): asking before the merge",
+                         guess.medianDeg, guess.samples);
+                return;
+            }
+        }
         MotionData after = m->motion;
         after.Merge(in);
         d.history.Push(std::make_unique<MotionSwapCommand>(d, d.selectedModel, Tr("모션 VMD 불러오기"), m->motion, std::move(after)));
     }
+    StudioFinishVmdImport(path);
+}
+
+void App::StudioFinishVmdImport(const std::filesystem::path& path) {
+    StudioDoc& d = *studio_;
     d.selection.clear();
     d.rowsKey = ~0ull;
     toast_ = {Tr("VMD를 불러왔어요"), PathToUtf8(path.filename()), {}, false, timeSeconds_ + 4.0};
@@ -4430,6 +4455,7 @@ void App::DrawStudio() {
     DrawStudioLightPresetConfirm();
     DrawStudioStopwatchConfirm();   // stopwatch off: "키프레임을 모두 지웁니다"
     DrawStudioBakeDialog();    // P2.2: the physics bake options / progress modal
+    DrawStudioRestPoseDialog();  // T-pose-authored VMDs: the arm rest-pose correction modal
     DrawVideoRenderDialog();   // the render dialog (top bar render menu); starting it leaves for Screen::Offline
     if (screen_ != Screen::Studio) return;
     DrawToast();
