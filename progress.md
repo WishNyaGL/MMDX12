@@ -2557,3 +2557,35 @@ word to deploy. Workers: opencode deepseek 4.1 1017 #low; Claude designed, revie
   the first make_update run picked it up as a new file. Delete it with the other leftovers before `make_update.py`
   (its orphan object stays local only, not uploaded).
 - NOT verified by hand: the RT mirror look in the packaged build (only the dev-build checks of 1bd15fb).
+
+## 2026-10-29 (2) - Studio: arm rest-pose correction, ribbon, UI audit; AMD device hang fixed (issue #8)
+- Arm rest-pose correction (6b84357): `library/motion/Romeo And Cinderella` (Project Sekai rips) is authored for a
+  T-pose rig, so A-pose models' arms sink into the body. `studio/RestPoseRetarget` detects it (median upper-arm angle
+  on the 38 deg reference >= 78; Romeo 82..87, every other library motion <= 73) and rewrites the arm keys (腕: R then
+  key; subtree: R key R^-1, translations by R^-1; un-keyed 腕 gets a frame-0 key), exact per `restpose_retarget_test`
+  (2e-6). VMD import asks before merging (modal "보정하고 불러오기 / 그대로 불러오기"); model menu / ribbon for manual.
+  Visual A/B at frames 0 / 900 / 2700 on Sour Miku White: natural poses after correction. Play mode untouched.
+- Studio ribbon (87d48e0) replaces the top bar (studio only): header row + tool row of groups per tab
+  (홈 / 애니메이션 / 카메라 / 조명 / 렌더 / 보기), Ctrl+F1 fold, tab + fold in the ini, `studioribbon` script command.
+  Worker built the structure; review fixed an early return inside the tool-row child (ImGui stack imbalance on
+  new / open / recent: now deferred `post`), replaced an invented 3-way "light source" with VMD 연동 + presets,
+  de-duplicated icons. Design (Claude, impeccable + DESIGN.md "Studio ribbon"): ink labels / ink2 icons, carets on
+  popup buttons, separators between groups only, one sliding tab underline.
+- UI audit (af5c1a9), each claim checked first: ink3 contrast 3.65 / 4.39 -> 5.05 / 4.95 (token change, app-wide),
+  duplicate panel captions removed, dock window-menu triangle off, bone pick switches the inspector to 본 and scrolls,
+  light delete at the bottom, camera rows named 가이드 / 화면 비율, 물리 시뮬레이션 instead of 물리 끄기, viewport
+  renderer moved from the transport into the viewport overlay, studio toasts below the overlay row and click-through
+  (a toast over the viewport blocked bone picks). Not changed (judged fine): auto-key switches next to key buttons, the
+  camera group's inline add buttons. ja / zh strings by a worker.
+- Issue #8 (37f2a73, pushed): AMD RX 6650 XT device hung with MMDX stages + volumetric. Reproduced on this laptop's AMD
+  iGPU (`MMDX12_ADAPTER=AMD`, driver 32.0.21045.16010). Bisected: froxel only, then the light loop, then `GoboFactor`.
+  Cause: sentinel-guarded bindless index (`gGoboParams.x = -1`, early return) whose descriptor fetch the AMD compiler
+  hoists above the branch -> index 0xFFFFFFFF outside the heap. Fix: `SafeSrv` / `SafeSrvU` (common.hlsli) on every
+  such site (antigravity static audit found ~15). Also fixed: feeds / mirrors drew the sky with the MSAA PSO into 1x
+  targets. Verified AMD arena_live / practice_room / color_cove + NVIDIA debug layer 0 errors. Diagnostics kept:
+  `--debug` logs D3D12 messages, `MMDX12_GBV=1`, `MMDX12_ADAPTER=<substring>`. Issue commented twice (progress, cause).
+- Mistakes: launched a diagnostic window while the ribbon worker needed the app (the worker killed it; user: don't fight
+  the worker); `git checkout -- .` in the diag worktree wiped the sky fix / env switches (re-applied on master);
+  scripted clicks used pre-ribbon coordinates (the ribbon is 64 px taller) and opened the audio menu.
+- NOT verified: `neon_plaza` on AMD (not installed here); the fix on the reporter's RX 6650 XT; ribbon at high DPI.
+- Leftover: `.worktrees/hang` folder could not be deleted (a process holds it); branch already deleted.
