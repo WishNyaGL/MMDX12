@@ -151,7 +151,9 @@ progress.md is the session log. Read its latest entry first.
     `studioaddlib <character|stage> <substr>`, `studiosong <substr>`, `studioaudio <file|none> [offset]`,
     `studiobgvideo <file|none>`, `studiobgvideoopt <offsetSeconds> <asBackground 0|1>`,
     `studioselect`/`studioremove <index>`, `studioreplace <index> <file>` / `studioreplacelib <index> <substr>` (swap a model's file), `studiorename <text>`, `studiomaterial <default|ray> [emd path]` (PBR material source of the selected model), `studioattach <parent|-1> <bone|-> tx ty tz rx ry rz s`,
-    `studioaspect <w:h>` (frame aspect preset, e.g. `9:16`, `16:9`, `2.39:1`), `studiorenderer <raster|rt|pt|gi>` (viewport renderer).
+    `studioaspect <w:h>` (frame aspect preset, e.g. `9:16`, `16:9`, `2.39:1`), `studiorenderer <raster|rt|pt|gi>` (viewport renderer),
+    `studioribbon <home|anim|camera|light|render|view>` / `studioribbon collapse 0|1` (ribbon tab / fold;
+    `studiostate` logs a `STUDIORIBBON tab=<id> collapsed=<0|1>` line).
     Drag and drop: `drop <file>[|<file>...]` injects a drop path list (models → characters/props, `.vmd`/`.vpd` onto
     the selected / single new model, audio, `.mmdxproj`; `|` separates paths so they may contain spaces).
     Focus: `studiofocus <frame> <auto|target|manual> [model index|distance] [aperture] [transition] [head|upper|center]`
@@ -571,7 +573,10 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
     the frame field; screen effects are a dock tab next to the properties (`###studio_effects`,
     `DrawStudioEffectsPanel`; the top-bar sparkle focuses it); camera-target rows carry a type tint
     (`TimelineRow::tint`); drag fields type on a plain click (`io.ConfigDragClickToInputText`).
-  - Panels (`App::DrawStudio`): ImGui docking (the vendored imgui is the docking branch). A fixed top-bar window, a transparent
+  - Panels (`App::DrawStudio`): ImGui docking (the vendored imgui is the docking branch). A fixed ribbon window
+    (`app/UiStudioRibbon.cpp`: a 44 px header row — back, project, tabs 홈 · 애니메이션 · 카메라 · 조명 · 렌더 · 보기,
+    undo / redo, theme, help, save — over a 76 px tool row of grouped buttons per tab; Ctrl+F1 or the caret folds the
+    tool row, `studioRibbonTab` / `studioRibbonCollapsed` in the ini), a transparent
     dock-space host and one dockable window per panel (`###studio_outliner/inspector/timeline/viewport`); each panel function
     still draws in screen coordinates and gets its window's content rect. The viewport window is transparent and its content
     rect is `RenderSettings::viewport*`. Default arrangement = `BuildDefaultStudioDock` (DockBuilder); the layout persists in

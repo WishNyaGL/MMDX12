@@ -147,36 +147,12 @@ DirectX::XMFLOAT3 App::StudioPerformerCenter() const {
     return {};
 }
 
-void App::DrawStudioRenderMenu() {
-    using namespace ui;
-    ImGui::SetNextWindowSize(ImVec2(Dp(320.0f), 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(12.0f), Dp(12.0f)));
-    if (ImGui::BeginPopup("##studiorender")) {
-        const StudioDoc& d = *studio_;
-        bool video = false, still = false;
-        double a = 0, b = 0;
-        StudioRenderRange(a, b);
-        const std::string range = d.HasRange() && !studioRenderWhole_
-                                      ? std::string(Tr("타임라인 범위")) + " " + std::to_string(d.view.rangeStart) + "–" +
-                                            std::to_string(d.view.rangeEnd)
-                                      : std::string(Tr("프로젝트 전체")) + " 0–" + std::to_string(d.EndFrame());
-        if (MenuItem("##rvideo", Tr("영상 렌더…"), icon::FilmStrip, range.c_str())) video = true;
-        Tooltip(Tr("타임라인 범위(없으면 전체)를 카메라 모션으로, 음원과 함께 MP4로 렌더링합니다"));
-        ImGui::BeginDisabled(!renderer_.OfflineSupported());
-        if (MenuItem("##rstill", Tr("고품질 스틸"), icon::Image, (std::string(Tr("현재 프레임")) + " " +
-                                                                      std::to_string(d.Frame())).c_str()))
-            still = true;
-        ImGui::EndDisabled();
-        Tooltip(renderer_.OfflineSupported() ? Tr("뷰포트에 보이는 장면을 오프라인 GI로 4K 사진으로 렌더링합니다")
-                                             : Tr("이 그래픽 카드에서는 오프라인 GI 렌더를 사용할 수 없습니다"));
-        if (video || still) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-        if (video) {
-            videoDialogOpen_ = true;
-        }
-        if (still) StartStudioRender(false);
-    }
-    ImGui::PopStyleVar();
+void App::StudioRenderVideo() {
+    videoDialogOpen_ = true;
+}
+
+void App::StudioRenderStill() {
+    StartStudioRender(false);
 }
 
 // The studio's "효과" panel (a tab next to the properties): real-time effects, colour LUT and the effect stack.

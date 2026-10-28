@@ -1067,7 +1067,7 @@ void App::StudioViewportLightHandles(bool hovered) {
         if (l.kind == LightKind::Sun) glyph = icon::Sun;
         else if (l.kind == LightKind::Spot) glyph = icon::Aperture;
         else if (l.kind == LightKind::Area) glyph = icon::Image;
-        else if (l.kind == LightKind::FogVolume) glyph = icon::Globe;
+        else if (l.kind == LightKind::FogVolume) glyph = icon::Drop;
         ui::Icon(dl, glyph, 12.0f, screenPos, glyphCol);
     }
 

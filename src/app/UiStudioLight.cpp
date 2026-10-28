@@ -173,6 +173,29 @@ void App::StudioDeleteLight(uint32_t uid) {
     d.rowsKey = ~0ull;
 }
 
+// The lighting source of the scene lights (the ribbon's 조명 tab): 0 VMD (the sun follows the camera VMD's light track),
+// 1 preset (the preset's own sun), 2 custom (hand-edited lights, the sun no longer linked). The studio has no stored
+// source field: the state is read off the sun, and every choice is one undo step like the inspector's VMD 연동 switch.
+void App::StudioSetLightSource(int source) {
+    if (!studio_) return;
+    StudioDoc& d = *studio_;
+    if (source == 1) {
+        // the inspector's own path: the confirmation modal, then one LightsCommand step
+        studioLightPresetPending_ = std::clamp(settings_.lighting, 0, 3);
+        return;
+    }
+    const bool link = source == 0;
+    SceneLight* sun = nullptr;
+    for (SceneLight& l : d.lights)
+        if (l.kind == studio::LightKind::Sun) { sun = &l; break; }
+    if (!sun || sun->vmdLink == link) return;
+    std::vector<SceneLight> before = d.lights;
+    sun->vmdLink = link;
+    d.history.Push(std::make_unique<LightsCommand>(d, Tr("조명 편집"), before, d.lights));
+    ++d.projectVersion;
+    d.rowsKey = ~0ull;
+}
+
 void App::StudioApplyLightPreset(int presetIndex) {
     if (!studio_) return;
     StudioDoc& d = *studio_;
@@ -294,10 +317,10 @@ void App::DrawStudioLightOutliner() {
         const char* sub = Tr("점광원");
         if (l.kind == LightKind::Sun) { glyph = icon::Sun; sub = Tr("태양"); }
         else if (l.kind == LightKind::Spot) { glyph = icon::Aperture; sub = Tr("스팟"); }
-        else if (l.kind == LightKind::Ambient) { glyph = icon::Globe; sub = Tr("환경광"); }
+        else if (l.kind == LightKind::Ambient) { glyph = icon::CircleHalf; sub = Tr("환경광"); }
         else if (l.kind == LightKind::Area) { glyph = icon::Image; sub = Tr("면광원"); }
-        else if (l.kind == LightKind::FogVolume) { glyph = icon::Globe; sub = Tr("안개 볼륨"); }
-        else if (l.kind == LightKind::Sky) { glyph = icon::Sun; sub = Tr("하늘"); }
+        else if (l.kind == LightKind::FogVolume) { glyph = icon::Drop; sub = Tr("안개 볼륨"); }
+        else if (l.kind == LightKind::Sky) { glyph = icon::Mountains; sub = Tr("하늘"); }
 
         char subBuf[64];
         if (!l.keys.empty()) {

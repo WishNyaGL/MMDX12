@@ -46,7 +46,7 @@ Shadows turn plain black and denser, the frosted veil's white hairline drops to 
 surface (not an inverted bubble). `AppSettings::theme` (0 system, 1 light, 2 dark; `--theme auto|light|dark`
 overrides one run); system = Windows' app mode, re-read on `WM_SETTINGCHANGE`. The title bar follows
 (`DWMWA_USE_IMMERSIVE_DARK_MODE`), the splash is themed. The theme button (sun / moon) sits in the library app bar and
-the studio top bar. Scene-like drawings (stage placeholders, viewport overlays, gizmos) are not themed.
+the studio ribbon's header row. Scene-like drawings (stage placeholders, viewport overlays, gizmos) are not themed.
 
 ## Type
 
@@ -78,6 +78,16 @@ pressed, disabled and keyboard-nav focus.
   without mouse movement.
 - Benchmark: resolution cards, the measured scene, nickname, start; leaderboard table with
   skeleton, error and empty states; result with the score in Display type and a stats grid.
+
+## Studio ribbon
+
+The studio's top edge is a ribbon (`app/UiStudioRibbon.cpp`), studio only. Header row 44 px (back, title, project +
+dirty badge, text tabs, undo / redo, theme, help, fold caret, the Primary save button) over a 76 px tool row of groups.
+A group = large buttons (icon 20 px in ink2 over a Caption label in ink; toggles that are on fill accentSoft with
+accentInk; popup buttons carry a small caret) or one Segmented, with its Caption name in ink2 underneath; hairline
+separators only between groups. One accent underline slides between tabs (~120 ms exponential); nothing else moves.
+Model-scoped tabs start with an accentSoft "대상: <name>" chip. Disabled buttons sit at 40 % and their tooltip names the
+reason. Toasts drop below the ribbon in the studio.
 
 ## Motion
 

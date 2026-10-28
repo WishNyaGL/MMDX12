@@ -283,6 +283,8 @@ float PackParamsPopupWidth(const ShaderChoice& choice);
 
 class App {
 public:
+    // The studio ribbon's row heights (UiStudioRibbon.cpp draws them; UiStudio.cpp sizes the top window with them).
+    static constexpr float kRibbonHeaderH = 44.0f, kRibbonToolsH = 76.0f;
     int Run(HINSTANCE instance, const AppOptions& options);  // returns process exit code
 
     // Window procedure trampoline (public so the static WndProc can call it).
@@ -540,7 +542,18 @@ private:
         double keySince = 0;       // timeSeconds_ when `key` was first seen
         bool warned = false;       // the BeginOffline failure was logged for this entry into GI mode
     } studioGi_;
-    void DrawStudioTopBar(float x0, float y0, float x1, float y1);
+    // The studio ribbon (UiStudioRibbon.cpp): a header row of tabs over a tool row of grouped buttons. It replaces the
+    // old flat top bar and calls the same functions the rest of the studio does.
+    void DrawStudioRibbon(float x0, float y0, float x1, float y1);
+    int studioRibbonTab_ = 0;              // selected ribbon tab: 0 home, 1 anim, 2 camera, 3 light, 4 render, 5 view
+    bool studioRibbonCollapsed_ = false;   // only the header row shows
+    // Helpers shared by the ribbon and the controls it duplicates (Settings: studioRenderer / physics / lighting source)
+    void StudioSetViewportRenderer(int choice);        // settings_.studioRenderer + save (the transport combo's setter)
+    void StudioTogglePhysics();                        // the transport's ##physics body
+    void StudioSetLightSource(int source);             // 0 VMD link on, 1 preset lights, 2 custom (VMD link off)
+    std::vector<std::filesystem::path> StudioRecentProjects() const;  // the 홈 tab's recent list (current excluded)
+    void StudioRenderVideo();                          // render menu: 영상 렌더…
+    void StudioRenderStill();                          // render menu: 고품질 스틸
     void DrawStudioOutliner(float x0, float y0, float x1, float y1);
     void StudioSelectWorld(uint32_t uid);              // 0 = no world selected
     void StudioAddWorld(const std::string& packId);    // add an installed world pack as a world entity (undoable)
@@ -844,7 +857,6 @@ private:
     int studioRestPoseAnswer_ = 0;            // ui-script answer pending: 1 = primary, 2 = secondary
     void DrawStudioPropPanel(float w);                // inspector: prop parent / bone / offset
     void DrawStudioUnsavedPrompt();
-    void DrawStudioProjectMenu();                     // top bar file menu (new / open / recent / save as)
     void DrawRecoveryPrompt();                        // select screen: offer the autosave of a crashed session
 
     // --- rendering the project, shortcut help (UiStudioRender.cpp)
@@ -855,7 +867,6 @@ private:
     void StudioPoseForRender(float frame);            // offline frames: every model at `frame` (physics steps forward)
     void StudioRestoreAfterRender();                  // FinishOffline: time, camera mode, physics back to the editor's
     DirectX::XMFLOAT3 StudioPerformerCenter() const;  // center bone of the first character (teleport detection)
-    void DrawStudioRenderMenu();                      // top bar popup: video / still
     void DrawStudioEffectsPanel(float x0, float y0, float x1, float y1);  // the "효과" panel: screen effects + effect stack
     // Shared keyable typed params of a studio effect / world (key diamonds at the playhead; `kind` = EffectParam /
     // WorldParam). True = a static value or a key changed this frame.

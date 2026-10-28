@@ -1808,45 +1808,17 @@ void App::DrawStudioUnsavedPrompt() {
     if (run != StudioAction::None) StudioRunAction(run, studioPendingFile_);
 }
 
-void App::DrawStudioProjectMenu() {
-    using namespace ui;
-    ImGui::SetNextWindowSize(ImVec2(Dp(300.0f), 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(12.0f), Dp(12.0f)));
-    if (ImGui::BeginPopup("##studioproj")) {
-        StudioAction act = StudioAction::None;
-        std::filesystem::path file;
-        if (MenuItemChip("##pnew", Tr("새 프로젝트"), icon::FilePlus, "Ctrl+N")) act = StudioAction::New;
-        if (MenuItemChip("##popen", Tr("열기…"), icon::FolderOpen, "Ctrl+O")) act = StudioAction::Open;
-        MenuSeparator();
-        bool save = false, saveAs = false;
-        if (MenuItemChip("##psave", Tr("저장"), icon::FloppyDisk, "Ctrl+S")) save = true;
-        if (MenuItemChip("##psaveas", Tr("다른 이름으로 저장…"), icon::FloppyDisk, "Ctrl+Shift+S")) saveAs = true;
-        const StudioDoc& d = *studio_;
-        bool anyRecent = false;
-        // A .pmm import has no projectPath: recent .pmm entries are never the "current" file.
-        const std::filesystem::path cur = d.projectPath;
-        for (size_t i = 0; i < settings_.recentProjects.size(); ++i) {
-            const std::filesystem::path rp = Utf8ToPath(settings_.recentProjects[i]);
-            if (!cur.empty() && rp.lexically_normal() == cur.lexically_normal()) continue;
-            if (!anyRecent) {
-                MenuSeparator();
-                SectionLabel(Tr("최근 프로젝트"));
-                anyRecent = true;
-            }
-            ImGui::PushID((int)i);
-            if (MenuItemChip("##recent", StemUtf8(rp).c_str(), icon::FolderSimple)) {
-                act = StudioAction::OpenFile;
-                file = rp;
-            }
-            Tooltip(settings_.recentProjects[i].c_str());
-            ImGui::PopID();
-        }
-        if (act != StudioAction::None || save || saveAs) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-        if (save || saveAs) StudioSave(saveAs);
-        if (act != StudioAction::None) StudioRequest(act, file);
+// The recent projects the project menu lists: every entry except the one open now (a .pmm import has no projectPath,
+// so its recent .pmm entries are never the "current" file). Shared by the menu and the ribbon's 홈 tab.
+std::vector<std::filesystem::path> App::StudioRecentProjects() const {
+    std::vector<std::filesystem::path> out;
+    const std::filesystem::path cur = studio_ ? studio_->projectPath : std::filesystem::path();
+    for (const std::string& entry : settings_.recentProjects) {
+        const std::filesystem::path rp = Utf8ToPath(entry);
+        if (!cur.empty() && rp.lexically_normal() == cur.lexically_normal()) continue;
+        out.push_back(rp);
     }
-    ImGui::PopStyleVar();
+    return out;
 }
 
 } // namespace mmdx

@@ -206,6 +206,8 @@ bool AppSettings::Load(const std::filesystem::path& file) {
         else if (key == "exposure" && ParseFloat(value, f)) exposure = f;
         else if (key == "renderPath" && ParseInt(value, i)) renderPath = i;
         else if (key == "studioRenderer" && ParseInt(value, i)) studioRenderer = i;
+        else if (key == "studioRibbonTab" && ParseInt(value, i)) studioRibbonTab = i;
+        else if (key == "studioRibbonCollapsed" && ParseBool(value, b)) studioRibbonCollapsed = b;
         else if (key == "upscaler" && ParseInt(value, i)) upscaler = i;
         else if (key == "upscalerQuality" && ParseInt(value, i)) upscalerQuality = i;
         else if (key == "dlssFrameGen" && ParseInt(value, i)) dlssFrameGen = i;
@@ -593,6 +595,7 @@ bool AppSettings::Load(const std::filesystem::path& file) {
     exposure = std::clamp(exposure, 0.5f, 2.0f);
     renderPath = std::clamp(renderPath, 0, 2);
     studioRenderer = std::clamp(studioRenderer, 0, 3);
+    studioRibbonTab = std::clamp(studioRibbonTab, 0, 5);
     upscaler = std::clamp(upscaler, 0, 3);
     upscalerQuality = std::clamp(upscalerQuality, 0, 4);
     if (dlssFrameGen != 2 && dlssFrameGen != 3 && dlssFrameGen != 4) dlssFrameGen = 0;
@@ -687,6 +690,8 @@ bool AppSettings::Save(const std::filesystem::path& file) const {
     std::fprintf(f, "exposure=%.3f\n", exposure);
     std::fprintf(f, "renderPath=%d\n", renderPath);
     std::fprintf(f, "studioRenderer=%d\n", studioRenderer);
+    std::fprintf(f, "studioRibbonTab=%d\n", studioRibbonTab);
+    std::fprintf(f, "studioRibbonCollapsed=%d\n", studioRibbonCollapsed ? 1 : 0);
     std::fprintf(f, "upscaler=%d\n", upscaler);
     std::fprintf(f, "upscalerQuality=%d\n", upscalerQuality);
     std::fprintf(f, "dlssFrameGen=%d\n", dlssFrameGen);

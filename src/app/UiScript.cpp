@@ -23,6 +23,9 @@
 namespace mmdx {
 
 namespace {
+// Studio ribbon tab ids, in header order (UiStudioRibbon.cpp kRibbonTabs): studioribbon / STUDIORIBBON use these.
+const char* const kRibbonTabIds[] = {"home", "anim", "camera", "light", "render", "view"};
+
 int ButtonOf(const std::vector<std::string>& args, size_t i) {
     if (args.size() <= i) return 0;
     return args[i] == "r" ? 1 : args[i] == "m" ? 2 : 0;
@@ -130,6 +133,8 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
                      (int)d.physics, d.history.UndoName().c_str(), d.history.RedoName().c_str(), d.history.Count(),
                      d.history.Bytes() / 1048576.0, d.view.scrollFrame, d.view.pxPerFrame,
                      GImGui->HoveredWindow ? GImGui->HoveredWindow->Name : "-", (unsigned)GImGui->ActiveId);
+            LOG_INFO("STUDIORIBBON tab=%s collapsed=%d", kRibbonTabIds[std::clamp(studioRibbonTab_, 0, 5)],
+                      (int)studioRibbonCollapsed_);
             LOG_INFO("STUDIORESTPOSE open=%d auto=%d model=%d median=%.1f", (int)studioRestPoseOpen_,
                      (int)studioRestPoseAuto_,
                      studioRestPoseModel_ < 0 ? -1 : d.IndexOfUid((uint32_t)studioRestPoseModel_),
@@ -430,11 +435,27 @@ bool App::ExecuteUiCommand(const std::string& cmd, const std::vector<std::string
             else if (v == "pt") r = 2;
             else if (v == "gi") r = 3;
             if (r >= 0) {
-                settings_.studioRenderer = r;
-                settings_.Save(settingsPath_);
+                StudioSetViewportRenderer(r);
             } else {
                 LOG_WARN("ui script: unknown studio renderer '%s'", args[0].c_str());
                 if (outError) *outError = "Unknown studio renderer: " + args[0];
+                return false;
+            }
+        }
+    } else if (cmd == "studioribbon") {  // studioribbon <home|anim|camera|light|render|view> | collapse <0|1>
+        if (!args.empty() && ToLowerAscii(args[0]) == "collapse") {
+            studioRibbonCollapsed_ = args.size() > 1 && std::atoi(args[1].c_str()) != 0;
+        } else if (!args.empty()) {
+            const std::string v = ToLowerAscii(args[0]);
+            int t = -1;
+            for (int i = 0; i < 6; ++i)
+                if (v == kRibbonTabIds[i]) t = i;
+            if (t >= 0) {
+                studioRibbonTab_ = t;
+                studioRibbonCollapsed_ = false;
+            } else {
+                LOG_WARN("ui script: unknown ribbon tab '%s'", args[0].c_str());
+                if (outError) *outError = "Unknown ribbon tab: " + args[0];
                 return false;
             }
         }

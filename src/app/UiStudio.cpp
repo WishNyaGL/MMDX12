@@ -31,7 +31,7 @@ namespace mmdx {
 using namespace studio;
 
 namespace {
-constexpr float kTopBarH = 56.0f, kOutlinerW = 236.0f, kInspectorW = 312.0f, kBottomH = 300.0f, kTransportH = 46.0f;
+constexpr float kOutlinerW = 236.0f, kInspectorW = 312.0f, kBottomH = 300.0f, kTransportH = 46.0f;
 const char* const kCenterBone = "\xE3\x82\xBB\xE3\x83\xB3\xE3\x82\xBF\xE3\x83\xBC";  // センター
 const char* const kHeadBone = "\xE9\xA0\xAD";                                        // 頭
 const char* const kCameraModelName = "\xE3\x82\xAB\xE3\x83\xA1\xE3\x83\xA9\xE3\x83\xBB\xE7\x85\xA7\xE6\x98\x8E";  // カメラ・照明
@@ -363,6 +363,14 @@ void App::StudioEnter(std::unique_ptr<StudioDoc> doc) {
     studioViewDrag_ = 0;
     studioAutosaveAt_ = timeSeconds_;
     lastRenderedTime_ = -1;
+    // The ribbon's tab and fold come from the ini; a scripted / --frames run always starts on 홈, expanded (so captures
+    // are reproducible whatever the last interactive session left behind).
+    studioRibbonTab_ = settings_.studioRibbonTab;
+    studioRibbonCollapsed_ = settings_.studioRibbonCollapsed;
+    if (HeadlessRun()) {
+        studioRibbonCollapsed_ = false;
+        studioRibbonTab_ = 0;
+    }
     if (uiScriptNext_ == 0) framesInScene_ = 0;  // a running ui script keeps its frame clock across project switches
     if (studio_->hasAudio) StudioSeekAudio();
     screen_ = Screen::Studio;
@@ -438,6 +446,9 @@ void App::UpdateStudio(double dt) {
     if (!io.WantTextInput && !videoDialogOpen_ && !studioLeaveConfirm_ &&
         ((ImGui::IsKeyPressed(ImGuiKey_Slash, false) && io.KeyShift) || ImGui::IsKeyPressed(ImGuiKey_F1, false)))
         studioHelpOpen_ = !studioHelpOpen_;
+    // Ctrl+F1 folds / unfolds the ribbon's tool row (the header row stays)
+    if (!io.WantTextInput && !StudioModal() && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F1, false))
+        studioRibbonCollapsed_ = !studioRibbonCollapsed_;
     // holding the right button flies the viewport camera with WASDQE: the shortcuts stay out of the way
     if (!io.WantTextInput && !StudioModal() &&
         !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
@@ -4363,6 +4374,20 @@ void BuildDefaultStudioDock(ImGuiID dock, ImVec2 size, float leftW, float rightW
 }
 } // namespace
 
+// Viewport renderer choice (the transport combo, the ribbon's 렌더 tab): saved so the next run keeps it.
+void App::StudioSetViewportRenderer(int choice) {
+    settings_.studioRenderer = std::clamp(choice, 0, 3);
+    settings_.Save(settingsPath_);
+}
+
+// Physics switch (the transport's ##physics, the ribbon's 애니메이션 tab): the next frame starts from the motion's pose.
+void App::StudioTogglePhysics() {
+    if (!studio_) return;
+    StudioDoc& d = *studio_;
+    d.physics = !d.physics;
+    d.physicsFrame = -1.0f;
+}
+
 void App::DrawStudio() {
     using namespace ui;
     if (!studio_) return;
@@ -4370,9 +4395,9 @@ void App::DrawStudio() {
     ImGuiIO& io = ImGui::GetIO();
     const ImVec2 ds = io.DisplaySize;
     const Palette& pal = P();
-    const float top = Dp(kTopBarH);
+    const float top = Dp(App::kRibbonHeaderH + (studioRibbonCollapsed_ ? 0.0f : App::kRibbonToolsH));
 
-    // --- top bar: a fixed window above the dock space
+    // --- ribbon: a fixed window above the dock space
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2(ds.x, top));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -4381,9 +4406,9 @@ void App::DrawStudio() {
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollWithMouse |
                      ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
-    DrawStudioTopBar(0, 0, ds.x, top);
+    DrawStudioRibbon(0, 0, ds.x, top);
     ImGui::End();
-    if (studio_.get() != &d) return;  // left the studio (back button) or replaced the project (project menu)
+    if (studio_.get() != &d) return;  // left the studio (back button) or replaced the project (recent menu)
 
     // --- dock space host (transparent: the 3D view shows through the viewport panel)
     const ImVec2 hostSize(ds.x, std::max(1.0f, ds.y - top));
@@ -4492,120 +4517,6 @@ void App::DrawStudio() {
             rs.viewportX = vx; rs.viewportY = vy; rs.viewportW = vw; rs.viewportH = vh;
             rs.shading = shading;
             renderer_.SetSettings(rs);
-        }
-    }
-}
-
-void App::DrawStudioTopBar(float x0, float y0, float x1, float y1) {
-    using namespace ui;
-    StudioDoc& d = *studio_;
-    const Palette& p = P();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), p.surface);
-    dl->AddLine(ImVec2(x0, y1 - 0.5f), ImVec2(x1, y1 - 0.5f), p.line);
-
-    const float cy = (y0 + y1) * 0.5f;
-    ImGui::SetCursorScreenPos(ImVec2(x0 + Dp(10.0f), cy - Dp(18.0f)));
-    if (IconButton("##back", icon::ArrowLeft, Tr("라이브러리로 돌아가기"))) {
-        StudioRequest(StudioAction::Leave);
-        if (!studio_) return;
-    }
-    float x = x0 + Dp(58.0f);
-    Text(dl, Font::Bold, size::Title, ImVec2(x, cy - Dp(11.0f)), p.ink, Tr("스튜디오"));
-    x += TextSize(Font::Bold, size::Title, Tr("스튜디오")).x + Dp(12.0f);
-    // project name (the file's stem; untitled until the first save)
-    {
-        const std::string title = d.projectPath.empty() ? std::string(Tr("제목 없음")) : PathToUtf8(d.projectPath.stem());
-        const float maxX = std::max(x + Dp(80.0f), std::min(x + Dp(260.0f), x1 - Dp(700.0f)));
-        dl->AddLine(ImVec2(x - Dp(4.0f), cy - Dp(9.0f)), ImVec2(x - Dp(4.0f), cy + Dp(9.0f)), p.line);
-        x += Dp(8.0f);
-        TextEllipsis(dl, Font::Semibold, size::Body, ImVec2(x, cy - Dp(10.0f)), maxX, p.ink2, title.c_str());
-        x = std::min(maxX, x + TextSize(Font::Semibold, size::Body, title.c_str()).x) + Dp(12.0f);
-        if (!d.projectPath.empty() && ImGui::IsMouseHoveringRect(ImVec2(x0 + Dp(58.0f), y0), ImVec2(x, y1)))
-            Tooltip(PathToUtf8(d.projectPath).c_str());
-    }
-    if (d.Dirty()) {
-        ImVec2 bs;
-        Badge(dl, ImVec2(x, cy - Dp(10.0f)), Tr("저장 안 됨"), p.warnSoft, p.warn, &bs);
-        x += bs.x + Dp(14.0f);
-    }
-
-    // undo / redo
-    ImGui::SetCursorScreenPos(ImVec2(x + Dp(6.0f), cy - Dp(18.0f)));
-    ImGui::BeginDisabled(!d.history.CanUndo());
-    const std::string undoTip = d.history.CanUndo() ? std::string(Tr("실행 취소: ")) + d.history.UndoName() + "  (Ctrl+Z)"
-                                                    : std::string(Tr("실행 취소"));
-    if (IconButton("##undo", icon::ArrowCcw, undoTip.c_str())) { d.history.Undo(); d.selection.clear(); d.rowsKey = ~0ull; }
-    ImGui::EndDisabled();
-    ImGui::SameLine(0, Dp(4.0f));
-    ImGui::BeginDisabled(!d.history.CanRedo());
-    const std::string redoTip = d.history.CanRedo() ? std::string(Tr("다시 실행: ")) + d.history.RedoName() + "  (Ctrl+Y)"
-                                                    : std::string(Tr("다시 실행"));
-    if (IconButton("##redo", icon::ArrowCw, redoTip.c_str())) { d.history.Redo(); d.selection.clear(); d.rowsKey = ~0ull; }
-    ImGui::EndDisabled();
-
-    // right: project menu | VMD import / export | save
-    const char* target = d.selectedModel < 0 ? Tr("카메라") : (d.Selected() ? d.Selected()->name.c_str() : "");
-    const float vmdW = 140.0f, saveW = 104.0f;
-    float rx = x1 - Dp(14.0f + saveW);
-    ImGui::SetCursorScreenPos(ImVec2(rx, cy - Dp(19.0f)));
-    if (Button("##save", Tr("저장"), icon::FloppyDisk, ButtonKind::Primary, ImVec2(saveW, 38.0f))) StudioSave(false);
-    Tooltip(Tr("프로젝트 저장  (Ctrl+S)"));
-    rx -= Dp(10.0f + vmdW);
-    ImGui::SetCursorScreenPos(ImVec2(rx, cy - Dp(19.0f)));
-    if (Button("##export", Tr("VMD 내보내기"), icon::Export, ButtonKind::Secondary, ImVec2(vmdW, 38.0f))) StudioExportVmd();
-    Tooltip((std::string(Tr("내보낼 대상: ")) + target).c_str());
-    rx -= Dp(8.0f + vmdW);
-    ImGui::SetCursorScreenPos(ImVec2(rx, cy - Dp(19.0f)));
-    if (Button("##import", Tr("VMD 불러오기"), icon::FolderOpen, ButtonKind::Secondary, ImVec2(vmdW, 38.0f)))
-        StudioImportVmd();
-    Tooltip((std::string(Tr("불러올 대상: ")) + target).c_str());
-    // project and render menus carry text: they are primary workflows, not tool toggles
-    const float projW = 104.0f, renderW = 88.0f;
-    rx -= Dp(14.0f + projW);
-    dl->AddLine(ImVec2(rx + Dp(projW + 7.0f), cy - Dp(11.0f)), ImVec2(rx + Dp(projW + 7.0f), cy + Dp(11.0f)), p.line);
-    ImGui::SetCursorScreenPos(ImVec2(rx, cy - Dp(19.0f)));
-    if (Button("##projmenu", Tr("프로젝트"), icon::List, ButtonKind::Ghost, ImVec2(projW, 38.0f)))
-        ImGui::OpenPopup("##studioproj");
-    Tooltip(Tr("새로 만들기, 열기, 다른 이름으로 저장"));
-    ImGui::SetNextWindowPos(ImVec2(rx + Dp(projW), y1 + Dp(6.0f)), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-    DrawStudioProjectMenu();
-    if (!studio_) return;
-    // render (video / still), screen effects, layout reset and the shortcut list
-    rx -= Dp(4.0f + renderW);
-    ImGui::SetCursorScreenPos(ImVec2(rx, cy - Dp(19.0f)));
-    if (Button("##rendermenu", Tr("렌더"), icon::FilmStrip, ButtonKind::Ghost, ImVec2(renderW, 38.0f)))
-        ImGui::OpenPopup("##studiorender");
-    Tooltip(Tr("영상 또는 고품질 스틸 렌더"));
-    ImGui::SetNextWindowPos(ImVec2(rx + Dp(renderW), y1 + Dp(6.0f)), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-    DrawStudioRenderMenu();
-    rx -= Dp(4.0f + 36.0f);
-    ImGui::SetCursorScreenPos(ImVec2(rx, cy - Dp(18.0f)));
-    const bool effectsActive = !settings_.effectStack.empty() || settings_.bloom || settings_.dof || settings_.volumetric;
-    ImGui::BeginDisabled(StudioModal());
-    if (IconButton("##effects", icon::Sparkle, Tr("화면 효과  (오른쪽 패널의 효과 탭)"), effectsActive))
-        studioFocusEffects_ = true;
-    ImGui::EndDisabled();
-    rx -= Dp(4.0f + 36.0f);
-    ImGui::SetCursorScreenPos(ImVec2(rx, cy - Dp(18.0f)));
-    if (IconButton("##layoutreset", icon::Stack, Tr("패널 배치 초기화 (패널은 탭을 끌어서 옮기고 크기를 바꿀 수 있어요)"))) studioResetLayout_ = true;
-    rx -= Dp(4.0f + 36.0f);
-    ImGui::SetCursorScreenPos(ImVec2(rx, cy - Dp(18.0f)));
-    if (IconButton("##help", icon::Keyboard, Tr("단축키  (?)"), studioHelpOpen_)) studioHelpOpen_ = !studioHelpOpen_;
-    rx -= Dp(4.0f + 36.0f);
-    DrawThemeButton(ImVec2(rx, cy - Dp(18.0f)), rx + Dp(36.0f), y1 + Dp(6.0f));
-    if (mcpServer_ && mcpServer_->IsConnected()) {
-        rx -= Dp(8.0f + 64.0f);
-        const ImVec2 mcpPos(rx, cy - Dp(14.0f));
-        dl->AddRectFilled(mcpPos, ImVec2(mcpPos.x + Dp(64.0f), mcpPos.y + Dp(28.0f)), WithAlpha(p.accent, 0.15f), Dp(14.0f));
-        dl->AddRect(mcpPos, ImVec2(mcpPos.x + Dp(64.0f), mcpPos.y + Dp(28.0f)), WithAlpha(p.accent, 0.4f), Dp(14.0f));
-        Icon(dl, icon::Cpu, 14.0f, ImVec2(mcpPos.x + Dp(12.0f), mcpPos.y + Dp(14.0f)), p.accentInk);
-        Text(dl, Font::Bold, size::Caption, ImVec2(mcpPos.x + Dp(26.0f), mcpPos.y + Dp(7.0f)), p.accentInk, "MCP");
-        ImGui::SetCursorScreenPos(mcpPos);
-        ImGui::InvisibleButton("##mcpbadge", ImVec2(Dp(64.0f), Dp(28.0f)));
-        if (ImGui::IsItemHovered()) {
-            std::string tip = std::string(Tr("MCP 연결됨: ")) + mcpServer_->PipeName();
-            Tooltip(tip.c_str());
         }
     }
 }
@@ -5828,10 +5739,7 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
             for (int i = 0; i < 4; ++i) {
                 const bool disabled = (i == 1 || i == 2) ? !rtOk : (i == 3 ? !giOk : false);
                 ImGui::BeginDisabled(disabled);
-                if (ImGui::Selectable(names[i], cur == i)) {
-                    settings_.studioRenderer = i;
-                    settings_.Save(settingsPath_);
-                }
+                if (ImGui::Selectable(names[i], cur == i)) StudioSetViewportRenderer(i);
                 if (disabled)
                     Tooltip(i == 3 ? Tr("이 그래픽 카드에서는 오프라인 GI 렌더를 사용할 수 없습니다")
                                    : Tr("이 그래픽 카드에서는 레이 트레이싱을 사용할 수 없습니다"));
@@ -5894,10 +5802,8 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
     if (IconButton("##physreset", icon::ArrowCcw, Tr("물리 초기화"), false, 34.0f)) d.physicsFrame = -1.0f;
     rx -= Dp(2.0f + 34.0f);
     ImGui::SetCursorScreenPos(ImVec2(rx, cy - Dp(17.0f)));
-    if (IconButton("##physics", icon::Atom, d.physics ? Tr("물리 켜짐 (클릭: 끄기)") : Tr("물리 꺼짐 (클릭: 켜기)"), d.physics, 34.0f)) {
-        d.physics = !d.physics;
-        d.physicsFrame = -1.0f;  // start from the motion's pose
-    }
+    if (IconButton("##physics", icon::Atom, d.physics ? Tr("물리 켜짐 (클릭: 끄기)") : Tr("물리 꺼짐 (클릭: 켜기)"), d.physics, 34.0f))
+        StudioTogglePhysics();
     rx -= Dp(28.0f);
     const ImVec2 physAt(rx, cy - Dp(17.0f));
     ImGui::SetCursorScreenPos(physAt);
