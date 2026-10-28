@@ -1009,8 +1009,10 @@ void App::FinishOffline(bool cancelled) {
                 if (!cancelled && !img.Empty()) EncodeOfflineImage(std::move(img), r);
             }
         }
-        const uint32_t written = offline_.sink->FramesWritten();
         const bool sinkOk = cancelled ? (offline_.sink->Abort(), true) : offline_.sink->Finish();
+        // Count after Finish / Abort: the worker encodes behind this thread, so before the drain a short render
+        // could still read 0 here and the finished file was deleted below.
+        const uint32_t written = offline_.sink->FramesWritten();
         if (!sinkOk && !cancelled) {
             if (!toast_.error) toast_ = {Tr("영상 인코딩에 실패했습니다"), "", {}, true, timeSeconds_ + 8.0};
         }
