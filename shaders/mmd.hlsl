@@ -362,14 +362,22 @@ float3 PunctualSpecularGGX(float3 wp, float3 n, float3 V, float rough, float3 f0
     return sum;
 }
 
-#if defined(SCENE_HAS_ID) && SCENE_HAS_ID
+// Normal-target z: the reflectivity, or < 0 = "no AO / no SSR here" (composite.hlsl). Translucent stage pixels
+// (alpha < 0.98) take the tag, so SSAO does not grey sheer curtains. Character and prop pixels keep their reflectivity:
+// the normal target is alpha-blended, so a faint overlay on a face (blush, cheek lines, tears; drawn from alpha 0.004)
+// pulled the face's value below zero and the face lost its AO in the overlay's whole footprint (pale rectangles).
 // `glass` (S2b): a transmissive surface keeps its Fresnel reflectivity even where alpha < 0.98, so SSR / RT
-// reflections show on it (the alpha < 0.98 rule marks ordinary translucent layers "no AO / no SSR").
+// reflections show on it.
+float NormalTag(float alpha, float reflectivity, bool glass) {
+    return (alpha < 0.98 && !glass && (gFlags & MAT_STAGE) != 0u) ? -1.0 : reflectivity;
+}
+
+#if defined(SCENE_HAS_ID) && SCENE_HAS_ID
 PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivity, float4 curClip, float4 prevClip, uint customId = 0, bool glass = false) {
     PSOut o;
     o.color = float4(color, alpha);
     float3 vn = normalize(mul(worldNormal, (float3x3)gView));
-    o.normal = float4(OctEncode(vn), (alpha < 0.98 && !glass) ? -1.0 : reflectivity, alpha);
+    o.normal = float4(OctEncode(vn), NormalTag(alpha, reflectivity, glass), alpha);
     o.velocity = Velocity(curClip, prevClip);
     if (customId != 0u) {
         o.id = (alpha < 0.98) ? 0u : customId;
@@ -386,7 +394,7 @@ PSOut PackOutput(float3 color, float alpha, float3 worldNormal, float reflectivi
     customId = customId;
     o.color = float4(color, alpha);
     float3 vn = normalize(mul(worldNormal, (float3x3)gView));
-    o.normal = float4(OctEncode(vn), (alpha < 0.98 && !glass) ? -1.0 : reflectivity, alpha);
+    o.normal = float4(OctEncode(vn), NormalTag(alpha, reflectivity, glass), alpha);
     o.velocity = Velocity(curClip, prevClip);
     return o;
 }
