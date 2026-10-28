@@ -109,7 +109,10 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
         chainProj[i] = true;
         const bool hover = inside && std::hypot(mouse.x - s.x, mouse.y - s.y) <= R + 3.0f * dpi;
         if (hover) hoverChain = i;
-        const ImU32 col = hover ? IM_COL32(255, 220, 80, 255) : IM_COL32(180, 230, 190, 230);
+        const bool sel = d.rigController == i;
+        const ImU32 col = hover ? IM_COL32(255, 220, 80, 255)
+                          : sel ? IM_COL32(120, 200, 255, 255)
+                                : IM_COL32(180, 230, 190, 230);
         dl->AddCircleFilled(s, R, ui::WithAlpha(p.sunken, 0.8f), 24);
         dl->AddCircle(s, R, col, 24, 2.0f * dpi);
         dl->AddCircleFilled(s, 3.0f * dpi, col, 12);
@@ -127,7 +130,10 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
         if (i == 0) { bodyCenterPx = s; bodyCenterProj = true; }
         const bool hover = inside && std::hypot(mouse.x - s.x, mouse.y - s.y) <= R + 2.0f * dpi;
         if (hover) hoverBody = i;
-        const ImU32 col = hover ? IM_COL32(255, 220, 80, 255) : IM_COL32(120, 160, 240, 210);
+        const bool sel = d.rigController == 6 + i;
+        const ImU32 col = hover ? IM_COL32(255, 220, 80, 255)
+                          : sel ? IM_COL32(120, 200, 255, 255)
+                                : IM_COL32(120, 160, 240, 210);
         dl->AddCircle(s, R * 1.15f, col, 28, 2.0f * dpi);
         dl->AddCircleFilled(s, 2.5f * dpi, col, 12);
         if (i == 1 && bodyCenterProj) {
@@ -271,6 +277,7 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
     if (inside && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyAlt) {
         if (hoverChain >= 0 && chainProj[hoverChain] && d.gizmoTool == 1) {
             const ChainInfo& ci = kChains[hoverChain];
+            StudioSelectRigController(hoverChain, io.KeyCtrl);  // select the controller (viewport ring <-> timeline row)
             RigChain chain;
             if (ResolveRigChain(*m->rig, ci.root, ci.mid, ci.end, chain)) {
                 rigVpDrag_.chain = chain;
@@ -327,6 +334,7 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
             else if ((hoverBody == 0 || hoverBody == 1) && d.gizmoTool == 1) {
                 // move tool: center (pelvis) and groove are draggable in the camera plane (exact ray-plane solve,
                 // same style as hands/feet). Other body rings just select.
+                StudioSelectRigController(6 + hoverBody, io.KeyCtrl);  // select the controller
                 rigVpDrag_.bodyBone = b;
                 rigVpDrag_.bodyStartT = StudioCurrentPose(*m)[(size_t)b].t;
                 rigVpDrag_.startMouse = mouse;
@@ -357,10 +365,12 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                 studioPoseBefore_ = m->pose;
                 consumed = true;
             } else {
+                StudioSelectRigController(6 + hoverBody, io.KeyCtrl);  // select the controller first
                 StudioSelectBone(b, false); studioViewDrag_ = 3; consumed = true;
             }
         } else if (hoverChain >= 0 && chainProj[hoverChain]) {
             // rotate tool: select the ready IK bone (arm/leg) when present, else the end bone (wrist/ankle)
+            StudioSelectRigController(hoverChain, io.KeyCtrl);  // select the controller
             const int end = m->rig->BoneFor(kChains[hoverChain].end);
             int pick = end;
             {
