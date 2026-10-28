@@ -448,6 +448,13 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
     StudioDoc& d = *studio_;
     ImGuiIO& io = ImGui::GetIO();
     StudioModel* m = StudioPoseModel();
+    // A rig-controller drag owns the viewport: skip all bone/gizmo interaction for this gesture.
+    if (rigVpDrag_.active) {
+        studioHoverBone_ = -1;
+        studioGizmoHot_ = GizmoPart::None;
+        consumed = true;
+        return;
+    }
     studioGizmoShown_ = false;
     if (!m || !m->visible || d.playing) {
         studioHoverBone_ = -1;

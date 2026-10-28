@@ -31,7 +31,7 @@ struct RoleAlias {
 // never take a body role.
 bool ShouldExcludeBone(const PmxBone& b) {
     const std::string n = WithoutSpaces(b.name) + " " + WithoutSpaces(b.nameEn);
-    const char* markers[] = {"ik", "ＩＫ", "親", "dummy", "捩", "先端"};
+    const char* markers[] = {"ik", "ＩＫ", "親", "dummy", "捩", "先端", "補助", "补助", "helper", "aux"};
     for (const char* m : markers)
         if (n.find(m) != std::string::npos) return true;
     return false;
@@ -44,6 +44,7 @@ const RoleAlias kAliases[] = {
     {RigRole::Pelvis,       "センター",   "pelvis", true},
     {RigRole::Pelvis,       "",           "center", true},
     {RigRole::Pelvis,       "",           "root", true},
+    {RigRole::Groove,       "グルーブ",   "groove", true},
     {RigRole::Spine,        "上半身",     "spine"},
     {RigRole::Spine,        "",           "torso"},
     {RigRole::Chest,        "上半身2",    "chest"},
@@ -68,11 +69,13 @@ const RoleAlias kAliases[] = {
     {RigRole::LeftShin,     "左すね",     "shin_l"},
     {RigRole::LeftShin,     "左ひざ",     "leftshin"},
     {RigRole::LeftFoot,     "左足首",     "foot_l", true},
+    {RigRole::LeftToe,      "左つま先",   "toe_l"},
     {RigRole::RightThigh,   "右足",       "thigh_r", true},
     {RigRole::RightThigh,   "右もも",     "rightthigh"},
     {RigRole::RightShin,    "右すね",     "shin_r"},
     {RigRole::RightShin,    "右ひざ",     "rightshin"},
     {RigRole::RightFoot,    "右足首",     "foot_r", true},
+    {RigRole::RightToe,     "右つま先",   "toe_r"},
 };
 
 std::string WithoutSpaces(const std::string& s) {
@@ -214,6 +217,35 @@ RigGenerateResult GenerateRig(const PmxModel& model) {
             bind.confidence = 1.0f;  // dictionary/structural match; refined later
         } else {
             diag.warnings.push_back(std::string("unresolved ") + RigRoleName(bind.role));
+        }
+    }
+
+    // Ready-made model IK bones (arm_IK / leg_IKP / toe_IK): find bones whose IK target is one of our end roles.
+    // Controllers can then move the IK bone itself as an object (the engine solves the chain).
+    // For feet, prefer the IK bone's PARENT (leg_IKP, the pivot under the heel) when it exists; else the IK bone.
+    {
+        static const RigRole kIkEnds[] = {
+            RigRole::LeftHand, RigRole::RightHand,
+            RigRole::LeftFoot, RigRole::RightFoot,
+            RigRole::LeftToe, RigRole::RightToe,
+        };
+        for (const RigRole role : kIkEnds) {
+            const int target = rig.BoneFor(role);
+            if (target < 0) continue;
+            for (int bi = 0; bi < n; ++bi) {
+                const PmxBone& b = model.bones[(size_t)bi];
+                if (!(b.flags & PmxBone_IK) || b.ikTargetIndex != target) continue;
+                int drive = bi;
+                // feet: prefer the parent (leg_IKP) as the control handle
+                if (role == RigRole::LeftFoot || role == RigRole::RightFoot) {
+                    const int par = b.parentIndex;
+                    if (par >= 0 && par < n) {
+                        const PmxBone& pb = model.bones[(size_t)par];
+                        if (!(pb.flags & PmxBone_IK)) drive = par;  // leg_IKP
+                    }
+                }
+                rig.ikBones.push_back({role, drive, model.bones[(size_t)drive].name});
+            }
         }
     }
 

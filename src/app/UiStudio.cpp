@@ -1980,12 +1980,45 @@ std::string StageParamLabel(const StudioStage& stage, const std::string& param) 
 // Editing
 // ---------------------------------------------------------------------------
 
+std::vector<uint64_t> App::StudioRigRowToBoneRows(uint64_t rigRow) const {
+    const StudioDoc& d = *studio_;
+    std::vector<uint64_t> out;
+    if (d.selectedModel < 0) return out;
+    StudioModel* m = d.models[d.selectedModel].get();
+    if (!m || !m->rig) return out;
+    const int idx = (int)RowIndexOf(rigRow);
+    if (idx < 0) return out;
+    // controllers 0..5 = chains (hands/feet/toes), 6..12 = body (pelvis, groove, spine, chest, neck, head)
+    const RigRole roles[13][3] = {
+        {RigRole::LeftUpperArm, RigRole::LeftForearm, RigRole::LeftHand},
+        {RigRole::RightUpperArm, RigRole::RightForearm, RigRole::RightHand},
+        {RigRole::LeftThigh, RigRole::LeftShin, RigRole::LeftFoot},
+        {RigRole::RightThigh, RigRole::RightShin, RigRole::RightFoot},
+        {RigRole::LeftFoot, RigRole::LeftToe, RigRole::LeftToe},
+        {RigRole::RightFoot, RigRole::RightToe, RigRole::RightToe},
+        {RigRole::Pelvis}, {RigRole::Groove}, {RigRole::Spine}, {RigRole::Chest}, {RigRole::Neck},
+        {RigRole::Head}, {RigRole::Pelvis},
+    };
+    const int total = 13;
+    if (idx >= total) return out;
+    int cnt = idx < 6 ? 3 : 1;
+    for (int k = 0; k < cnt; ++k) {
+        const int bi = m->rig->BoneFor(roles[idx][k]);
+        if (bi >= 0) out.push_back(MakeRowId(RowKind::Bone, 0, (uint32_t)bi));
+    }
+    return out;
+}
+
 bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const {
     const StudioDoc& d = *studio_;
     kind = RowKindOf(row);
     name.clear();
     if (kind == RowKind::GraphLane || kind == RowKind::GraphChannel) return false;  // graph rows carry no track / keys
     if (IsCameraKind(kind)) return d.selectedModel < 0;
+    if (kind == RowKind::Rig) {
+        return d.selectedModel >= 0 && d.models[d.selectedModel]->rig &&
+               (int)RowIndexOf(row) < 13;
+    }
     if (kind == RowKind::SceneLight) {
         // a light row is only offered through the camera target (the lights live next to the camera)
         const uint32_t uid = RowIndexOf(row);
@@ -2051,6 +2084,14 @@ std::vector<TrackState> App::StudioCaptureSelectedTracks() {
     for (const KeyId& k : d.selection) {
         RowKind kind;
         std::string name;
+        if (RowKindOf(k.first) == RowKind::Rig) {
+            for (uint64_t brow : StudioRigRowToBoneRows(k.first)) {
+                if (!StudioTrackOfRow(brow, kind, name)) continue;
+                if (!seen.insert({(int)kind, name}).second) continue;
+                out.push_back(CaptureTrack(d, d.selectedModel, kind, name));
+            }
+            continue;
+        }
         if (!StudioTrackOfRow(k.first, kind, name)) continue;
         if (!seen.insert({(int)kind, name}).second) continue;
         out.push_back(CaptureTrack(d, d.selectedModel, kind, name));
@@ -2141,10 +2182,19 @@ CameraKf App::StudioViewportCameraKey(int frame) const {
 void App::StudioInsertKeys(const std::vector<uint64_t>& rows, int frame) {
     OpTimer timer{"StudioInsertKeys"};
     StudioDoc& d = *studio_;
+    // Expand rig-controller rows into their bone rows so a controller key writes all its bones.
+    std::vector<uint64_t> expanded;
+    expanded.reserve(rows.size());
+    for (uint64_t row : rows) {
+        if (RowKindOf(row) == RowKind::Rig) {
+            auto br = StudioRigRowToBoneRows(row);
+            expanded.insert(expanded.end(), br.begin(), br.end());
+        } else expanded.push_back(row);
+    }
     std::vector<TrackState> before;
     std::set<KeyId> inserted;
     std::set<std::pair<int, std::string>> seen;  // a bone listed in two display frames has two rows
-    for (uint64_t row : rows) {
+    for (uint64_t row : expanded) {
         RowKind kind;
         std::string name;
         if (!StudioTrackOfRow(row, kind, name)) continue;
@@ -2152,7 +2202,7 @@ void App::StudioInsertKeys(const std::vector<uint64_t>& rows, int frame) {
     }
     if (before.empty()) return;
     seen.clear();
-    for (uint64_t row : rows) {
+    for (uint64_t row : expanded) {
         RowKind kind;
         std::string name;
         if (!StudioTrackOfRow(row, kind, name)) continue;
@@ -2429,6 +2479,12 @@ void App::StudioDeleteSelected(const char* undoName) {
     for (const KeyId& k : d.selection) {
         RowKind kind;
         std::string name;
+        if (RowKindOf(k.first) == RowKind::Rig) {
+            for (uint64_t brow : StudioRigRowToBoneRows(k.first)) {
+                if (StudioTrackOfRow(brow, kind, name)) frames[{(int)kind, name}].insert(k.second);
+            }
+            continue;
+        }
         if (StudioTrackOfRow(k.first, kind, name)) frames[{(int)kind, name}].insert(k.second);
     }
     for (const auto& [track, fs] : frames) {
@@ -2744,7 +2800,19 @@ void App::StudioShiftFrames(bool remove) {
     const int at = d.HasRange() ? d.view.rangeStart : d.Frame();
     const int count = d.HasRange() ? d.view.rangeEnd - d.view.rangeStart + 1 : 1;
     const char* undoName = remove ? Tr("프레임 삭제") : Tr("프레임 삽입");
-    const std::vector<uint64_t> rows = StudioTargetRows();
+    std::vector<uint64_t> rows = StudioTargetRows();
+    {
+        // expand rig-controller rows into their bone rows
+        std::vector<uint64_t> expanded;
+        expanded.reserve(rows.size());
+        for (uint64_t row : rows) {
+            if (RowKindOf(row) == RowKind::Rig) {
+                auto br = StudioRigRowToBoneRows(row);
+                expanded.insert(expanded.end(), br.begin(), br.end());
+            } else expanded.push_back(row);
+        }
+        rows = std::move(expanded);
+    }
     if (rows.empty()) {
         // every track of the shown target, IK/light/shadow included: swap the whole motion
         if (d.selectedModel >= (int)d.models.size()) return;
@@ -2824,6 +2892,20 @@ void App::StudioCopyCurve() {
     for (const KeyId& k : d.selection) {
         RowKind kind;
         std::string name;
+        if (RowKindOf(k.first) == RowKind::Rig) {
+            // copy from the first bone of the rig row (curves are shared across the controlled bones)
+            const auto br = StudioRigRowToBoneRows(k.first);
+            if (!br.empty() && StudioTrackOfRow(br.front(), kind, name) && kind == RowKind::Bone) {
+                const auto& t = d.models[d.selectedModel]->motion.bones;
+                if (auto it = t.find(name); it != t.end())
+                    if (const BoneKf* b = FindKey(it->second, k.second)) {
+                        std::memcpy(d.curveClip, b->interp, sizeof(b->interp));
+                        d.curveClipKind = RowKind::Bone;
+                        return;
+                    }
+            }
+            return;
+        }
         if (!StudioTrackOfRow(k.first, kind, name)) continue;
         if (kind == RowKind::Camera) {
             if (const CameraKf* c = FindKey(d.SelectedCameraTrack().camera, k.second)) {
@@ -2850,6 +2932,13 @@ void App::StudioPasteCurve() {
     for (const KeyId& k : d.selection) {
         RowKind kind;
         std::string name;
+        if (RowKindOf(k.first) == RowKind::Rig) {
+            for (uint64_t brow : StudioRigRowToBoneRows(k.first)) {
+                if (StudioTrackOfRow(brow, kind, name) && kind == d.curveClipKind && seen.insert({(int)kind, name}).second)
+                    before.push_back(CaptureTrack(d, d.selectedModel, kind, name));
+            }
+            continue;
+        }
         if (StudioTrackOfRow(k.first, kind, name) && kind == d.curveClipKind && seen.insert({(int)kind, name}).second)
             before.push_back(CaptureTrack(d, d.selectedModel, kind, name));
     }
@@ -2857,6 +2946,14 @@ void App::StudioPasteCurve() {
     for (const KeyId& k : d.selection) {
         RowKind kind;
         std::string name;
+        if (RowKindOf(k.first) == RowKind::Rig) {
+            for (uint64_t brow : StudioRigRowToBoneRows(k.first)) {
+                if (!StudioTrackOfRow(brow, kind, name) || kind != d.curveClipKind) continue;
+                if (auto& t = d.models[d.selectedModel]->motion.bones; t.count(name))
+                    if (BoneKf* b = FindKey(t[name], k.second)) CopyBoneCurves(d.curveClip, b->interp);
+            }
+            continue;
+        }
         if (!StudioTrackOfRow(k.first, kind, name) || kind != d.curveClipKind) continue;
         if (kind == RowKind::Camera) {
             if (CameraKf* c = FindKey(d.SelectedCameraTrack().camera, k.second)) std::memcpy(c->interp, d.curveClip, sizeof(c->interp));
@@ -3517,6 +3614,14 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
         for (const KeyId& k : d.selection) {
             RowKind kind;
             std::string name;
+            if (RowKindOf(k.first) == RowKind::Rig) {
+                for (uint64_t brow : StudioRigRowToBoneRows(k.first)) {
+                    if (!StudioTrackOfRow(brow, kind, name)) continue;
+                    frames[{(int)kind, name}].insert(k.second);
+                    rowsOf[{(int)kind, name}].insert(brow);
+                }
+                continue;
+            }
             if (!StudioTrackOfRow(k.first, kind, name)) continue;
             frames[{(int)kind, name}].insert(k.second);
             rowsOf[{(int)kind, name}].insert(k.first);
@@ -4202,6 +4307,50 @@ void App::StudioRebuildRows() {
         for (auto& c : children) d.rows.push_back(std::move(c));
     };
 
+    // Rig mode: show controller rows instead of bones/morphs. A controller key drives all its bones (see
+    // StudioRigRowToBoneRows); the row's key list is the union of its bones' keys.
+    if (d.rigMode) {
+        StudioModel* rm = d.Selected();
+        if (rm && rm->rig) {
+            static const char* kCtl[13] = {"hand_l", "hand_r", "foot_l", "foot_r", "toe_l", "toe_r",
+                                            "center", "groove", "spine", "chest", "neck", "head", "head top"};
+            TimelineRow group;
+            group.id = MakeRowId(RowKind::Group, 0u, 0u);
+            group.label = Tr("리그");
+            group.isGroup = true;
+            group.keysEditable = false;
+            group.expanded = !d.collapsed.count(group.id);
+            group.selected = d.selectedRows.count(group.id) != 0;
+            std::vector<uint64_t>& childIds = d.groupChildren[group.id];
+            std::set<int> summary;
+            std::vector<TimelineRow> children;
+            for (int ci = 0; ci < 13; ++ci) {
+                TimelineRow r;
+                r.id = MakeRowId(RowKind::Rig, 0u, (uint32_t)ci);
+                r.label = kCtl[ci];
+                r.displayLabel = kCtl[ci];
+                r.depth = 1;
+                for (uint64_t brow : StudioRigRowToBoneRows(r.id)) {
+                    RowKind bk; std::string bname;
+                    if (!StudioTrackOfRow(brow, bk, bname)) continue;
+                    auto it = mo.bones.find(bname);
+                    if (it == mo.bones.end()) continue;
+                    std::vector<TimelineKey> kk;
+                    keysOfModel(brow, it->second, kk);
+                    for (const auto& k : kk) { r.keys.push_back(k); summary.insert(k.frame); }
+                }
+                std::sort(r.keys.begin(), r.keys.end(), [](const TimelineKey& a, const TimelineKey& b){ return a.frame < b.frame; });
+                r.selected = d.selectedRows.count(r.id) != 0;
+                childIds.push_back(r.id);
+                if (group.expanded) children.push_back(std::move(r));
+            }
+            for (int f : summary) group.keys.push_back({f, false});
+            d.rows.push_back(std::move(group));
+            for (auto& c : children) d.rows.push_back(std::move(c));
+            return;
+        }
+    }
+
     std::vector<char> boneListed(pmx.bones.size(), 0), morphListed(pmx.morphs.size(), 0);
     uint32_t g = 0;
     for (const PmxDisplayFrame& f : pmx.displayFrames) {
@@ -4651,6 +4800,15 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
                                                    ? std::string(DisplayName(m.pmx->name, m.pmx->nameEn))
                                                    : m.name;
                 row(i, glyph, modelLabel.c_str(), sub, &m.visible);
+                // rig controls sit directly under the selected character's entry (when it has a rig)
+                if (d.selectedModel == i && m.kind == ModelKind::Character && m.rig) {
+                    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x + Dp(48.0f), ImGui::GetCursorScreenPos().y));
+                    bool tm = d.rigMode;
+                    if (ImGui::Checkbox(Tr("리그 타임라인"), &tm)) { d.rigMode = tm; d.rowsKey = ~0ull; }
+                    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x + Dp(48.0f), ImGui::GetCursorScreenPos().y));
+                    ImGui::Checkbox(Tr("뷰포트에 리그 표시"), &m.showRig);
+                    Gap(2.0f);
+                }
             }
         }
         // S3: an MMDX stage is ONE row (its entity's name) with its parts as children, collapsed by default. Selecting
@@ -6316,6 +6474,8 @@ void App::DrawStudioKeyMenu() {
 void App::StudioViewportNavigate(bool hovered, bool active) {
     StudioDoc& d = *studio_;
     ImGuiIO& io = ImGui::GetIO();
+    // While a rig controller is being dragged, do not let the mouse navigate the camera too.
+    if (rigVpDrag_.active) return;
     const bool possessed = d.possessCamera;
     const AppSettings& st = settings_;
     const float rotX = (st.cameraInvertX ? -1.0f : 1.0f) * st.cameraRotateSpeed;
@@ -6555,6 +6715,9 @@ void App::DrawStudioViewport(float x0, float y0, float x1, float y1) {
         studioViewDrag_ = 1;
     }
     bool consumed = false;
+    // Rig controllers first (before the bone gizmo): a click on a controller ring must not be taken by the gizmo.
+    if (av == 0)
+        StudioRigViewport(rr[0], rr[1], rr[0] + rr[2], rr[1] + rr[3], hovered || active, consumed);
     StudioViewportPose(act.x0, act.y0, act.x1, act.y1, hovered || active, consumed);
     if (av == 0) {
         StudioViewportCameraHandles(hovered || active);

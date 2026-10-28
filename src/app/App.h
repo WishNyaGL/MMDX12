@@ -32,6 +32,7 @@
 #include "render/Renderer.h"
 #include "studio/AutoIk.h"
 #include "studio/Gizmo.h"
+#include "studio/RigSolver.h"
 #include "studio/PhysicsBake.h"
 #include "studio/RestPoseRetarget.h"
 #include "studio/StudioDoc.h"
@@ -507,6 +508,8 @@ private:
     void StudioPushTrackEdit(const char* name, const std::vector<studio::TrackState>& before);  // after = current state
     std::vector<studio::TrackState> StudioCaptureSelectedTracks();
     bool StudioTrackOfRow(uint64_t row, studio::RowKind& kind, std::string& name) const;
+    // Rig-controller rows drive multiple bones: expand a rig row into its bone rows (for key ops / undo).
+    std::vector<uint64_t> StudioRigRowToBoneRows(uint64_t rigRow) const;
     void StudioInsertKeys(const std::vector<uint64_t>& rows, int frame);  // key the current value of each row
     std::vector<int> StudioRowFrames(uint64_t row) const;                 // key frames of a bone/morph/camera row
     std::vector<uint64_t> StudioExpandRows(const std::set<uint64_t>& rows) const;  // groups -> their key rows
@@ -638,6 +641,25 @@ private:
     ImVec2 studioGizmoLastRaw_{0, 0};
     bool studioGizmoCtrl_ = false;
     bool studioGizmoInit_ = false;
+    // --- rig viewport controllers (stage 3) ---
+    struct RigVpDrag {
+        bool active = false;
+        studio::RigChain chain;
+        studio::RigChainDrag drag;
+        ImVec2 startMouse{0, 0};        // screen position at drag start
+        DirectX::XMFLOAT3 viewRight{1, 0, 0}, viewUp{0, 1, 0};
+        float pixelWorld = 0.002f;      // world units per screen px at the end joint
+        int chainId = -1;               // 0 L hand, 1 R hand, 2 L foot, 3 R foot, 4 L toe, 5 R toe
+        int footIkBone = -1;            // ready IK bone being driven (arm/leg/toe)
+        DirectX::XMFLOAT3 planeOrigin{0, 0, 0};   // FIXED world point the drag plane passes through (captured at start)
+        DirectX::XMFLOAT3 planeNormal{0, 0, 1};   // camera-forward plane normal
+        DirectX::XMFLOAT3 grabOffset{0, 0, 0};    // world offset from grab point to the bone center (so a click on
+                                                 // the ring edge does not jump the bone)
+        int bodyBone = -1;              // body drag (pelvis/spine/chest/neck/head): the bone being translated
+        DirectX::XMFLOAT3 bodyStartT{0, 0, 0};    // its local translation at drag start
+    } rigVpDrag_;
+    void StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered, bool& consumed);
+
     // When on, clicking a bone in the viewport also centers the free camera on it.
     bool studioCenterOnBone_ = false;
     void StudioSelectAllBones();  // Ctrl+A: pick every bone of the active model
@@ -765,6 +787,8 @@ private:
     // Writes each model's rig (if it has one in-memory) to a .mmdxrig next to `projectFile` and fills
     // ProjectModel::rigPath. Returns false on write failure (with *error). No-op when no rigs are present.
     bool StudioWriteRigFiles(const std::filesystem::path& projectFile, studio::ProjectData& data, std::string* error);
+    // Save the active model's rig to a .mmdxrig the user picks (independent of the project). Sets model.rigFile.
+    bool StudioSaveRigDialog();
     bool StudioSaveTo(const std::filesystem::path& file);
     studio::ProjectData StudioProjectData() const;    // snapshot of the document (copies the motions)
     std::filesystem::path StudioRecoveryFile() const; // <exe>/recovery/autosave.mmdxproj

@@ -76,6 +76,7 @@ struct StudioModel {
     std::shared_ptr<RigDefinition> rig;   // generated rig (null = none); stored separately from the model/animation
     std::filesystem::path rigFile;        // persistence path of the rig (absolute); empty = in-memory only
     RigDiagnostics rigDiag;
+    bool showRig = true;                  // viewport controller rings visible
     PoseLayer pose;                // unregistered viewport edits (override the motion at pose.frame)
     // stages: what the static BLAS was last built from (StudioUpdateModel rebuilds it when this changes)
     uint64_t stageMotionApplied = 0;
@@ -95,23 +96,7 @@ struct StudioModel {
 // Timeline row ids: kind in the top byte, then a 24-bit group and a 32-bit index. Light is the camera VMD's light
 // track; SceneLight is the keys of one scene light (SceneLight.h): MakeRowId(RowKind::SceneLight, 0, light uid).
 // Focus is the studio's depth-of-field focus track (camera MotionData::focus, saved in the project, not in VMD).
-enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11, GraphLane = 12, GraphChannel = 13, StageParam = 14 };
-// GraphLane rows are the kTimelineGraphRows rows of an open value / speed graph lane: never a track, no keys. Their id
-// group is the parent row's low 24 bits and their index the block's channel in the high byte, the lane index
-// (0..kTimelineGraphRows-1) in the low byte: MakeRowId(GraphLane, parentLow24, (channel << 8) | laneIndex);
-// `TimelineRow::graphOf` carries the parent id and `graphLaneChannel` the block's channel (kTimelineGraphAllChannels
-// for the "all channels" lane). A block = the lane rows of one (parent, channel) and sits directly under its channel row.
-// GraphChannel rows are the channel sub-rows of an open graph (one per channel, printed right after the parent): never a
-// track, no keys of their own (they show the parent's keys dimmed). Their id group is the parent's low 24 bits and their
-// index the channel; `TimelineRow::graphOf` carries the parent id and `graphChannelIndex` the channel.
-// Group rows of the effect / world trees (RowKind::Group): the category groups are MakeRowId(Group, 0, 0) ("화면 효과")
-// and MakeRowId(Group, 0, 1) ("월드"); an entity group is MakeRowId(Group, 0x400000 | uid, 0) (effect) or
-// MakeRowId(Group, 0x800000 | uid, 0) (world); a pack.json group of that entity is the same group word with the index
-// 1 + its index in the pack's `groups` ("params without a group" sit directly under the entity). Model display-frame
-// groups are MakeRowId(Group, displayFrameIndex, 0) and never set the 0x400000 / 0x800000 bits.
-// S3: the stage tree uses the same scheme: the category group is MakeRowId(Group, 0, 2) ("스테이지"), an entity group
-// MakeRowId(Group, 0xC00000 | stage uid, 0) and a manifest `groups` entry the same group word with the index 1 + its
-// index in the manifest's `groups`.
+enum class RowKind : uint8_t { Group = 1, Bone = 2, Morph = 3, Camera = 4, Light = 5, Shadow = 6, SceneLight = 7, Focus = 8, Accessory = 9, EffectParam = 10, WorldParam = 11, GraphLane = 12, GraphChannel = 13, StageParam = 14, Rig = 15 };
 inline uint64_t MakeRowId(RowKind k, uint32_t group, uint32_t index) {
     return ((uint64_t)k << 56) | ((uint64_t)(group & 0xFFFFFF) << 32) | index;
 }
@@ -293,6 +278,7 @@ struct StudioDoc {
     // editor
     int selectedModel = -1;     // index into models; -1 = camera (the camera VMD, or a scene light: selectedLightUid)
     uint32_t selectedLightUid = 0;  // the selected scene light (0 = none); selectedModel stays -1 (-2 is the audio row)
+    bool rigMode = false;       // timeline shows rig-controller rows for the selected model (instead of bones)
     TimelineView view;
     int followFrame = -1;             // frame the timeline last scrolled to show (follows playback and seeks)
     std::set<KeyId> selection;

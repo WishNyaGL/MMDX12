@@ -5,6 +5,7 @@ namespace mmdx::studio {
 const char* RigRoleName(RigRole role) {
     switch (role) {
         case RigRole::Pelvis: return "pelvis";
+        case RigRole::Groove: return "groove";
         case RigRole::Spine: return "spine";
         case RigRole::Chest: return "chest";
         case RigRole::Neck: return "neck";
@@ -20,23 +21,24 @@ const char* RigRoleName(RigRole role) {
         case RigRole::LeftThigh: return "thigh_l";
         case RigRole::LeftShin: return "shin_l";
         case RigRole::LeftFoot: return "foot_l";
+        case RigRole::LeftToe: return "toe_l";
         case RigRole::RightThigh: return "thigh_r";
         case RigRole::RightShin: return "shin_r";
         case RigRole::RightFoot: return "foot_r";
+        case RigRole::RightToe: return "toe_r";
         default: return "?";
     }
 }
 
 bool RigRoleIsLeft(RigRole role) {
-    // left arm roles + left leg roles (they are not contiguous in the enum)
     return role == RigRole::LeftShoulder || role == RigRole::LeftUpperArm || role == RigRole::LeftForearm ||
            role == RigRole::LeftHand || role == RigRole::LeftThigh || role == RigRole::LeftShin ||
-           role == RigRole::LeftFoot;
+           role == RigRole::LeftFoot || role == RigRole::LeftToe;
 }
 bool RigRoleIsRight(RigRole role) {
     return role == RigRole::RightShoulder || role == RigRole::RightUpperArm || role == RigRole::RightForearm ||
            role == RigRole::RightHand || role == RigRole::RightThigh || role == RigRole::RightShin ||
-           role == RigRole::RightFoot;
+           role == RigRole::RightFoot || role == RigRole::RightToe;
 }
 
 int RigDefinition::BoneFor(RigRole role) const {
@@ -45,8 +47,15 @@ int RigDefinition::BoneFor(RigRole role) const {
     return bindings[(size_t)i].boneIndex;
 }
 
+int RigDefinition::IkBoneFor(RigRole role) const {
+    for (const RigIkBone& b : ikBones)
+        if (b.targetRole == role) return b.boneIndex;
+    return -1;
+}
+
 void RigDefinition::Clear() {
     for (RigBoneBinding& b : bindings) b = RigBoneBinding{};
+    ikBones.clear();
     sourceModelName.clear();
 }
 
