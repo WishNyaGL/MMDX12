@@ -246,7 +246,12 @@ void App::DrawStudioCameraPanel(float w) {
                        d.showCameraPath, btn))
             d.showCameraPath = !d.showCameraPath;
         // render frame guides (shown when looking through the motion camera)
-        ImGui::Dummy(ImVec2(w, Dp(6.0f)));
+        ImGui::Dummy(ImVec2(w, Dp(8.0f)));
+        {
+            const ImVec2 lc = ImGui::GetCursorScreenPos();
+            Text(ImGui::GetWindowDrawList(), Font::Regular, size::Caption, lc, p.ink3, Tr("가이드"));
+            ImGui::Dummy(ImVec2(w, Dp(18.0f)));
+        }
         const float gw = (w / Dpi() - 12.0f) / 3.0f;
         const std::string maskLabel = std::string(d.AspectLabel()) + " " + Tr("프레임");
         if (Button("##fmask", maskLabel.c_str(), nullptr, d.frameMask ? ButtonKind::Primary : ButtonKind::Secondary, ImVec2(gw, 30.0f)))
@@ -261,7 +266,10 @@ void App::DrawStudioCameraPanel(float w) {
             d.showSafeFrames = !d.showSafeFrames;
         Tooltip(Tr("액션 세이프 93 % · 타이틀 세이프 90 %"));
         if (d.frameMask) {
-            ImGui::Dummy(ImVec2(w, Dp(4.0f)));
+            ImGui::Dummy(ImVec2(w, Dp(8.0f)));
+            const ImVec2 lc = ImGui::GetCursorScreenPos();
+            Text(ImGui::GetWindowDrawList(), Font::Regular, size::Caption, lc, p.ink3, Tr("화면 비율"));
+            ImGui::Dummy(ImVec2(w, Dp(18.0f)));
             const char* presets[kAspectPresetCount];
             for (int i = 0; i < kAspectPresetCount; ++i) presets[i] = kAspectPresets[i].label;
             int curAspect = d.AspectIndex();

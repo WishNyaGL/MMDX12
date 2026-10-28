@@ -25,7 +25,7 @@ Palette MakeLightPalette() {
     p.lineStrong = Hex(0xCBD2D9);
     p.ink = Hex(0x13171C);
     p.ink2 = Hex(0x4C5560);
-    p.ink3 = Hex(0x7D8792);
+    p.ink3 = Hex(0x667079);
     p.accent = Hex(0x39C5BB);        // Hatsune Miku
     p.accentHover = Hex(0x2FB5AB);
     p.accentPress = Hex(0x26A198);
@@ -51,7 +51,7 @@ Palette MakeDarkPalette() {
     p.lineStrong = Hex(0x3A444E);
     p.ink = Hex(0xE8ECEF);
     p.ink2 = Hex(0xA9B3BC);
-    p.ink3 = Hex(0x78838E);
+    p.ink3 = Hex(0x818C97);
     p.accent = Hex(0x39C5BB);
     p.accentHover = Hex(0x4DD3C9);
     p.accentPress = Hex(0x2FB5AB);

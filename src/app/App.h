@@ -546,7 +546,8 @@ private:
     // old flat top bar and calls the same functions the rest of the studio does.
     void DrawStudioRibbon(float x0, float y0, float x1, float y1);
     int studioRibbonTab_ = 0;              // selected ribbon tab: 0 home, 1 anim, 2 camera, 3 light, 4 render, 5 view
-    bool studioRibbonCollapsed_ = false;   // only the header row shows
+    bool studioRibbonCollapsed_ = false;
+    bool studioInspectorToBones_ = false;   // a viewport bone pick: the inspector scrolls to its 본 tab   // only the header row shows
     // Helpers shared by the ribbon and the controls it duplicates (Settings: studioRenderer / physics / lighting source)
     void StudioSetViewportRenderer(int choice);        // settings_.studioRenderer + save (the transport combo's setter)
     void StudioTogglePhysics();                        // the transport's ##physics body

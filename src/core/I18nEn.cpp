@@ -1532,6 +1532,15 @@ const Entry kEnglish[] = {
     {"다른 이름으로 저장  (Ctrl+Shift+S)", "Save as  (Ctrl+Shift+S)"},
     {"프로젝트 열기  (Ctrl+O)", "Open a project  (Ctrl+O)"},
     {"현재 포즈를 키로 등록  (I)", "Key the current pose  (I)"},
+    // Studio ribbon / rest pose (2026-10-29)
+    {"VMD", "VMD"},
+    {"메인 조명이 없습니다", "No main light"},
+    {"카메라 VMD의 조명 키를 따릅니다 (클릭: 직접 편집)", "Following camera VMD light keys (click: edit manually)"},
+    {"직접 편집 중 (클릭: 카메라 VMD의 조명 키 따르기)", "Editing manually (click: follow camera VMD light keys)"},
+    {"물리 시뮬레이션", "Physics simulation"},
+    {"끄면 구운 키로 재생해요 (프로젝트에 저장)", "When off, plays the baked keys (saved in the project)"},
+    {"가이드", "Guides"},
+    {"뷰포트 렌더러 (솔리드 단일 뷰에서만 적용)", "Viewport renderer (solid single view only)"},
 };
 const int kEnglishCount = (int)(sizeof(kEnglish) / sizeof(kEnglish[0]));
 

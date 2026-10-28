@@ -4428,7 +4428,7 @@ void App::DrawStudio() {
         studioResetLayout_ = false;
         studioResetLayoutDone_ = true;
     }
-    ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_None);
+    ImGui::DockSpace(dockId, ImVec2(0, 0), (ImGuiDockNodeFlags)ImGuiDockNodeFlags_NoWindowMenuButton);
     ImGui::End();
 
     // One dockable window per panel. The panel code draws in screen coordinates, so each gets its content rectangle.
@@ -4528,7 +4528,6 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), p.surface);
     dl->AddLine(ImVec2(x1 - 0.5f, y0), ImVec2(x1 - 0.5f, y1), p.line);
-    Text(dl, Font::Semibold, size::Caption, ImVec2(x0 + Dp(16.0f), y0 + Dp(14.0f)), p.ink3, Tr("하이어라키"));
     // "+": add a scene item / light / world effect (one drill-down popup)
     ImGui::SetCursorScreenPos(ImVec2(x1 - Dp(12.0f + 64.0f), y0 + Dp(5.0f)));
     const bool addClicked = Button("##addmodel", Tr("추가"), icon::Plus, ButtonKind::Ghost, ImVec2(64.0f, 30.0f));
@@ -5026,11 +5025,9 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), p.surface);
     dl->AddLine(ImVec2(x0 + 0.5f, y0), ImVec2(x0 + 0.5f, y1), p.line);
-    Text(dl, Font::Semibold, size::Caption, ImVec2(x0 + Dp(18.0f), y0 + Dp(14.0f)), p.ink3, Tr("속성"));
-
     const float pad = Dp(18.0f);
-    ImGui::SetCursorScreenPos(ImVec2(x0 + pad, y0 + Dp(38.0f)));
-    ImGui::BeginChild("##inspector", ImVec2(x1 - x0 - pad * 2.0f, y1 - y0 - Dp(38.0f)), ImGuiChildFlags_None,
+    ImGui::SetCursorScreenPos(ImVec2(x0 + pad, y0 + Dp(14.0f)));
+    ImGui::BeginChild("##inspector", ImVec2(x1 - x0 - pad * 2.0f, y1 - y0 - Dp(14.0f)), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoBackground);
     ImDrawList* cdl = ImGui::GetWindowDrawList();
     const float w = ImGui::GetContentRegionAvail().x - Dp(4.0f);
@@ -5080,10 +5077,10 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
             // P2.2: per-model physics off (saved in the project; baked keys play instead of physics)
             if (m->kind == ModelKind::Character && !PhysicsDrivenBones(*m->pmx).empty()) {
                 ImGui::Dummy(ImVec2(w, Dp(6.0f)));
-                bool off = m->physicsOff;
-                if (Switch("##modelphysics", Tr("물리 끄기"), &off, Tr("구운 키로 재생할 때 (프로젝트에 저장)")) &&
-                    off != m->physicsOff)
-                    d.history.Push(std::make_unique<PhysicsOffCommand>(d, d.selectedModel, m->physicsOff, off));
+                bool on = !m->physicsOff;
+                if (Switch("##modelphysics", Tr("물리 시뮬레이션"), &on, Tr("끄면 구운 키로 재생해요 (프로젝트에 저장)")) &&
+                    on == m->physicsOff)
+                    d.history.Push(std::make_unique<PhysicsOffCommand>(d, d.selectedModel, m->physicsOff, !on));
             }
             if (m->kind == ModelKind::Character) DrawStudioShaderRow(w);
             DrawStudioMaterialRow(w);
@@ -5106,6 +5103,10 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
         const char* tabs[] = {Tr("키"), Tr("본"), Tr("모프")};
         const char* tabIcons[] = {icon::Diamond, icon::Bone, icon::Sliders};
         d.inspectorTab = std::clamp(d.inspectorTab, 0, 2);
+        if (studioInspectorToBones_) {   // a bone was just picked in the viewport
+            ImGui::SetScrollHereY(0.0f);
+            studioInspectorToBones_ = false;
+        }
         Segmented("##inspectortab", tabs, 3, &d.inspectorTab, w / Dpi(), 32.0f, tabIcons);
         ImGui::Dummy(ImVec2(w, Dp(10.0f)));
         if (d.inspectorTab == 1 || d.inspectorTab == 2) {
@@ -5716,41 +5717,6 @@ void App::DrawStudioTimeline(float x0, float y0, float x1, float y1) {
         ImGui::PopStyleVar();
         ImGui::SameLine(0, Dp(12.0f));
     }
-    // renderer: the lit single view of the viewport (raster / ray traced / path traced / GI preview)
-    {
-        const bool rtOk = renderer_.RayTracingSupported();
-        const bool giOk = renderer_.OfflineSupported();
-        int cur = std::clamp(settings_.studioRenderer, 0, 3);
-        if ((cur == 1 || cur == 2) && !rtOk) cur = 0;   // an unsupported saved choice runs as raster
-        if (cur == 3 && !giOk) cur = 0;
-        const char* names[4] = {Tr("래스터"), Tr("레이 트레이싱"), Tr("패스 트레이싱"), Tr("GI 미리보기")};
-        ImGui::SetNextItemWidth(Dp(150.0f));
-        PushFont(Font::Regular, size::Small);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Dp(6.0f), Dp(6.0f)));
-        const bool rendererOpen = ImGui::BeginCombo("##studiorenderer", names[cur], ImGuiComboFlags_NoArrowButton);
-        ImGui::PopStyleVar();
-        {
-            const ImVec2 cmax = ImGui::GetItemRectMax(), cmin = ImGui::GetItemRectMin();
-            Icon(ImGui::GetWindowDrawList(), icon::CaretDown, 12.0f,
-                 ImVec2(cmax.x - Dp(12.0f), (cmin.y + cmax.y) * 0.5f), P().ink3);
-        }
-        Tooltip(Tr("뷰포트 렌더러 (솔리드 단일 뷰에 적용)"));
-        if (rendererOpen) {
-            for (int i = 0; i < 4; ++i) {
-                const bool disabled = (i == 1 || i == 2) ? !rtOk : (i == 3 ? !giOk : false);
-                ImGui::BeginDisabled(disabled);
-                if (ImGui::Selectable(names[i], cur == i)) StudioSetViewportRenderer(i);
-                if (disabled)
-                    Tooltip(i == 3 ? Tr("이 그래픽 카드에서는 오프라인 GI 렌더를 사용할 수 없습니다")
-                                   : Tr("이 그래픽 카드에서는 레이 트레이싱을 사용할 수 없습니다"));
-                ImGui::EndDisabled();
-            }
-            ImGui::EndCombo();
-        }
-        PopFont();
-        ImGui::SameLine(0, Dp(12.0f));
-    }
-
     // frame field with one-frame steppers (also ← / →): applied on Enter (typing must not seek on every digit)
     const auto stepFrame = [&](int delta) {
         StudioSetPlaying(false);
@@ -6663,6 +6629,44 @@ void App::DrawStudioViewport(float x0, float y0, float x1, float y1) {
         const char* layouts[] = {Tr("단일"), Tr("4분할")};
         ImGui::SetCursorScreenPos(ImVec2(x1 - Dp(segW) - Dp(12.0f) - Dp(layW) - Dp(8.0f), y0 + Dp(8.0f)));
         Segmented("##viewlayout", layouts, 2, &d.viewLayout, layW, 30.0f);
+        // the renderer of the lit single view: a pill left of the layout switch, opening the four choices
+        const bool rtOk = renderer_.RayTracingSupported(), giOk = renderer_.OfflineSupported();
+        int cur = std::clamp(settings_.studioRenderer, 0, 3);
+        if ((cur == 1 || cur == 2) && !rtOk) cur = 0;   // an unsupported saved choice runs as raster
+        if (cur == 3 && !giOk) cur = 0;
+        const char* names[4] = {Tr("래스터"), Tr("레이 트레이싱"), Tr("패스 트레이싱"), Tr("GI 미리보기")};
+        const ImVec2 ts = TextSize(Font::Semibold, size::Small, names[cur]);
+        const float rw = ts.x + Dp(40.0f), rh = Dp(30.0f);
+        const ImVec2 ra(x1 - Dp(segW) - Dp(12.0f) - Dp(layW) - Dp(16.0f) - rw, y0 + Dp(8.0f)), rb(ra.x + rw, ra.y + rh);
+        ImGui::SetCursorScreenPos(ra);
+        const bool rClick = ImGui::InvisibleButton("##vprenderer", ImVec2(rw, rh));
+        uiprobe::Info(ImGui::GetItemID(), "##vprenderer", names[cur]);
+        const bool rHover = ImGui::IsItemHovered();
+        dl->AddRectFilled(ra, rb, rHover ? p.surface : p.sunken, rh * 0.5f);
+        const bool liveView = (ViewShading)std::clamp(d.shading, 0, 2) == ViewShading::Lit && d.viewLayout == 0;
+        Text(dl, Font::Semibold, size::Small, ImVec2(ra.x + Dp(14.0f), ra.y + (rh - ts.y) * 0.5f),
+             liveView ? p.ink : p.ink3, names[cur]);
+        Icon(dl, icon::CaretDown, 11.0f, ImVec2(rb.x - Dp(14.0f), ra.y + rh * 0.5f), p.ink2);
+        Tooltip(liveView ? Tr("뷰포트 렌더러") : Tr("뷰포트 렌더러 (솔리드 단일 뷰에서만 적용)"));
+        if (rClick) ImGui::OpenPopup("##vprendererpop");
+        ImGui::SetNextWindowPos(ImVec2(ra.x, rb.y + Dp(4.0f)));
+        ImGui::SetNextWindowSize(ImVec2(Dp(220.0f), 0));
+        if (ImGui::BeginPopup("##vprendererpop")) {
+            static const char* const kIds[4] = {"##vpr0", "##vpr1", "##vpr2", "##vpr3"};
+            for (int i = 0; i < 4; ++i) {
+                const bool off = (i == 1 || i == 2) ? !rtOk : (i == 3 ? !giOk : false);
+                ImGui::BeginDisabled(off);
+                if (MenuItem(kIds[i], names[i], i == cur ? icon::Check : nullptr)) {
+                    StudioSetViewportRenderer(i);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndDisabled();
+                if (off)
+                    Tooltip(i == 3 ? Tr("이 그래픽 카드에서는 오프라인 GI 렌더를 사용할 수 없습니다")
+                                   : Tr("이 그래픽 카드에서는 레이 트레이싱을 사용할 수 없습니다"));
+            }
+            ImGui::EndPopup();
+        }
     }
     if (StudioGiActive()) {
         // GI preview progress, bottom-left of the viewport

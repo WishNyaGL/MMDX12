@@ -616,13 +616,6 @@ void App::DrawStudioLightInspector(float w) {
     }
     ImGui::Dummy(ImVec2(w, Dp(4.0f)));
 
-    // Delete button (undoable)
-    if (Button("##deletelight", Tr("조명 삭제"), icon::Trash, ButtonKind::Danger, ImVec2(w / Dpi(), btnH))) {
-        StudioDeleteLight(light->uid);
-        return;
-    }
-
-
     separator(6.0f);
 
     // Current values at playhead
@@ -1290,6 +1283,12 @@ void App::DrawStudioLightInspector(float w) {
         }
     }
 
+    // the destructive action sits last, below everything it would throw away (undoable)
+    separator(8.0f);
+    if (Button("##deletelight", Tr("조명 삭제"), icon::Trash, ButtonKind::Danger, ImVec2(w / Dpi(), btnH))) {
+        StudioDeleteLight(light->uid);
+        return;
+    }
     ImGui::Dummy(ImVec2(w, Dp(16.0f)));
 }
 

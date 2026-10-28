@@ -1540,9 +1540,9 @@ void App::DrawToast() {
     float w = contentW + Dp(16.0f + 24.0f + 12.0f + 20.0f);
     if (!toast_.path.empty()) w += openW + Dp(16.0f);
     const float h = Dp(toast_.detail.empty() ? 52.0f : 66.0f);
-    // the studio's ribbon owns the top edge: the toast drops below it instead of covering its controls
+    // the studio's ribbon and the viewport's overlay row own the top edge: the toast drops below both
     const float top = screen_ == Screen::Studio && studio_
-                          ? Dp(kRibbonHeaderH + (studioRibbonCollapsed_ ? 0.0f : kRibbonToolsH)) + Dp(12.0f)
+                          ? Dp(kRibbonHeaderH + (studioRibbonCollapsed_ ? 0.0f : kRibbonToolsH)) + Dp(84.0f)
                           : Dp(20.0f);
     const float y = top - Dp(30.0f) * (1.0f - vis);
     const ImVec2 a((ImGui::GetIO().DisplaySize.x - w) * 0.5f, y), b(a.x + w, y + h);
@@ -1552,7 +1552,9 @@ void App::DrawToast() {
     ImGui::SetNextWindowSize(ImVec2(w, h));
     ImGui::Begin("##toast", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                     ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav);
+                     ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav |
+                     // a toast without its folder button lets clicks through (it sits over the studio viewport)
+                     (toast_.path.empty() ? ImGuiWindowFlags_NoInputs : 0));
     ImDrawList* dl = ImGui::GetWindowDrawList();
     FrostedPanel(dl, a, b, Dp(16.0f), (ImTextureID)0, rect0);
     Icon(dl, toast_.error ? icon::Warning : icon::Check, Dp(20.0f), ImVec2(a.x + Dp(20.0f) + Dp(10.0f), (a.y + b.y) * 0.5f),

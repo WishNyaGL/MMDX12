@@ -18,7 +18,7 @@ Experience (the UI slides away and the scene owns the screen).
 | surface | #FFFFFF | panels, cards, app bar |
 | sunken | #EBEEF1 | tracks, segmented background, search, skeletons |
 | line / lineStrong | #E2E6EA / #CBD2D9 | hairlines, input borders |
-| ink / ink2 / ink3 | #13171C / #4C5560 / #7D8792 | text, secondary, tertiary |
+| ink / ink2 / ink3 | #13171C / #4C5560 / #667079 | text, secondary, tertiary (ink3 5.05:1 on surface) |
 | accent | #39C5BB | primary fills, selection rings, progress, switches |
 | accentHover / accentPress | #2FB5AB / #26A198 | primary states |
 | accentInk | #0A7F78 | accent as text/icon on light (4.8:1) |
@@ -38,7 +38,7 @@ Same hue family, surfaces and ink swapped (`MakeDarkPalette` in UiKit.cpp; `P()`
 |---|---|
 | bg / surface / sunken | #0F1316 / #181D22 / #0C0F12 (sunken stays the recessed tone) |
 | line / lineStrong | #262D34 / #3A444E |
-| ink / ink2 / ink3 | #E8ECEF / #A9B3BC / #78838E |
+| ink / ink2 / ink3 | #E8ECEF / #A9B3BC / #818C97 |
 | accent / accentInk / accentSoft | #39C5BB / #5ED8CE (text) / #143331 |
 | danger / warn | #F06A71 / #E3AB45 |
 
@@ -87,7 +87,8 @@ A group = large buttons (icon 20 px in ink2 over a Caption label in ink; toggles
 accentInk; popup buttons carry a small caret) or one Segmented, with its Caption name in ink2 underneath; hairline
 separators only between groups. One accent underline slides between tabs (~120 ms exponential); nothing else moves.
 Model-scoped tabs start with an accentSoft "대상: <name>" chip. Disabled buttons sit at 40 % and their tooltip names the
-reason. Toasts drop below the ribbon in the studio.
+reason. Studio toasts sit below the ribbon and the viewport overlay row, and let clicks through unless they
+carry a button.
 
 ## Motion
 

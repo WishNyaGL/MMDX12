@@ -149,6 +149,11 @@ void App::StudioSelectBone(int bone, bool toggle) {
     } else {
         d.selectedBones = {bone};
         d.activeBone = bone;
+        // a fresh pick shows the bone's values: the inspector switches to 본 (and scrolls there once, on the switch)
+        if (d.inspectorTab != 1) {
+            d.inspectorTab = 1;
+            studioInspectorToBones_ = true;
+        }
     }
     // timeline: the bones' rows are picked, their keys at the current frame selected
     const int frame = d.Frame();
