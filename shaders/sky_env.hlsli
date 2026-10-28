@@ -46,7 +46,7 @@ float3 SkyEnvDir(float v, float u) {
 // E(n) = sum_k A_k L_k Y_k(n) with A = (PI, 2PI/3 x3, PI/4 x5): the Lambertian irradiance of the sky, clamped at 0.
 // SkyColor already carries gSunIntensity, so the coefficients do too (the caller must not scale by it again).
 float3 SkyShIrradiance(float3 n) {
-    const ByteAddressBuffer b = SKY_ENV_BUF((uint)gSkyEnvParams.x);
+    const ByteAddressBuffer b = SKY_ENV_BUF(SafeSrv(gSkyEnvParams.x));
     const float3 d = n;
     const float basis[9] = {
         0.282095,
@@ -75,7 +75,7 @@ bool SkyEnvSample(float2 u, out float3 dir, out float pdf) {
     dir = float3(0.0, 1.0, 0.0);
     pdf = 0.0;
     if (!SkyEnvOn()) return false;
-    const ByteAddressBuffer b = SKY_ENV_BUF((uint)gSkyEnvParams.x);
+    const ByteAddressBuffer b = SKY_ENV_BUF(SafeSrv(gSkyEnvParams.x));
     // row: the first index whose marginal CDF passes u.x
     uint lo = 0u, hi = kSkyEnvH - 1u;
     [loop] while (lo < hi) {
@@ -112,7 +112,7 @@ bool SkyEnvSample(float2 u, out float3 dir, out float pdf) {
 // share and the same conversion. 0 when the direction has no sample (the top / bottom row's poles are covered).
 float SkyEnvPdf(float3 dir) {
     if (!SkyEnvOn()) return 0.0;
-    const ByteAddressBuffer b = SKY_ENV_BUF((uint)gSkyEnvParams.x);
+    const ByteAddressBuffer b = SKY_ENV_BUF(SafeSrv(gSkyEnvParams.x));
     const float theta = acos(clamp(dir.y, -1.0, 1.0));
     float phi = atan2(dir.z, dir.x);
     if (phi < 0.0) phi += 2.0 * PI;

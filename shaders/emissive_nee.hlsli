@@ -26,12 +26,12 @@ bool EmissiveOn() { return gEmissive.x >= 0.0 && gEmissive.z >= 1.0; }
 // The geometry's first entry in the pick list, or 0xFFFFFFFF when it does not emit.
 uint EmissiveBase(uint geometryId) {
     if (!EmissiveOn()) return 0xFFFFFFFFu;
-    ByteAddressBuffer base = gBindlessBuf[NonUniformResourceIndex((uint)gEmissive.w)];
+    ByteAddressBuffer base = gBindlessBuf[NonUniformResourceIndex(SafeSrv(gEmissive.w))];
     return base.Load(geometryId * 4u);
 }
 
 EmissiveTri EmissiveTriAt(uint entry) {
-    ByteAddressBuffer tris = gBindlessBuf[NonUniformResourceIndex((uint)gEmissive.x)];
+    ByteAddressBuffer tris = gBindlessBuf[NonUniformResourceIndex(SafeSrv(gEmissive.x))];
     uint2 v = tris.Load2(entry * 8u);
     EmissiveTri t;
     t.geometry = v.x;
@@ -41,7 +41,7 @@ EmissiveTri EmissiveTriAt(uint entry) {
 
 // The CDF share of entry `i` (its discrete probability).
 float EmissiveCdfAt(uint i) {
-    ByteAddressBuffer cdf = gBindlessBuf[NonUniformResourceIndex((uint)gEmissive.y)];
+    ByteAddressBuffer cdf = gBindlessBuf[NonUniformResourceIndex(SafeSrv(gEmissive.y))];
     return asfloat(cdf.Load(i * 4u));
 }
 

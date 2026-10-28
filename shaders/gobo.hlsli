@@ -50,7 +50,7 @@ GoboRef GoboOf(uint lightIndex) {
     const int table = (int)gGoboParams.x;
     if (table < 0) return g;
     // one GpuGobo (16 B) per light: 4 floats at lightIndex * 16 B
-    ByteAddressBuffer gobos = GOBO_BUF(table);
+    ByteAddressBuffer gobos = GOBO_BUF(SafeSrv(table));
     g.srv = asfloat(gobos.Load(lightIndex * 16u + 0u));
     g.rotation = asfloat(gobos.Load(lightIndex * 16u + 4u));
     g.scale = asfloat(gobos.Load(lightIndex * 16u + 8u));
@@ -87,7 +87,7 @@ float3 GoboSample(GoboRef g, float3 wp, float3 lightPos, float3 lightDir, float 
     if (!g.on) return 1.0;
     const float2 uv = GoboUv(wp, lightPos, lightDir, cosOuter, g);
     if (any(uv < 0.0) || any(uv > 1.0)) return 0.0;
-    return GOBO_TEX((uint)g.srv).SampleLevel(GOBO_SAMPLER, uv, max(g.mipBias + loD, 0.0)).rgb;
+    return GOBO_TEX(SafeSrv(g.srv)).SampleLevel(GOBO_SAMPLER, uv, max(g.mipBias + loD, 0.0)).rgb;
 }
 
 // The same factor for a light the caller already has as (position, direction, cosOuter) - the per-light convenience.

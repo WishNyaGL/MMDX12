@@ -115,6 +115,7 @@ private:
     ComPtr<ID3D12PipelineState> psoGuideBack_, psoGuideNoCull_;
     Texture guideDiffuse_, guideSpecular_, guideNormal_;
     ComPtr<ID3D12PipelineState> psoCullBack_, psoNoCull_, psoEdge_, psoSky_, psoFloor_;
+    ComPtr<ID3D12PipelineState> psoSkyFeed_;   // psoSky_ for the single-sample feed / mirror targets
     ComPtr<ID3D12PipelineState> psoWireBack_, psoWireNoCull_, psoWireFloor_, psoFlatBg_;
     // model .emd blend hints (MatFlag_Additive / MatFlag_NoDepthWrite): additive (SrcAlpha/One, no depth write)
     // and no-depth-write (same blend, depth write off) variants of the lit PSOs. Normal/velocity MRT writes off.

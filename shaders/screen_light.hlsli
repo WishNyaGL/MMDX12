@@ -48,7 +48,7 @@ struct GpuScreenLightHLSL {
 bool ScreenLightsActive() { return gScreenLights.x >= 0.0 && gScreenLights.y > 0.0; }
 
 GpuScreenLightHLSL ScreenLightOf(uint i) {
-    const ByteAddressBuffer table = SCREEN_LIGHT_BUF((uint)gScreenLights.x);
+    const ByteAddressBuffer table = SCREEN_LIGHT_BUF(SafeSrv(gScreenLights.x));
     const uint o = i * 64u;   // GpuScreenLight is 64 B
     GpuScreenLightHLSL l;
     l.center = asfloat(table.Load4(o + 0u));
@@ -63,7 +63,7 @@ GpuScreenLightHLSL ScreenLightOf(uint i) {
 float3 ScreenLightAverage(GpuScreenLightHLSL l, uint i) {
     const int avg = (int)gScreenLights.z;
     if (avg < 0) return 0.0;
-    const float3 c = asfloat(SCREEN_LIGHT_BUF((uint)avg).Load4(i * 16u)).rgb;
+    const float3 c = asfloat(SCREEN_LIGHT_BUF(SafeSrv(avg)).Load4(i * 16u)).rgb;
     return max(c, 0.0) * max(l.center.w, 0.0);
 }
 
@@ -72,7 +72,7 @@ float3 ScreenLightAverage(GpuScreenLightHLSL l, uint i) {
 float3 ScreenLightColorAt(GpuScreenLightHLSL l, float2 uv, uint i) {
     const int tex = (int)l.axisA.w;
     if (tex < 0) return ScreenLightAverage(l, i);
-    const float3 s = saturate(SCREEN_LIGHT_TEX((uint)tex).SampleLevel(SCREEN_LIGHT_SAMPLER, uv, 0.0).rgb);
+    const float3 s = saturate(SCREEN_LIGHT_TEX(SafeSrv(tex)).SampleLevel(SCREEN_LIGHT_SAMPLER, uv, 0.0).rgb);
     return max(SrgbToLinear(s), 0.0) * max(l.center.w, 0.0);
 }
 

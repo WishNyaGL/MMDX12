@@ -77,7 +77,7 @@ float3 ToonSun(RtGeometry g, float4 tex, float2 uv, float3 n, float3 V, float ra
     if (g.flags & (MAT_SPHERE_MUL | MAT_SPHERE_ADD)) {
         float3 nv = normalize(mul(n, (float3x3)gView));
         float2 suv = nv.xy * float2(0.5, -0.5) + 0.5;
-        float3 sp = ApplyTexFactor3(gBindlessTex[NonUniformResourceIndex(g.sphereSrv)].SampleLevel(gLinear, suv, 0).rgb, g.sphereMul, g.sphereAdd, (g.flags & MAT_SPHERE_MUL) ? 1.0 : 0.0);
+        float3 sp = ApplyTexFactor3(gBindlessTex[NonUniformResourceIndex(SafeSrvU(g.sphereSrv))].SampleLevel(gLinear, suv, 0).rgb, g.sphereMul, g.sphereAdd, (g.flags & MAT_SPHERE_MUL) ? 1.0 : 0.0);
         if (g.flags & MAT_SPHERE_MUL) lit *= sp; else lit += sp;
     }
     float occ = (1.0 - rawSh) * gSunShadowParams.z;
@@ -87,12 +87,12 @@ float3 ToonSun(RtGeometry g, float4 tex, float2 uv, float3 n, float3 V, float ra
     float3 c;
     if (g.flags & MAT_TOON_MAP) {
         // Project Sekai layout: the "toon" is the painted shadow colour at the same UV.
-        float3 shadowTex = ApplyTexFactor3(gBindlessTex[NonUniformResourceIndex(g.toonSrv)].SampleLevel(gRtWrap, uv, 0).rgb, g.toonMul, g.toonAdd, 1.0);
+        float3 shadowTex = ApplyTexFactor3(gBindlessTex[NonUniformResourceIndex(SafeSrvU(g.toonSrv))].SampleLevel(gRtWrap, uv, 0).rgb, g.toonMul, g.toonAdd, 1.0);
         float term = sh * lerp(smoothstep(-0.03, 0.06, ndl), 1.0, flat);
         c = lerp(saturate(g.ambient + g.diffuse.rgb * gLightColor) * shadowTex, lit, term);
     } else if (g.flags & MAT_HAS_TOON) {
         float v = lerp(1.0, saturate(0.5 - 0.5 * ndl), sh);
-        c = lit * ApplyTexFactor3(gBindlessTex[NonUniformResourceIndex(g.toonSrv)].SampleLevel(gLinear, float2(0.5, v), 0).rgb, g.toonMul, g.toonAdd, 1.0);
+        c = lit * ApplyTexFactor3(gBindlessTex[NonUniformResourceIndex(SafeSrvU(g.toonSrv))].SampleLevel(gLinear, float2(0.5, v), 0).rgb, g.toonMul, g.toonAdd, 1.0);
     } else {
         c = lit;
     }
@@ -136,7 +136,7 @@ float3 PbrSunDirect(PtPbrSurface p, RtGeometry g, float4 tex, float2 uv, float3 
     float3 c = mddLight * cAlbedo;
     if (p.model == 8u) {   // CEL: the toon ramp replaces the PBR diffuse colour
         float v = lerp(1.0, saturate(0.5 - 0.5 * ndl), sh);
-        c = mddLight * tex.rgb * ApplyTexFactor3(gBindlessTex[NonUniformResourceIndex(g.toonSrv)].SampleLevel(gLinear, float2(0.5, v), 0).rgb, g.toonMul, g.toonAdd, 1.0);
+        c = mddLight * tex.rgb * ApplyTexFactor3(gBindlessTex[NonUniformResourceIndex(SafeSrvU(g.toonSrv))].SampleLevel(gLinear, float2(0.5, v), 0).rgb, g.toonMul, g.toonAdd, 1.0);
     } else {
         float term = lerp(sh * smoothstep(-0.12, 0.22, ndl), lerp(1.0, sh, 0.8), flat);
         float3 shade = c * lerp(1.0, saturate(c), 0.55) * float3(0.90, 0.90, 0.96);

@@ -3,6 +3,14 @@
 #define MMDX_COMMON_HLSLI
 #pragma pack_matrix(row_major)
 
+// Bindless table indices that carry a "none" sentinel (-1 from a constant, 0xFFFFFFFF = DescriptorHeap::kInvalid) are
+// guarded by a branch, but compilers / drivers may hoist the descriptor fetch above that branch. On AMD (issue #8) a
+// hoisted fetch at index 0xFFFFFFFF read far outside the descriptor heap: page fault, device hung. Every such index goes
+// through these, so a speculated fetch stays inside the heap (slot 0); the guard still decides whether it is used.
+uint SafeSrv(int i) { return (uint)max(i, 0); }
+uint SafeSrv(float f) { return (uint)max((int)f, 0); }
+uint SafeSrvU(uint i) { return i == 0xFFFFFFFFu ? 0u : i; }
+
 // PMX material morph texture factors, as MMD's default shader (full.fx) applies them:
 // rgb = lerp(neutral, rgb * mul + add, mul.a + add.a); the factor alphas weight the effect and the
 // texture alpha is not changed. Identity: mul 1, add 0. neutral = 1 (texture, toon, multiply

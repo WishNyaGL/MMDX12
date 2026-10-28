@@ -30,7 +30,7 @@ groupshared float3 gSum[SCREEN_AVG_SAMPLES];
 
 // The screen texture of light `light`: GpuScreenLight::axisA.w (byte offset 44 of the 64-byte entry).
 uint ScreenTextureSrv(uint light) {
-    const ByteAddressBuffer table = gScreenBuf[NonUniformResourceIndex((uint)gP0.y)];
+    const ByteAddressBuffer table = gScreenBuf[NonUniformResourceIndex(SafeSrv(gP0.y))];
     return (uint)asfloat(table.Load(light * 64u + 44u));
 }
 

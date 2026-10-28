@@ -7,6 +7,8 @@
 #include <windows.h>
 #include <algorithm>
 #include <cstring>
+#include <cwctype>
+#include <string>
 
 namespace mmdx {
 
@@ -114,6 +116,13 @@ bool Dx12Context::Initialize(HWND hwnd, uint32_t width, uint32_t height, bool en
         ComPtr<ID3D12Debug> dbg;
         if (CheckHr(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)), "D3D12GetDebugInterface"))
             dbg->EnableDebugLayer();
+        // MMDX12_GBV=1 (with --debug): GPU-based validation (descriptor / resource-state errors at execution time; slow)
+        char gbv[8] = {};
+        ComPtr<ID3D12Debug1> dbg1;
+        if (GetEnvironmentVariableA("MMDX12_GBV", gbv, sizeof(gbv)) && gbv[0] == '1' && dbg && SUCCEEDED(dbg.As(&dbg1))) {
+            dbg1->SetEnableGPUBasedValidation(TRUE);
+            LOG_INFO("D3D12 GPU-based validation on");
+        }
     }
 
     UINT factoryFlags = enableDebugLayer ? DXGI_CREATE_FACTORY_DEBUG : 0;
@@ -139,6 +148,17 @@ bool Dx12Context::Initialize(HWND hwnd, uint32_t width, uint32_t height, bool en
         DXGI_ADAPTER_DESC1 d{};
         if (FAILED(a->GetDesc1(&d))) continue;
         if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+        // MMDX12_ADAPTER=<substring>: the first adapter whose name contains it (case-insensitive), e.g. "AMD" to test on
+        // a hybrid laptop's integrated GPU instead of the high-performance one
+        {
+            wchar_t want[128] = {};
+            if (GetEnvironmentVariableW(L"MMDX12_ADAPTER", want, 128) && want[0]) {
+                std::wstring name = d.Description, needle = want;
+                for (auto& c : name) c = (wchar_t)towlower(c);
+                for (auto& c : needle) c = (wchar_t)towlower(c);
+                if (name.find(needle) == std::wstring::npos) continue;
+            }
+        }
         ComPtr<ID3D12Device> dev;
         if (SUCCEEDED(D3D12CreateDevice(a.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev)))) {
             adapter_ = std::move(a);
@@ -149,6 +169,19 @@ bool Dx12Context::Initialize(HWND hwnd, uint32_t width, uint32_t height, bool en
     if (!device_) {
         LOG_ERROR("no Direct3D 12 hardware adapter found");
         return false;
+    }
+    // --debug: the debug layer's messages go to the log (OutputDebugString is invisible without a debugger)
+    if (enableDebugLayer) {
+        ComPtr<ID3D12InfoQueue1> iq;
+        if (SUCCEEDED(device_.As(&iq))) {
+            DWORD cookie = 0;
+            iq->RegisterMessageCallback(
+                [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY sev, D3D12_MESSAGE_ID id, LPCSTR text, void*) {
+                    if (sev <= D3D12_MESSAGE_SEVERITY_ERROR) LOG_ERROR("D3D12 [%d] %s", (int)id, text);
+                    else if (sev == D3D12_MESSAGE_SEVERITY_WARNING) LOG_WARN("D3D12 [%d] %s", (int)id, text);
+                },
+                D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie);
+        }
     }
 
     // Caps.

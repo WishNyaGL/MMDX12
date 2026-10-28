@@ -17,7 +17,7 @@ uint LightCdfPick(float u, uint lightCount, out float pdf) {
     pdf = 0.0;
     const int idx = (int)gLightCdf.x;
     if (idx < 0 || lightCount == 0u) return 0u;
-    ByteAddressBuffer cdf = gBindlessBuf[NonUniformResourceIndex((uint)idx)];
+    ByteAddressBuffer cdf = gBindlessBuf[NonUniformResourceIndex(SafeSrv(idx))];
     // binary search for the first entry whose running sum reaches u
     uint lo = 0u, hi = lightCount - 1u;
     [loop] while (lo < hi) {

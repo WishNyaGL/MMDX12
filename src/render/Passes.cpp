@@ -643,6 +643,14 @@ bool ScenePass::CreatePipelines(Dx12Context& ctx, const std::filesystem::path& s
     sky.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
     if (!CheckHr(device->CreateGraphicsPipelineState(&sky, IID_PPV_ARGS(&psoSky_)), "ScenePass: PSO sky"))
         return false;
+    {   // S5 / S10: camera feeds and mirrors draw the sky into single-sample targets (DrawFeed): a 1x twin. The MSAA sky
+        // PSO there is a sample-count mismatch (undefined behaviour; flagged by the debug layer, issue #8).
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC sky1 = sky;
+        sky1.SampleDesc = {1, 0};
+        sky1.RasterizerState.MultisampleEnable = FALSE;
+        if (!CheckHr(device->CreateGraphicsPipelineState(&sky1, IID_PPV_ARGS(&psoSkyFeed_)), "ScenePass: PSO sky feed"))
+            return false;
+    }
     // Flat background (wireframe): the same draw with one flat colour.
     sky.PS = {psWireBg->GetBufferPointer(), psWireBg->GetBufferSize()};
     if (!CheckHr(device->CreateGraphicsPipelineState(&sky, IID_PPV_ARGS(&psoFlatBg_)), "ScenePass: PSO flat bg"))
@@ -2137,8 +2145,8 @@ bool ScenePass::DrawFeed(PassContext& pc, Texture& color, Texture& normal, Textu
     cmd->SetGraphicsRootDescriptorTable(10, ctx.SrvHeap().Gpu(0));
     cmd->SetGraphicsRootConstantBufferView(0, pc.sceneConstants);
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    if (psoSky_) {
-        cmd->SetPipelineState(psoSky_.Get());
+    if (psoSkyFeed_) {   // the single-sample sky (the feed / mirror targets are 1x whatever the frame's MSAA is)
+        cmd->SetPipelineState(psoSkyFeed_.Get());
         cmd->DrawInstanced(3, 1, 0, 0);
     }
     const uint32_t pbrDebugChannel = (uint32_t)pc.settings.pbrDebug;

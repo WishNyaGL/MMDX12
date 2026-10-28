@@ -60,7 +60,7 @@ LightList LightListFor(float3 vp) {
     bool beyondGrid = false;
     const uint base = LightClusterIndex(vp, beyondGrid) * (1u + kClusterMaxLights);
     if (beyondGrid) return list;   // past the culling range: every light, in order
-    ByteAddressBuffer clusters = gPbrBuf[NonUniformResourceIndex((uint)srv)];
+    ByteAddressBuffer clusters = gPbrBuf[NonUniformResourceIndex(SafeSrv(srv))];
     const uint count = clusters.Load(base * 4u);
     if (count >= kClusterOverflow) return list;   // overflowed: every light, in order
     list.first = base + 1u;
@@ -72,7 +72,7 @@ LightList LightListFor(float3 vp) {
 // The loop counter -> light index (`k` = the loop counter of the fragment's list).
 uint LightListAt(LightList list, uint k) {
     if (list.all) return k;
-    return gPbrBuf[NonUniformResourceIndex((uint)gLightCluster.x)].Load((list.first + k) * 4u);
+    return gPbrBuf[NonUniformResourceIndex(SafeSrv(gLightCluster.x))].Load((list.first + k) * 4u);
 }
 
 #endif

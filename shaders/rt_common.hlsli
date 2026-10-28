@@ -144,7 +144,7 @@ void LoadAddUv(RtGeometry g, uint3 tri, float2 bary, out float4 uv1, out float4 
     uv1 = 0;
     uv2 = 0;
     if (g.addUvSrv == 0xFFFFFFFFu) return;
-    ByteAddressBuffer adduv = gBindlessBuf[NonUniformResourceIndex(g.addUvSrv)];
+    ByteAddressBuffer adduv = gBindlessBuf[NonUniformResourceIndex(SafeSrvU(g.addUvSrv))];
     float3 w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
     uv1 = asfloat(adduv.Load4(tri.x * kAddUvStride + 0)) * w.x +
           asfloat(adduv.Load4(tri.y * kAddUvStride + 0)) * w.y +
@@ -180,7 +180,7 @@ RtSurface FetchSurface(RtGeometry g, uint prim, float2 bary) {
 
 float4 SampleBaseTexture(RtGeometry g, float2 uv, float lod) {
     if ((g.flags & MAT_HAS_TEXTURE) == 0) return float4(1, 1, 1, 1);
-    return ApplyTexFactor(gBindlessTex[NonUniformResourceIndex(g.textureSrv)].SampleLevel(gRtWrap, uv, lod),
+    return ApplyTexFactor(gBindlessTex[NonUniformResourceIndex(SafeSrvU(g.textureSrv))].SampleLevel(gRtWrap, uv, lod),
                           g.texMul, g.texAdd);
 }
 

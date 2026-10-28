@@ -97,7 +97,7 @@ GpuPbrSlot PbrLoadSlot(ByteAddressBuffer b, uint base) {
 
 GpuPbrMaterial PbrLoadMaterial(int srvIndex, uint index) {
     GpuPbrMaterial m;
-    ByteAddressBuffer b = gPbrBuf[NonUniformResourceIndex((uint)srvIndex)];
+    ByteAddressBuffer b = gPbrBuf[NonUniformResourceIndex(SafeSrv(srvIndex))];
     const uint base = index * 864u;   // sizeof(GpuPbrMaterial)
     m.flags = b.Load(base + 0);
     m.shadingModel = b.Load(base + 4);
@@ -156,9 +156,9 @@ void PbrSetUvGradients(float2 dx, float2 dy) { gPbrUvDx = dx; gPbrUvDy = dy; }
 float4 PbrSlotTexel(GpuPbrSlot s, float2 uv) {
     if (s.textureSrv >= 0) {
 #ifdef PBR_SAMPLE_LEVEL0
-        return gPbrTex[NonUniformResourceIndex((uint)s.textureSrv)].SampleLevel(gPbrWrap, PbrSlotUv(s, uv), 0);
+        return gPbrTex[NonUniformResourceIndex(SafeSrv(s.textureSrv))].SampleLevel(gPbrWrap, PbrSlotUv(s, uv), 0);
 #else
-        return gPbrTex[NonUniformResourceIndex((uint)s.textureSrv)].SampleGrad(gPbrWrap, PbrSlotUv(s, uv),
+        return gPbrTex[NonUniformResourceIndex(SafeSrv(s.textureSrv))].SampleGrad(gPbrWrap, PbrSlotUv(s, uv),
                                                                              PbrSlotUvDelta(s, gPbrUvDx),
                                                                              PbrSlotUvDelta(s, gPbrUvDy));
 #endif
@@ -333,7 +333,7 @@ float PbrTransmission(GpuPbrMaterial m) { return saturate(m.transmission.x); }
 float PbrTransmissionAt(GpuPbrMaterial m, float2 uv) {
     const int srv = (int)m.sheen.w;
     if (srv < 0) return PbrTransmission(m);
-    return saturate(PbrTransmission(m) * gPbrTex[NonUniformResourceIndex((uint)srv)].SampleLevel(gPbrWrap, uv, 0).r);
+    return saturate(PbrTransmission(m) * gPbrTex[NonUniformResourceIndex(SafeSrv(srv))].SampleLevel(gPbrWrap, uv, 0).r);
 }
 
 // KHR_materials_volume thickness factor (the record keeps the factor; the thickness map is not needed before S2b).
@@ -524,7 +524,7 @@ float3 MirrorReflection(int srv, int slot, float3 worldPos, float3 tint, float r
     if (clip.w <= 0.0) return tint;
     const float2 uv = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
     if (any(uv < 0.0) || any(uv > 1.0)) return tint;   // the reflected ray leaves the reflection view
-    const uint s = NonUniformResourceIndex((uint)srv);
+    const uint s = NonUniformResourceIndex(SafeSrv(srv));
     if (roughness <= 0.02) return tint * gPbrTex[s].SampleLevel(gPbrWrap, uv, 0).rgb;
     // Rough mirror: 3x3 taps, spread with the roughness (a "blurrier" reflection at half the render resolution).
     uint tw = 0, th = 0;

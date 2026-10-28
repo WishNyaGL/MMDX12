@@ -25,7 +25,7 @@ float3 SkyMapRadiance(float3 dir) {
     u = frac(u);
     // the v clamp keeps a bilinear sample off the edge rows (the panorama's zenith / nadir row is one texel)
     float v = clamp(acos(clamp(dir.y, -1.0, 1.0)) / PI, 0.5 / gSkyMapSize.y, 1.0 - 0.5 / gSkyMapSize.y);
-    return SKY_MAP_TEX((uint)gSkyMapParams.x).SampleLevel(SKY_MAP_SAMPLER, float2(u, v), 0.0).rgb * gSkyMapParams.z;
+    return SKY_MAP_TEX(SafeSrv(gSkyMapParams.x)).SampleLevel(SKY_MAP_SAMPLER, float2(u, v), 0.0).rgb * gSkyMapParams.z;
 }
 
 #endif // MMDX_SKY_MAP_HLSLI
