@@ -2981,7 +2981,7 @@ void App::StudioRowStopwatch(uint64_t rowId) {
             StudioEndLightEdit(light->uid);
             d.rowsKey = ~0ull;
         } else {
-            studioStopwatchLabel_ = light->name;
+            studioStopwatchLabel_ = LightDisplayName(light->name);
             studioStopwatchOff_ = [this, &d, uid = light->uid] {
                 if (SceneLight* l = d.FindLight(uid)) {
                     std::vector<SceneLight> before = d.lights;
@@ -3682,7 +3682,7 @@ void App::StudioRebuildRows() {
             if (light.kind == LightKind::Ambient) continue;
             TimelineRow r;
             r.id = MakeRowId(RowKind::SceneLight, 0, light.uid);
-            r.label = light.name;
+            r.label = LightDisplayName(light.name);
             r.selected = d.selectedRows.count(r.id) != 0;
             const bool vmdLinkedSun = (light.kind == LightKind::Sun && light.vmdLink && !d.camera.light.empty());
             if (!vmdLinkedSun) {
@@ -5172,7 +5172,7 @@ void App::DrawStudioInspector(float x0, float y0, float x1, float y1) {
     line(IsCameraKind(kind) || kind == RowKind::SceneLight
              ? Tr("트랙")
              : (kind == RowKind::Bone ? Tr("본") : Tr("모프")),
-         kind == RowKind::SceneLight ? (sceneLight ? sceneLight->name : std::string())
+         kind == RowKind::SceneLight ? (sceneLight ? LightDisplayName(sceneLight->name) : std::string())
                                      : IsCameraKind(kind) ? trackName : name);
     line(Tr("프레임"), std::to_string(first->second));
     if (IsCameraKind(kind) && !keyAwayFromPlayhead) {

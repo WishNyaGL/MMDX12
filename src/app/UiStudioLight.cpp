@@ -302,7 +302,8 @@ void App::DrawStudioLightOutliner() {
         const bool selected = (d.selectedModel == -1 && d.selectedLightUid == l.uid && studioSelectedWorld_ == 0);
 
         ImGui::InvisibleButton("##row", ImVec2(w - Dp(40.0f), rowH));
-        uiprobe::Info(ImGui::GetItemID(), "##row", l.name.c_str());   // MCP ui_click by name
+        const std::string shownName = LightDisplayName(l.name);
+        uiprobe::Info(ImGui::GetItemID(), "##row", shownName.c_str());   // MCP ui_click by name
         const bool hovered = ImGui::IsItemHovered();
         if (ImGui::IsItemClicked()) {
             StudioSelectLight(l.uid);
@@ -333,7 +334,7 @@ void App::DrawStudioLightOutliner() {
         const ImU32 fg = selected ? p.accentInk : p.ink;
         Icon(cdl, glyph, 16.0f, ImVec2(a.x + Dp(26.0f), a.y + rowH * 0.5f), selected ? p.accentInk : p.ink2);
         const float tx = a.x + Dp(44.0f), maxX = b.x - Dp(46.0f);
-        TextEllipsis(cdl, Font::Semibold, size::Small, ImVec2(tx, a.y + Dp(4.0f)), maxX, fg, l.name.c_str());
+        TextEllipsis(cdl, Font::Semibold, size::Small, ImVec2(tx, a.y + Dp(4.0f)), maxX, fg, shownName.c_str());
         TextEllipsis(cdl, Font::Regular, size::Caption, ImVec2(tx, a.y + Dp(21.0f)), maxX, p.ink3, sub);
 
         // Enable eye toggle
@@ -579,14 +580,15 @@ void App::DrawStudioLightInspector(float w) {
         if (!stageDriven.empty()) stageNote();
     }
 
-    // Rename (undoable)
+    // Rename (undoable). The field shows the display name; an untouched default name keeps its saved form.
     {
+        const std::string shownName = LightDisplayName(light->name);
         char nameBuf[128];
-        std::snprintf(nameBuf, sizeof(nameBuf), "%s", light->name.c_str());
+        std::snprintf(nameBuf, sizeof(nameBuf), "%s", shownName.c_str());
         row(Tr("이름"), [&] {
             if (ImGui::InputText("##lightname", nameBuf, sizeof(nameBuf), ImGuiInputTextFlags_EnterReturnsTrue) ||
                 ImGui::IsItemDeactivatedAfterEdit()) {
-                if (nameBuf[0] != '\0' && light->name != nameBuf) {
+                if (nameBuf[0] != '\0' && shownName != nameBuf) {
                     std::vector<SceneLight> before = d.lights;
                     std::vector<SceneLight> after = before;
                     for (SceneLight& l : after) {

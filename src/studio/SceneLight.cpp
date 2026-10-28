@@ -1,7 +1,10 @@
 // Scene lights: project-file names, exact equality, key sampling and the preset lists. See SceneLight.h.
 #include "studio/SceneLight.h"
+#include "core/I18n.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstddef>
 
 namespace mmdx::studio {
 
@@ -300,6 +303,20 @@ std::vector<SceneLight> PresetLights(int presetIndex, DirectX::XMFLOAT3 focus, u
         out.push_back(std::move(fill));
     }
     return out;
+}
+
+std::string LightDisplayName(const std::string& stored) {
+    for (const char* fixed : {"메인 조명", "환경광", "채움광", "하늘"})
+        if (stored == fixed) return Tr(fixed);
+    // "<kind> <n>": the numbered names of StudioAddLight, the Concert preset and a stage's unnamed fog volume
+    for (const char* kind : {"스팟", "점광원", "면광원", "안개"}) {
+        const std::string prefix = std::string(kind) + " ";
+        if (stored.size() > prefix.size() && stored.compare(0, prefix.size(), prefix) == 0 &&
+            std::all_of(stored.begin() + (std::ptrdiff_t)prefix.size(), stored.end(),
+                        [](unsigned char c) { return std::isdigit(c) != 0; }))
+            return std::string(Tr(kind)) + stored.substr(prefix.size() - 1);
+    }
+    return stored;
 }
 
 } // namespace mmdx::studio

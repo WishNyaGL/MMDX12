@@ -3,6 +3,7 @@
 // Imitates studio_project_test.cpp: a tiny CHECK, PASS/FAIL per check and a summary, exit code 0 on success.
 #include "app/Lighting.h"
 #include "asset/AssetLibrary.h"
+#include "core/I18n.h"
 #include "render/Renderer.h"
 #include "studio/SceneLight.h"
 #include "studio/StudioDoc.h"
@@ -1090,6 +1091,28 @@ static void TestSkyLight() {
     Check(duskSky.second.color.x > duskSky.second.color.z * 1.2f, "the sunset sun is warm");
 }
 
+// ---- default light names: saved in Korean, shown in the UI language ----
+static void TestLightDisplayNames() {
+    SetLanguage(Language::Chinese);
+    Check(LightDisplayName("메인 조명") == "主光源", "display name: sun default translated");
+    Check(LightDisplayName("환경광") == "环境光", "display name: ambient default translated");
+    Check(LightDisplayName("채움광") == "补光", "display name: concert fill translated");
+    Check(LightDisplayName("하늘") == "天空", "display name: sky default translated");
+    Check(LightDisplayName("스팟 12") == "聚光灯 12", "display name: a numbered spot keeps its number");
+    Check(LightDisplayName("점광원 1") == "点光源 1" && LightDisplayName("면광원 3") == "面光源 3",
+          "display name: numbered point / area lights");
+    Check(LightDisplayName("안개 2") == "雾 2", "display name: a numbered fog volume (studio / unnamed stage volume)");
+    Check(LightDisplayName("스팟 A") == "스팟 A" && LightDisplayName("스팟 ") == "스팟 " &&
+              LightDisplayName("My key") == "My key" && LightDisplayName("안개 볼륨") == "안개 볼륨",
+          "display name: other names unchanged");
+    uint32_t uid = 1;
+    const std::vector<SceneLight> concert = PresetLights(2, {0, 10, 0}, uid);
+    Check(concert.front().name == "메인 조명" && concert.back().name == "채움광", "saved preset names stay Korean");
+    SetLanguage(Language::Korean);
+    Check(LightDisplayName("메인 조명") == "메인 조명" && LightDisplayName("스팟 3") == "스팟 3",
+          "display name: the Korean UI shows the saved name");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // unbuffered: a crash mid-test loses buffered PASS lines
     TestPresetRegression();
@@ -1108,6 +1131,7 @@ int main() {
     TestAreaLight();
     TestFogVolumes();
     TestSkyLight();
+    TestLightDisplayNames();
     std::printf("studio_light_test: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed > 0 ? 1 : 0;
 }
