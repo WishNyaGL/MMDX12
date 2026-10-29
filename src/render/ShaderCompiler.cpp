@@ -14,8 +14,9 @@ namespace mmdx {
 
 static ComPtr<ID3DBlob> CompileShaderDxcUncached(const std::filesystem::path& file, const char* entry, const char* target,
                                                  const ShaderDefines& defines, std::string* errors) {
-    // dxcompiler.dll ships next to the exe; load it (and the compiler instances) once.
-    static struct Dxc {
+    // dxcompiler.dll ships next to the exe; load it (and the compiler instances) once per thread: the renderer creates
+    // its pipelines on several threads at startup, and one IDxcCompiler3 must not compile on two threads at once.
+    thread_local struct Dxc {
         ComPtr<IDxcUtils> utils;
         ComPtr<IDxcCompiler3> compiler;
         ComPtr<IDxcIncludeHandler> include;

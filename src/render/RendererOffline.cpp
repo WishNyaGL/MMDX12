@@ -6,7 +6,14 @@
 
 namespace mmdx {
 
+void Renderer::EnsureOffline() {
+    if (!offlineInit_.valid()) return;
+    offline_ = offlineInit_.get();   // waits while the background creation runs
+    if (offlineInitFailed_) offline_.reset();
+}
+
 bool Renderer::BeginOffline(ID3D12GraphicsCommandList* cmd, const FrameView& view, const OfflineJobDesc& job) {
+    EnsureOffline();
     if (!offline_ || !rt_ || !cmd || job.width == 0 || job.height == 0) return false;
     ctx_->WaitForGpu();
     ID3D12DescriptorHeap* heaps[] = {ctx_->SrvHeap().Heap()};
