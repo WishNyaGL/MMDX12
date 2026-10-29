@@ -940,6 +940,7 @@ const Entry kEnglish[] = {
     {"조명 프리셋", "Lighting presets"},
     {"조명 프리셋 적용", "Apply lighting preset"},
     {"지면", "Ground"},
+    {"채움광", "Fill light"},
     {"카메라 VMD의 조명 키를 따릅니다", "Follows camera VMD light keys"},
     {"카메라 VMD의 조명 트랙과 연동되어 있어 색과 방향이 읽기 전용입니다.", "Linked to camera VMD light track; colour and direction are read-only."},
     {"켜기", "Turn on"},

@@ -187,4 +187,9 @@ LightValues SampleLightValues(const SceneLight& light, int frame);
 // which is incremented. The values equal what BuildLighting produces for the preset (tools/studio_light_test.cpp).
 std::vector<SceneLight> PresetLights(int presetIndex, DirectX::XMFLOAT3 focus, uint32_t& nextLightUid);
 
+// The default names the studio gives its lights are saved in Korean, the source language ("메인 조명", "환경광",
+// "채움광", "하늘", "스팟 N", "점광원 N", "면광원 N", "안개 N"; a stage's unnamed fog volume is "안개 N" too). For display
+// such a name is translated into the UI language (Tr); any other name, e.g. one the user typed, is returned unchanged.
+std::string LightDisplayName(const std::string& stored);
+
 } // namespace mmdx::studio

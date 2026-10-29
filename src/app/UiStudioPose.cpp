@@ -1078,7 +1078,7 @@ void App::StudioViewportLightHandles(bool hovered) {
 
     if (iconHoveredUid != 0 && studioViewDrag_ == 0) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        if (const SceneLight* hl = d.FindLight(iconHoveredUid)) ui::Tooltip(hl->name.c_str());
+        if (const SceneLight* hl = d.FindLight(iconHoveredUid)) ui::Tooltip(LightDisplayName(hl->name).c_str());
     }
 
     // Clicking a light icon selects that light
