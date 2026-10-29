@@ -2589,3 +2589,33 @@ word to deploy. Workers: opencode deepseek 4.1 1017 #low; Claude designed, revie
   scripted clicks used pre-ribbon coordinates (the ribbon is 64 px taller) and opened the audio menu.
 - NOT verified: `neon_plaza` on AMD (not installed here); the fix on the reporter's RX 6650 XT; ribbon at high DPI.
 - Leftover: `.worktrees/hang` folder could not be deleted (a process holds it); branch already deleted.
+
+## 2026-10-29 (3) - PRs #9 / #10, i18n check, CI, release 3.2.0
+- PR #9 (quasiquiescent, parallel pass pipelines + background offline GI renderer): reviewed every `CreatePipelines`
+  for `ctx` / statics, the shader cache, thread-local DXC, locked `DescriptorHeap`, the offline task's object-only
+  `Initialize`. Measured warm first frame 7.6 s (master) -> 4.6-5.3 s, passes 1.1 s on 16 threads. Two early runs of
+  the first merged build took 23 s in Scene (warm cache, no slow compiles); not reproducible afterwards (1 vs 16
+  threads both fast), likely the driver's PSO cache after a rebuild.
+- Regression found in the packaged smoke (user saw "응답 없음"): `Renderer::Shutdown` waited for the background
+  offline creation on the main thread, so quitting within ~85 s of a cold start froze the window ~80 s. Fixed
+  (8a95e9b): `OfflineRenderer::Initialize(..., cancel)` checks a flag before each slow shader, Shutdown sets it, and
+  App hides the window before `Renderer::Shutdown`. Packaged cold quit 132 s -> 40.5 s, window hidden meanwhile.
+- PR #10 (light display names in the UI language) merged; follow-up per the user: `tools/i18n_check.py` runs in the
+  build (CMake `i18n_check` ALL target): every `Tr` / `TrKey` key needs En / Ja / Zh, duplicates / printf mismatches
+  / empty translations fail. `TrKey()` marks labels reaching `Tr` through variables (the ribbon tabs were invisible to
+  a literal scan). Ja / Zh fall back to English. 66 missing keys filled (worker, opencode deepseek; resumed once after
+  it stopped mid-cleanup; Claude fixed `%%` / `*` handling in the printf check and Zh 부품).
+- CI (`.github/workflows/ci.yml`): windows-2025 hosted runner, MSVC + Ninja build (incl. i18n_check), 19 CPU-only
+  tests, run_capture selftest, `pack_check --compile` of the built-in packs; ~10 min. Not note20: it is a Linux
+  chroot (cannot build) and a self-hosted runner would execute fork PRs on the user's server. The first run caught a
+  stale `gallery_index_test` expectation (world packs compatible since 2.5.1) and `mme_parse_test` needing
+  `--selftest`.
+- Issues: #11 answered (Korean stays the source language; the check + English fallback + filled keys address the
+  effects; the first reply wrongly claimed most users are Korean, corrected after the user pointed it out). #8: fix
+  shipped in 3.2.0, asked the reporter to confirm.
+- Release 3.2.0 (minor): notes `dist/notes_3.2.0.md` (4 languages, credits quasiquiescent / zhangyan453), cover
+  `docs/media/studio-ribbon-3.2.0.jpg`, package (196.1 / 16.3 MB), packaged smoke (v3.2.0, 0 `[E]`/`[W]`, cold quit
+  check, leftovers removed), delta manifest 16 new objects uploaded (manifest + exe hashes match live), GitHub v3.2.0
+  (digests = local zips), website deployed (`/latest.json` -> 3.2.0 with manifest).
+- NOT verified: the fix on the reporter's RX 6650 XT; ribbon at high DPI; Ja translations of the new keys by a
+  native speaker.
