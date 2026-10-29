@@ -482,8 +482,9 @@ bool Renderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderD
         offlineInit_ = std::async(std::launch::async, [this, &ctx, shaderDir] {
             const auto t0 = std::chrono::steady_clock::now();
             auto offline = std::make_unique<OfflineRenderer>();
-            if (!offline->Initialize(ctx, shaderDir)) {
-                LOG_WARN("offline renderer unavailable");
+            if (!offline->Initialize(ctx, shaderDir, &offlineInitCancel_)) {
+                if (offlineInitCancel_) LOG_INFO("offline renderer: background creation cancelled (shutdown)");
+                else LOG_WARN("offline renderer unavailable");
                 offlineInitFailed_ = true;
             }
             LOG_INFO("STARTUP offline renderer (background): %.0f ms", MsSince(t0));
@@ -2708,7 +2709,8 @@ void Renderer::SetColorLut(const ImageRGBA8* strip) {
 void Renderer::Shutdown() {
     if (!ctx_) return;
     ctx_->WaitForGpu();
-    EnsureOffline();   // a background creation still running finishes before anything goes away
+    offlineInitCancel_ = true;   // a background creation still running stops before its next shader...
+    EnsureOffline();             // ...and is waited for before anything goes away
     if (offline_) {
         offline_->Shutdown();
         offline_.reset();

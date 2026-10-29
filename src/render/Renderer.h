@@ -306,6 +306,7 @@ private:
     // The background creation of offline_ (Initialize; EnsureOffline takes it over on the main thread). Declared after
     // the flag it sets: its destructor waits for the task.
     std::atomic<bool> offlineInitFailed_{false};
+    std::atomic<bool> offlineInitCancel_{false};   // Shutdown: the background creation stops before its next shader
     std::future<std::unique_ptr<OfflineRenderer>> offlineInit_;
     std::unique_ptr<ScreenVideo> screenVideo_;   // background AVI (背景AVI) feeding screen.bmp materials
     std::unique_ptr<StageScreens> stageScreens_;  // S5: MMDX stage screens (image / video / camera feed)

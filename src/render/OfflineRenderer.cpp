@@ -1155,7 +1155,7 @@ void OfflineRenderer::Impl::Finish(PassContext& pc) {
 OfflineRenderer::OfflineRenderer() = default;
 OfflineRenderer::~OfflineRenderer() = default;
 
-bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderDir) {
+bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& shaderDir, const std::atomic<bool>* cancel) {
     impl_ = std::make_unique<Impl>();
     impl_->ctx = &ctx;
     if (!RtPipelinesSupported(ctx)) return false;
@@ -1164,16 +1164,21 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
     m.shaderDir = shaderDir;
     const std::filesystem::path gi = shaderDir / L"offline_gi.hlsl";
     const std::filesystem::path post = shaderDir / L"offline_post.hlsl";
+    const auto cancelled = [cancel] { return cancel && cancel->load(); };
     bool ok = true;
     ok &= m.clearImage.Create(ctx, gi, "CSClearImage");
     ok &= m.clearCounter.Create(ctx, gi, "CSClearCounter");
     if (!m.clearTiles.Create(ctx, gi, "CSClearTiles") || !m.activeTiles.Create(ctx, gi, "CSActiveTiles"))
         m.activeTiles = {};   // optional: the tail then keeps dispatching the whole image
+    if (cancelled()) return false;
     ok &= m.defaultRender.Create(ctx, gi, "CSRender");
     m.render = &m.defaultRender;
+    if (cancelled()) return false;
     ok &= m.prepassLevel.Create(ctx, gi, "CSPrepassLevel");
+    if (cancelled()) return false;
     ok &= m.prepassDisplay.Create(ctx, gi, "CSPrepassDisplay");
     ok &= m.prepassSmooth.Create(ctx, gi, "CSPrepassSmooth");
+    if (cancelled()) return false;
     ok &= m.denoise.Create(ctx, post, "CSDenoise");
     ok &= m.bloomDown.Create(ctx, post, "CSBloomDown");
     ok &= m.bloomBlur.Create(ctx, post, "CSBloomBlur");
@@ -1184,12 +1189,14 @@ bool OfflineRenderer::Initialize(Dx12Context& ctx, const std::filesystem::path& 
     ok &= m.effectVelocity.Create(ctx, post, "CSEffectVelocity");
     ok &= m.effectDepth.Create(ctx, shaderDir / L"offline_effect.hlsl", "CSEffectDepth");
     // the packs' effect.hlsl is compiled lazily from the shader directory (as the real-time passes do)
+    if (cancelled()) return false;
     m.effectPre.CreatePipelines(ctx, shaderDir, 0);
     m.effectPost.CreatePipelines(ctx, shaderDir, 0);
     m.mmePost.CreatePipelines(ctx, shaderDir, 0);
     // M8b: the video layers (the background PSO must exist even when it draws nothing; a failure only disables it).
     if (!m.videoBg.CreatePipelines(ctx, shaderDir, 0)) LOG_WARN("offline renderer: video background unavailable");
     if (!m.videoOverlay.CreatePipelines(ctx, shaderDir, 0)) LOG_WARN("offline renderer: video overlay unavailable");
+    if (cancelled()) return false;
     if (!ok) {
         LOG_ERROR("offline renderer: compute pipeline creation failed");
         return false;

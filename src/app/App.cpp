@@ -724,6 +724,9 @@ int App::Run(HINSTANCE instance, const AppOptions& options) {
     UnloadScene();
     thumbs_.Shutdown();
     ShutdownImGui();
+    // The renderer may still wait for the offline GI renderer's background creation (a compile in progress after a
+    // cold start): hide the window first, so a quit never shows a frozen "not responding" window meanwhile.
+    if (hwnd_) ShowWindow(hwnd_, SW_HIDE);
     renderer_.Shutdown();
 
     RECT crc;

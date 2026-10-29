@@ -35,6 +35,7 @@
 #include "render/RenderTypes.h"
 #include "render/ShaderInterop.h"
 #include "render/ShaderPack.h"
+#include <atomic>
 #include <filesystem>
 #include <memory>
 #include <vector>
@@ -121,7 +122,9 @@ public:
     // Compiles offline_gi.hlsl / offline_post.hlsl (ComputePipeline) and offline_edge.hlsl (FXC
     // raster PSOs), creates the upload/readback buffers.
     // False (logged) on any failure.
-    bool Initialize(Dx12Context& ctx, const std::filesystem::path& shaderDir);
+    // `cancel` (optional): checked before each slow shader; once set, Initialize returns false (the background creation
+    // stops at app shutdown instead of compiling the rest while the app waits).
+    bool Initialize(Dx12Context& ctx, const std::filesystem::path& shaderDir, const std::atomic<bool>* cancel = nullptr);
     void Shutdown();  // the GPU must be idle
 
     // S8a: the emissive-triangle pick table of one image (Renderer::BuildEmissiveTable over the RtScene geometry
