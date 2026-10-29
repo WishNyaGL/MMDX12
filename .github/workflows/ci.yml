@@ -1,0 +1,69 @@
+# Build + CPU-only tests on GitHub-hosted Windows runners (no GPU: rendering QA stays local, see CLAUDE.md).
+# Runs for pull requests (also from forks: read-only token, no secrets) and pushes to master.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Ninja
+        run: pip install ninja
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      # The ALL build also runs tools/i18n_check.py (missing / duplicate translation keys, printf mismatches).
+      - name: Build
+        run: cmake --build build
+
+      - name: Tests (no GPU, no asset library)
+        shell: pwsh
+        run: |
+          $tests = @(
+            'studio_edit_test', 'studio_light_test', 'studio_project_test', 'studio_gizmo_test', 'studio_pose_test',
+            'studio_focus_test', 'restpose_retarget_test', 'rest_pose_test', 'shader_choice_test', 'look_preset_test',
+            'world_track_test', 'gallery_index_test', 'stage_store_test', 'pack_guard_test', 'mme_parse_test',
+            'mme_script_test', 'dds_test', 'raymat_test', 'pack_suggest_test'
+          )
+          $failed = @()
+          foreach ($t in $tests) {
+            Write-Host "::group::$t"
+            & "build/bin/$t.exe"
+            $code = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            if ($code -ne 0) { Write-Host "::error::$t failed (exit $code)"; $failed += $t }
+          }
+          python -I tools/run_capture.py --selftest
+          if ($LASTEXITCODE -ne 0) { $failed += 'run_capture selftest' }
+          if ($failed.Count -gt 0) { throw "failed: $($failed -join ', ')" }
+
+      - name: Shader packs compile (FXC / DXC, no GPU)
+        shell: pwsh
+        run: |
+          $failed = @()
+          foreach ($d in Get-ChildItem build/bin/shaders/packs -Directory) {
+            & build/bin/pack_check.exe $d.FullName --compile
+            if ($LASTEXITCODE -ne 0) { $failed += $d.Name }
+          }
+          if ($failed.Count -gt 0) { throw "pack_check failed: $($failed -join ', ')" }
