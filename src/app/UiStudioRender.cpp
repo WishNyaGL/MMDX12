@@ -415,49 +415,49 @@ struct HelpGroup {
 };
 
 const HelpRow kPlayback[] = {
-    {{"Space"}, "재생 / 일시정지"},
-    {{"←", "→"}, "이전 / 다음 프레임"},
-    {{"Ctrl+←", "Ctrl+→"}, "이전 / 다음 키"},
-    {{"Home", "End"}, "처음 / 끝으로"},
+    {{"Space"}, TrKey("재생 / 일시정지")},
+    {{"←", "→"}, TrKey("이전 / 다음 프레임")},
+    {{"Ctrl+←", "Ctrl+→"}, TrKey("이전 / 다음 키")},
+    {{"Home", "End"}, TrKey("처음 / 끝으로")},
 };
 const HelpRow kEdit[] = {
-    {{"I"}, "포즈 등록 (선택한 행에 키)"},
-    {{"Ctrl+I"}, "모든 본 등록"},
-    {{"Delete"}, "선택한 키 삭제"},
-    {{"Ctrl+C", "Ctrl+X", "Ctrl+V"}, "복사 / 잘라내기 / 붙여넣기"},
-    {{"Ctrl+Shift+V"}, "보간 곡선만 붙여넣기"},
-    {{"Ctrl+A"}, "모든 키 선택"},
-    {{"Ctrl+Z", "Ctrl+Y"}, "실행 취소 / 다시 실행"},
+    {{"I"}, TrKey("포즈 등록 (선택한 행에 키)")},
+    {{"Ctrl+I"}, TrKey("모든 본 등록")},
+    {{"Delete"}, TrKey("선택한 키 삭제")},
+    {{"Ctrl+C", "Ctrl+X", "Ctrl+V"}, TrKey("복사 / 잘라내기 / 붙여넣기")},
+    {{"Ctrl+Shift+V"}, TrKey("보간 곡선만 붙여넣기")},
+    {{"Ctrl+A"}, TrKey("모든 키 선택")},
+    {{"Ctrl+Z", "Ctrl+Y"}, TrKey("실행 취소 / 다시 실행")},
 };
 const HelpRow kPose[] = {
-    {{"E"}, "회전 도구"},
-    {{"W"}, "이동 도구"},
-    {{"L"}, "로컬 ↔ 글로벌 축"},
-    {{"Esc"}, "본 선택 해제"},
+    {{"E"}, TrKey("회전 도구")},
+    {{"W"}, TrKey("이동 도구")},
+    {{"L"}, TrKey("로컬 ↔ 글로벌 축")},
+    {{"Esc"}, TrKey("본 선택 해제")},
 };
 const HelpRow kProject[] = {
-    {{"Ctrl+S"}, "프로젝트 저장"},
-    {{"Ctrl+Shift+S"}, "다른 이름으로 저장"},
-    {{"Ctrl+O"}, "프로젝트 열기"},
-    {{"Ctrl+N"}, "새 프로젝트"},
-    {{"?", "F1"}, "단축키 도움말"},
+    {{"Ctrl+S"}, TrKey("프로젝트 저장")},
+    {{"Ctrl+Shift+S"}, TrKey("다른 이름으로 저장")},
+    {{"Ctrl+O"}, TrKey("프로젝트 열기")},
+    {{"Ctrl+N"}, TrKey("새 프로젝트")},
+    {{"?", "F1"}, TrKey("단축키 도움말")},
 };
 const HelpRow kViewport[] = {
-    {{"왼쪽 드래그"}, "카메라 회전 · 기즈모 · 본 선택"},
-    {{"Ctrl+클릭"}, "본 추가 선택"},
-    {{"오른쪽 드래그", "가운데 드래그"}, "카메라 이동"},
-    {{"휠"}, "화각 (줌)"},
-    {{"Ctrl+휠"}, "카메라 앞뒤 이동"},
-    {{"오른쪽 버튼+휠"}, "비행 속도"},
+    {{TrKey("왼쪽 드래그")}, TrKey("카메라 회전 · 기즈모 · 본 선택")},
+    {{TrKey("Ctrl+클릭")}, TrKey("본 추가 선택")},
+    {{TrKey("오른쪽 드래그"), TrKey("가운데 드래그")}, TrKey("카메라 이동")},
+    {{TrKey("휠")}, TrKey("화각 (줌)")},
+    {{TrKey("Ctrl+휠")}, TrKey("카메라 앞뒤 이동")},
+    {{TrKey("오른쪽 버튼+휠")}, TrKey("비행 속도")},
 };
 const HelpRow kTimeline[] = {
-    {{"휠"}, "위아래 스크롤"},
-    {{"Ctrl+휠"}, "확대 / 축소"},
-    {{"Shift+휠", "가운데 드래그"}, "좌우 이동"},
-    {{"Shift+눈금자 드래그"}, "프레임 범위 선택"},
-    {{"우클릭"}, "키 메뉴 · 구간 시작 / 끝 / 해제"},
-    {{"빈 곳 드래그"}, "키 박스 선택"},
-    {{"더블클릭"}, "키 추가"},
+    {{TrKey("휠")}, TrKey("위아래 스크롤")},
+    {{TrKey("Ctrl+휠")}, TrKey("확대 / 축소")},
+    {{TrKey("Shift+휠"), TrKey("가운데 드래그")}, TrKey("좌우 이동")},
+    {{TrKey("Shift+눈금자 드래그")}, TrKey("프레임 범위 선택")},
+    {{TrKey("우클릭")}, TrKey("키 메뉴 · 구간 시작 / 끝 / 해제")},
+    {{TrKey("빈 곳 드래그")}, TrKey("키 박스 선택")},
+    {{TrKey("더블클릭")}, TrKey("키 추가")},
 };
 
 float ChipsWidth(const HelpRow& r) {
@@ -478,9 +478,9 @@ void App::DrawStudioHelp() {
     const ImVec2 ds = ImGui::GetIO().DisplaySize;
     const Palette& p = P();
     static const HelpGroup kColumns[3][2] = {
-        {{"재생과 이동", kPlayback, (int)std::size(kPlayback)}, {"키 편집", kEdit, (int)std::size(kEdit)}},
-        {{"포즈", kPose, (int)std::size(kPose)}, {"프로젝트", kProject, (int)std::size(kProject)}},
-        {{"마우스 · 뷰포트", kViewport, (int)std::size(kViewport)}, {"마우스 · 타임라인", kTimeline, (int)std::size(kTimeline)}},
+        {{TrKey("재생과 이동"), kPlayback, (int)std::size(kPlayback)}, {TrKey("키 편집"), kEdit, (int)std::size(kEdit)}},
+        {{TrKey("포즈"), kPose, (int)std::size(kPose)}, {TrKey("프로젝트"), kProject, (int)std::size(kProject)}},
+        {{TrKey("마우스 · 뷰포트"), kViewport, (int)std::size(kViewport)}, {TrKey("마우스 · 타임라인"), kTimeline, (int)std::size(kTimeline)}},
     };
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));

@@ -2603,7 +2603,7 @@ bool Renderer::UpscalerAvailable(UpscalerKind kind) const {
 
 bool Renderer::FrameGenAvailable() const { return frameGen_ && frameGen_->Available(); }
 int Renderer::FrameGenMaxMultiplier() const { return frameGen_ ? frameGen_->MaxMultiplier() : 0; }
-const char* Renderer::FrameGenReason() const { return frameGen_ ? frameGen_->Reason() : "사용할 수 없음"; }
+const char* Renderer::FrameGenReason() const { return frameGen_ ? frameGen_->Reason() : TrKey("사용할 수 없음"); }
 
 void Renderer::FrameGenCopyHudless(ID3D12GraphicsCommandList* cmd) {
     if (!frameGen_ || !frameGenPending_ || !ctx_) return;

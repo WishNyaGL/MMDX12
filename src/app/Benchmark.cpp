@@ -1,5 +1,7 @@
 #include "app/Benchmark.h"
 
+#include "core/I18n.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -16,13 +18,13 @@ struct Tier {
 
 // Tier titles identical to the web version (src/benchmark/benchmarkCalculator.ts).
 constexpr Tier kTiers[] = {
-    {18000, "SSS", "DIVA GOD · 정점"},
-    {12000, "SS",  "VOCALOID MASTER · 최상위"},
-    {8000,  "S",   "PRO PERFORMER · 하이엔드"},
-    {5000,  "A",   "CONCERT READY · 쾌적"},
-    {3000,  "B",   "SMOOTH DANCER · 준수"},
-    {1500,  "C",   "TRAINEE · 한계 사양"},
-    {0,     "D",   "NEEDS BOOST · 구동 어려움"},
+    {18000, "SSS", TrKey("DIVA GOD · 정점")},
+    {12000, "SS",  TrKey("VOCALOID MASTER · 최상위")},
+    {8000,  "S",   TrKey("PRO PERFORMER · 하이엔드")},
+    {5000,  "A",   TrKey("CONCERT READY · 쾌적")},
+    {3000,  "B",   TrKey("SMOOTH DANCER · 준수")},
+    {1500,  "C",   TrKey("TRAINEE · 한계 사양")},
+    {0,     "D",   TrKey("NEEDS BOOST · 구동 어려움")},
 };
 
 } // namespace

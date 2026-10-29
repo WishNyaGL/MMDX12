@@ -20,6 +20,9 @@ const char* LanguageName(Language lang);
 const char* Tr(const char* ko);
 inline const char* Tr(const std::string& ko) { return Tr(ko.c_str()); }
 
+// Marks a Korean literal that reaches Tr() through a variable (a table of labels), so tools/i18n_check.py sees it.
+constexpr const char* TrKey(const char* ko) { return ko; }
+
 namespace i18n {
 struct Entry { const char* ko; const char* tr; };
 extern const Entry kEnglish[];

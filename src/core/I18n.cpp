@@ -73,7 +73,14 @@ const char* Tr(const char* ko) {
     if (l == Language::Korean || !ko) return ko;
     const Table& t = TableFor(l);
     const auto it = t.find(std::string_view(ko));
-    return it != t.end() ? it->second : ko;
+    if (it != t.end()) return it->second;
+    // Japanese / Chinese fall back to English rather than to Korean when the entry is missing.
+    if (l == Language::Japanese || l == Language::Chinese) {
+        const Table& en = TableFor(Language::English);
+        const auto enIt = en.find(std::string_view(ko));
+        if (enIt != en.end()) return enIt->second;
+    }
+    return ko;
 }
 
 } // namespace mmdx

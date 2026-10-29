@@ -10,7 +10,7 @@ namespace mmdx::studio {
 
 // Korean source strings (I18n keys), translated with Tr() when drawn.
 const char* const kBezierPresetNames[kBezierPresetCount] = {
-    "선형", "천천히 시작", "천천히 끝", "천천히 시작과 끝", "빠르게 시작"
+    TrKey("선형"), TrKey("천천히 시작"), TrKey("천천히 끝"), TrKey("천천히 시작과 끝"), TrKey("빠르게 시작")
 };
 
 void BezierPreset(int index, uint8_t out[4]) {

@@ -321,3 +321,15 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tools/video_probe.cpp)
   add_executable(video_probe tools/video_probe.cpp)
   target_link_libraries(video_probe PRIVATE mmdx_core)
 endif()
+
+# ---- i18n check ------------------------------------------------------------
+# Every Tr() / TrKey() key needs En / Ja / Zh entries: the build fails on a missing key (tools/i18n_check.py).
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_custom_target(i18n_check ALL
+    COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/i18n_check.py --root ${CMAKE_SOURCE_DIR}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    VERBATIM)
+else()
+  message(STATUS "Python 3 not found: i18n_check skipped")
+endif()

@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <string>
 
+#include "core/I18n.h"
 #include "core/TextUtil.h"
 
 namespace mmdx::components {
@@ -35,7 +36,7 @@ inline constexpr const char* kCjkFontFiles[] = {
 inline constexpr Def kDlss = {"upscaler:dlss", 1, "NVIDIA DLSS", kDlssFiles, 3};
 inline constexpr Def kFsr = {"upscaler:fsr", 2, "AMD FSR", kFsrFiles, 2};
 inline constexpr Def kXess = {"upscaler:xess", 3, "Intel XeSS", kXessFiles, 1};
-inline constexpr Def kCjk = {"fonts:cjk", 0, "고품질 CJK 글꼴", kCjkFontFiles, 4};
+inline constexpr Def kCjk = {"fonts:cjk", 0, TrKey("고품질 CJK 글꼴"), kCjkFontFiles, 4};
 
 inline const Def* const kAll[] = {&kDlss, &kFsr, &kXess, &kCjk};
 inline constexpr int kAllCount = (int)(sizeof(kAll) / sizeof(kAll[0]));

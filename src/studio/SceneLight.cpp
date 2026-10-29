@@ -306,10 +306,10 @@ std::vector<SceneLight> PresetLights(int presetIndex, DirectX::XMFLOAT3 focus, u
 }
 
 std::string LightDisplayName(const std::string& stored) {
-    for (const char* fixed : {"메인 조명", "환경광", "채움광", "하늘"})
+    for (const char* fixed : {TrKey("메인 조명"), TrKey("환경광"), TrKey("채움광"), TrKey("하늘")})
         if (stored == fixed) return Tr(fixed);
     // "<kind> <n>": the numbered names of StudioAddLight, the Concert preset and a stage's unnamed fog volume
-    for (const char* kind : {"스팟", "점광원", "면광원", "안개"}) {
+    for (const char* kind : {TrKey("스팟"), TrKey("점광원"), TrKey("면광원"), TrKey("안개")}) {
         const std::string prefix = std::string(kind) + " ";
         if (stored.size() > prefix.size() && stored.compare(0, prefix.size(), prefix) == 0 &&
             std::all_of(stored.begin() + (std::ptrdiff_t)prefix.size(), stored.end(),

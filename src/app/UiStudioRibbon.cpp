@@ -36,12 +36,12 @@ struct RibbonTab {
     const char* label;
 };
 const RibbonTab kRibbonTabs[] = {
-    {"home", "홈"},
-    {"anim", "애니메이션"},
-    {"camera", "카메라"},
-    {"light", "조명"},
-    {"render", "렌더"},
-    {"view", "보기"},
+    {"home", TrKey("홈")},
+    {"anim", TrKey("애니메이션")},
+    {"camera", TrKey("카메라")},
+    {"light", TrKey("조명")},
+    {"render", TrKey("렌더")},
+    {"view", TrKey("보기")},
 };
 constexpr int kRibbonTabCount = 6;
 

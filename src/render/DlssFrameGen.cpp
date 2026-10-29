@@ -3,6 +3,7 @@
 #include "render/DlssFrameGen.h"
 #include "render/Dx12Context.h"
 #include "render/NgxShared.h"
+#include "core/I18n.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
 #include <nvsdk_ngx.h>
@@ -35,25 +36,25 @@ bool DlssFrameGen::Initialize(Dx12Context& ctx) {
     device_ = ctx.Device();
     const std::filesystem::path exeDir = ExecutableDir();
     if (ctx.Caps().vendorId != 0x10DE) {
-        reason_ = "NVIDIA GPU가 아닙니다";
+        reason_ = TrKey("NVIDIA GPU가 아닙니다");
         LOG_INFO("DLSS-G: not an NVIDIA GPU");
         return false;
     }
     if (!std::filesystem::exists(exeDir / L"nvngx_dlssg.dll")) {
-        reason_ = "nvngx_dlssg.dll이 없습니다";
+        reason_ = TrKey("nvngx_dlssg.dll이 없습니다");
         LOG_WARN("DLSS-G: nvngx_dlssg.dll not found next to the exe");
         return false;
     }
     // NGX must be initialised only once per device / app id; share the upscaler's instance.
     if (!NgxSharedInit(ctx)) {
-        reason_ = "NGX 초기화에 실패했습니다";
+        reason_ = TrKey("NGX 초기화에 실패했습니다");
         LOG_WARN("DLSS-G: NGX init failed");
         return false;
     }
     NVSDK_NGX_Parameter* params = nullptr;
     NVSDK_NGX_Result r = NVSDK_NGX_D3D12_GetCapabilityParameters(&params);
     if (NVSDK_NGX_FAILED(r) || !params) {
-        reason_ = "NGX 기능 조회에 실패했습니다";
+        reason_ = TrKey("NGX 기능 조회에 실패했습니다");
         LOG_WARN("DLSS-G: GetCapabilityParameters failed (0x%08X)", (unsigned)r);
         NgxSharedRelease();
         return false;
@@ -64,7 +65,7 @@ bool DlssFrameGen::Initialize(Dx12Context& ctx) {
     if (!ok) {
         int initResult = 0;
         params->Get(NVSDK_NGX_Parameter_FrameGeneration_FeatureInitResult, &initResult);
-        reason_ = "이 GPU 또는 드라이버는 프레임 생성을 지원하지 않습니다";
+        reason_ = TrKey("이 GPU 또는 드라이버는 프레임 생성을 지원하지 않습니다");
         LOG_INFO("DLSS-G: FrameGeneration not available (init result 0x%08X)", (unsigned)initResult);
         NVSDK_NGX_D3D12_DestroyParameters((NVSDK_NGX_Parameter*)params_);
         params_ = nullptr;

@@ -1186,7 +1186,7 @@ void App::DrawStudioStageScreens(float w, uint32_t stageUid) {
         TextEllipsis(cdl, Font::Regular, size::Small, rowTop, rowTop.x + w, p.ink, id.c_str());
         ImGui::Dummy(ImVec2(w, Dp(22.0f)));
         // source combo: 없음 / 이미지 / 영상 / 카메라 (program stays unimplemented = 없음)
-        static const char* const kSourceLabels[] = {"없음", "이미지", "영상", "카메라"};
+        static const char* const kSourceLabels[] = {TrKey("없음"), TrKey("이미지"), TrKey("영상"), TrKey("카메라")};
         static const StageScreenSource kSources[] = {StageScreenSource::None, StageScreenSource::Image,
                                                      StageScreenSource::Video, StageScreenSource::Camera};
         int sel = 0;

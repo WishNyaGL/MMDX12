@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 
+#include "core/I18n.h"
 #include "render/OfflineRenderer.h"
 
 namespace mmdx {
@@ -47,10 +48,10 @@ struct VideoQualityPreset {
     float relativeCost;               // render time relative to "high" (measured at 1080p, estimates only)
 };
 inline constexpr VideoQualityPreset kVideoQualities[] = {
-    {"초안", 32, 128, 0.016f, 128, 4, 0.21f},
-    {"표준", 64, 384, 0.008f, 256, 8, 0.43f},
-    {"고품질", kOfflineVideoMinSamples, kOfflineVideoMaxSamples, 0.0053f, 512, 12, 1.0f},
-    {"최고", 256, 2048, 0.0033f, 1024, 12, 2.1f}};
+    {TrKey("초안"), 32, 128, 0.016f, 128, 4, 0.21f},
+    {TrKey("표준"), 64, 384, 0.008f, 256, 8, 0.43f},
+    {TrKey("고품질"), kOfflineVideoMinSamples, kOfflineVideoMaxSamples, 0.0053f, 512, 12, 1.0f},
+    {TrKey("최고"), 256, 2048, 0.0033f, 1024, 12, 2.1f}};
 inline constexpr int kVideoQualityCount = 4;
 
 // Which renderer produces the video frames. The first three are the real-time renderers, driven at
@@ -60,10 +61,10 @@ enum class VideoRenderer : int { Raster = 0, RayTraced = 1, PathTraced = 2, Offl
 inline constexpr int kVideoRendererCount = 4;
 struct VideoRendererInfo { const char* label; const char* summary; };
 inline constexpr VideoRendererInfo kVideoRenderers[] = {
-    {"래스터", "가장 빠르게 완성되는 기본 화질"},
-    {"실시간 RT", "레이 트레이싱 그림자와 반사"},
-    {"실시간 PT", "빛의 경로를 추적한 사실적인 조명"},
-    {"오프라인 GI", "가장 사실적인 전역 조명, 시간이 오래 걸림"}};
+    {TrKey("래스터"), TrKey("가장 빠르게 완성되는 기본 화질")},
+    {TrKey("실시간 RT"), TrKey("레이 트레이싱 그림자와 반사")},
+    {TrKey("실시간 PT"), TrKey("빛의 경로를 추적한 사실적인 조명")},
+    {TrKey("오프라인 GI"), TrKey("가장 사실적인 전역 조명, 시간이 오래 걸림")}};
 
 // Quality of the real-time renderers (the GI renderer uses kVideoQualities).
 struct VideoRealtimeQuality {

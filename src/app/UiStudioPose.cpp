@@ -60,7 +60,7 @@ void Perpendiculars(XMVECTOR a, XMFLOAT3& u, XMFLOAT3& v) {
     XMStoreFloat3(&v, pv);
 }
 
-const char* const kMorphPanelNames[4] = {"눈", "눈썹", "입", "기타"};  // panels 2, 1, 3, 4 (0 = other)
+const char* const kMorphPanelNames[4] = {TrKey("눈"), TrKey("눈썹"), TrKey("입"), TrKey("기타")};  // panels 2, 1, 3, 4 (0 = other)
 int MorphPanelSlot(uint8_t panel) { return panel == 2 ? 0 : panel == 1 ? 1 : panel == 3 ? 2 : 3; }
 
 } // namespace

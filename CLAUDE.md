@@ -817,6 +817,7 @@ Agents keep misusing the CLI and then blaming the app. These rules are verified 
   Some camera VMDs use distance 0 (the target is the eye position). `CameraMotion::ToView` handles this.
 - Per-frame GPU buffers must live in the UPLOAD heap and stay persistently mapped. `UploadBatch` is for DEFAULT-heap static data only.
 - UI text is Korean. Fonts are Pretendard + Phosphor icons (assets/fonts, copied to bin by `copy_assets`), with YuGoth/msyh merged for JP/CN. Pretendard's Private Use Area is excluded so Phosphor glyphs win.
+- Every Korean UI string goes through `Tr("...")` (or `TrKey("...")` when a table of labels reaches `Tr` through a variable) and needs En / Ja / Zh entries; the build runs `tools/i18n_check.py` (missing keys, duplicates, printf mismatches fail it); Ja / Zh fall back to English for a missing key.
 - Runtime shader compile errors only appear in `build/bin/mmdx12.log` as `[E]` lines (warnings `[W]`); a failed optional pipeline silently falls back, so grep the log after every capture. `line` is a reserved word in HLSL (DXC rejects it as a variable name).
 - Shaders under `build/bin/shaders` compile at runtime, so a shader can be debugged by editing that copy and rerunning (restore it afterwards).
 - `library/` (MMD assets, about 1.4 GB) and `captures/` are git-ignored test data. Never modify `library/`.

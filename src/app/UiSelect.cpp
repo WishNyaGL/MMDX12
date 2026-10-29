@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "core/I18n.h"
 #include "core/Log.h"
 #include "core/TextUtil.h"
 #include "asset/StageManifest.h"
@@ -237,20 +238,20 @@ void App::DrawAppBar(int activeNav) {
         SectionLabel(Tr("카메라"));
         changed |= Switch("##set_invx", Tr("가로 축 반전"), &settings_.cameraInvertX);
         changed |= Switch("##set_invy", Tr("세로 축 반전"), &settings_.cameraInvertY);
-        speedRow("##set_rotspd", "회전 감도", &settings_.cameraRotateSpeed, 0.05f, 10.0f);
-        speedRow("##set_panspd", "이동 감도", &settings_.cameraPanSpeed, 0.05f, 10.0f);
-        speedRow("##set_zoomspd", "줌 감도", &settings_.cameraZoomSpeed, 0.05f, 10.0f);
-        speedRow("##set_fovspd", "화각 감도", &settings_.cameraFovSpeed, 0.05f, 10.0f);
-        speedRow("##set_flyspd", "비행 속도", &settings_.cameraFlySpeed, 0.05f, 20.0f);
+        speedRow("##set_rotspd", TrKey("회전 감도"), &settings_.cameraRotateSpeed, 0.05f, 10.0f);
+        speedRow("##set_panspd", TrKey("이동 감도"), &settings_.cameraPanSpeed, 0.05f, 10.0f);
+        speedRow("##set_zoomspd", TrKey("줌 감도"), &settings_.cameraZoomSpeed, 0.05f, 10.0f);
+        speedRow("##set_fovspd", TrKey("화각 감도"), &settings_.cameraFovSpeed, 0.05f, 10.0f);
+        speedRow("##set_flyspd", TrKey("비행 속도"), &settings_.cameraFlySpeed, 0.05f, 20.0f);
 
         SectionLabel(Tr("편집"));
-        speedRow("##set_precision", "Ctrl 정밀도", &settings_.editorPrecisionFactor, 0.01f, 1.0f);
+        speedRow("##set_precision", TrKey("Ctrl 정밀도"), &settings_.editorPrecisionFactor, 0.01f, 1.0f);
         ui::Tooltip(Tr("기즈모를 드래그할 때 Ctrl을 누르면 이 배율만큼 정밀하게 이동·회전합니다."));
 
         SectionLabel(Tr("인터페이스"));
         changed |= Switch("##set_enames", Tr("본·모프 영문 이름 표시"), &settings_.showEnglishNames);
         ui::Tooltip(Tr("PMX에 영어 이름이 있으면 목록과 툴팁에서 표시합니다 (내부 식별자는 그대로)."));
-        speedRow("##set_boneoverlay", "본 오버레이 크기", &settings_.boneOverlayScale, 0.5f, 2.5f);
+        speedRow("##set_boneoverlay", TrKey("본 오버레이 크기"), &settings_.boneOverlayScale, 0.5f, 2.5f);
         ui::Tooltip(Tr("뷰포트에서 본 마커(점과 선)의 크기입니다."));
 
         SectionLabel(Tr("입력"));
@@ -260,12 +261,12 @@ void App::DrawAppBar(int activeNav) {
             static std::string recAction;
             struct KeyRow { const char* action; const char* label; };
             static const KeyRow kRows[] = {
-                {"toolMove",     "이동 도구 (W)"},
-                {"toolRotate",   "회전 도구 (E)"},
-                {"toolAutoIk",   "자동 IK 전환 (K)"},
-                {"toggleBones",  "본 표시 전환 (C)"},
-                {"registerPose", "키 등록 (I)"},
-                {"togglePlay",   "재생/일시정지 (Space)"},
+                {"toolMove",     TrKey("이동 도구 (W)")},
+                {"toolRotate",   TrKey("회전 도구 (E)")},
+                {"toolAutoIk",   TrKey("자동 IK 전환 (K)")},
+                {"toggleBones",  TrKey("본 표시 전환 (C)")},
+                {"registerPose", TrKey("키 등록 (I)")},
+                {"togglePlay",   TrKey("재생/일시정지 (Space)")},
             };
             for (int ai = 0; ai < (int)(sizeof(kRows) / sizeof(kRows[0])); ++ai) {
                 const bool rec = recAction == kRows[ai].action;
