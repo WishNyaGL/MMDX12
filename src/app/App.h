@@ -657,6 +657,8 @@ private:
                                                  // the ring edge does not jump the bone)
         int bodyBone = -1;              // body drag (pelvis/spine/chest/neck/head): the bone being translated
         DirectX::XMFLOAT3 bodyStartT{0, 0, 0};    // its local translation at drag start
+        int jointBone = -1;             // FK rotate joint (upper arm / thigh): the bone being rotated
+        DirectX::XMFLOAT4 jointStartR{0, 0, 0, 1};  // its local rotation at drag start
     } rigVpDrag_;
     void StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered, bool& consumed);
 

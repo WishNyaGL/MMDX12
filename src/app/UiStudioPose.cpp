@@ -203,7 +203,7 @@ void App::StudioSelectRigController(int controller, bool toggle) {
     StudioDoc& d = *studio_;
     StudioModel* m = StudioPoseModel();
     if (!m || !m->rig) return;
-    if (controller < 0 || controller >= 13) {
+    if (controller < 0 || controller >= 17) {
         controller = -1;
     } else if (toggle) {
         controller = (d.rigController == controller) ? -1 : controller;
@@ -1090,10 +1090,16 @@ void App::StudioViewportLightHandles(bool hovered) {
     const LightAnchors anchors = StudioBuildLightAnchors();
     const XMFLOAT3 focus = anchors.focus;
 
+    // When the rig is visible its center (pelvis) controller sits on the same world point as the sun icon. Hide the
+    // sun handle so it does not cover the center ring / block dragging it.
+    StudioModel* rigModel = StudioPoseModel();
+    const bool rigVisible = rigModel && rigModel->kind == ModelKind::Character && rigModel->showRig;
+
     // Draw icons for all lights with viewportVisible
     uint32_t iconHoveredUid = 0;
     for (const SceneLight& l : d.lights) {
         if (!l.viewportVisible) continue;
+        if (l.kind == LightKind::Sun && rigVisible) continue;  // the sun icon overlaps the rig center controller
         const LightValues cur = SampleLightValues(l, frame);
         XMFLOAT3 anchor = cur.position;
         if (l.kind == LightKind::Sun) {

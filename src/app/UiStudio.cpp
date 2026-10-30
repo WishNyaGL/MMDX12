@@ -1988,8 +1988,9 @@ std::vector<uint64_t> App::StudioRigRowToBoneRows(uint64_t rigRow) const {
     if (!m || !m->rig) return out;
     const int idx = (int)RowIndexOf(rigRow);
     if (idx < 0) return out;
-    // controllers 0..5 = chains (hands/feet/toes), 6..12 = body (pelvis, groove, spine, chest, neck, head)
-    const RigRole roles[13][3] = {
+    // controllers 0..5 = chains (hands/feet/toes), 6..12 = body (pelvis, groove, spine, chest, neck, head),
+    // 13..16 = FK rotate joints (upper arms, thighs)
+    const RigRole roles[17][3] = {
         {RigRole::LeftUpperArm, RigRole::LeftForearm, RigRole::LeftHand},
         {RigRole::RightUpperArm, RigRole::RightForearm, RigRole::RightHand},
         {RigRole::LeftThigh, RigRole::LeftShin, RigRole::LeftFoot},
@@ -1998,8 +1999,10 @@ std::vector<uint64_t> App::StudioRigRowToBoneRows(uint64_t rigRow) const {
         {RigRole::RightFoot, RigRole::RightToe, RigRole::RightToe},
         {RigRole::Pelvis}, {RigRole::Groove}, {RigRole::Spine}, {RigRole::Chest}, {RigRole::Neck},
         {RigRole::Head}, {RigRole::Pelvis},
+        {RigRole::LeftUpperArm}, {RigRole::RightUpperArm},
+        {RigRole::LeftThigh}, {RigRole::RightThigh},
     };
-    const int total = 13;
+    const int total = 17;
     if (idx >= total) return out;
     int cnt = idx < 6 ? 3 : 1;
     for (int k = 0; k < cnt; ++k) {
@@ -2027,7 +2030,7 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
     if (IsCameraKind(kind)) return d.selectedModel < 0;
     if (kind == RowKind::Rig) {
         return d.selectedModel >= 0 && d.models[d.selectedModel]->rig &&
-               (int)RowIndexOf(row) < 13;
+               (int)RowIndexOf(row) < 17;
     }
     if (kind == RowKind::SceneLight) {
         // a light row is only offered through the camera target (the lights live next to the camera)
@@ -3583,7 +3586,7 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
         {
             int rig = -1;
             for (uint64_t r : d.selectedRows)
-                if (RowKindOf(r) == RowKind::Rig && (int)RowIndexOf(r) < 13) { rig = (int)RowIndexOf(r); break; }
+                if (RowKindOf(r) == RowKind::Rig && (int)RowIndexOf(r) < 17) { rig = (int)RowIndexOf(r); break; }
             d.rigController = rig;
             if (rig >= 0) d.inspectorTab = 1;
         }
@@ -3612,7 +3615,7 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
                 if (d.activeBone < 0) d.activeBone = (int)RowIndexOf(row);
             }
             // keys of a rig controller row pick that controller for the viewport rings (even when hidden)
-            if (RowKindOf(row) == RowKind::Rig && (int)RowIndexOf(row) < 13)
+            if (RowKindOf(row) == RowKind::Rig && (int)RowIndexOf(row) < 17)
                 d.rigController = (int)RowIndexOf(row);
         }
         // a plain click on one key seeks the playhead to it (Premiere / AE): the live panels then show and edit that key's values
@@ -4334,8 +4337,9 @@ void App::StudioRebuildRows() {
     if (d.rigMode) {
         StudioModel* rm = d.Selected();
         if (rm && rm->rig) {
-            static const char* kCtl[13] = {"hand_l", "hand_r", "foot_l", "foot_r", "toe_l", "toe_r",
-                                            "center", "groove", "spine", "chest", "neck", "head", "head top"};
+            static const char* kCtl[17] = {"hand_l", "hand_r", "foot_l", "foot_r", "toe_l", "toe_r",
+                                            "center", "groove", "spine", "chest", "neck", "head", "head top",
+                                            "upper_arm_l", "upper_arm_r", "thigh_l", "thigh_r"};
             TimelineRow group;
             group.id = MakeRowId(RowKind::Group, 0u, 0u);
             group.label = Tr("리그");
@@ -4346,7 +4350,7 @@ void App::StudioRebuildRows() {
             std::vector<uint64_t>& childIds = d.groupChildren[group.id];
             std::set<int> summary;
             std::vector<TimelineRow> children;
-            for (int ci = 0; ci < 13; ++ci) {
+            for (int ci = 0; ci < 17; ++ci) {
                 TimelineRow r;
                 r.id = MakeRowId(RowKind::Rig, 0u, (uint32_t)ci);
                 r.label = kCtl[ci];

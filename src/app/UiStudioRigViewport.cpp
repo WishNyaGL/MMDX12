@@ -63,6 +63,18 @@ const BodyInfo kBody[6] = {
     {RigRole::Head,   "head"},
 };
 
+// FK rotate joints (single-bone, direct rotation): upper arms and thighs. Controller ids 13..16.
+struct JointInfo {
+    RigRole role;
+    const char* label;
+};
+const JointInfo kJoints[4] = {
+    {RigRole::LeftUpperArm, "upper_arm_l"},
+    {RigRole::RightUpperArm, "upper_arm_r"},
+    {RigRole::LeftThigh, "thigh_l"},
+    {RigRole::RightThigh, "thigh_r"},
+};
+
 } // namespace
 
 void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered, bool& consumed) {
@@ -89,6 +101,7 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
     // ---- draw + pick ----
     int hoverChain = -1;
     int hoverBody = -1;
+    int hoverJoint = -1;
     ImVec2 chainPos[6];
     bool chainProj[6] = {false, false, false, false, false, false};
 
@@ -159,15 +172,69 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
         }
     }
 
+    // FK rotate joints (upper arm / thigh): diamond markers that directly rotate the bone
+    for (int i = 0; i < 4; ++i) {
+        const int b = m->rig->BoneFor(kJoints[i].role);
+        if (b < 0) continue;
+        const XMFLOAT3 w = BoneJointWorld(*m->pmx, *m->inst, b);
+        ImVec2 s;
+        if (!studioVp_.Project(w, s)) continue;
+        const bool hover = inside && std::hypot(mouse.x - s.x, mouse.y - s.y) <= R + 2.0f * dpi;
+        if (hover) hoverJoint = i;
+        const bool sel = d.rigController == 13 + i;
+        const ImU32 col = hover ? IM_COL32(255, 220, 80, 255)
+                          : sel ? IM_COL32(120, 200, 255, 255)
+                                : IM_COL32(255, 160, 120, 230);
+        const float rr = R * 1.15f;
+        dl->AddQuadFilled(ImVec2(s.x - rr, s.y), ImVec2(s.x, s.y - rr),
+                          ImVec2(s.x + rr, s.y), ImVec2(s.x, s.y + rr), col);
+        dl->AddQuad(ImVec2(s.x - rr, s.y), ImVec2(s.x, s.y - rr),
+                    ImVec2(s.x + rr, s.y), ImVec2(s.x, s.y + rr), IM_COL32(10, 14, 20, 200));
+    }
+
     // ---- interaction ----
     if (rigVpDrag_.active) {
         consumed = true;
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             // commit one undo step
-            const char* undoName = rigVpDrag_.bodyBone >= 0 ? Tr("본 이동 (리그)") : Tr(kChains[rigVpDrag_.chainId].undo);
+            const char* undoName;
+            if (rigVpDrag_.bodyBone >= 0 || rigVpDrag_.jointBone >= 0)
+                undoName = Tr("본 이동 (리그)");
+            else
+                undoName = Tr(kChains[rigVpDrag_.chainId].undo);
             StudioSetPose(undoName, studioPoseBefore_);
             rigVpDrag_.active = false;
             rigVpDrag_.bodyBone = -1;
+            rigVpDrag_.jointBone = -1;
+        } else if (rigVpDrag_.jointBone >= 0) {
+            // FK joint rotation: yaw around the view-up axis, pitch around the view-right axis, relative to the drag
+            // start (total change since start, like the gizmo solvers).
+            StudioApplyPose(*m);
+            const int bone = rigVpDrag_.jointBone;
+            const float dx = mouse.x - rigVpDrag_.startMouse.x;
+            const float dy = mouse.y - rigVpDrag_.startMouse.y;
+            constexpr float kAng = 0.01f;  // radians per screen pixel
+            const XMFLOAT3& rv = rigVpDrag_.viewRight;
+            const XMFLOAT3& uv = rigVpDrag_.viewUp;
+            XMVECTOR qYaw = XMQuaternionRotationAxis(XMLoadFloat3(&uv), -dx * kAng);
+            XMVECTOR qPitch = XMQuaternionRotationAxis(XMLoadFloat3(&rv), dy * kAng);
+            XMVECTOR q = XMQuaternionMultiply(qPitch, qYaw);
+            const PmxBone& pb = m->pmx->bones[(size_t)bone];
+            const int parent = pb.parentIndex;
+            XMVECTOR parentRot = parent >= 0
+                ? XMQuaternionRotationMatrix(XMLoadFloat4x4(&m->inst->BoneWorld(parent)))
+                : XMQuaternionIdentity();
+            XMVECTOR oldWorld = XMQuaternionMultiply(parentRot, XMLoadFloat4(&rigVpDrag_.jointStartR));
+            XMVECTOR newWorld = XMQuaternionNormalize(XMQuaternionMultiply(q, oldWorld));
+            XMVECTOR invParent = XMQuaternionInverse(parentRot);
+            XMVECTOR newLocal = XMQuaternionNormalize(XMQuaternionMultiply(invParent, newWorld));
+            PoseLayer& pose = m->pose;
+            const int frame = d.Frame();
+            if (pose.frame != frame) pose = PoseLayer{};
+            pose.frame = frame;
+            PoseBone vv = StudioCurrentPose(*m)[(size_t)bone];
+            XMStoreFloat4(&vv.r, newLocal);
+            pose.bones[bone] = vv;
         } else if (rigVpDrag_.bodyBone >= 0) {
             // pelvis drag: exact ray-plane solve (like hands/feet) so the pelvis follows the cursor
             StudioApplyPose(*m);
@@ -275,7 +342,25 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
     // press: start a chain drag (move tool) or select a bone so the gizmo appears (rotate tool). The selection is
     // registered as a bone-pick (studioViewDrag_ = 3) so the viewport does not clear it as an "empty click".
     if (inside && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyAlt) {
-        if (hoverChain >= 0 && chainProj[hoverChain] && d.gizmoTool == 1) {
+        if (hoverJoint >= 0) {
+            // FK rotate joint: start a direct rotation drag (independent of the gizmo tool)
+            const int b = m->rig->BoneFor(kJoints[hoverJoint].role);
+            if (b >= 0) {
+                rigVpDrag_.active = true;
+                rigVpDrag_.jointBone = b;
+                rigVpDrag_.startMouse = mouse;
+                rigVpDrag_.bodyBone = -1;
+                rigVpDrag_.chainId = -1;
+                rigVpDrag_.footIkBone = -1;
+                const XMFLOAT4X4& vm = studioVp_.view;
+                rigVpDrag_.viewRight = {vm._11, vm._21, vm._31};
+                rigVpDrag_.viewUp = {vm._12, vm._22, vm._32};
+                studioPoseBefore_ = m->pose;
+                rigVpDrag_.jointStartR = StudioCurrentPose(*m)[(size_t)b].r;
+                StudioSelectRigController(13 + hoverJoint, io.KeyCtrl);  // select (timeline <-> viewport sync)
+                consumed = true;
+            }
+        } else if (hoverChain >= 0 && chainProj[hoverChain] && d.gizmoTool == 1) {
             const ChainInfo& ci = kChains[hoverChain];
             StudioSelectRigController(hoverChain, io.KeyCtrl);  // select the controller (viewport ring <-> timeline row)
             RigChain chain;
@@ -365,12 +450,13 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                 studioPoseBefore_ = m->pose;
                 consumed = true;
             } else {
-                StudioSelectRigController(6 + hoverBody, io.KeyCtrl);  // select the controller first
                 StudioSelectBone(b, false); studioViewDrag_ = 3; consumed = true;
+                // select the controller after the bone pick (StudioSelectBone clears the rows, so the rig row added
+                // afterwards survives).
+                StudioSelectRigController(6 + hoverBody, io.KeyCtrl);
             }
         } else if (hoverChain >= 0 && chainProj[hoverChain]) {
             // rotate tool: select the ready IK bone (arm/leg) when present, else the end bone (wrist/ankle)
-            StudioSelectRigController(hoverChain, io.KeyCtrl);  // select the controller
             const int end = m->rig->BoneFor(kChains[hoverChain].end);
             int pick = end;
             {
@@ -378,6 +464,9 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                 if (ik >= 0) pick = ik;
             }
             if (pick >= 0) { StudioSelectBone(pick, false); studioViewDrag_ = 3; consumed = true; }
+            // select the rig controller AFTER the bone pick: StudioSelectBone clears the rows, so the rig row added
+            // afterwards survives (it must come last to stay on the timeline).
+            StudioSelectRigController(hoverChain, io.KeyCtrl);
         }
     }
 

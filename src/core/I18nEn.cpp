@@ -447,6 +447,7 @@ const Entry kEnglish[] = {
     {"본 값 편집", "Edit bone value"},
     {"본 숨기기", "Hide bones"},
     {"본 이동", "Move bone"},
+    {"본 이동 (리그)", "Move (rig)"},
     {"본 편집", "Edit bone"},
     {"본 표시", "Show bones"},
     {"본 회전", "Rotate bone"},
