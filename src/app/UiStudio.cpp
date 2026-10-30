@@ -501,7 +501,10 @@ void App::UpdateStudio(double dt) {
         const auto kbd = [&](const char* a) { return (ImGuiKey)settings_.KeyFor(a); };
         if (pressed(kbd("registerPose"), false)) StudioRegisterPose(ctrl);  // pose edits, or the picked rows (Ctrl: all bones)
         if (!ctrl && pressed(ImGuiKey_T, false)) d.modelGizmo = !d.modelGizmo;
-        if (!ctrl && pressed(kbd("toolRotate"), false)) d.gizmoTool = 0;
+        if (!ctrl && pressed(kbd("toolRotate"), false)) {
+            if (d.gizmoTool != 0) d.gizmoTool = 0;        // enable rotate
+            else d.gizmoSphere = !d.gizmoSphere;          // already rotate: toggle the free-rotate sphere
+        }
         if (!ctrl && pressed(kbd("toolMove"), false)) d.gizmoTool = 1;
         if (!ctrl && pressed(ImGuiKey_L, false)) d.gizmoLocal = !d.gizmoLocal;
         if (!ctrl && pressed(kbd("toolAutoIk"), false)) d.autoIk = !d.autoIk;

@@ -514,7 +514,8 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
         return;
 
     }
-    const GizmoStyle gs = MakeGizmoStyle();
+    GizmoStyle gs = MakeGizmoStyle();
+    gs.showSphere = d.gizmoSphere;
     BoneOverlayStyle os = MakeOverlayStyle(settings_.boneOverlayScale);
     os.showPhysicsBones = studio_->showPhysicsBones;
     if (m && d.activeBone >= (int)m->pmx->bones.size()) d.activeBone = -1;
@@ -687,14 +688,11 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
                 dt = XMVector3Rotate(dt, XMQuaternionInverse(parent));  // world -> parent frame (the key's space)
                 XMStoreFloat3(&v.t, XMVectorAdd(XMLoadFloat3(&studioDragBase_.t), dt));
             } else {
-                XMFLOAT3 axis;
-                const float angle = GizmoDragAngle(studioGizmoDrag_, gizmoMouse, &axis);
-                if (angle != 0.0f) {
-                    // world rotation q about `axis` after the bone's rotation: local' = local * (P q P^-1)
-                    const XMVECTOR q = XMQuaternionRotationAxis(XMVector3Normalize(XMLoadFloat3(&axis)), angle);
-                    const XMVECTOR dq = XMQuaternionMultiply(XMQuaternionMultiply(parent, q), XMQuaternionInverse(parent));
-                    XMStoreFloat4(&v.r, XMQuaternionNormalize(XMQuaternionMultiply(XMLoadFloat4(&studioDragBase_.r), dq)));
-                }
+                // rotate (rings or free-rotate sphere): world rotation q about the gizmo centre after the bone's
+                // rotation: local' = local * (P q P^-1)
+                const XMVECTOR dq = GizmoDragQuaternion(studioGizmoDrag_, gizmoMouse);
+                const XMVECTOR par = XMQuaternionMultiply(XMQuaternionMultiply(parent, dq), XMQuaternionInverse(parent));
+                XMStoreFloat4(&v.r, XMQuaternionNormalize(XMQuaternionMultiply(XMLoadFloat4(&studioDragBase_.r), par)));
             }
             if (!studioAutoIkActive_) {
                 PoseLayer& pose = m->pose;
@@ -783,7 +781,20 @@ void App::StudioViewportToolbar(float x, float cy) {
             sel->showRig = !sel->showRig;
     }
     ImGui::SameLine(0, Dp(9.0f));
-    if (IconButton("##vprot", icon::Refresh, Tr("회전  (E)"), d.gizmoTool == 0, b)) d.gizmoTool = 0;
+    {
+        const bool rotActive = d.gizmoTool == 0;
+        if (IconButton("##vprot", icon::Refresh, Tr("회전  (E)"), rotActive, b)) {
+            if (!rotActive) { d.gizmoTool = 0; d.gizmoSphere = false; }   // move -> rotate, rings only
+            else if (!d.gizmoSphere) { d.gizmoSphere = true; }             // rings -> rings + sphere
+            else { d.gizmoTool = 1; }                                     // rings + sphere -> move
+        }
+        // indicator: a ring around the button when the free-rotate sphere is on
+        if (rotActive && d.gizmoSphere) {
+            const ImVec2 a = ImGui::GetItemRectMin(), c = ImGui::GetItemRectMax();
+            const ImVec2 cc((a.x + c.x) * 0.5f, (a.y + c.y) * 0.5f);
+            dl->AddCircle(cc, Dp(b * 0.25f + 2.0f), ui::WithAlpha(p.accentInk, 200), 32, 1.8f);
+        }
+    }
     ImGui::SameLine(0, Dp(gap));
     if (IconButton("##vpmove", icon::ArrowsOutCardinal, Tr("이동  (W)"), d.gizmoTool == 1, b)) d.gizmoTool = 1;
     ImGui::SameLine(0, Dp(gap));
@@ -1710,7 +1721,8 @@ void App::StudioDrawPoseOverlay(const ViewProj& vp, float x0, float y0, float x1
 
 bool App::StudioScriptGizmoPoint(int part, ImVec2& out) const {
     if (!studioGizmoShown_) return false;
-    const GizmoStyle gs = MakeGizmoStyle();
+    GizmoStyle gs = MakeGizmoStyle();
+    gs.showSphere = studio_->gizmoSphere;
     ImVec2 c;
     if (!studioVp_.Project(studioGizmoFrame_.center, c)) return false;
     // the hit point of that part farthest from the centre (arrow tips, ring rims)

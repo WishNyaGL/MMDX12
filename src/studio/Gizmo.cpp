@@ -533,6 +533,11 @@ GizmoPart GizmoHitTest(const ViewProj& vp, const GizmoFrame& f, GizmoMode mode, 
                 best = kRings[i];
             }
         }
+        // Free-rotate sphere: inside the ring disc counts when no ring was hit.
+        if (best == GizmoPart::None && s.showSphere) {
+            const float dc = std::hypot(mouse.x - cp.x, mouse.y - cp.y);
+            if (dc <= s.ringRadius) return GizmoPart::Sphere;
+        }
         return best;
     }
 
@@ -599,6 +604,14 @@ void DrawGizmo(ImDrawList* dl, const ViewProj& vp, const GizmoFrame& f, GizmoMod
     const float scale = vp.PixelWorldSize(f.center);
 
     if (mode == GizmoMode::Rotate) {
+        // free-rotate sphere: faint white disc + rim, hot/active tinted yellow
+        if (s.showSphere) {
+            const bool sphHot = hot == GizmoPart::Sphere || active == GizmoPart::Sphere;
+            const ImU32 sphFill = sphHot ? WithAlpha(s.hotColor, 70) : WithAlpha(IM_COL32(255, 255, 255, 255), 22);
+            const ImU32 sphEdge = sphHot ? s.hotColor : IM_COL32(255, 255, 255, 75);
+            dl->AddCircleFilled(cp, s.ringRadius, sphFill, 64);
+            dl->AddCircle(cp, s.ringRadius, sphEdge, 64, 1.2f);
+        }
         dl->AddCircle(cp, s.ringRadius + 6.0f, s.outerColor, 64, 1.5f);
         ImVec2 pts[3][kRingSamples];
         bool ok[3][kRingSamples];
@@ -701,6 +714,22 @@ GizmoDrag BeginGizmoDrag(const ViewProj& vp, const GizmoFrame& f, GizmoMode mode
         return d;
     }
     const int ring = RingIndexOf(part);
+    if (part == GizmoPart::Sphere) {
+        // free-rotate sphere: capture the camera basis + the normalized start point on the sphere
+        d.radiusPx = s.ringRadius;
+        const XMFLOAT4X4& vm = vp.view;
+        d.camRight = Store(XMVector3Normalize(XMVectorSet(vm._11, vm._21, vm._31, 0)));
+        d.camUp = Store(XMVector3Normalize(XMVectorSet(vm._12, vm._22, vm._32, 0)));
+        d.camFwd = Store(XMVector3Normalize(XMVectorSet(vm._13, vm._23, vm._33, 0)));
+        float sx = mouse.x - cp.x, sy = mouse.y - cp.y;
+        const float sl = std::sqrt(sx * sx + sy * sy);
+        if (sl > d.radiusPx && sl > 1e-6f) { sx *= d.radiusPx / sl; sy *= d.radiusPx / sl; }
+        const float nx = d.radiusPx > 1e-5f ? sx / d.radiusPx : 0.0f;
+        const float ny = d.radiusPx > 1e-5f ? sy / d.radiusPx : 0.0f;
+        const float nsq = nx * nx + ny * ny;
+        d.sphereStart = {nx, ny, nsq < 1.0f ? std::sqrt(1.0f - nsq) : 0.0f};
+        return d;
+    }
     if (ring < 0) return d;
 
     d.radiusPx = s.ringRadius;
@@ -780,6 +809,42 @@ float GizmoDragAngle(const GizmoDrag& d, ImVec2 mouse, XMFLOAT3* axis) {
         return d.angleSign * WrapPi(a1 - a0);
     }
     return DotV(mouse - d.startMouse, d.tangent) / d.radiusPx;
+}
+
+XMVECTOR GizmoDragQuaternion(const GizmoDrag& d, ImVec2 mouse) {
+    if (d.part != GizmoPart::Sphere) {
+        XMFLOAT3 axis;
+        const float angle = GizmoDragAngle(d, mouse, &axis);
+        return XMQuaternionRotationAxis(XMVector3Normalize(XMLoadFloat3(&axis)), angle);
+    }
+    // free-rotate arcball: map the mouse to two points on the unit sphere in the camera basis, then rotate the
+    // bone around the sphere centre so the first point follows the second. The resulting quaternion is in world space.
+    // The right axis is mirrored so horizontal mouse drags feel inverted (drag right = turn left).
+    const XMVECTOR cR = XMVectorNegate(XMVector3Normalize(XMVectorSet(d.camRight.x, d.camRight.y, d.camRight.z, 0)));
+    const XMVECTOR cU = XMVector3Normalize(XMVectorSet(d.camUp.x, d.camUp.y, d.camUp.z, 0));
+    const XMVECTOR cF = XMVector3Normalize(XMVectorSet(d.camFwd.x, d.camFwd.y, d.camFwd.z, 0));
+    float dx = mouse.x - d.centerPx.x, dy = mouse.y - d.centerPx.y;
+    const float sl = std::sqrt(dx * dx + dy * dy);
+    const float R = d.radiusPx;
+    if (sl > R && sl > 1e-6f) { dx *= R / sl; dy *= R / sl; }
+    const float nx = R > 1e-5f ? dx / R : 0.0f;
+    const float ny = R > 1e-5f ? dy / R : 0.0f;
+    const float nsq = nx * nx + ny * ny;
+    const float nz = nsq < 1.0f ? std::sqrt(1.0f - nsq) : 0.0f;
+    const XMVECTOR p0 = XMVectorSet(d.sphereStart.x, d.sphereStart.y, d.sphereStart.z, 0);
+    const XMVECTOR p1 = XMVectorSet(nx, ny, nz, 0);
+    const XMVECTOR a0 = XMVectorAdd(XMVectorAdd(XMVectorScale(cR, XMVectorGetX(p0)),
+                                                XMVectorScale(cU, XMVectorGetY(p0))),
+                                    XMVectorScale(cF, XMVectorGetZ(p0)));
+    const XMVECTOR a1 = XMVectorAdd(XMVectorAdd(XMVectorScale(cR, nx), XMVectorScale(cU, ny)),
+                                    XMVectorScale(cF, nz));
+    const XMVECTOR a0n = XMVector3Normalize(a0);
+    const XMVECTOR a1n = XMVector3Normalize(a1);
+    const float dot = XMVectorGetX(XMVector3Dot(a0n, a1n));
+    if (dot > 0.99999f) return XMQuaternionIdentity();
+    const XMVECTOR cross = XMVector3Cross(a0n, a1n);
+    if (XMVectorGetX(XMVector3LengthSq(cross)) < 1e-12f) return XMQuaternionIdentity();
+    return XMQuaternionNormalize(XMVectorSetW(cross, dot + 1.0f));
 }
 
 // ---- camera path ------------------------------------------------------------------------------------------------

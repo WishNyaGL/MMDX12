@@ -318,6 +318,7 @@ struct StudioDoc {
     std::set<int> selectedBones;      // bones picked in the viewport / on bone rows (selected model)
     int activeBone = -1;              // the gizmo's bone (last picked), -1 none
     int gizmoTool = 0;                // 0 rotate, 1 translate
+    bool gizmoSphere = false;         // rotate mode: also show/hit the free-rotate sphere (arcball)
     bool gizmoLocal = false;          // gizmo axes: bone-local (true) or global
     bool autoIk = false;              // auto-IK posing: dragging a wrist / hand solves the parent chain (not saved)
     bool showBones = true;            // bone overlay

@@ -98,7 +98,7 @@ std::vector<int> PickBoneCandidates(const ViewProj& vp, const PmxModel& model, c
 // ---- gizmo ------------------------------------------------------------------------------------------------------
 
 enum class GizmoMode { Rotate, Translate };
-enum class GizmoPart : int { None = 0, AxisX, AxisY, AxisZ, PlaneYZ, PlaneZX, PlaneXY, RingX, RingY, RingZ };
+enum class GizmoPart : int { None = 0, AxisX, AxisY, AxisZ, PlaneYZ, PlaneZX, PlaneXY, RingX, RingY, RingZ, Sphere };
 
 struct GizmoFrame {
     DirectX::XMFLOAT3 center{};                     // world
@@ -116,6 +116,7 @@ struct GizmoStyle {
     ImU32 axisColor[3] = {IM_COL32(235, 75, 75, 255), IM_COL32(110, 205, 70, 255), IM_COL32(70, 130, 245, 255)};
     ImU32 hotColor = IM_COL32(255, 220, 60, 255);
     ImU32 outerColor = IM_COL32(255, 255, 255, 110);  // view-aligned circle around the rotate rings (decoration)
+    bool showSphere = false;       // rotate mode: also draw / hit the free-rotate sphere (arcball)
 };
 
 // Part under the mouse, None if nothing is within style.hitDistance. Rotate mode tests the rings (front half
@@ -141,6 +142,9 @@ struct GizmoDrag {
     bool screenAngle = false;  // rotate: tangent degenerate -> use the mouse angle around the projected centre
     ImVec2 centerPx{};
     float angleSign = 1.0f;    // rotate, screenAngle mode
+    // sphere (free rotate / arcball): world camera basis at drag start + the normalized start point on the sphere
+    DirectX::XMFLOAT3 camRight{1, 0, 0}, camUp{0, 1, 0}, camFwd{0, 0, 1};
+    DirectX::XMFLOAT3 sphereStart{0, 0, 1};
 };
 GizmoDrag BeginGizmoDrag(const ViewProj& vp, const GizmoFrame& f, GizmoMode mode, const GizmoStyle& s, GizmoPart part,
                          ImVec2 mouse);
@@ -149,6 +153,9 @@ DirectX::XMFLOAT3 GizmoDragTranslation(const GizmoDrag& d, ImVec2 mouse);
 // Rotation angle in radians about the ring's world axis (written to `axis`) for Ring* parts (0 for others). A positive
 // angle means XMQuaternionRotationAxis(axis, angle) rotates the grabbed ring point towards where the mouse moved.
 float GizmoDragAngle(const GizmoDrag& d, ImVec2 mouse, DirectX::XMFLOAT3* axis);
+// Rotation quaternion delivered by a drag: for Ring* parts it matches GizmoDragAngle; for the Sphere (free-rotate)
+// part it is an arcball turn in world space about the gizmo centre.
+DirectX::XMVECTOR GizmoDragQuaternion(const GizmoDrag& d, ImVec2 mouse);
 
 // ---- camera path ----
 
