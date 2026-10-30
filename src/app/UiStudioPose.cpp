@@ -203,7 +203,7 @@ void App::StudioSelectRigController(int controller, bool toggle) {
     StudioDoc& d = *studio_;
     StudioModel* m = StudioPoseModel();
     if (!m || !m->rig) return;
-    if (controller < 0 || controller >= 17) {
+    if (controller < 0 || controller >= 19) {
         controller = -1;
     } else if (toggle) {
         controller = (d.rigController == controller) ? -1 : controller;
@@ -768,11 +768,20 @@ void App::StudioViewportToolbar(float x, float cy) {
     const Palette& p = P();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float b = 30.0f, gap = 2.0f;
-    const float w = Dp(7 * b + 6 * gap + 3 * 9.0f + 8.0f);
+    // the rig toggle button joins only when the selected model has a generated rig
+    StudioModel* sel = d.Selected();
+    const bool hasRig = sel && sel->kind == ModelKind::Character && sel->rig != nullptr;
+    const int buttonCount = hasRig ? 8 : 7;
+    const float w = Dp(buttonCount * b + (buttonCount - 1) * gap + 3 * 9.0f + gap + 8.0f);
     dl->AddRectFilled(ImVec2(x, cy - Dp(b * 0.5f + 4.0f)), ImVec2(x + w, cy + Dp(b * 0.5f + 4.0f)), WithAlpha(p.surface, 0.85f),
                       Dp(10.0f));
     ImGui::SetCursorScreenPos(ImVec2(x + Dp(4.0f), cy - Dp(b * 0.5f)));
     if (IconButton("##vpbones", icon::Bone, d.showBones ? Tr("본 숨기기") : Tr("본 표시"), d.showBones, b)) d.showBones = !d.showBones;
+    if (hasRig) {
+        ImGui::SameLine(0, Dp(gap));
+        if (IconButton("##vprig", icon::Atom, sel->showRig ? Tr("리그 숨기기") : Tr("리그 표시"), sel->showRig, b))
+            sel->showRig = !sel->showRig;
+    }
     ImGui::SameLine(0, Dp(9.0f));
     if (IconButton("##vprot", icon::Refresh, Tr("회전  (E)"), d.gizmoTool == 0, b)) d.gizmoTool = 0;
     ImGui::SameLine(0, Dp(gap));

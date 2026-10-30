@@ -48,6 +48,8 @@ const RoleAlias kAliases[] = {
     {RigRole::Spine,        "上半身",     "spine"},
     {RigRole::Spine,        "",           "torso"},
     {RigRole::Chest,        "上半身2",    "chest"},
+    {RigRole::Waist,        "腰",         "waist"},
+    {RigRole::Waist,        "ウェスト",   "waist"},
     {RigRole::Neck,         "首",         "neck", true},
     {RigRole::Head,         "頭",         "head"},
     {RigRole::LeftShoulder, "左肩",       "shoulder_l"},
@@ -139,6 +141,7 @@ RigRole ParentRoleFor(RigRole role) {
     switch (role) {
         case RigRole::Spine: return RigRole::Pelvis;
         case RigRole::Chest: return RigRole::Spine;
+        case RigRole::Waist: return RigRole::Chest;
         case RigRole::Neck: return RigRole::Chest;
         case RigRole::Head: return RigRole::Neck;
         case RigRole::LeftUpperArm: return RigRole::LeftShoulder;

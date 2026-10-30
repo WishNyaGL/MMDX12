@@ -26,6 +26,7 @@ const char* RigRoleName(RigRole role) {
         case RigRole::RightShin: return "shin_r";
         case RigRole::RightFoot: return "foot_r";
         case RigRole::RightToe: return "toe_r";
+        case RigRole::Waist: return "waist";
         default: return "?";
     }
 }

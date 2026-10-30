@@ -41,7 +41,7 @@ int CheckRole(const RigDefinition& rig, RigRole role, const char* roleName) {
 
 } // namespace
 
-// Prints a compact one-line resolution summary for a model: resolved/19 roles + the set of unresolved roles.
+// Prints a compact one-line resolution summary for a model: resolved/20 roles + the set of unresolved roles.
 int Summarize(const PmxModel& model, const char* label) {
     const RigGenerateResult res = GenerateRig(model);
     int resolved = 0;
@@ -51,7 +51,7 @@ int Summarize(const PmxModel& model, const char* label) {
         if (b.boneIndex >= 0) ++resolved;
         else { if (!unresolved.empty()) unresolved += ","; unresolved += RigRoleName(b.role); }
     }
-    std::printf("%-46s %2d/19  %s\n", label, resolved, unresolved.c_str());
+    std::printf("%-46s %2d/%d  %s\n", label, resolved, (int)RigRole::Count, unresolved.c_str());
     return resolved == (int)RigRole::Count ? 0 : 1;
 }
 
@@ -74,7 +74,10 @@ int main(int argc, char** argv) {
             for (const auto& f : files) {
                 PmxModel model;
                 std::string err;
-                const std::string pathStr = f.string();
+                // Use u8string (always UTF-8) for display: string() throws on Unicode names that the narrow code page
+                // cannot encode (e.g. Korean/Japanese), which would terminate the scan.
+                const auto u8path = f.u8string();
+                const std::string pathStr((const char*)u8path.data(), u8path.size());
                 if (!LoadPmx(f, model, &err)) {
                     std::printf("%-46s LOAD-FAIL (%s)\n", pathStr.c_str(), err.c_str());
                     std::fflush(stdout);
@@ -153,6 +156,7 @@ int main(int argc, char** argv) {
         const int center = AddBone(m, "センター", "Center", -1);
         const int spine = AddBone(m, "上半身", "Spine", center);
         const int chest = AddBone(m, "胸", "Chest", spine);
+        const int waist = AddBone(m, "腰", "Waist", chest);
         const int neck = AddBone(m, "首", "Neck", chest);
         const int head = AddBone(m, "頭", "Head", neck);
         const int ls = AddBone(m, "左肩", "Left Shoulder", chest);
@@ -177,6 +181,7 @@ int main(int argc, char** argv) {
         failed += CheckRole(res.rig, RigRole::Pelvis, "pelvis");
         failed += CheckRole(res.rig, RigRole::Spine, "spine");
         failed += CheckRole(res.rig, RigRole::Chest, "chest");
+        failed += CheckRole(res.rig, RigRole::Waist, "waist");
         failed += CheckRole(res.rig, RigRole::Neck, "neck");
         failed += CheckRole(res.rig, RigRole::Head, "head");
         failed += CheckRole(res.rig, RigRole::LeftUpperArm, "upper_arm_l");
@@ -199,6 +204,7 @@ int main(int argc, char** argv) {
         const int center = AddBone(m, "Root", "", -1);
         const int spine = AddBone(m, "Spine", "", center);
         const int chest = AddBone(m, "Chest", "", spine);
+        const int waist = AddBone(m, "Waist", "", chest);
         const int neck = AddBone(m, "Neck", "", chest);
         const int head = AddBone(m, "Head", "", neck);
         const int la = AddBone(m, "LeftArm", "", chest);
@@ -221,6 +227,7 @@ int main(int argc, char** argv) {
         failed += CheckRole(res.rig, RigRole::Pelvis, "pelvis");
         failed += CheckRole(res.rig, RigRole::Spine, "spine");
         failed += CheckRole(res.rig, RigRole::Chest, "chest");
+        failed += CheckRole(res.rig, RigRole::Waist, "waist");
         failed += CheckRole(res.rig, RigRole::Neck, "neck");
         failed += CheckRole(res.rig, RigRole::Head, "head");
         failed += CheckRole(res.rig, RigRole::LeftUpperArm, "upper_arm_l");

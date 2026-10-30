@@ -659,6 +659,7 @@ private:
         DirectX::XMFLOAT3 bodyStartT{0, 0, 0};    // its local translation at drag start
         int jointBone = -1;             // FK rotate joint (upper arm / thigh): the bone being rotated
         DirectX::XMFLOAT4 jointStartR{0, 0, 0, 1};  // its local rotation at drag start
+        int jointPitchSign = 1;        // FK rotate: pitch sign (arms invert vertical drag)
     } rigVpDrag_;
     void StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered, bool& consumed);
 

@@ -34,6 +34,7 @@ enum class RigRole : int {
     RightShin,
     RightFoot,
     RightToe,
+    Waist,
     Count
 };
 

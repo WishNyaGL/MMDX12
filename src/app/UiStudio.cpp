@@ -506,6 +506,8 @@ void App::UpdateStudio(double dt) {
         if (!ctrl && pressed(ImGuiKey_L, false)) d.gizmoLocal = !d.gizmoLocal;
         if (!ctrl && pressed(kbd("toolAutoIk"), false)) d.autoIk = !d.autoIk;
         if (!ctrl && pressed(kbd("toggleBones"), false)) d.showBones = !d.showBones;
+        if (!ctrl && pressed(kbd("toggleRig"), false) && StudioPoseModel() && StudioPoseModel()->rig)
+            StudioPoseModel()->showRig = !StudioPoseModel()->showRig;
         if (pressed(ImGuiKey_Escape, false) && d.possessCamera) StudioPossess(false);
         if (pressed(ImGuiKey_Escape, false) && studioViewDrag_ != 2 && d.activeBone >= 0) StudioSelectBone(-1, false);
         if (ctrl && pressed(ImGuiKey_S, false)) StudioSave(shift);
@@ -1988,9 +1990,9 @@ std::vector<uint64_t> App::StudioRigRowToBoneRows(uint64_t rigRow) const {
     if (!m || !m->rig) return out;
     const int idx = (int)RowIndexOf(rigRow);
     if (idx < 0) return out;
-    // controllers 0..5 = chains (hands/feet/toes), 6..12 = body (pelvis, groove, spine, chest, neck, head),
-    // 13..16 = FK rotate joints (upper arms, thighs)
-    const RigRole roles[17][3] = {
+    // controllers 0..5 = chains (hands/feet/toes), 6..12 = body (pelvis, groove, spine, chest, neck, head, waist),
+    // 13..18 = FK rotate joints (shoulders, upper arms, thighs)
+    const RigRole roles[19][3] = {
         {RigRole::LeftUpperArm, RigRole::LeftForearm, RigRole::LeftHand},
         {RigRole::RightUpperArm, RigRole::RightForearm, RigRole::RightHand},
         {RigRole::LeftThigh, RigRole::LeftShin, RigRole::LeftFoot},
@@ -1998,11 +2000,12 @@ std::vector<uint64_t> App::StudioRigRowToBoneRows(uint64_t rigRow) const {
         {RigRole::LeftFoot, RigRole::LeftToe, RigRole::LeftToe},
         {RigRole::RightFoot, RigRole::RightToe, RigRole::RightToe},
         {RigRole::Pelvis}, {RigRole::Groove}, {RigRole::Spine}, {RigRole::Chest}, {RigRole::Neck},
-        {RigRole::Head}, {RigRole::Pelvis},
+        {RigRole::Head}, {RigRole::Waist},
+        {RigRole::LeftShoulder}, {RigRole::RightShoulder},
         {RigRole::LeftUpperArm}, {RigRole::RightUpperArm},
         {RigRole::LeftThigh}, {RigRole::RightThigh},
     };
-    const int total = 17;
+    const int total = 19;
     if (idx >= total) return out;
     int cnt = idx < 6 ? 3 : 1;
     for (int k = 0; k < cnt; ++k) {
@@ -2030,7 +2033,7 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
     if (IsCameraKind(kind)) return d.selectedModel < 0;
     if (kind == RowKind::Rig) {
         return d.selectedModel >= 0 && d.models[d.selectedModel]->rig &&
-               (int)RowIndexOf(row) < 17;
+               (int)RowIndexOf(row) < 19;
     }
     if (kind == RowKind::SceneLight) {
         // a light row is only offered through the camera target (the lights live next to the camera)
@@ -2405,6 +2408,15 @@ std::vector<int> App::StudioRowFrames(uint64_t row) const {
             if (const StudioStage* stage = d.FindStage(stageUid))
                 if (const EffectParamTrack* t = FindStageParamTrack(*stage, param)) add(t->keys);
         }
+    } else if (kind == RowKind::Rig) {
+        // a rig (controller) row's key frames are the union of its bones' keys
+        const StudioModel* m = d.selectedModel >= 0 && d.selectedModel < (int)d.models.size() ? d.models[d.selectedModel].get() : nullptr;
+        if (m && m->rig)
+            for (uint64_t brow : StudioRigRowToBoneRows(row)) {
+                RowKind bk; std::string bname;
+                if (!StudioTrackOfRow(brow, bk, bname) || bk != RowKind::Bone) continue;
+                if (auto it = m->motion.bones.find(bname); it != m->motion.bones.end()) add(it->second);
+            }
     } else if (d.selectedModel < d.models.size()) {
         const MotionData& m = d.models[d.selectedModel]->motion;
         if (kind == RowKind::Bone) {
@@ -2646,6 +2658,21 @@ void App::StudioCopySelected() {
             const auto& t = d.models[d.selectedModel]->motion.bones;
             if (auto it = t.find(name); it != t.end())
                 if (const BoneKf* p = FindKey(it->second, k.second)) { c.bone = *p; found = true; }
+        } else if (kind == RowKind::Rig) {
+            // a rig (controller) key expands to its bones' keys, so copy/paste works like ordinary bone keys
+            const auto& t = d.models[d.selectedModel]->motion.bones;
+            for (uint64_t brow : StudioRigRowToBoneRows(k.first)) {
+                RowKind bk; std::string bname;
+                if (!StudioTrackOfRow(brow, bk, bname) || bk != RowKind::Bone) continue;
+                if (auto it = t.find(bname); it != t.end())
+                    if (const BoneKf* p = FindKey(it->second, k.second)) {
+                        ClipboardKey c2 = c;
+                        c2.row = brow;
+                        c2.bone = *p;
+                        d.clipboard.push_back(c2);
+                    }
+            }
+            continue;
         } else if (kind == RowKind::Accessory) {
             const auto& t = d.models[d.selectedModel]->motion.accessory;
             if (const AccessoryKf* p = FindKey(t, k.second)) { c.accessory = *p; found = true; }
@@ -3586,7 +3613,7 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
         {
             int rig = -1;
             for (uint64_t r : d.selectedRows)
-                if (RowKindOf(r) == RowKind::Rig && (int)RowIndexOf(r) < 17) { rig = (int)RowIndexOf(r); break; }
+                if (RowKindOf(r) == RowKind::Rig && (int)RowIndexOf(r) < 19) { rig = (int)RowIndexOf(r); break; }
             d.rigController = rig;
             if (rig >= 0) d.inspectorTab = 1;
         }
@@ -3615,7 +3642,7 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
                 if (d.activeBone < 0) d.activeBone = (int)RowIndexOf(row);
             }
             // keys of a rig controller row pick that controller for the viewport rings (even when hidden)
-            if (RowKindOf(row) == RowKind::Rig && (int)RowIndexOf(row) < 17)
+            if (RowKindOf(row) == RowKind::Rig && (int)RowIndexOf(row) < 19)
                 d.rigController = (int)RowIndexOf(row);
         }
         // a plain click on one key seeks the playhead to it (Premiere / AE): the live panels then show and edit that key's values
@@ -4337,9 +4364,9 @@ void App::StudioRebuildRows() {
     if (d.rigMode) {
         StudioModel* rm = d.Selected();
         if (rm && rm->rig) {
-            static const char* kCtl[17] = {"hand_l", "hand_r", "foot_l", "foot_r", "toe_l", "toe_r",
-                                            "center", "groove", "spine", "chest", "neck", "head", "head top",
-                                            "upper_arm_l", "upper_arm_r", "thigh_l", "thigh_r"};
+            static const char* kCtl[19] = {"hand_l", "hand_r", "foot_l", "foot_r", "toe_l", "toe_r",
+                                            "center", "groove", "spine", "chest", "neck", "head", "waist",
+                                            "shoulder_l", "shoulder_r", "upper_arm_l", "upper_arm_r", "thigh_l", "thigh_r"};
             TimelineRow group;
             group.id = MakeRowId(RowKind::Group, 0u, 0u);
             group.label = Tr("리그");
@@ -4350,7 +4377,7 @@ void App::StudioRebuildRows() {
             std::vector<uint64_t>& childIds = d.groupChildren[group.id];
             std::set<int> summary;
             std::vector<TimelineRow> children;
-            for (int ci = 0; ci < 17; ++ci) {
+            for (int ci = 0; ci < 19; ++ci) {
                 TimelineRow r;
                 r.id = MakeRowId(RowKind::Rig, 0u, (uint32_t)ci);
                 r.label = kCtl[ci];
@@ -4362,7 +4389,11 @@ void App::StudioRebuildRows() {
                     auto it = mo.bones.find(bname);
                     if (it == mo.bones.end()) continue;
                     std::vector<TimelineKey> kk;
-                    keysOfModel(brow, it->second, kk);
+                    kk.reserve(it->second.size());
+                    // a key is highlighted when either the rig row or its bone row is selected
+                    for (const auto& k : it->second)
+                        kk.push_back({k.frame, d.selection.count({r.id, k.frame}) != 0 ||
+                                            d.selection.count({brow, k.frame}) != 0});
                     for (const auto& k : kk) { r.keys.push_back(k); summary.insert(k.frame); }
                 }
                 std::sort(r.keys.begin(), r.keys.end(), [](const TimelineKey& a, const TimelineKey& b){ return a.frame < b.frame; });
@@ -4831,8 +4862,6 @@ void App::DrawStudioOutliner(float x0, float y0, float x1, float y1) {
                     ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x + Dp(48.0f), ImGui::GetCursorScreenPos().y));
                     bool tm = d.rigMode;
                     if (ImGui::Checkbox(Tr("리그 타임라인"), &tm)) { d.rigMode = tm; d.rowsKey = ~0ull; }
-                    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x + Dp(48.0f), ImGui::GetCursorScreenPos().y));
-                    ImGui::Checkbox(Tr("뷰포트에 리그 표시"), &m.showRig);
                     Gap(2.0f);
                 }
             }

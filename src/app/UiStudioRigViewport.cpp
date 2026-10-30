@@ -54,21 +54,24 @@ struct BodyInfo {
     RigRole role;
     const char* label;
 };
-const BodyInfo kBody[6] = {
+const BodyInfo kBody[7] = {
     {RigRole::Pelvis, "center"},
     {RigRole::Groove, "groove"},
     {RigRole::Spine,  "spine"},
     {RigRole::Chest,  "chest"},
     {RigRole::Neck,   "neck"},
     {RigRole::Head,   "head"},
+    {RigRole::Waist,  "waist"},
 };
 
-// FK rotate joints (single-bone, direct rotation): upper arms and thighs. Controller ids 13..16.
+// FK rotate joints (single-bone, direct rotation): shoulders, upper arms and thighs. Controller ids 13..18.
 struct JointInfo {
     RigRole role;
     const char* label;
 };
-const JointInfo kJoints[4] = {
+const JointInfo kJoints[6] = {
+    {RigRole::LeftShoulder, "shoulder_l"},
+    {RigRole::RightShoulder, "shoulder_r"},
     {RigRole::LeftUpperArm, "upper_arm_l"},
     {RigRole::RightUpperArm, "upper_arm_r"},
     {RigRole::LeftThigh, "thigh_l"},
@@ -124,17 +127,18 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
         if (hover) hoverChain = i;
         const bool sel = d.rigController == i;
         const ImU32 col = hover ? IM_COL32(255, 220, 80, 255)
-                          : sel ? IM_COL32(120, 200, 255, 255)
+                          : sel ? IM_COL32(255, 70, 70, 255)
                                 : IM_COL32(180, 230, 190, 230);
         dl->AddCircleFilled(s, R, ui::WithAlpha(p.sunken, 0.8f), 24);
-        dl->AddCircle(s, R, col, 24, 2.0f * dpi);
+        dl->AddCircle(s, R + 3.0f * dpi, IM_COL32(255, 255, 255, 90), 24, 1.5f * dpi);  // outer contrast ring (selected)
+        dl->AddCircle(s, R, col, 24, 2.5f * dpi);
         dl->AddCircleFilled(s, 3.0f * dpi, col, 12);
     }
 
     // body rings
     ImVec2 bodyCenterPx;
     bool bodyCenterProj = false;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         const int b = bodyWeight(kBody[i].role);
         if (b < 0) continue;
         const XMFLOAT3 w = BoneJointWorld(*m->pmx, *m->inst, b);
@@ -145,9 +149,10 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
         if (hover) hoverBody = i;
         const bool sel = d.rigController == 6 + i;
         const ImU32 col = hover ? IM_COL32(255, 220, 80, 255)
-                          : sel ? IM_COL32(120, 200, 255, 255)
+                          : sel ? IM_COL32(255, 70, 70, 255)
                                 : IM_COL32(120, 160, 240, 210);
-        dl->AddCircle(s, R * 1.15f, col, 28, 2.0f * dpi);
+        dl->AddCircle(s, R * 1.15f + 3.0f * dpi, IM_COL32(255, 255, 255, 90), 28, 1.5f * dpi);  // outer contrast ring (selected)
+        dl->AddCircle(s, R * 1.15f, col, 28, 2.5f * dpi);
         dl->AddCircleFilled(s, 2.5f * dpi, col, 12);
         if (i == 1 && bodyCenterProj) {
             // arrow from center -> groove (outline + fill for visibility)
@@ -172,8 +177,8 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
         }
     }
 
-    // FK rotate joints (upper arm / thigh): diamond markers that directly rotate the bone
-    for (int i = 0; i < 4; ++i) {
+    // FK rotate joints (shoulders / upper arms / thighs): diamond markers that directly rotate the bone
+    for (int i = 0; i < 6; ++i) {
         const int b = m->rig->BoneFor(kJoints[i].role);
         if (b < 0) continue;
         const XMFLOAT3 w = BoneJointWorld(*m->pmx, *m->inst, b);
@@ -183,9 +188,12 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
         if (hover) hoverJoint = i;
         const bool sel = d.rigController == 13 + i;
         const ImU32 col = hover ? IM_COL32(255, 220, 80, 255)
-                          : sel ? IM_COL32(120, 200, 255, 255)
+                          : sel ? IM_COL32(255, 70, 70, 255)
                                 : IM_COL32(255, 160, 120, 230);
         const float rr = R * 1.15f;
+        dl->AddQuadFilled(ImVec2(s.x - rr - 2.5f * dpi, s.y), ImVec2(s.x, s.y - rr - 2.5f * dpi),
+                          ImVec2(s.x + rr + 2.5f * dpi, s.y), ImVec2(s.x, s.y + rr + 2.5f * dpi),
+                          ui::WithAlpha(p.sunken, 0.8f));
         dl->AddQuadFilled(ImVec2(s.x - rr, s.y), ImVec2(s.x, s.y - rr),
                           ImVec2(s.x + rr, s.y), ImVec2(s.x, s.y + rr), col);
         dl->AddQuad(ImVec2(s.x - rr, s.y), ImVec2(s.x, s.y - rr),
@@ -217,7 +225,7 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
             const XMFLOAT3& rv = rigVpDrag_.viewRight;
             const XMFLOAT3& uv = rigVpDrag_.viewUp;
             XMVECTOR qYaw = XMQuaternionRotationAxis(XMLoadFloat3(&uv), -dx * kAng);
-            XMVECTOR qPitch = XMQuaternionRotationAxis(XMLoadFloat3(&rv), dy * kAng);
+            XMVECTOR qPitch = XMQuaternionRotationAxis(XMLoadFloat3(&rv), (float)rigVpDrag_.jointPitchSign * dy * kAng);
             XMVECTOR q = XMQuaternionMultiply(qPitch, qYaw);
             const PmxBone& pb = m->pmx->bones[(size_t)bone];
             const int parent = pb.parentIndex;
@@ -357,6 +365,9 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                 rigVpDrag_.viewUp = {vm._12, vm._22, vm._32};
                 studioPoseBefore_ = m->pose;
                 rigVpDrag_.jointStartR = StudioCurrentPose(*m)[(size_t)b].r;
+                // invert the vertical (pitch) drag for the shoulder / upper-arm controllers (a downward drag lifts the
+                // limb / up lowers it); thighs keep the default direction
+                rigVpDrag_.jointPitchSign = (hoverJoint <= 3) ? -1 : 1;
                 StudioSelectRigController(13 + hoverJoint, io.KeyCtrl);  // select (timeline <-> viewport sync)
                 consumed = true;
             }

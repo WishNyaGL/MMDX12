@@ -125,6 +125,7 @@ const DefaultKey kDefaultKeys[] = {
     {"toolRotate",    ImGuiKey_E},
     {"toolAutoIk",    ImGuiKey_K},
     {"toggleBones",   ImGuiKey_C},
+    {"toggleRig",     ImGuiKey_X},
     {"registerPose",  ImGuiKey_I},
     {"togglePlay",    ImGuiKey_Space},
 };
