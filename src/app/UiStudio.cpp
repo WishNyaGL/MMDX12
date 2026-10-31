@@ -4,6 +4,7 @@
 #include "ui_probe/UiProbe.h"
 
 #include <algorithm>
+#include <set>
 #include <chrono>
 #include <climits>
 #include <cstring>
@@ -2010,21 +2011,19 @@ std::vector<uint64_t> App::StudioRigRowToBoneRows(uint64_t rigRow) const {
     };
     const int total = 19;
     if (idx >= total) return out;
+    // General de-duplication by bone index: a controller may bind the same role twice (e.g. toe chains list the
+    // toe role in both the mid and end slots), and future controllers may bind several bones. Each bone row appears
+    // once so keys are never duplicated on the timeline or when copying.
+    std::set<int> seen;
+    auto pushBone = [&](int bi) {
+        if (bi >= 0 && seen.insert(bi).second) out.push_back(MakeRowId(RowKind::Bone, 0, (uint32_t)bi));
+    };
     int cnt = idx < 6 ? 3 : 1;
-    for (int k = 0; k < cnt; ++k) {
-        const int bi = m->rig->BoneFor(roles[idx][k]);
-        if (bi >= 0) out.push_back(MakeRowId(RowKind::Bone, 0, (uint32_t)bi));
-    }
+    for (int k = 0; k < cnt; ++k) pushBone(m->rig->BoneFor(roles[idx][k]));
     // Chain controllers drive the model's ready IK bone (arm/leg/toe) as an object when present (the drag writes the
     // key on that IK bone, not on the chain's bones), so include it in the row too — otherwise the controller's keys
     // would not show up on the timeline for legs/toes.
-    if (idx < 6) {
-        const int ik = m->rig->IkBoneFor(roles[idx][cnt - 1]);
-        if (ik >= 0) {
-            const uint64_t ikRow = MakeRowId(RowKind::Bone, 0, (uint32_t)ik);
-            if (std::find(out.begin(), out.end(), ikRow) == out.end()) out.push_back(ikRow);
-        }
-    }
+    if (idx < 6) pushBone(m->rig->IkBoneFor(roles[idx][cnt - 1]));
     return out;
 }
 
