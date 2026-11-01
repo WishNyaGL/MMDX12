@@ -43,6 +43,39 @@ const char* RigRoleName(RigRole role);
 bool RigRoleIsLeft(RigRole role);
 bool RigRoleIsRight(RigRole role);
 
+// Controller kind: a limb chain (hands/feet/toes), a body ring (single-bone
+// select/drag), or an FK joint (diamond, directly rotates a bone).
+enum class RigControllerKind { Chain, Body, Joint };
+// Visual shape of the controller (grows in stage 4).
+enum class RigControllerShape { Ring, Diamond, Sphere, Cube };
+// Solver type / IK mode (stage 2): FK, or IK with a native PMX IK bone or a
+// virtual chain.
+enum class RigSolverType { FK, IK };
+enum class RigIkMode { NativePMX, Virtual };
+// Transform constraints (stage 5): axis locks and a movement distance limit.
+struct RigControllerConstraints {
+    bool lockX = false, lockY = false, lockZ = false;
+    bool hasMaxDist = false;
+    float maxDist = 0.0f;
+};
+
+// One controller = the target architecture's unit. It is an entity resolved to
+// one or more bone roles (bindings), with a visual shape and a solver. The
+// prototype still drives most behaviour from the role bindings; the controller
+// list is the single source of truth for what exists and how it is drawn.
+struct RigController {
+    std::string id;                              // stable id (also the timeline row label)
+    RigControllerKind kind = RigControllerKind::Body;
+    RigControllerShape shape = RigControllerShape::Ring;
+    std::vector<RigRole> roles;                  // roles this controller binds
+    bool draggable = false;                      // body: center/groove drag in the camera plane
+    bool rotate = false;                         // joint: directly rotates its bone
+    float size = 1.0f;                           // visual size scale
+    RigSolverType solverType = RigSolverType::FK;
+    RigIkMode ikMode = RigIkMode::NativePMX;
+    RigControllerConstraints constraints;
+};
+
 // One role -> PMX bone binding.
 struct RigBoneBinding {
     RigRole role = RigRole::Pelvis;
@@ -65,12 +98,19 @@ struct RigDefinition {
     int version = 1;
     std::vector<RigBoneBinding> bindings;  // size == (int)RigRole::Count
     std::vector<RigIkBone> ikBones;        // ready-made model IK bones (arm/leg/toe) the controllers can drive
+    std::vector<RigController> controllers; // the controller entities (single source of truth for what exists)
     std::string sourceModelName;           // display-only hint (not part of identity)
 
     RigDefinition() { bindings.resize((size_t)RigRole::Count); }
     int BoneFor(RigRole role) const;
     int IkBoneFor(RigRole role) const;     // index of the model IK bone that drives `role`, -1 if none
     void Clear();
+    // Controllers: the single source of truth for what exists. When `controllers`
+    // is empty (legacy rig files), callers fall back to the fixed role arrays.
+    const RigController* ControllerAt(int i) const {
+        return (i >= 0 && i < (int)controllers.size()) ? &controllers[(size_t)i] : nullptr;
+    }
+    bool HasControllers() const { return !controllers.empty(); }
 };
 
 // Diagnostics from generation: warnings plus what got resolved.

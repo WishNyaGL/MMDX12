@@ -203,7 +203,8 @@ void App::StudioSelectRigController(int controller, bool toggle) {
     StudioDoc& d = *studio_;
     StudioModel* m = StudioPoseModel();
     if (!m || !m->rig) return;
-    if (controller < 0 || controller >= 19) {
+    const int count = m->rig->HasControllers() ? (int)m->rig->controllers.size() : 19;
+    if (controller < 0 || controller >= count) {
         controller = -1;
     } else if (toggle) {
         controller = (d.rigController == controller) ? -1 : controller;

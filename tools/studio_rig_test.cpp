@@ -196,6 +196,10 @@ int main(int argc, char** argv) {
         failed += CheckRole(res.rig, RigRole::RightThigh, "thigh_r");
         failed += CheckRole(res.rig, RigRole::RightShin, "shin_r");
         failed += CheckRole(res.rig, RigRole::RightFoot, "foot_r");
+        if (res.rig.controllers.size() != 19) {
+            std::printf("  FAIL controllers count = %zu (expected 19)\n", res.rig.controllers.size());
+            ++failed;
+        }
     }
 
     // --- synthetic English-only skeleton (names unknown to JP dictionary)
@@ -303,6 +307,22 @@ int main(int argc, char** argv) {
                 }
                 std::printf("  rig round-trip: %s\n", ok ? "ok" : "MISMATCH");
                 if (!ok) ++failed;
+                // controllers survive the round-trip
+                if (loaded.controllers.size() != g.rig.controllers.size() || g.rig.controllers.empty()) {
+                    std::printf("  FAIL controllers round-trip: %zu vs %zu\n",
+                                loaded.controllers.size(), g.rig.controllers.size());
+                    ++failed;
+                } else {
+                    bool cok = true;
+                    for (size_t i = 0; i < loaded.controllers.size(); ++i) {
+                        const RigController& a = loaded.controllers[i];
+                        const RigController& b = g.rig.controllers[i];
+                        if (a.id != b.id || a.kind != b.kind || a.shape != b.shape ||
+                            a.rotate != b.rotate || a.draggable != b.draggable || a.roles != b.roles)
+                            cok = false;
+                    }
+                    if (!cok) { std::printf("  FAIL controllers mismatch\n"); ++failed; }
+                }
                 // rebind against the same model keeps every already-resolved binding
                 RebindRig(loaded, m);
                 int resolved = 0, savedResolved = 0;

@@ -49,6 +49,23 @@ bool SaveRig(const std::filesystem::path& file, const RigDefinition& rig, std::s
         bindings.push_back(std::move(jb));
     }
     j["bindings"] = std::move(bindings);
+    nlohmann::json ctl = nlohmann::json::array();
+    for (const RigController& c : rig.controllers) {
+        nlohmann::json jc;
+        jc["id"] = c.id;
+        jc["kind"] = (int)c.kind;
+        jc["shape"] = (int)c.shape;
+        jc["draggable"] = c.draggable;
+        jc["rotate"] = c.rotate;
+        jc["size"] = c.size;
+        jc["solverType"] = (int)c.solverType;
+        jc["ikMode"] = (int)c.ikMode;
+        nlohmann::json jroles = nlohmann::json::array();
+        for (RigRole r : c.roles) jroles.push_back(RigRoleName(r));
+        jc["roles"] = std::move(jroles);
+        ctl.push_back(std::move(jc));
+    }
+    j["controllers"] = std::move(ctl);
     return WriteRigAtomic(file, j.dump(2), error);
 }
 
@@ -88,6 +105,29 @@ bool LoadRig(const std::filesystem::path& file, RigDefinition& out, std::string*
             b.boneIndex = jb.value("bone", -1);
             b.boneName = ReadString(jb, "name", "");
             b.confidence = jb.value("confidence", 0.0f);
+        }
+    }
+    out.controllers.clear();
+    if (j.contains("controllers") && j["controllers"].is_array()) {
+        for (const nlohmann::json& jc : j["controllers"]) {
+            RigController c;
+            c.id = ReadString(jc, "id", "");
+            c.kind = (RigControllerKind)jc.value("kind", (int)RigControllerKind::Body);
+            c.shape = (RigControllerShape)jc.value("shape", (int)RigControllerShape::Ring);
+            c.draggable = jc.value("draggable", false);
+            c.rotate = jc.value("rotate", false);
+            c.size = jc.value("size", 1.0f);
+            c.solverType = (RigSolverType)jc.value("solverType", (int)RigSolverType::FK);
+            c.ikMode = (RigIkMode)jc.value("ikMode", (int)RigIkMode::NativePMX);
+            if (jc.contains("roles") && jc["roles"].is_array()) {
+                for (const nlohmann::json& jr : jc["roles"]) {
+                    if (!jr.is_string()) continue;
+                    const std::string roleName = jr.get<std::string>();
+                    for (int r = 0; r < (int)RigRole::Count; ++r)
+                        if (roleName == RigRoleName((RigRole)r)) { c.roles.push_back((RigRole)r); break; }
+                }
+            }
+            out.controllers.push_back(std::move(c));
         }
     }
     return true;

@@ -1994,9 +1994,8 @@ std::vector<uint64_t> App::StudioRigRowToBoneRows(uint64_t rigRow) const {
     if (!m || !m->rig) return out;
     const int idx = (int)RowIndexOf(rigRow);
     if (idx < 0) return out;
-    // controllers 0..5 = chains (hands/feet/toes), 6..12 = body (pelvis, groove, spine, chest, neck, head, waist),
-    // 13..18 = FK rotate joints (shoulders, upper arms, thighs)
-    const RigRole roles[19][3] = {
+    // Legacy role table (used when the rig has no controller entities, e.g. old files).
+    static const RigRole kLegacyRoles[19][3] = {
         {RigRole::LeftUpperArm, RigRole::LeftForearm, RigRole::LeftHand},
         {RigRole::RightUpperArm, RigRole::RightForearm, RigRole::RightHand},
         {RigRole::LeftThigh, RigRole::LeftShin, RigRole::LeftFoot},
@@ -2009,7 +2008,7 @@ std::vector<uint64_t> App::StudioRigRowToBoneRows(uint64_t rigRow) const {
         {RigRole::LeftUpperArm}, {RigRole::RightUpperArm},
         {RigRole::LeftThigh}, {RigRole::RightThigh},
     };
-    const int total = 19;
+    const int total = m->rig->HasControllers() ? (int)m->rig->controllers.size() : 19;
     if (idx >= total) return out;
     // General de-duplication by bone index: a controller may bind the same role twice (e.g. toe chains list the
     // toe role in both the mid and end slots), and future controllers may bind several bones. Each bone row appears
@@ -2018,12 +2017,16 @@ std::vector<uint64_t> App::StudioRigRowToBoneRows(uint64_t rigRow) const {
     auto pushBone = [&](int bi) {
         if (bi >= 0 && seen.insert(bi).second) out.push_back(MakeRowId(RowKind::Bone, 0, (uint32_t)bi));
     };
-    int cnt = idx < 6 ? 3 : 1;
-    for (int k = 0; k < cnt; ++k) pushBone(m->rig->BoneFor(roles[idx][k]));
-    // Chain controllers drive the model's ready IK bone (arm/leg/toe) as an object when present (the drag writes the
-    // key on that IK bone, not on the chain's bones), so include it in the row too — otherwise the controller's keys
-    // would not show up on the timeline for legs/toes.
-    if (idx < 6) pushBone(m->rig->IkBoneFor(roles[idx][cnt - 1]));
+    if (const RigController* c = m->rig->ControllerAt(idx)) {
+        for (RigRole r : c->roles) pushBone(m->rig->BoneFor(r));
+        // chain controllers also drive the model's ready IK bone (arm/leg/toe)
+        if (c->kind == RigControllerKind::Chain && !c->roles.empty())
+            pushBone(m->rig->IkBoneFor(c->roles.back()));
+    } else {
+        int cnt = idx < 6 ? 3 : 1;
+        for (int k = 0; k < cnt; ++k) pushBone(m->rig->BoneFor(kLegacyRoles[idx][k]));
+        if (idx < 6) pushBone(m->rig->IkBoneFor(kLegacyRoles[idx][cnt - 1]));
+    }
     return out;
 }
 
@@ -2034,8 +2037,9 @@ bool App::StudioTrackOfRow(uint64_t row, RowKind& kind, std::string& name) const
     if (kind == RowKind::GraphLane || kind == RowKind::GraphChannel) return false;  // graph rows carry no track / keys
     if (IsCameraKind(kind)) return d.selectedModel < 0;
     if (kind == RowKind::Rig) {
-        return d.selectedModel >= 0 && d.models[d.selectedModel]->rig &&
-               (int)RowIndexOf(row) < 19;
+        const StudioModel* rm = d.selectedModel >= 0 && d.selectedModel < (int)d.models.size() ? d.models[d.selectedModel].get() : nullptr;
+        const int count = rm && rm->rig ? (rm->rig->HasControllers() ? (int)rm->rig->controllers.size() : 19) : 0;
+        return rm && rm->rig && (int)RowIndexOf(row) < count;
     }
     if (kind == RowKind::SceneLight) {
         // a light row is only offered through the camera target (the lights live next to the camera)
@@ -3613,9 +3617,11 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
         // a rig (controller) row pick also selects the controller for the viewport rings (works even when the rings
         // are hidden: the choice is kept in rigController and the rings highlight it when shown).
         {
+            const StudioModel* rsm = d.Selected();
+            const int rigCount = rsm && rsm->rig ? (rsm->rig->HasControllers() ? (int)rsm->rig->controllers.size() : 19) : 0;
             int rig = -1;
             for (uint64_t r : d.selectedRows)
-                if (RowKindOf(r) == RowKind::Rig && (int)RowIndexOf(r) < 19) { rig = (int)RowIndexOf(r); break; }
+                if (RowKindOf(r) == RowKind::Rig && (int)RowIndexOf(r) < rigCount) { rig = (int)RowIndexOf(r); break; }
             d.rigController = rig;
             if (rig >= 0) d.inspectorTab = 1;
         }
@@ -3644,7 +3650,8 @@ void App::StudioHandleTimeline(const TimelineEvents& ev) {
                 if (d.activeBone < 0) d.activeBone = (int)RowIndexOf(row);
             }
             // keys of a rig controller row pick that controller for the viewport rings (even when hidden)
-            if (RowKindOf(row) == RowKind::Rig && (int)RowIndexOf(row) < 19)
+            if (RowKindOf(row) == RowKind::Rig && sm && sm->rig &&
+                (int)RowIndexOf(row) < (sm->rig->HasControllers() ? (int)sm->rig->controllers.size() : 19))
                 d.rigController = (int)RowIndexOf(row);
         }
         // a plain click on one key seeks the playhead to it (Premiere / AE): the live panels then show and edit that key's values
@@ -4366,9 +4373,14 @@ void App::StudioRebuildRows() {
     if (d.rigMode) {
         StudioModel* rm = d.Selected();
         if (rm && rm->rig) {
-            static const char* kCtl[19] = {"hand_l", "hand_r", "foot_l", "foot_r", "toe_l", "toe_r",
+            static const char* kCtlLegacy[19] = {"hand_l", "hand_r", "foot_l", "foot_r", "toe_l", "toe_r",
                                             "center", "groove", "spine", "chest", "neck", "head", "waist",
                                             "shoulder_l", "shoulder_r", "upper_arm_l", "upper_arm_r", "thigh_l", "thigh_r"};
+            const int ctlCount = rm->rig->HasControllers() ? (int)rm->rig->controllers.size() : 19;
+            const auto ctlLabel = [&](int i) -> const char* {
+                if (const RigController* c = rm->rig->ControllerAt(i)) return c->id.c_str();
+                return kCtlLegacy[i];
+            };
             TimelineRow group;
             group.id = MakeRowId(RowKind::Group, 0u, 0u);
             group.label = Tr("리그");
@@ -4379,11 +4391,11 @@ void App::StudioRebuildRows() {
             std::vector<uint64_t>& childIds = d.groupChildren[group.id];
             std::set<int> summary;
             std::vector<TimelineRow> children;
-            for (int ci = 0; ci < 19; ++ci) {
+            for (int ci = 0; ci < ctlCount; ++ci) {
                 TimelineRow r;
                 r.id = MakeRowId(RowKind::Rig, 0u, (uint32_t)ci);
-                r.label = kCtl[ci];
-                r.displayLabel = kCtl[ci];
+                r.label = ctlLabel(ci);
+                r.displayLabel = r.label;
                 r.depth = 1;
                 for (uint64_t brow : StudioRigRowToBoneRows(r.id)) {
                     RowKind bk; std::string bname;

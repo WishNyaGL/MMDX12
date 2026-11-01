@@ -252,6 +252,62 @@ RigGenerateResult GenerateRig(const PmxModel& model) {
         }
     }
 
+    // Build the controller entities (stage 1 data). Order matches the prototype's
+    // array indices: 0..5 chains, 6..12 body, 13..18 FK joints. This list is the
+    // single source of truth for the viewport and the timeline.
+    rig.controllers.clear();
+    // chains: hands / feet / toes
+    static const RigRole kChainRoles[6][3] = {
+        {RigRole::LeftUpperArm, RigRole::LeftForearm, RigRole::LeftHand},
+        {RigRole::RightUpperArm, RigRole::RightForearm, RigRole::RightHand},
+        {RigRole::LeftThigh, RigRole::LeftShin, RigRole::LeftFoot},
+        {RigRole::RightThigh, RigRole::RightShin, RigRole::RightFoot},
+        {RigRole::LeftFoot, RigRole::LeftToe, RigRole::LeftToe},
+        {RigRole::RightFoot, RigRole::RightToe, RigRole::RightToe},
+    };
+    static const char* kChainIds[6] = {"hand_l", "hand_r", "foot_l", "foot_r", "toe_l", "toe_r"};
+    for (int i = 0; i < 6; ++i) {
+        RigController c;
+        c.id = kChainIds[i];
+        c.kind = RigControllerKind::Chain;
+        c.shape = RigControllerShape::Ring;
+        c.solverType = RigSolverType::IK;
+        c.ikMode = RigIkMode::NativePMX;
+        c.roles.assign(&kChainRoles[i][0], &kChainRoles[i][0] + 3);
+        rig.controllers.push_back(std::move(c));
+    }
+    // body rings: center / groove / spine / chest / neck / head / waist
+    static const RigRole kBodyRoles[7] = {
+        RigRole::Pelvis, RigRole::Groove, RigRole::Spine, RigRole::Chest,
+        RigRole::Neck, RigRole::Head, RigRole::Waist,
+    };
+    static const char* kBodyIds[7] = {"center", "groove", "spine", "chest", "neck", "head", "waist"};
+    for (int i = 0; i < 7; ++i) {
+        RigController c;
+        c.id = kBodyIds[i];
+        c.kind = RigControllerKind::Body;
+        c.shape = RigControllerShape::Ring;
+        c.draggable = (i == 0 || i == 1);
+        c.roles.push_back(kBodyRoles[i]);
+        rig.controllers.push_back(std::move(c));
+    }
+    // FK joints: shoulders / upper arms / thighs
+    static const RigRole kJointRoles[6] = {
+        RigRole::LeftShoulder, RigRole::RightShoulder,
+        RigRole::LeftUpperArm, RigRole::RightUpperArm,
+        RigRole::LeftThigh, RigRole::RightThigh,
+    };
+    static const char* kJointIds[6] = {"shoulder_l", "shoulder_r", "upper_arm_l", "upper_arm_r", "thigh_l", "thigh_r"};
+    for (int i = 0; i < 6; ++i) {
+        RigController c;
+        c.id = kJointIds[i];
+        c.kind = RigControllerKind::Joint;
+        c.shape = RigControllerShape::Diamond;
+        c.rotate = true;
+        c.roles.push_back(kJointRoles[i]);
+        rig.controllers.push_back(std::move(c));
+    }
+
     return result;
 }
 

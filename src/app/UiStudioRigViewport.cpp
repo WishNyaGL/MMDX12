@@ -78,6 +78,32 @@ const JointInfo kJoints[6] = {
     {RigRole::RightThigh, "thigh_r"},
 };
 
+// Resolve a controller's bound roles from the entity list when available, else from
+// the legacy fixed arrays. Returns the number of roles resolved (0 = none).
+int ResolveControllerRoles(const RigDefinition& rig, int controllerIndex, RigRole* out, int maxRoles) {
+    if (const RigController* c = rig.ControllerAt(controllerIndex)) {
+        int n = 0;
+        for (RigRole r : c->roles)
+            if (n < maxRoles) out[n++] = r;
+        return n;
+    }
+    if (controllerIndex < 6 && maxRoles >= 3) {  // legacy chains
+        out[0] = kChains[controllerIndex].root;
+        out[1] = kChains[controllerIndex].mid;
+        out[2] = kChains[controllerIndex].end;
+        return 3;
+    }
+    if (controllerIndex >= 6 && controllerIndex < 13 && maxRoles >= 1) {  // legacy body
+        out[0] = kBody[controllerIndex - 6].role;
+        return 1;
+    }
+    if (controllerIndex >= 13 && maxRoles >= 1) {  // legacy joints
+        out[0] = kJoints[controllerIndex - 13].role;
+        return 1;
+    }
+    return 0;
+}
+
 } // namespace
 
 void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered, bool& consumed) {
@@ -97,10 +123,6 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
     const float dpi = ui::Dpi();
     const float R = 9.0f * dpi;
 
-    auto bodyWeight = [&](RigRole role) -> int {
-        return m->rig->BoneFor(role);
-    };
-
     // ---- draw + pick ----
     int hoverChain = -1;
     int hoverBody = -1;
@@ -110,12 +132,14 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
 
     // hands/feet/toes rings
     for (int i = 0; i < 6; ++i) {
-        const int end = m->rig->BoneFor(kChains[i].end);
+        RigRole roles[3]; const int roleCount = ResolveControllerRoles(*m->rig, i, roles, 3);
+        if (roleCount < 3) continue;
+        const int end = m->rig->BoneFor(roles[2]);
         if (end < 0) continue;
         // draw on the model's ready IK bone (arm/leg) when present (the control target); else on the end bone
         int vis = end;
         {
-            const int ik = m->rig->IkBoneFor(kChains[i].end);
+            const int ik = m->rig->IkBoneFor(roles[2]);
             if (ik >= 0) vis = ik;
         }
         const XMFLOAT3 w = BoneJointWorld(*m->pmx, *m->inst, vis);
@@ -139,7 +163,9 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
     ImVec2 bodyCenterPx;
     bool bodyCenterProj = false;
     for (int i = 0; i < 7; ++i) {
-        const int b = bodyWeight(kBody[i].role);
+        RigRole role = RigRole::Pelvis;
+        if (ResolveControllerRoles(*m->rig, 6 + i, &role, 1) < 1) continue;
+        const int b = m->rig->BoneFor(role);
         if (b < 0) continue;
         const XMFLOAT3 w = BoneJointWorld(*m->pmx, *m->inst, b);
         ImVec2 s;
@@ -179,7 +205,9 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
 
     // FK rotate joints (shoulders / upper arms / thighs): diamond markers that directly rotate the bone
     for (int i = 0; i < 6; ++i) {
-        const int b = m->rig->BoneFor(kJoints[i].role);
+        RigRole role = RigRole::Pelvis;
+        if (ResolveControllerRoles(*m->rig, 13 + i, &role, 1) < 1) continue;
+        const int b = m->rig->BoneFor(role);
         if (b < 0) continue;
         const XMFLOAT3 w = BoneJointWorld(*m->pmx, *m->inst, b);
         ImVec2 s;
@@ -352,7 +380,9 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
     if (inside && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyAlt) {
         if (hoverJoint >= 0) {
             // FK rotate joint: start a direct rotation drag (independent of the gizmo tool)
-            const int b = m->rig->BoneFor(kJoints[hoverJoint].role);
+            RigRole role = RigRole::Pelvis;
+            if (ResolveControllerRoles(*m->rig, 13 + hoverJoint, &role, 1) < 1) return;
+            const int b = m->rig->BoneFor(role);
             if (b >= 0) {
                 rigVpDrag_.active = true;
                 rigVpDrag_.jointBone = b;
@@ -372,10 +402,11 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                 consumed = true;
             }
         } else if (hoverChain >= 0 && chainProj[hoverChain] && d.gizmoTool == 1) {
-            const ChainInfo& ci = kChains[hoverChain];
+            RigRole roles[3];
+            if (ResolveControllerRoles(*m->rig, hoverChain, roles, 3) < 3) return;
             StudioSelectRigController(hoverChain, io.KeyCtrl);  // select the controller (viewport ring <-> timeline row)
             RigChain chain;
-            if (ResolveRigChain(*m->rig, ci.root, ci.mid, ci.end, chain)) {
+            if (ResolveRigChain(*m->rig, roles[0], roles[1], roles[2], chain)) {
                 rigVpDrag_.chain = chain;
                 rigVpDrag_.drag = BeginRigChainDrag(*m->inst, chain);
                 if (rigVpDrag_.drag.valid) {
@@ -386,7 +417,7 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                     studioPoseBefore_ = m->pose;
                     // choose the drive: if the model has a ready IK bone for this limb end, move that IK bone as an
                     // object; otherwise hands fall back to the two-bone IK.
-                    const RigRole endRole = kChains[hoverChain].end;
+                    const RigRole endRole = roles[2];
                     rigVpDrag_.footIkBone = m->rig->IkBoneFor(endRole);
                     if (rigVpDrag_.footIkBone >= 0)
                         rigVpDrag_.planeOrigin = BoneJointWorld(*m->pmx, *m->inst, rigVpDrag_.footIkBone);
@@ -425,7 +456,9 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                 }
             }
         } else if (hoverBody >= 0) {
-            const int b = bodyWeight(kBody[hoverBody].role);
+            RigRole role = RigRole::Pelvis;
+            if (ResolveControllerRoles(*m->rig, 6 + hoverBody, &role, 1) < 1) return;
+            const int b = m->rig->BoneFor(role);
             if (b < 0) { /* no bone */ }
             else if ((hoverBody == 0 || hoverBody == 1) && d.gizmoTool == 1) {
                 // move tool: center (pelvis) and groove are draggable in the camera plane (exact ray-plane solve,
@@ -468,10 +501,12 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
             }
         } else if (hoverChain >= 0 && chainProj[hoverChain]) {
             // rotate tool: select the ready IK bone (arm/leg) when present, else the end bone (wrist/ankle)
-            const int end = m->rig->BoneFor(kChains[hoverChain].end);
+            RigRole roles[3];
+            if (ResolveControllerRoles(*m->rig, hoverChain, roles, 3) < 3) return;
+            const int end = m->rig->BoneFor(roles[2]);
             int pick = end;
             {
-                const int ik = m->rig->IkBoneFor(kChains[hoverChain].end);
+                const int ik = m->rig->IkBoneFor(roles[2]);
                 if (ik >= 0) pick = ik;
             }
             if (pick >= 0) { StudioSelectBone(pick, false); studioViewDrag_ = 3; consumed = true; }

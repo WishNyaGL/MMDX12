@@ -57,6 +57,7 @@ int RigDefinition::IkBoneFor(RigRole role) const {
 void RigDefinition::Clear() {
     for (RigBoneBinding& b : bindings) b = RigBoneBinding{};
     ikBones.clear();
+    controllers.clear();
     sourceModelName.clear();
 }
 
