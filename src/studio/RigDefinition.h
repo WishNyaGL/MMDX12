@@ -59,6 +59,28 @@ struct RigControllerConstraints {
     float maxDist = 0.0f;
 };
 
+// A per-bone rotation limit used by the virtual IK to protect anatomical joints
+// (elbows / knees bend mainly in one axis). Filled automatically for known limbs,
+// editable in the rig editor.
+struct RigBoneLimit {
+    int boneIndex = -1;
+    bool lockX = false, lockY = false, lockZ = false;  // freeze a world/local axis
+    bool hasMin = false, hasMax = false;                 // angle range around the bend axis (radians)
+    float minAngle = 0.0f, maxAngle = 0.0f;
+};
+
+// IK binding of a controller. For native PMX IK, `ikBone` references the model's
+// IK bone and the chain is solved by the PMX. For virtual IK, the chain bones are
+// listed and the limits protect the joints.
+struct RigIkBinding {
+    int ikBone = -1;                 // native PMX IK bone index (-1 = none)
+    int targetBone = -1;             // the bone the IK moves (end of the chain)
+    int effectorBone = -1;           // the chain end (the controlled target)
+    std::vector<int> chainBones;     // virtual IK: bones to rotate (root..mid..target)
+    RigIkMode mode = RigIkMode::NativePMX;
+    std::vector<RigBoneLimit> limits; // per-bone limits (virtual IK)
+};
+
 // One controller = the target architecture's unit. It is an entity resolved to
 // one or more bone roles (bindings), with a visual shape and a solver. The
 // prototype still drives most behaviour from the role bindings; the controller
@@ -70,10 +92,13 @@ struct RigController {
     std::vector<RigRole> roles;                  // roles this controller binds
     bool draggable = false;                      // body: center/groove drag in the camera plane
     bool rotate = false;                         // joint: directly rotates its bone
+    bool canTranslate = false;                   // controller supports the move (translate) tool
+    bool canRotate = false;                      // controller supports the rotate tool
     float size = 1.0f;                           // visual size scale
     RigSolverType solverType = RigSolverType::FK;
     RigIkMode ikMode = RigIkMode::NativePMX;
     RigControllerConstraints constraints;
+    RigIkBinding ik;                             // used when solverType == IK
 };
 
 // One role -> PMX bone binding.

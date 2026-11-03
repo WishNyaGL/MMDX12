@@ -651,6 +651,8 @@ private:
         float pixelWorld = 0.002f;      // world units per screen px at the end joint
         int chainId = -1;               // 0 L hand, 1 R hand, 2 L foot, 3 R foot, 4 L toe, 5 R toe
         int footIkBone = -1;            // ready IK bone being driven (arm/leg/toe)
+        studio::RigVirtualIkDrag virtualIk;  // virtual IK chain (used when there is no native IK bone)
+        bool useVirtualIk = false;
         DirectX::XMFLOAT3 planeOrigin{0, 0, 0};   // FIXED world point the drag plane passes through (captured at start)
         DirectX::XMFLOAT3 planeNormal{0, 0, 1};   // camera-forward plane normal
         DirectX::XMFLOAT3 grabOffset{0, 0, 0};    // world offset from grab point to the bone center (so a click on

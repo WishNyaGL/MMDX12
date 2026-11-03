@@ -25,6 +25,18 @@ namespace {
 // Chain controller ids.
 enum : int { kChainLeftHand = 0, kChainRightHand, kChainLeftFoot, kChainRightFoot, kChainLeftToe, kChainRightToe };
 
+// Debug logging for rig viewport interaction (controller drag, gizmo, pointer). These are
+// intentionally verbose; they are stripped before release by #undef'ing RIG_DEBUG_LOG.
+#ifndef RIG_DEBUG_LOG
+#define RIG_DEBUG_LOG(...) LOG_INFO(__VA_ARGS__)
+#endif
+static void LogV3(const char* tag, const XMFLOAT3& v) {
+    RIG_DEBUG_LOG("RG %s=(%.3f, %.3f, %.3f)", tag, v.x, v.y, v.z);
+}
+static void LogQ4(const char* tag, const XMFLOAT4& q) {
+    RIG_DEBUG_LOG("RG %s=(%.3f, %.3f, %.3f, %.3f)", tag, q.x, q.y, q.z, q.w);
+}
+
 struct ChainInfo {
     RigRole root, mid, end;
     const char* undo;
@@ -242,34 +254,31 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
             rigVpDrag_.active = false;
             rigVpDrag_.bodyBone = -1;
             rigVpDrag_.jointBone = -1;
+            rigVpDrag_.useVirtualIk = false;
+            rigVpDrag_.virtualIk = {};
         } else if (rigVpDrag_.jointBone >= 0) {
-            // FK joint rotation: yaw around the view-up axis, pitch around the view-right axis, relative to the drag
-            // start (total change since start, like the gizmo solvers).
+            // FK joint rotation: handled by the shared FK solver (RigSolver), yaw/pitch
+            // about the camera axes relative to the drag start.
             StudioApplyPose(*m);
             const int bone = rigVpDrag_.jointBone;
             const float dx = mouse.x - rigVpDrag_.startMouse.x;
             const float dy = mouse.y - rigVpDrag_.startMouse.y;
-            constexpr float kAng = 0.01f;  // radians per screen pixel
-            const XMFLOAT3& rv = rigVpDrag_.viewRight;
-            const XMFLOAT3& uv = rigVpDrag_.viewUp;
-            XMVECTOR qYaw = XMQuaternionRotationAxis(XMLoadFloat3(&uv), -dx * kAng);
-            XMVECTOR qPitch = XMQuaternionRotationAxis(XMLoadFloat3(&rv), (float)rigVpDrag_.jointPitchSign * dy * kAng);
-            XMVECTOR q = XMQuaternionMultiply(qPitch, qYaw);
             const PmxBone& pb = m->pmx->bones[(size_t)bone];
             const int parent = pb.parentIndex;
-            XMVECTOR parentRot = parent >= 0
-                ? XMQuaternionRotationMatrix(XMLoadFloat4x4(&m->inst->BoneWorld(parent)))
-                : XMQuaternionIdentity();
-            XMVECTOR oldWorld = XMQuaternionMultiply(parentRot, XMLoadFloat4(&rigVpDrag_.jointStartR));
-            XMVECTOR newWorld = XMQuaternionNormalize(XMQuaternionMultiply(q, oldWorld));
-            XMVECTOR invParent = XMQuaternionInverse(parentRot);
-            XMVECTOR newLocal = XMQuaternionNormalize(XMQuaternionMultiply(invParent, newWorld));
+            XMFLOAT4 parentWorld{0, 0, 0, 1};
+            if (parent >= 0)
+                XMStoreFloat4(&parentWorld, XMQuaternionRotationMatrix(XMLoadFloat4x4(&m->inst->BoneWorld(parent))));
+            RigFkDrag fk;
+            fk.bone = bone;
+            fk.startLocal = rigVpDrag_.jointStartR;
+            fk.pitchSign = (float)rigVpDrag_.jointPitchSign;
+            const XMFLOAT4 newLocal = SolveRigFkDrag(fk, rigVpDrag_.viewRight, rigVpDrag_.viewUp, parentWorld, dx, dy);
             PoseLayer& pose = m->pose;
             const int frame = d.Frame();
             if (pose.frame != frame) pose = PoseLayer{};
             pose.frame = frame;
             PoseBone vv = StudioCurrentPose(*m)[(size_t)bone];
-            XMStoreFloat4(&vv.r, newLocal);
+            vv.r = newLocal;
             pose.bones[bone] = vv;
         } else if (rigVpDrag_.bodyBone >= 0) {
             // pelvis drag: exact ray-plane solve (like hands/feet) so the pelvis follows the cursor
@@ -350,13 +359,47 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                             PoseBone vv = StudioCurrentPose(*m)[(size_t)bone];
                             vv.t = localT;
                             pose.bones[bone] = vv;
+                            RIG_DEBUG_LOG("RG update footIk bone=%d parent=%d target=(%.3f,%.3f,%.3f) t=(%.3f,%.3f,%.3f)",
+                                          bone, parent, target.x, target.y, target.z, localT.x, localT.y, localT.z);
                         }
                     }
+                }
+            } else if (rigVpDrag_.useVirtualIk) {
+                // virtual IK: solve the chain toward the pointer target (hand follows the wrist)
+                const XMFLOAT3& e = rigVpDrag_.drag.endPos;
+                const XMFLOAT3 target{e.x + tx, e.y + ty, e.z + tz};
+                RIG_DEBUG_LOG("RG update virtualIK chain=%d end=(%.3f,%.3f,%.3f) target=(%.3f,%.3f,%.3f)",
+                              (int)rigVpDrag_.virtualIk.chain.size(), e.x, e.y, e.z, target.x, target.y, target.z);
+                // If the pointer has not moved since the press (we compare the mouse position, not the
+                // derived target — float error can make target slightly differ from end even when the
+                // mouse is still), do not solve: a plain click must never mutate the pose. This is the
+                // guard that stops the hand's angle from accumulating across repeated clicks.
+                const float mMove = std::fabs(mouse.x - rigVpDrag_.startMouse.x) +
+                                    std::fabs(mouse.y - rigVpDrag_.startMouse.y);
+                if (mMove > 0.5f) {
+                    std::vector<DirectX::XMFLOAT4> outLocal;
+                    if (SolveRigVirtualIkDrag(rigVpDrag_.virtualIk, target, outLocal)) {
+                        for (size_t i = 0; i < outLocal.size() && i < rigVpDrag_.virtualIk.chain.size(); ++i) {
+                            const int b = rigVpDrag_.virtualIk.chain[i];
+                            PoseBone vv = StudioCurrentPose(*m)[(size_t)b];
+                            vv.r = outLocal[i];
+                            pose.bones[b] = vv;
+                            RIG_DEBUG_LOG("RG update virtualIK bone=%d r=(%.3f,%.3f,%.3f,%.3f)", b,
+                                          outLocal[i].x, outLocal[i].y, outLocal[i].z, outLocal[i].w);
+                        }
+                    } else {
+                        RIG_DEBUG_LOG("RG update virtualIK solve FAILED (target=(%.3f,%.3f,%.3f))", target.x, target.y, target.z);
+                    }
+                } else {
+                    RIG_DEBUG_LOG("RG update virtualIK no-move (click only): pose untouched");
                 }
             } else {
                 // hands: two-bone IK solve to the pointer target
                 const XMFLOAT3& e = rigVpDrag_.drag.endPos;
                 const XMFLOAT3 target{e.x + tx, e.y + ty, e.z + tz};
+                RIG_DEBUG_LOG("RG update twoBone root=%d mid=%d end=%d target=(%.3f,%.3f,%.3f)",
+                              rigVpDrag_.chain.root, rigVpDrag_.chain.mid, rigVpDrag_.chain.end,
+                              target.x, target.y, target.z);
                 RigChainResult r;
                 if (SolveRigChainDrag(rigVpDrag_.drag, target, &r)) {
                     PoseBone v0 = StudioCurrentPose(*m)[(size_t)rigVpDrag_.chain.root];
@@ -368,6 +411,12 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                     pose.bones[rigVpDrag_.chain.root] = v0;
                     pose.bones[rigVpDrag_.chain.mid] = v1;
                     pose.bones[rigVpDrag_.chain.end] = v2;
+                    RIG_DEBUG_LOG("RG update twoBone root r=(%.3f,%.3f,%.3f,%.3f) mid r=(%.3f,%.3f,%.3f,%.3f) end r=(%.3f,%.3f,%.3f,%.3f)",
+                                  r.rootLocal.x, r.rootLocal.y, r.rootLocal.z, r.rootLocal.w,
+                                  r.midLocal.x, r.midLocal.y, r.midLocal.z, r.midLocal.w,
+                                  r.endLocal.x, r.endLocal.y, r.endLocal.z, r.endLocal.w);
+                } else {
+                    RIG_DEBUG_LOG("RG update twoBone solve FAILED (target=(%.3f,%.3f,%.3f))", target.x, target.y, target.z);
                 }
             }
         }
@@ -378,6 +427,17 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
     // press: start a chain drag (move tool) or select a bone so the gizmo appears (rotate tool). The selection is
     // registered as a bone-pick (studioViewDrag_ = 3) so the viewport does not clear it as an "empty click".
     if (inside && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyAlt) {
+        // auto-match the tool to the hovered controller's capabilities so the interaction
+        // works immediately (no need to re-click after switching tool).
+        const auto fixToolForHover = [&](int cidx) {
+            if (const RigController* c = m->rig->ControllerAt(cidx)) {
+                if (d.gizmoTool == 1 && !c->canTranslate) d.gizmoTool = 0;
+                else if (d.gizmoTool == 0 && !c->canRotate) d.gizmoTool = 1;
+            }
+        };
+        if (hoverJoint >= 0) fixToolForHover(13 + hoverJoint);
+        else if (hoverBody >= 0) fixToolForHover(6 + hoverBody);
+        else if (hoverChain >= 0) fixToolForHover(hoverChain);
         if (hoverJoint >= 0) {
             // FK rotate joint: start a direct rotation drag (independent of the gizmo tool)
             RigRole role = RigRole::Pelvis;
@@ -416,13 +476,54 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                     rigVpDrag_.bodyBone = -1;
                     studioPoseBefore_ = m->pose;
                     // choose the drive: if the model has a ready IK bone for this limb end, move that IK bone as an
-                    // object; otherwise hands fall back to the two-bone IK.
+                    // object; otherwise use the virtual IK chain (or fall back to the two-bone IK).
                     const RigRole endRole = roles[2];
                     rigVpDrag_.footIkBone = m->rig->IkBoneFor(endRole);
-                    if (rigVpDrag_.footIkBone >= 0)
+                    rigVpDrag_.useVirtualIk = false;
+                    if (rigVpDrag_.footIkBone >= 0) {
                         rigVpDrag_.planeOrigin = BoneJointWorld(*m->pmx, *m->inst, rigVpDrag_.footIkBone);
-                    else
+                    } else {
+                        // no native IK: build a virtual IK chain from the actual bone hierarchy
+                        // (root -> end), skipping twist bones, so the elbow/knee is included.
+                        const int rootBone = m->rig->BoneFor(roles[0]);
+                        const int endBone = m->rig->BoneFor(roles[2]);
+                        std::vector<int> bones = BuildRigChainByHierarchy(*m->pmx, rootBone, endBone);
+                        if (bones.size() < 2) {  // fall back to the resolved chain
+                            bones.clear();
+                            for (int r = 0; r < 3; ++r) {
+                                const int bi = m->rig->BoneFor(roles[r]);
+                                if (bi >= 0) bones.push_back(bi);
+                            }
+                        }
+                        if (bones.size() >= 2) {
+                            std::vector<RigBoneLimit> limits;
+                            if (const RigController* c = m->rig->ControllerAt(hoverChain)) limits = c->ik.limits;
+                            rigVpDrag_.virtualIk = BeginRigVirtualIkDrag(*m->inst, bones, limits, endBone);
+                            rigVpDrag_.useVirtualIk = rigVpDrag_.virtualIk.valid;
+                            // TEMP: log the solved chain (bone index + name) to verify twist bones
+                            // are excluded (their hand-set angle must not be re-derived).
+                            {
+                                std::string chainLog;
+                                for (int bi : bones) {
+                                    if (!chainLog.empty()) chainLog += " ";
+                                    if (bi >= 0 && bi < (int)m->pmx->bones.size()) {
+                                        const PmxBone& bb = m->pmx->bones[(size_t)bi];
+                                        chainLog += std::to_string(bi) + "[" + std::to_string(bb.flags) + "]:" + bb.name;
+                                    } else {
+                                        chainLog += std::to_string(bi);
+                                    }
+                                }
+                                RIG_DEBUG_LOG("RG virtualIk chain = %s", chainLog.c_str());
+                            }
+                        }
                         rigVpDrag_.planeOrigin = rigVpDrag_.drag.endPos;
+                    }
+                    RIG_DEBUG_LOG("RG pressStart controller=%d roles=(%d,%d,%d) root=%d mid=%d end=%d"
+                                  " drive=%s footIk=%d virtual=%d tool=%d mouse=(%.0f,%.0f)",
+                                  hoverChain, (int)roles[0], (int)roles[1], (int)roles[2],
+                                  chain.root, chain.mid, chain.end,
+                                  rigVpDrag_.footIkBone >= 0 ? "nativeIK" : (rigVpDrag_.useVirtualIk ? "virtual" : "twoBone"),
+                                  rigVpDrag_.footIkBone, rigVpDrag_.useVirtualIk ? 1 : 0, d.gizmoTool, mouse.x, mouse.y);
                     {
                         // camera-right/up (for hands) and a plane normal facing the camera (from the point toward the
                         // eye), so projection is exact regardless of the matrix's sign conventions.
@@ -500,16 +601,19 @@ void App::StudioRigViewport(float x0, float y0, float x1, float y1, bool hovered
                 StudioSelectRigController(6 + hoverBody, io.KeyCtrl);
             }
         } else if (hoverChain >= 0 && chainProj[hoverChain]) {
-            // rotate tool: select the ready IK bone (arm/leg) when present, else the end bone (wrist/ankle)
+            // rotate tool: select the wrist/ankle end bone. For the hands we always pick the wrist FK bone
+            // (not the IK bone) so the hand can be rotated; legs/toes keep the ready IK bone when present.
             RigRole roles[3];
             if (ResolveControllerRoles(*m->rig, hoverChain, roles, 3) < 3) return;
             const int end = m->rig->BoneFor(roles[2]);
             int pick = end;
-            {
+            if (hoverChain >= 2) {  // legs / toes: keep using the model's IK bone for rotate
                 const int ik = m->rig->IkBoneFor(roles[2]);
                 if (ik >= 0) pick = ik;
             }
             if (pick >= 0) { StudioSelectBone(pick, false); studioViewDrag_ = 3; consumed = true; }
+            RIG_DEBUG_LOG("RG rotateSelect controller=%d end=%d pick=%d tool=%d mouse=(%.0f,%.0f)",
+                          hoverChain, end, pick, d.gizmoTool, mouse.x, mouse.y);
             // select the rig controller AFTER the bone pick: StudioSelectBone clears the rows, so the rig row added
             // afterwards survives (it must come last to stay on the timeline).
             StudioSelectRigController(hoverChain, io.KeyCtrl);

@@ -3,6 +3,11 @@
 // The pose layer overrides the evaluated motion at its frame (StudioApplyPose); dragging never re-binds the motion.
 #include "app/App.h"
 
+// Debug logging for studio pose/gizmo interaction (mirrors UiStudioRigViewport's RIG_DEBUG_LOG).
+#ifndef RIG_DEBUG_LOG
+#define RIG_DEBUG_LOG(...) LOG_INFO(__VA_ARGS__)
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -90,6 +95,22 @@ bool App::StudioApplyPose(StudioModel& m) {
     if (m.pose.Empty() || m.pose.frame != studio_->Frame()) return false;
     // a video renders the registered motion only (MMD); a still shows the edits like the viewport
     if (offline_.studio && offline_.mode != OfflineMode::Still) return false;
+    // Debug: log hand/arm bone values actually applied (via the rig's arm roles).
+    if (m.rig) {
+        static const RigRole kArmRoles[] = {
+            RigRole::LeftUpperArm, RigRole::LeftForearm, RigRole::LeftHand,
+            RigRole::RightUpperArm, RigRole::RightForearm, RigRole::RightHand,
+        };
+        for (RigRole role : kArmRoles) {
+            const int bi = m.rig->BoneFor(role);
+            if (bi < 0) continue;
+            const auto it = m.pose.bones.find(bi);
+            if (it == m.pose.bones.end()) continue;
+            RIG_DEBUG_LOG("RG applyPose role=%s bone=%d t=(%.3f,%.3f,%.3f) r=(%.3f,%.3f,%.3f,%.3f)",
+                          RigRoleName(role), bi, it->second.t.x, it->second.t.y, it->second.t.z,
+                          it->second.r.x, it->second.r.y, it->second.r.z, it->second.r.w);
+        }
+    }
     for (const auto& [b, v] : m.pose.bones) m.inst->SetBoneAnim(b, v.t, v.r);
     for (const auto& [i, w] : m.pose.morphs) m.inst->SetMorphWeight(i, w);
     return true;
@@ -210,6 +231,15 @@ void App::StudioSelectRigController(int controller, bool toggle) {
         controller = (d.rigController == controller) ? -1 : controller;
     }
     d.rigController = controller;
+    // keep the current tool matching the controller's capabilities: if the selected
+    // controller can't do what the active tool does, switch to the other tool so the
+    // next interaction works without re-clicking the controller.
+    if (controller >= 0) {
+        if (const RigController* c = m->rig->ControllerAt(controller)) {
+            if (d.gizmoTool == 1 && !c->canTranslate) d.gizmoTool = 0;
+            else if (d.gizmoTool == 0 && !c->canRotate) d.gizmoTool = 1;
+        }
+    }
     const uint64_t row = controller >= 0 ? MakeRowId(RowKind::Rig, 0, (uint32_t)controller) : 0;
     d.selectedRows.clear();
     d.selection.clear();
@@ -576,6 +606,9 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
                 studioViewDrag_ = 2;
                 studioDragBone_ = bone;
                 studioPoseBefore_ = m->pose;
+                RIG_DEBUG_LOG("RG gizmoPress bone=%d tool=%s part=%d mouse=(%.0f,%.0f)", bone,
+                              studioGizmoMode_ == GizmoMode::Translate ? "translate" : "rotate",
+                              (int)studioGizmoHot_, mouse.x, mouse.y);
                 const auto it = m->pose.bones.find(bone);
                 studioDragBase_ = it != m->pose.bones.end() && m->pose.frame == d.Frame()
                                       ? it->second
@@ -700,6 +733,10 @@ void App::StudioViewportPose(float x0, float y0, float x1, float y1, bool hovere
                 if (pose.frame != d.Frame()) pose = PoseLayer{};
                 pose.frame = d.Frame();
                 pose.bones[studioDragBone_] = v;
+                RIG_DEBUG_LOG("RG gizmoUpdate bone=%d tool=%s v.t=(%.3f,%.3f,%.3f) v.r=(%.3f,%.3f,%.3f,%.3f)",
+                              studioDragBone_,
+                              studioGizmoMode_ == GizmoMode::Translate ? "translate" : "rotate",
+                              v.t.x, v.t.y, v.t.z, v.r.x, v.r.y, v.r.z, v.r.w);
             }
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 StudioSetPose(studioAutoIkActive_ ? Tr("자동 IK")

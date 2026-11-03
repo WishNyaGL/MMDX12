@@ -60,6 +60,24 @@ bool SaveRig(const std::filesystem::path& file, const RigDefinition& rig, std::s
         jc["size"] = c.size;
         jc["solverType"] = (int)c.solverType;
         jc["ikMode"] = (int)c.ikMode;
+        nlohmann::json jik;
+        jik["ikBone"] = c.ik.ikBone;
+        jik["targetBone"] = c.ik.targetBone;
+        jik["effectorBone"] = c.ik.effectorBone;
+        nlohmann::json jchain = nlohmann::json::array();
+        for (int b : c.ik.chainBones) jchain.push_back(b);
+        jik["chainBones"] = std::move(jchain);
+        nlohmann::json jlim = nlohmann::json::array();
+        for (const RigBoneLimit& L : c.ik.limits) {
+            nlohmann::json jl;
+            jl["bone"] = L.boneIndex;
+            jl["lockX"] = L.lockX;
+            jl["lockY"] = L.lockY;
+            jl["lockZ"] = L.lockZ;
+            jlim.push_back(std::move(jl));
+        }
+        jik["limits"] = std::move(jlim);
+        jc["ik"] = std::move(jik);
         nlohmann::json jroles = nlohmann::json::array();
         for (RigRole r : c.roles) jroles.push_back(RigRoleName(r));
         jc["roles"] = std::move(jroles);
@@ -119,6 +137,24 @@ bool LoadRig(const std::filesystem::path& file, RigDefinition& out, std::string*
             c.size = jc.value("size", 1.0f);
             c.solverType = (RigSolverType)jc.value("solverType", (int)RigSolverType::FK);
             c.ikMode = (RigIkMode)jc.value("ikMode", (int)RigIkMode::NativePMX);
+            if (jc.contains("ik") && jc["ik"].is_object()) {
+                const nlohmann::json& jik = jc["ik"];
+                c.ik.ikBone = jik.value("ikBone", -1);
+                c.ik.targetBone = jik.value("targetBone", -1);
+                c.ik.effectorBone = jik.value("effectorBone", -1);
+                if (jik.contains("chainBones") && jik["chainBones"].is_array())
+                    for (const nlohmann::json& jb : jik["chainBones"]) c.ik.chainBones.push_back(jb.get<int>());
+                if (jik.contains("limits") && jik["limits"].is_array()) {
+                    for (const nlohmann::json& jl : jik["limits"]) {
+                        RigBoneLimit L;
+                        L.boneIndex = jl.value("bone", -1);
+                        L.lockX = jl.value("lockX", false);
+                        L.lockY = jl.value("lockY", false);
+                        L.lockZ = jl.value("lockZ", false);
+                        c.ik.limits.push_back(L);
+                    }
+                }
+            }
             if (jc.contains("roles") && jc["roles"].is_array()) {
                 for (const nlohmann::json& jr : jc["roles"]) {
                     if (!jr.is_string()) continue;
